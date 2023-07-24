@@ -1,0 +1,825 @@
+<html>
+<head>
+<title>build_main.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #629755; font-style: italic;}
+.s3 { color: #cc7832;}
+.s4 { color: #6a8759;}
+.s5 { color: #6897bb;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+build_main.py</font>
+</center></td></tr></table>
+<pre><span class="s0">#-----------------------------------------------------------------------------</span>
+<span class="s0"># Copyright (c) 2005-2021, PyInstaller Development Team.</span>
+<span class="s0">#</span>
+<span class="s0"># Distributed under the terms of the GNU General Public License (version 2</span>
+<span class="s0"># or later) with exception for distributing the bootloader.</span>
+<span class="s0">#</span>
+<span class="s0"># The full license is in the file COPYING.txt, distributed with this software.</span>
+<span class="s0">#</span>
+<span class="s0"># SPDX-License-Identifier: (GPL-2.0-or-later WITH Bootloader-exception)</span>
+<span class="s0">#-----------------------------------------------------------------------------</span>
+<span class="s2">&quot;&quot;&quot; 
+Build packages using spec files. 
+ 
+NOTE: All global variables, classes and imported modules create API for .spec files. 
+&quot;&quot;&quot;</span>
+
+<span class="s3">import </span><span class="s1">glob</span>
+<span class="s3">import </span><span class="s1">os</span>
+<span class="s3">import </span><span class="s1">pprint</span>
+<span class="s3">import </span><span class="s1">shutil</span>
+
+<span class="s3">import </span><span class="s1">sys</span>
+
+<span class="s3">from </span><span class="s1">PyInstaller </span><span class="s3">import </span><span class="s1">DEFAULT_DISTPATH</span><span class="s3">, </span><span class="s1">DEFAULT_WORKPATH</span><span class="s3">, </span><span class="s1">HOMEPATH</span><span class="s3">, </span><span class="s1">compat</span>
+<span class="s3">from </span><span class="s1">PyInstaller </span><span class="s3">import </span><span class="s1">log </span><span class="s3">as </span><span class="s1">logging</span>
+<span class="s3">from </span><span class="s1">PyInstaller.archive </span><span class="s3">import </span><span class="s1">pyz_crypto</span>
+<span class="s3">from </span><span class="s1">PyInstaller.building.api </span><span class="s3">import </span><span class="s1">COLLECT</span><span class="s3">, </span><span class="s1">EXE</span><span class="s3">, </span><span class="s1">MERGE</span><span class="s3">, </span><span class="s1">PYZ</span>
+<span class="s3">from </span><span class="s1">PyInstaller.building.datastruct </span><span class="s3">import </span><span class="s1">TOC</span><span class="s3">, </span><span class="s1">Target</span><span class="s3">, </span><span class="s1">Tree</span><span class="s3">, </span><span class="s1">_check_guts_eq</span>
+<span class="s3">from </span><span class="s1">PyInstaller.building.osx </span><span class="s3">import </span><span class="s1">BUNDLE</span>
+<span class="s3">from </span><span class="s1">PyInstaller.building.splash </span><span class="s3">import </span><span class="s1">Splash</span>
+<span class="s3">from </span><span class="s1">PyInstaller.building.toc_conversion </span><span class="s3">import </span><span class="s1">DependencyProcessor</span>
+<span class="s3">from </span><span class="s1">PyInstaller.building.utils </span><span class="s3">import </span><span class="s1">(_check_guts_toc_mtime</span><span class="s3">, </span><span class="s1">_should_include_system_binary</span><span class="s3">, </span><span class="s1">format_binaries_and_datas)</span>
+<span class="s3">from </span><span class="s1">PyInstaller.compat </span><span class="s3">import </span><span class="s1">PYDYLIB_NAMES</span><span class="s3">, </span><span class="s1">is_win</span>
+<span class="s3">from </span><span class="s1">PyInstaller.depend </span><span class="s3">import </span><span class="s1">bindepend</span>
+<span class="s3">from </span><span class="s1">PyInstaller.depend.analysis </span><span class="s3">import </span><span class="s1">initialize_modgraph</span>
+<span class="s3">from </span><span class="s1">PyInstaller.depend.utils </span><span class="s3">import </span><span class="s1">(create_py3_base_library</span><span class="s3">, </span><span class="s1">scan_code_for_ctypes)</span>
+<span class="s3">from </span><span class="s1">PyInstaller.utils.hooks </span><span class="s3">import </span><span class="s1">exec_statement</span>
+<span class="s3">from </span><span class="s1">PyInstaller.utils.misc </span><span class="s3">import </span><span class="s1">(</span>
+    <span class="s1">absnormpath</span><span class="s3">, </span><span class="s1">compile_py_files</span><span class="s3">, </span><span class="s1">get_path_to_toplevel_modules</span><span class="s3">, </span><span class="s1">get_unicode_modules</span><span class="s3">, </span><span class="s1">mtime</span>
+<span class="s1">)</span>
+
+<span class="s3">if </span><span class="s1">is_win:</span>
+    <span class="s3">from </span><span class="s1">PyInstaller.utils.win32 </span><span class="s3">import </span><span class="s1">winmanifest</span>
+
+<span class="s1">logger = logging.getLogger(__name__)</span>
+
+<span class="s1">STRINGTYPE = type(</span><span class="s4">''</span><span class="s1">)</span>
+<span class="s1">TUPLETYPE = type((</span><span class="s3">None,</span><span class="s1">))</span>
+
+<span class="s1">rthooks = {}</span>
+
+<span class="s0"># Place where the loader modules and initialization scripts live.</span>
+<span class="s1">_init_code_path = os.path.join(HOMEPATH</span><span class="s3">, </span><span class="s4">'PyInstaller'</span><span class="s3">, </span><span class="s4">'loader'</span><span class="s1">)</span>
+
+<span class="s1">IMPORT_TYPES = [</span>
+    <span class="s4">'top-level'</span><span class="s3">, </span><span class="s4">'conditional'</span><span class="s3">, </span><span class="s4">'delayed'</span><span class="s3">, </span><span class="s4">'delayed, conditional'</span><span class="s3">, </span><span class="s4">'optional'</span><span class="s3">, </span><span class="s4">'conditional, optional'</span><span class="s3">,</span>
+    <span class="s4">'delayed, optional'</span><span class="s3">, </span><span class="s4">'delayed, conditional, optional'</span>
+<span class="s1">]</span>
+
+<span class="s1">WARNFILE_HEADER = </span><span class="s4">&quot;&quot;&quot;</span><span class="s3">\ 
+</span>
+<span class="s4">This file lists modules PyInstaller was not able to find. This does not 
+necessarily mean this module is required for running your program. Python and 
+Python 3rd-party packages include a lot of conditional or optional modules. For 
+example the module 'ntpath' only exists on Windows, whereas the module 
+'posixpath' only exists on Posix systems. 
+ 
+Types if import: 
+* top-level: imported at the top-level - look at these first 
+* conditional: imported within an if-statement 
+* delayed: imported within a function 
+* optional: imported within a try-except-statement 
+ 
+IMPORTANT: Do NOT post this list to the issue-tracker. Use it as a basis for 
+            tracking down the missing module yourself. Thanks! 
+ 
+&quot;&quot;&quot;</span>
+
+
+<span class="s0"># TODO find better place for function.</span>
+<span class="s3">def </span><span class="s1">setupUPXFlags():</span>
+    <span class="s1">f = compat.getenv(</span><span class="s4">&quot;UPX&quot;</span><span class="s3">, </span><span class="s4">&quot;&quot;</span><span class="s1">)</span>
+    <span class="s3">if </span><span class="s1">is_win:</span>
+        <span class="s0"># Binaries built with Visual Studio 7.1 require --strip-loadconf or they will not compress. Configure.py makes</span>
+        <span class="s0"># sure that UPX is new enough to support --strip-loadconf.</span>
+        <span class="s1">f = </span><span class="s4">&quot;--strip-loadconf &quot; </span><span class="s1">+ f</span>
+    <span class="s0"># Do not compress any icon, so that additional icons in the executable can still be externally bound.</span>
+    <span class="s1">f = </span><span class="s4">&quot;--compress-icons=0 &quot; </span><span class="s1">+ f</span>
+    <span class="s1">f = </span><span class="s4">&quot;--best &quot; </span><span class="s1">+ f</span>
+    <span class="s1">compat.setenv(</span><span class="s4">&quot;UPX&quot;</span><span class="s3">, </span><span class="s1">f)</span>
+
+
+<span class="s3">def </span><span class="s1">discover_hook_directories():</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Discover hook directories via pkg_resources and pyinstaller40 entry points. Perform the discovery in a subprocess 
+    to avoid importing the package(s) in the main process. 
+ 
+    :return: list of discovered hook directories. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s1">hook_directories = []</span>
+    <span class="s1">output = exec_statement(</span>
+        <span class="s4">&quot;&quot;&quot; 
+        import sys 
+        import pkg_resources 
+ 
+        entry_points = pkg_resources.iter_entry_points('pyinstaller40', 'hook-dirs') 
+        for entry_point in entry_points: 
+            try: 
+                hook_dirs = entry_point.load()() 
+                for hook_dir in hook_dirs: 
+                    print('</span><span class="s3">\\</span><span class="s4">n$_pyi:' + hook_dir + '*') 
+            except Exception as e: 
+                print(&quot;discover_hook_directories: Failed to process hook entry point '%s': %s&quot; % 
+                      (entry_point, e), file=sys.stderr) 
+        &quot;&quot;&quot;</span>
+    <span class="s1">)</span>
+
+    <span class="s0"># Use splitlines rather than split, because split can break on any whitespaces in the path.</span>
+    <span class="s3">for </span><span class="s1">line </span><span class="s3">in </span><span class="s1">output.splitlines():</span>
+        <span class="s0"># Filter out extra output by checking for the special prefix and suffix</span>
+        <span class="s3">if </span><span class="s1">line.startswith(</span><span class="s4">&quot;$_pyi:&quot;</span><span class="s1">) </span><span class="s3">and </span><span class="s1">line.endswith(</span><span class="s4">&quot;*&quot;</span><span class="s1">):</span>
+            <span class="s1">hook_directories.append(line[</span><span class="s5">6</span><span class="s1">:-</span><span class="s5">1</span><span class="s1">])</span>
+
+    <span class="s1">logger.debug(</span><span class="s4">&quot;discover_hook_directories: Hook directories: %s&quot;</span><span class="s3">, </span><span class="s1">hook_directories)</span>
+
+    <span class="s3">return </span><span class="s1">hook_directories</span>
+
+
+<span class="s3">class </span><span class="s1">Analysis(Target):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Class that performs analysis of the user's main Python scripts. 
+ 
+    An Analysis has five outputs, all TOCs (Table of Contents) accessed as attributes of the analysis. 
+ 
+    scripts 
+            The scripts you gave Analysis as input, with any runtime hook scripts prepended. 
+    pure 
+            The pure Python modules. 
+    binaries 
+            The extensionmodules and their dependencies. The secondary dependecies are filtered. On Windows files from 
+            C:\\Windows are excluded by default. On Linux/Unix only system libraries from /lib or /usr/lib are excluded. 
+    datas 
+            Data-file dependencies. These are data-file that are found to be needed by modules. They can be anything: 
+            plugins, font files, images, translations, etc. 
+    zipfiles 
+            The zipfiles dependencies (usually .egg files). 
+    &quot;&quot;&quot;</span>
+    <span class="s1">_old_scripts = {</span>
+        <span class="s1">absnormpath(os.path.join(HOMEPATH</span><span class="s3">, </span><span class="s4">&quot;support&quot;</span><span class="s3">, </span><span class="s4">&quot;_mountzlib.py&quot;</span><span class="s1">))</span><span class="s3">,</span>
+        <span class="s1">absnormpath(os.path.join(HOMEPATH</span><span class="s3">, </span><span class="s4">&quot;support&quot;</span><span class="s3">, </span><span class="s4">&quot;useUnicode.py&quot;</span><span class="s1">))</span><span class="s3">,</span>
+        <span class="s1">absnormpath(os.path.join(HOMEPATH</span><span class="s3">, </span><span class="s4">&quot;support&quot;</span><span class="s3">, </span><span class="s4">&quot;useTK.py&quot;</span><span class="s1">))</span><span class="s3">,</span>
+        <span class="s1">absnormpath(os.path.join(HOMEPATH</span><span class="s3">, </span><span class="s4">&quot;support&quot;</span><span class="s3">, </span><span class="s4">&quot;unpackTK.py&quot;</span><span class="s1">))</span><span class="s3">,</span>
+        <span class="s1">absnormpath(os.path.join(HOMEPATH</span><span class="s3">, </span><span class="s4">&quot;support&quot;</span><span class="s3">, </span><span class="s4">&quot;removeTK.py&quot;</span><span class="s1">))</span>
+    <span class="s1">}</span>
+
+    <span class="s3">def </span><span class="s1">__init__(</span>
+        <span class="s1">self</span><span class="s3">,</span>
+        <span class="s1">scripts</span><span class="s3">,</span>
+        <span class="s1">pathex=</span><span class="s3">None,</span>
+        <span class="s1">binaries=</span><span class="s3">None,</span>
+        <span class="s1">datas=</span><span class="s3">None,</span>
+        <span class="s1">hiddenimports=</span><span class="s3">None,</span>
+        <span class="s1">hookspath=</span><span class="s3">None,</span>
+        <span class="s1">hooksconfig=</span><span class="s3">None,</span>
+        <span class="s1">excludes=</span><span class="s3">None,</span>
+        <span class="s1">runtime_hooks=</span><span class="s3">None,</span>
+        <span class="s1">cipher=</span><span class="s3">None,</span>
+        <span class="s1">win_no_prefer_redirects=</span><span class="s3">False,</span>
+        <span class="s1">win_private_assemblies=</span><span class="s3">False,</span>
+        <span class="s1">noarchive=</span><span class="s3">False</span>
+    <span class="s1">):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        scripts 
+                A list of scripts specified as file names. 
+        pathex 
+                An optional list of paths to be searched before sys.path. 
+        binaries 
+                An optional list of additional binaries (dlls, etc.) to include. 
+        datas 
+                An optional list of additional data files to include. 
+        hiddenimport 
+                An optional list of additional (hidden) modules to include. 
+        hookspath 
+                An optional list of additional paths to search for hooks. (hook-modules). 
+        hooksconfig 
+                An optional dict of config settings for hooks. (hook-modules). 
+        excludes 
+                An optional list of module or package names (their Python names, not path names) that will be 
+                ignored (as though they were not found). 
+        runtime_hooks 
+                An optional list of scripts to use as users' runtime hooks. Specified as file names. 
+        cipher 
+                Add optional instance of the pyz_crypto.PyiBlockCipher class (with a provided key). 
+        win_no_prefer_redirects 
+                If True, prefer not to follow version redirects when searching for Windows SxS Assemblies. 
+        win_private_assemblies 
+                If True, change all bundled Windows SxS Assemblies into Private Assemblies to enforce assembly versions. 
+        noarchive 
+                If True, do not place source files in a archive, but keep them as individual files. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">super(Analysis</span><span class="s3">, </span><span class="s1">self).__init__()</span>
+        <span class="s3">from </span><span class="s1">PyInstaller.config </span><span class="s3">import </span><span class="s1">CONF</span>
+
+        <span class="s1">self.inputs = []</span>
+        <span class="s1">spec_dir = os.path.dirname(CONF[</span><span class="s4">'spec'</span><span class="s1">])</span>
+        <span class="s3">for </span><span class="s1">script </span><span class="s3">in </span><span class="s1">scripts:</span>
+            <span class="s0"># If path is relative, it is relative to the location of .spec file.</span>
+            <span class="s3">if not </span><span class="s1">os.path.isabs(script):</span>
+                <span class="s1">script = os.path.join(spec_dir</span><span class="s3">, </span><span class="s1">script)</span>
+            <span class="s3">if </span><span class="s1">absnormpath(script) </span><span class="s3">in </span><span class="s1">self._old_scripts:</span>
+                <span class="s1">logger.warning(</span><span class="s4">'Ignoring obsolete auto-added script %s'</span><span class="s3">, </span><span class="s1">script)</span>
+                <span class="s3">continue</span>
+            <span class="s0"># Normalize script path.</span>
+            <span class="s1">script = os.path.normpath(script)</span>
+            <span class="s3">if not </span><span class="s1">os.path.exists(script):</span>
+                <span class="s3">raise </span><span class="s1">SystemExit(</span><span class="s4">&quot;script '%s' not found&quot; </span><span class="s1">% script)</span>
+            <span class="s1">self.inputs.append(script)</span>
+
+        <span class="s0"># Django hook requires this variable to find the script manage.py.</span>
+        <span class="s1">CONF[</span><span class="s4">'main_script'</span><span class="s1">] = self.inputs[</span><span class="s5">0</span><span class="s1">]</span>
+
+        <span class="s1">self.pathex = self._extend_pathex(pathex</span><span class="s3">, </span><span class="s1">self.inputs)</span>
+        <span class="s0"># Set global config variable 'pathex' to make it available for PyInstaller.utils.hooks and import hooks. Path</span>
+        <span class="s0"># extensions for module search.</span>
+        <span class="s1">CONF[</span><span class="s4">'pathex'</span><span class="s1">] = self.pathex</span>
+        <span class="s0"># Extend sys.path so PyInstaller could find all necessary modules.</span>
+        <span class="s1">logger.info(</span><span class="s4">'Extending PYTHONPATH with paths</span><span class="s3">\n</span><span class="s4">' </span><span class="s1">+ pprint.pformat(self.pathex))</span>
+        <span class="s1">sys.path.extend(self.pathex)</span>
+
+        <span class="s0"># Set global variable to hold assembly binding redirects</span>
+        <span class="s1">CONF[</span><span class="s4">'binding_redirects'</span><span class="s1">] = []</span>
+
+        <span class="s1">self.hiddenimports = hiddenimports </span><span class="s3">or </span><span class="s1">[]</span>
+        <span class="s0"># Include modules detected when parsing options, like 'codecs' and encodings.</span>
+        <span class="s1">self.hiddenimports.extend(CONF[</span><span class="s4">'hiddenimports'</span><span class="s1">])</span>
+
+        <span class="s1">self.hookspath = []</span>
+        <span class="s0"># Append directories in `hookspath` (`--additional-hooks-dir`) to take precedence over those from the entry</span>
+        <span class="s0"># points.</span>
+        <span class="s3">if </span><span class="s1">hookspath:</span>
+            <span class="s1">self.hookspath.extend(hookspath)</span>
+
+        <span class="s0"># Add hook directories from PyInstaller entry points.</span>
+        <span class="s1">self.hookspath += discover_hook_directories()</span>
+
+        <span class="s1">self.hooksconfig = {}</span>
+        <span class="s3">if </span><span class="s1">hooksconfig:</span>
+            <span class="s1">self.hooksconfig.update(hooksconfig)</span>
+
+        <span class="s0"># Custom runtime hook files that should be included and started before any existing PyInstaller runtime hooks.</span>
+        <span class="s1">self.custom_runtime_hooks = runtime_hooks </span><span class="s3">or </span><span class="s1">[]</span>
+
+        <span class="s3">if </span><span class="s1">cipher:</span>
+            <span class="s1">logger.info(</span><span class="s4">'Will encrypt Python bytecode with key: %s'</span><span class="s3">, </span><span class="s1">cipher.key)</span>
+            <span class="s0"># Create a Python module which contains the decryption key which will be used at runtime by</span>
+            <span class="s0"># pyi_crypto.PyiBlockCipher.</span>
+            <span class="s1">pyi_crypto_key_path = os.path.join(CONF[</span><span class="s4">'workpath'</span><span class="s1">]</span><span class="s3">, </span><span class="s4">'pyimod00_crypto_key.py'</span><span class="s1">)</span>
+            <span class="s3">with </span><span class="s1">open(pyi_crypto_key_path</span><span class="s3">, </span><span class="s4">'w'</span><span class="s3">, </span><span class="s1">encoding=</span><span class="s4">'utf-8'</span><span class="s1">) </span><span class="s3">as </span><span class="s1">f:</span>
+                <span class="s1">f.write(</span><span class="s4">'# -*- coding: utf-8 -*-</span><span class="s3">\n</span><span class="s4">key = %r</span><span class="s3">\n</span><span class="s4">' </span><span class="s1">% cipher.key)</span>
+            <span class="s1">self.hiddenimports.append(</span><span class="s4">'tinyaes'</span><span class="s1">)</span>
+
+        <span class="s1">self.excludes = excludes </span><span class="s3">or </span><span class="s1">[]</span>
+        <span class="s1">self.scripts = TOC()</span>
+        <span class="s1">self.pure = TOC()</span>
+        <span class="s1">self.binaries = TOC()</span>
+        <span class="s1">self.zipfiles = TOC()</span>
+        <span class="s1">self.zipped_data = TOC()</span>
+        <span class="s1">self.datas = TOC()</span>
+        <span class="s1">self.dependencies = TOC()</span>
+        <span class="s1">self.binding_redirects = CONF[</span><span class="s4">'binding_redirects'</span><span class="s1">] = []</span>
+        <span class="s1">self.win_no_prefer_redirects = win_no_prefer_redirects</span>
+        <span class="s1">self.win_private_assemblies = win_private_assemblies</span>
+        <span class="s1">self._python_version = sys.version</span>
+        <span class="s1">self.noarchive = noarchive</span>
+
+        <span class="s1">self.__postinit__()</span>
+
+        <span class="s0"># TODO: create a function to convert datas/binaries from 'hook format' to TOC.</span>
+        <span class="s0"># Initialise 'binaries' and 'datas' with lists specified in .spec file.</span>
+        <span class="s3">if </span><span class="s1">binaries:</span>
+            <span class="s1">logger.info(</span><span class="s4">&quot;Appending 'binaries' from .spec&quot;</span><span class="s1">)</span>
+            <span class="s3">for </span><span class="s1">name</span><span class="s3">, </span><span class="s1">pth </span><span class="s3">in </span><span class="s1">format_binaries_and_datas(binaries</span><span class="s3">, </span><span class="s1">workingdir=spec_dir):</span>
+                <span class="s1">self.binaries.append((name</span><span class="s3">, </span><span class="s1">pth</span><span class="s3">, </span><span class="s4">'BINARY'</span><span class="s1">))</span>
+        <span class="s3">if </span><span class="s1">datas:</span>
+            <span class="s1">logger.info(</span><span class="s4">&quot;Appending 'datas' from .spec&quot;</span><span class="s1">)</span>
+            <span class="s3">for </span><span class="s1">name</span><span class="s3">, </span><span class="s1">pth </span><span class="s3">in </span><span class="s1">format_binaries_and_datas(datas</span><span class="s3">, </span><span class="s1">workingdir=spec_dir):</span>
+                <span class="s1">self.datas.append((name</span><span class="s3">, </span><span class="s1">pth</span><span class="s3">, </span><span class="s4">'DATA'</span><span class="s1">))</span>
+
+    <span class="s1">_GUTS = (  </span><span class="s0"># input parameters</span>
+        <span class="s1">(</span><span class="s4">'inputs'</span><span class="s3">, </span><span class="s1">_check_guts_eq)</span><span class="s3">,  </span><span class="s0"># parameter `scripts`</span>
+        <span class="s1">(</span><span class="s4">'pathex'</span><span class="s3">, </span><span class="s1">_check_guts_eq)</span><span class="s3">,</span>
+        <span class="s1">(</span><span class="s4">'hiddenimports'</span><span class="s3">, </span><span class="s1">_check_guts_eq)</span><span class="s3">,</span>
+        <span class="s1">(</span><span class="s4">'hookspath'</span><span class="s3">, </span><span class="s1">_check_guts_eq)</span><span class="s3">,</span>
+        <span class="s1">(</span><span class="s4">'hooksconfig'</span><span class="s3">, </span><span class="s1">_check_guts_eq)</span><span class="s3">,</span>
+        <span class="s1">(</span><span class="s4">'excludes'</span><span class="s3">, </span><span class="s1">_check_guts_eq)</span><span class="s3">,</span>
+        <span class="s1">(</span><span class="s4">'custom_runtime_hooks'</span><span class="s3">, </span><span class="s1">_check_guts_eq)</span><span class="s3">,</span>
+        <span class="s1">(</span><span class="s4">'win_no_prefer_redirects'</span><span class="s3">, </span><span class="s1">_check_guts_eq)</span><span class="s3">,</span>
+        <span class="s1">(</span><span class="s4">'win_private_assemblies'</span><span class="s3">, </span><span class="s1">_check_guts_eq)</span><span class="s3">,</span>
+        <span class="s1">(</span><span class="s4">'noarchive'</span><span class="s3">, </span><span class="s1">_check_guts_eq)</span><span class="s3">,</span>
+
+        <span class="s0"># 'cipher': no need to check as it is implied by an additional hidden import</span>
+
+        <span class="s0"># calculated/analysed values</span>
+        <span class="s1">(</span><span class="s4">'_python_version'</span><span class="s3">, </span><span class="s1">_check_guts_eq)</span><span class="s3">,</span>
+        <span class="s1">(</span><span class="s4">'scripts'</span><span class="s3">, </span><span class="s1">_check_guts_toc_mtime)</span><span class="s3">,</span>
+        <span class="s1">(</span><span class="s4">'pure'</span><span class="s3">, lambda </span><span class="s1">*args: _check_guts_toc_mtime(*args</span><span class="s3">, </span><span class="s1">**{</span><span class="s4">'pyc'</span><span class="s1">: </span><span class="s5">1</span><span class="s1">}))</span><span class="s3">,</span>
+        <span class="s1">(</span><span class="s4">'binaries'</span><span class="s3">, </span><span class="s1">_check_guts_toc_mtime)</span><span class="s3">,</span>
+        <span class="s1">(</span><span class="s4">'zipfiles'</span><span class="s3">, </span><span class="s1">_check_guts_toc_mtime)</span><span class="s3">,</span>
+        <span class="s1">(</span><span class="s4">'zipped_data'</span><span class="s3">, None</span><span class="s1">)</span><span class="s3">,  </span><span class="s0"># TODO check this, too</span>
+        <span class="s1">(</span><span class="s4">'datas'</span><span class="s3">, </span><span class="s1">_check_guts_toc_mtime)</span><span class="s3">,</span>
+        <span class="s0"># TODO: Need to add &quot;dependencies&quot;?</span>
+
+        <span class="s0"># cached binding redirects - loaded into CONF for PYZ/COLLECT to find.</span>
+        <span class="s1">(</span><span class="s4">'binding_redirects'</span><span class="s3">, None</span><span class="s1">)</span><span class="s3">,</span>
+    <span class="s1">)</span>
+
+    <span class="s3">def </span><span class="s1">_extend_pathex(self</span><span class="s3">, </span><span class="s1">spec_pathex</span><span class="s3">, </span><span class="s1">scripts):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Normalize additional paths where PyInstaller will look for modules and add paths with scripts to the list of 
+        paths. 
+ 
+        :param spec_pathex: Additional paths defined defined in .spec file. 
+        :param scripts: Scripts to create executable from. 
+        :return: list of updated paths 
+        &quot;&quot;&quot;</span>
+        <span class="s0"># Based on main supplied script - add top-level modules directory to PYTHONPATH.</span>
+        <span class="s0"># Sometimes the main app script is not top-level module but submodule like 'mymodule.mainscript.py'.</span>
+        <span class="s0"># In that case PyInstaller will not be able find modules in the directory containing 'mymodule'.</span>
+        <span class="s0"># Add this directory to PYTHONPATH so PyInstaller could find it.</span>
+        <span class="s1">pathex = []</span>
+        <span class="s0"># Add scripts paths first.</span>
+        <span class="s3">for </span><span class="s1">script </span><span class="s3">in </span><span class="s1">scripts:</span>
+            <span class="s1">logger.debug(</span><span class="s4">'script: %s' </span><span class="s1">% script)</span>
+            <span class="s1">script_toplevel_dir = get_path_to_toplevel_modules(script)</span>
+            <span class="s3">if </span><span class="s1">script_toplevel_dir:</span>
+                <span class="s1">pathex.append(script_toplevel_dir)</span>
+        <span class="s0"># Append paths from .spec.</span>
+        <span class="s3">if </span><span class="s1">spec_pathex </span><span class="s3">is not None</span><span class="s1">:</span>
+            <span class="s1">pathex.extend(spec_pathex)</span>
+        <span class="s0"># Normalize paths in pathex and make them absolute.</span>
+        <span class="s3">return </span><span class="s1">[absnormpath(p) </span><span class="s3">for </span><span class="s1">p </span><span class="s3">in </span><span class="s1">pathex]</span>
+
+    <span class="s3">def </span><span class="s1">_check_guts(self</span><span class="s3">, </span><span class="s1">data</span><span class="s3">, </span><span class="s1">last_build):</span>
+        <span class="s3">if </span><span class="s1">Target._check_guts(self</span><span class="s3">, </span><span class="s1">data</span><span class="s3">, </span><span class="s1">last_build):</span>
+            <span class="s3">return True</span>
+        <span class="s3">for </span><span class="s1">fnm </span><span class="s3">in </span><span class="s1">self.inputs:</span>
+            <span class="s3">if </span><span class="s1">mtime(fnm) &gt; last_build:</span>
+                <span class="s1">logger.info(</span><span class="s4">&quot;Building because %s changed&quot;</span><span class="s3">, </span><span class="s1">fnm)</span>
+                <span class="s3">return True</span>
+        <span class="s0"># Now we know that none of the input parameters and none of the input files has changed. So take the values</span>
+        <span class="s0"># calculated resp. analysed in the last run and store them in `self`.</span>
+        <span class="s1">self.scripts = TOC(data[</span><span class="s4">'scripts'</span><span class="s1">])</span>
+        <span class="s1">self.pure = TOC(data[</span><span class="s4">'pure'</span><span class="s1">])</span>
+        <span class="s1">self.binaries = TOC(data[</span><span class="s4">'binaries'</span><span class="s1">])</span>
+        <span class="s1">self.zipfiles = TOC(data[</span><span class="s4">'zipfiles'</span><span class="s1">])</span>
+        <span class="s1">self.zipped_data = TOC(data[</span><span class="s4">'zipped_data'</span><span class="s1">])</span>
+        <span class="s1">self.datas = TOC(data[</span><span class="s4">'datas'</span><span class="s1">])</span>
+
+        <span class="s0"># Store previously found binding redirects in CONF for later use by PKG/COLLECT</span>
+        <span class="s3">from </span><span class="s1">PyInstaller.config </span><span class="s3">import </span><span class="s1">CONF</span>
+        <span class="s1">self.binding_redirects = CONF[</span><span class="s4">'binding_redirects'</span><span class="s1">] = data[</span><span class="s4">'binding_redirects'</span><span class="s1">]</span>
+
+        <span class="s3">return False</span>
+
+    <span class="s3">def </span><span class="s1">assemble(self):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        This method is the MAIN method for finding all necessary files to be bundled. 
+        &quot;&quot;&quot;</span>
+        <span class="s3">from </span><span class="s1">PyInstaller.config </span><span class="s3">import </span><span class="s1">CONF</span>
+
+        <span class="s3">for </span><span class="s1">m </span><span class="s3">in </span><span class="s1">self.excludes:</span>
+            <span class="s1">logger.debug(</span><span class="s4">&quot;Excluding module '%s'&quot; </span><span class="s1">% m)</span>
+        <span class="s1">self.graph = initialize_modgraph(excludes=self.excludes</span><span class="s3">, </span><span class="s1">user_hook_dirs=self.hookspath)</span>
+
+        <span class="s0"># TODO: find a better place where to put 'base_library.zip' and when to created it.</span>
+        <span class="s0"># For Python 3 it is necessary to create file 'base_library.zip' containing core Python modules. In Python 3</span>
+        <span class="s0"># some built-in modules are written in pure Python. base_library.zip is a way how to have those modules as</span>
+        <span class="s0"># &quot;built-in&quot;.</span>
+        <span class="s1">libzip_filename = os.path.join(CONF[</span><span class="s4">'workpath'</span><span class="s1">]</span><span class="s3">, </span><span class="s4">'base_library.zip'</span><span class="s1">)</span>
+        <span class="s1">create_py3_base_library(libzip_filename</span><span class="s3">, </span><span class="s1">graph=self.graph)</span>
+        <span class="s0"># Bundle base_library.zip as data file.</span>
+        <span class="s0"># Data format of TOC item:   ('relative_path_in_dist_dir', 'absolute_path_on_disk', 'DATA')</span>
+        <span class="s1">self.datas.append((os.path.basename(libzip_filename)</span><span class="s3">, </span><span class="s1">libzip_filename</span><span class="s3">, </span><span class="s4">'DATA'</span><span class="s1">))</span>
+
+        <span class="s0"># Expand sys.path of module graph. The attribute is the set of paths to use for imports: sys.path, plus our</span>
+        <span class="s0"># loader, plus other paths from e.g. --path option).</span>
+        <span class="s1">self.graph.path = self.pathex + self.graph.path</span>
+        <span class="s1">self.graph.set_setuptools_nspackages()</span>
+
+        <span class="s1">logger.info(</span><span class="s4">&quot;running Analysis %s&quot;</span><span class="s3">, </span><span class="s1">self.tocbasename)</span>
+        <span class="s0"># Get paths to Python and, in Windows, the manifest.</span>
+        <span class="s1">python = compat.python_executable</span>
+        <span class="s3">if not </span><span class="s1">is_win:</span>
+            <span class="s0"># Linux/MacOS: get a real, non-link path to the running Python executable.</span>
+            <span class="s3">while </span><span class="s1">os.path.islink(python):</span>
+                <span class="s1">python = os.path.join(os.path.dirname(python)</span><span class="s3">, </span><span class="s1">os.readlink(python))</span>
+            <span class="s1">depmanifest = </span><span class="s3">None</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s0"># Windows: Create a manifest to embed into built .exe, containing the same dependencies as python.exe.</span>
+            <span class="s1">depmanifest = winmanifest.Manifest(</span>
+                <span class="s1">type_=</span><span class="s4">&quot;win32&quot;</span><span class="s3">,</span>
+                <span class="s1">name=CONF[</span><span class="s4">'specnm'</span><span class="s1">]</span><span class="s3">,</span>
+                <span class="s1">processorArchitecture=winmanifest.processor_architecture()</span><span class="s3">,</span>
+                <span class="s1">version=(</span><span class="s5">1</span><span class="s3">, </span><span class="s5">0</span><span class="s3">, </span><span class="s5">0</span><span class="s3">, </span><span class="s5">0</span><span class="s1">)</span>
+            <span class="s1">)</span>
+            <span class="s1">depmanifest.filename = os.path.join(CONF[</span><span class="s4">'workpath'</span><span class="s1">]</span><span class="s3">, </span><span class="s1">CONF[</span><span class="s4">'specnm'</span><span class="s1">] + </span><span class="s4">&quot;.exe.manifest&quot;</span><span class="s1">)</span>
+
+        <span class="s0"># We record &quot;binaries&quot; separately from the modulegraph, as there is no way to record those dependencies in the</span>
+        <span class="s0"># graph. These include the python executable and any binaries added by hooks later. &quot;binaries&quot; are not the same</span>
+        <span class="s0"># as &quot;extensions&quot; which are .so or .dylib that are found and recorded as extension nodes in the graph. Reset</span>
+        <span class="s0"># seen variable before running bindepend. We use bindepend only for the python executable.</span>
+        <span class="s1">bindepend.seen.clear()</span>
+
+        <span class="s0"># Add binary and assembly dependencies of Python.exe. This also ensures that its assembly depencies under</span>
+        <span class="s0"># Windows get added to the built .exe's manifest. Python 2.7 extension modules have no assembly dependencies,</span>
+        <span class="s0"># and rely on the app-global dependencies set by the .exe.</span>
+        <span class="s1">self.binaries.extend(</span>
+            <span class="s1">bindepend.Dependencies([(</span><span class="s4">''</span><span class="s3">, </span><span class="s1">python</span><span class="s3">, </span><span class="s4">''</span><span class="s1">)]</span><span class="s3">, </span><span class="s1">manifest=depmanifest</span><span class="s3">, </span><span class="s1">redirects=self.binding_redirects)[</span><span class="s5">1</span><span class="s1">:]</span>
+        <span class="s1">)</span>
+        <span class="s3">if </span><span class="s1">is_win:</span>
+            <span class="s1">depmanifest.writeprettyxml()</span>
+
+        <span class="s0"># -- Module graph. --</span>
+        <span class="s0">#</span>
+        <span class="s0"># Construct the module graph of import relationships between modules required by this user's application. For</span>
+        <span class="s0"># each entry point (top-level user-defined Python script), all imports originating from this entry point are</span>
+        <span class="s0"># recursively parsed into a subgraph of the module graph. This subgraph is then connected to this graph's root</span>
+        <span class="s0"># node, ensuring imported module nodes will be reachable from the root node -- which is is (arbitrarily) chosen</span>
+        <span class="s0"># to be the first entry point's node.</span>
+
+        <span class="s0"># List to hold graph nodes of scripts and runtime hooks in use order.</span>
+        <span class="s1">priority_scripts = []</span>
+
+        <span class="s0"># Assume that if the script does not exist, Modulegraph will raise error. Save the graph nodes of each in</span>
+        <span class="s0"># sequence.</span>
+        <span class="s3">for </span><span class="s1">script </span><span class="s3">in </span><span class="s1">self.inputs:</span>
+            <span class="s1">logger.info(</span><span class="s4">&quot;Analyzing %s&quot;</span><span class="s3">, </span><span class="s1">script)</span>
+            <span class="s1">priority_scripts.append(self.graph.add_script(script))</span>
+
+        <span class="s0"># Analyze the script's hidden imports (named on the command line)</span>
+        <span class="s1">self.graph.add_hiddenimports(self.hiddenimports)</span>
+
+        <span class="s0"># -- Post-graph hooks. --</span>
+        <span class="s1">self.graph.process_post_graph_hooks(self)</span>
+
+        <span class="s0"># Update 'binaries' TOC and 'datas' TOC.</span>
+        <span class="s1">deps_proc = DependencyProcessor(self.graph</span><span class="s3">, </span><span class="s1">self.graph._additional_files_cache)</span>
+        <span class="s1">self.binaries.extend(deps_proc.make_binaries_toc())</span>
+        <span class="s1">self.datas.extend(deps_proc.make_datas_toc())</span>
+        <span class="s1">self.zipped_data.extend(deps_proc.make_zipped_data_toc())</span>
+        <span class="s0"># Note: zipped eggs are collected below</span>
+
+        <span class="s0"># -- Look for dlls that are imported by Python 'ctypes' module. --</span>
+        <span class="s0"># First get code objects of all modules that import 'ctypes'.</span>
+        <span class="s1">logger.info(</span><span class="s4">'Looking for ctypes DLLs'</span><span class="s1">)</span>
+        <span class="s0"># dict like: {'module1': code_obj, 'module2': code_obj}</span>
+        <span class="s1">ctypes_code_objs = self.graph.get_code_using(</span><span class="s4">&quot;ctypes&quot;</span><span class="s1">)</span>
+
+        <span class="s3">for </span><span class="s1">name</span><span class="s3">, </span><span class="s1">co </span><span class="s3">in </span><span class="s1">ctypes_code_objs.items():</span>
+            <span class="s0"># Get dlls that might be needed by ctypes.</span>
+            <span class="s1">logger.debug(</span><span class="s4">'Scanning %s for shared libraries or dlls'</span><span class="s3">, </span><span class="s1">name)</span>
+            <span class="s3">try</span><span class="s1">:</span>
+                <span class="s1">ctypes_binaries = scan_code_for_ctypes(co)</span>
+                <span class="s1">self.binaries.extend(set(ctypes_binaries))</span>
+            <span class="s3">except </span><span class="s1">Exception </span><span class="s3">as </span><span class="s1">ex:</span>
+                <span class="s3">raise </span><span class="s1">RuntimeError(</span><span class="s4">f&quot;Failed to scan the module '</span><span class="s3">{</span><span class="s1">name</span><span class="s3">}</span><span class="s4">'. &quot; f&quot;This is a bug. Please report it.&quot;</span><span class="s1">) </span><span class="s3">from </span><span class="s1">ex</span>
+
+        <span class="s1">self.datas.extend((dest</span><span class="s3">, </span><span class="s1">source</span><span class="s3">, </span><span class="s4">&quot;DATA&quot;</span><span class="s1">)</span>
+                          <span class="s3">for </span><span class="s1">(dest</span><span class="s3">, </span><span class="s1">source) </span><span class="s3">in </span><span class="s1">format_binaries_and_datas(self.graph.metadata_required()))</span>
+
+        <span class="s0"># Analyze run-time hooks. Run-time hooks has to be executed before user scripts. Add them to the beginning of</span>
+        <span class="s0"># 'priority_scripts'.</span>
+        <span class="s1">priority_scripts = self.graph.analyze_runtime_hooks(self.custom_runtime_hooks) + priority_scripts</span>
+
+        <span class="s0"># 'priority_scripts' is now a list of the graph nodes of custom runtime hooks, then regular runtime hooks, then</span>
+        <span class="s0"># the PyI loader scripts. Further on, we will make sure they end up at the front of self.scripts</span>
+
+        <span class="s0"># -- Extract the nodes of the graph as TOCs for further processing. --</span>
+
+        <span class="s0"># Initialize the scripts list with priority scripts in the proper order.</span>
+        <span class="s1">self.scripts = self.graph.nodes_to_toc(priority_scripts)</span>
+
+        <span class="s0"># Extend the binaries list with all the Extensions modulegraph has found.</span>
+        <span class="s1">self.binaries = self.graph.make_binaries_toc(self.binaries)</span>
+        <span class="s0"># Fill the &quot;pure&quot; list with pure Python modules.</span>
+        <span class="s3">assert </span><span class="s1">len(self.pure) == </span><span class="s5">0</span>
+        <span class="s1">self.pure = self.graph.make_pure_toc()</span>
+        <span class="s0"># And get references to module code objects constructed by ModuleGraph to avoid writing .pyc/pyo files to hdd.</span>
+        <span class="s1">self.pure._code_cache = self.graph.get_code_objects()</span>
+
+        <span class="s0"># Add remaining binary dependencies - analyze Python C-extensions and what DLLs they depend on.</span>
+        <span class="s1">logger.info(</span><span class="s4">'Looking for dynamic libraries'</span><span class="s1">)</span>
+
+        <span class="s0"># In the case of MS App Store python, add compat.base_prefix to extra library search paths. In addition to</span>
+        <span class="s0"># python38.dll (that we manage to resolve by other means, if necessary), this directory also contains</span>
+        <span class="s0"># python3.dll that might be required by some 3rd-party extension modules, and would otherwise end up missing</span>
+        <span class="s0"># during the dependency analysis.</span>
+        <span class="s1">extra_libdirs = []</span>
+        <span class="s3">if </span><span class="s1">compat.is_ms_app_store:</span>
+            <span class="s1">extra_libdirs.append(compat.base_prefix)</span>
+
+        <span class="s1">self.binaries.extend(</span>
+            <span class="s1">bindepend.Dependencies(self.binaries</span><span class="s3">, </span><span class="s1">redirects=self.binding_redirects</span><span class="s3">, </span><span class="s1">xtrapath=extra_libdirs)</span>
+        <span class="s1">)</span>
+
+        <span class="s0"># Include zipped Python eggs.</span>
+        <span class="s1">logger.info(</span><span class="s4">'Looking for eggs'</span><span class="s1">)</span>
+        <span class="s1">self.zipfiles.extend(deps_proc.make_zipfiles_toc())</span>
+
+        <span class="s0"># Verify that Python dynamic library can be found. Without dynamic Python library PyInstaller cannot continue.</span>
+        <span class="s1">self._check_python_library(self.binaries)</span>
+
+        <span class="s3">if </span><span class="s1">is_win:</span>
+            <span class="s0"># Remove duplicate redirects</span>
+            <span class="s1">self.binding_redirects[:] = list(set(self.binding_redirects))</span>
+            <span class="s1">logger.info(</span><span class="s4">&quot;Found binding redirects: </span><span class="s3">\n</span><span class="s4">%s&quot;</span><span class="s3">, </span><span class="s1">self.binding_redirects)</span>
+
+        <span class="s0"># Filter binaries to adjust path of extensions that come from python's lib-dynload directory. Prefix them with</span>
+        <span class="s0"># lib-dynload so that we will collect them into subdirectory instead of directly into _MEIPASS</span>
+        <span class="s3">for </span><span class="s1">idx</span><span class="s3">, </span><span class="s1">tpl </span><span class="s3">in </span><span class="s1">enumerate(self.binaries):</span>
+            <span class="s1">name</span><span class="s3">, </span><span class="s1">path</span><span class="s3">, </span><span class="s1">typecode = tpl</span>
+            <span class="s3">if </span><span class="s1">(</span>
+                <span class="s1">typecode == </span><span class="s4">'EXTENSION' </span><span class="s3">and not </span><span class="s1">os.path.dirname(os.path.normpath(name))</span>
+                <span class="s3">and </span><span class="s1">os.path.basename(os.path.dirname(path)) == </span><span class="s4">'lib-dynload'</span>
+            <span class="s1">):</span>
+                <span class="s1">name = os.path.join(</span><span class="s4">'lib-dynload'</span><span class="s3">, </span><span class="s1">name)</span>
+                <span class="s1">self.binaries[idx] = (name</span><span class="s3">, </span><span class="s1">path</span><span class="s3">, </span><span class="s1">typecode)</span>
+
+        <span class="s0"># Place Python source in data files for the noarchive case.</span>
+        <span class="s3">if </span><span class="s1">self.noarchive:</span>
+            <span class="s0"># Create a new TOC of ``(dest path for .pyc, source for .py, type)``.</span>
+            <span class="s1">new_toc = TOC()</span>
+            <span class="s3">for </span><span class="s1">name</span><span class="s3">, </span><span class="s1">path</span><span class="s3">, </span><span class="s1">typecode </span><span class="s3">in </span><span class="s1">self.pure:</span>
+                <span class="s3">assert </span><span class="s1">typecode == </span><span class="s4">'PYMODULE'</span>
+                <span class="s0"># Transform a python module name into a file name.</span>
+                <span class="s1">name = name.replace(</span><span class="s4">'.'</span><span class="s3">, </span><span class="s1">os.sep)</span>
+                <span class="s0"># Special case: modules have an implied filename to add.</span>
+                <span class="s3">if </span><span class="s1">os.path.splitext(os.path.basename(path))[</span><span class="s5">0</span><span class="s1">] == </span><span class="s4">'__init__'</span><span class="s1">:</span>
+                    <span class="s1">name += os.sep + </span><span class="s4">'__init__'</span>
+                <span class="s0"># Append the extension for the compiled result. In python 3.5 (PEP-488) .pyo files were replaced by</span>
+                <span class="s0"># .opt-1.pyc and .opt-2.pyc. However, it seems that for bytecode-only module distribution, we always</span>
+                <span class="s0"># need to use the .pyc extension.</span>
+                <span class="s1">name += </span><span class="s4">'.pyc'</span>
+                <span class="s1">new_toc.append((name</span><span class="s3">, </span><span class="s1">path</span><span class="s3">, </span><span class="s1">typecode))</span>
+            <span class="s0"># Put the result of byte-compiling this TOC in datas. Mark all entries as data.</span>
+            <span class="s3">for </span><span class="s1">name</span><span class="s3">, </span><span class="s1">path</span><span class="s3">, </span><span class="s1">typecode </span><span class="s3">in </span><span class="s1">compile_py_files(new_toc</span><span class="s3">, </span><span class="s1">CONF[</span><span class="s4">'workpath'</span><span class="s1">]):</span>
+                <span class="s1">self.datas.append((name</span><span class="s3">, </span><span class="s1">path</span><span class="s3">, </span><span class="s4">'DATA'</span><span class="s1">))</span>
+            <span class="s0"># Store no source in the archive.</span>
+            <span class="s1">self.pure = TOC()</span>
+
+        <span class="s0"># Write warnings about missing modules.</span>
+        <span class="s1">self._write_warnings()</span>
+        <span class="s0"># Write debug information about hte graph</span>
+        <span class="s1">self._write_graph_debug()</span>
+
+    <span class="s3">def </span><span class="s1">_write_warnings(self):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Write warnings about missing modules. Get them from the graph and use the graph to figure out who tried to 
+        import them. 
+        &quot;&quot;&quot;</span>
+        <span class="s3">def </span><span class="s1">dependency_description(name</span><span class="s3">, </span><span class="s1">dep_info):</span>
+            <span class="s3">if not </span><span class="s1">dep_info </span><span class="s3">or </span><span class="s1">dep_info == </span><span class="s4">'direct'</span><span class="s1">:</span>
+                <span class="s1">imptype = </span><span class="s5">0</span>
+            <span class="s3">else</span><span class="s1">:</span>
+                <span class="s1">imptype = (dep_info.conditional + </span><span class="s5">2 </span><span class="s1">* dep_info.function + </span><span class="s5">4 </span><span class="s1">* dep_info.tryexcept)</span>
+            <span class="s3">return </span><span class="s4">'%s (%s)' </span><span class="s1">% (name</span><span class="s3">, </span><span class="s1">IMPORT_TYPES[imptype])</span>
+
+        <span class="s3">from </span><span class="s1">PyInstaller.config </span><span class="s3">import </span><span class="s1">CONF</span>
+        <span class="s1">miss_toc = self.graph.make_missing_toc()</span>
+        <span class="s3">with </span><span class="s1">open(CONF[</span><span class="s4">'warnfile'</span><span class="s1">]</span><span class="s3">, </span><span class="s4">'w'</span><span class="s3">, </span><span class="s1">encoding=</span><span class="s4">'utf-8'</span><span class="s1">) </span><span class="s3">as </span><span class="s1">wf:</span>
+            <span class="s1">wf.write(WARNFILE_HEADER)</span>
+            <span class="s3">for </span><span class="s1">(n</span><span class="s3">, </span><span class="s1">p</span><span class="s3">, </span><span class="s1">status) </span><span class="s3">in </span><span class="s1">miss_toc:</span>
+                <span class="s1">importers = self.graph.get_importers(n)</span>
+                <span class="s1">print(</span>
+                    <span class="s1">status</span><span class="s3">,</span>
+                    <span class="s4">'module named'</span><span class="s3">,</span>
+                    <span class="s1">n</span><span class="s3">,</span>
+                    <span class="s4">'- imported by'</span><span class="s3">,</span>
+                    <span class="s4">', '</span><span class="s1">.join(dependency_description(name</span><span class="s3">, </span><span class="s1">data) </span><span class="s3">for </span><span class="s1">name</span><span class="s3">, </span><span class="s1">data </span><span class="s3">in </span><span class="s1">importers)</span><span class="s3">,</span>
+                    <span class="s1">file=wf</span>
+                <span class="s1">)</span>
+        <span class="s1">logger.info(</span><span class="s4">&quot;Warnings written to %s&quot;</span><span class="s3">, </span><span class="s1">CONF[</span><span class="s4">'warnfile'</span><span class="s1">])</span>
+
+    <span class="s3">def </span><span class="s1">_write_graph_debug(self):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Write a xref (in html) and with `--log-level DEBUG` a dot-drawing of the graph. 
+        &quot;&quot;&quot;</span>
+        <span class="s3">from </span><span class="s1">PyInstaller.config </span><span class="s3">import </span><span class="s1">CONF</span>
+        <span class="s3">with </span><span class="s1">open(CONF[</span><span class="s4">'xref-file'</span><span class="s1">]</span><span class="s3">, </span><span class="s4">'w'</span><span class="s3">, </span><span class="s1">encoding=</span><span class="s4">'utf-8'</span><span class="s1">) </span><span class="s3">as </span><span class="s1">fh:</span>
+            <span class="s1">self.graph.create_xref(fh)</span>
+            <span class="s1">logger.info(</span><span class="s4">&quot;Graph cross-reference written to %s&quot;</span><span class="s3">, </span><span class="s1">CONF[</span><span class="s4">'xref-file'</span><span class="s1">])</span>
+        <span class="s3">if </span><span class="s1">logger.getEffectiveLevel() &gt; logging.DEBUG:</span>
+            <span class="s3">return</span>
+        <span class="s0"># The `DOT language's &lt;https://www.graphviz.org/doc/info/lang.html&gt;`_ default character encoding (see the end</span>
+        <span class="s0"># of the linked page) is UTF-8.</span>
+        <span class="s3">with </span><span class="s1">open(CONF[</span><span class="s4">'dot-file'</span><span class="s1">]</span><span class="s3">, </span><span class="s4">'w'</span><span class="s3">, </span><span class="s1">encoding=</span><span class="s4">'utf-8'</span><span class="s1">) </span><span class="s3">as </span><span class="s1">fh:</span>
+            <span class="s1">self.graph.graphreport(fh)</span>
+            <span class="s1">logger.info(</span><span class="s4">&quot;Graph drawing written to %s&quot;</span><span class="s3">, </span><span class="s1">CONF[</span><span class="s4">'dot-file'</span><span class="s1">])</span>
+
+    <span class="s3">def </span><span class="s1">_check_python_library(self</span><span class="s3">, </span><span class="s1">binaries):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Verify presence of the Python dynamic library in the binary dependencies. Python library is an essential 
+        piece that has to be always included. 
+        &quot;&quot;&quot;</span>
+        <span class="s0"># First check that libpython is in resolved binary dependencies.</span>
+        <span class="s3">for </span><span class="s1">(nm</span><span class="s3">, </span><span class="s1">filename</span><span class="s3">, </span><span class="s1">typ) </span><span class="s3">in </span><span class="s1">binaries:</span>
+            <span class="s3">if </span><span class="s1">typ == </span><span class="s4">'BINARY' </span><span class="s3">and </span><span class="s1">nm </span><span class="s3">in </span><span class="s1">PYDYLIB_NAMES:</span>
+                <span class="s0"># Just print its filename and return.</span>
+                <span class="s1">logger.info(</span><span class="s4">'Using Python library %s'</span><span class="s3">, </span><span class="s1">filename)</span>
+                <span class="s0"># Checking was successful - end of function.</span>
+                <span class="s3">return</span>
+
+        <span class="s0"># Python lib not in dependencies - try to find it.</span>
+        <span class="s1">logger.info(</span><span class="s4">'Python library not in binary dependencies. Doing additional searching...'</span><span class="s1">)</span>
+        <span class="s1">python_lib = bindepend.get_python_library_path()</span>
+        <span class="s1">logger.debug(</span><span class="s4">'Adding Python library to binary dependencies'</span><span class="s1">)</span>
+        <span class="s1">binaries.append((os.path.basename(python_lib)</span><span class="s3">, </span><span class="s1">python_lib</span><span class="s3">, </span><span class="s4">'BINARY'</span><span class="s1">))</span>
+        <span class="s1">logger.info(</span><span class="s4">'Using Python library %s'</span><span class="s3">, </span><span class="s1">python_lib)</span>
+
+    <span class="s3">def </span><span class="s1">exclude_system_libraries(self</span><span class="s3">, </span><span class="s1">list_of_exceptions=[]):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        This method may be optionally called from the spec file to exclude any system libraries from the list of 
+        binaries other than those containing the shell-style wildcards in list_of_exceptions. Those that match 
+        '*python*' or are stored under 'lib-dynload' are always treated as exceptions and not excluded. 
+        &quot;&quot;&quot;</span>
+
+        <span class="s1">self.binaries = [i </span><span class="s3">for </span><span class="s1">i </span><span class="s3">in </span><span class="s1">self.binaries </span><span class="s3">if </span><span class="s1">_should_include_system_binary(i</span><span class="s3">, </span><span class="s1">list_of_exceptions)]</span>
+
+
+<span class="s3">class </span><span class="s1">ExecutableBuilder:</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Class that constructs the executable. 
+    &quot;&quot;&quot;</span>
+    <span class="s0"># TODO wrap the 'main' and 'build' function into this class.</span>
+
+
+<span class="s3">def </span><span class="s1">build(spec</span><span class="s3">, </span><span class="s1">distpath</span><span class="s3">, </span><span class="s1">workpath</span><span class="s3">, </span><span class="s1">clean_build):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Build the executable according to the created SPEC file. 
+    &quot;&quot;&quot;</span>
+    <span class="s3">from </span><span class="s1">PyInstaller.config </span><span class="s3">import </span><span class="s1">CONF</span>
+
+    <span class="s0"># Ensure starting tilde and environment variables get expanded in distpath / workpath.</span>
+    <span class="s0"># '~/path/abc', '${env_var_name}/path/abc/def'</span>
+    <span class="s1">distpath = compat.expand_path(distpath)</span>
+    <span class="s1">workpath = compat.expand_path(workpath)</span>
+    <span class="s1">CONF[</span><span class="s4">'spec'</span><span class="s1">] = compat.expand_path(spec)</span>
+
+    <span class="s1">CONF[</span><span class="s4">'specpath'</span><span class="s1">]</span><span class="s3">, </span><span class="s1">CONF[</span><span class="s4">'specnm'</span><span class="s1">] = os.path.split(spec)</span>
+    <span class="s1">CONF[</span><span class="s4">'specnm'</span><span class="s1">] = os.path.splitext(CONF[</span><span class="s4">'specnm'</span><span class="s1">])[</span><span class="s5">0</span><span class="s1">]</span>
+
+    <span class="s0"># Add 'specname' to workpath and distpath if they point to PyInstaller homepath.</span>
+    <span class="s3">if </span><span class="s1">os.path.dirname(distpath) == HOMEPATH:</span>
+        <span class="s1">distpath = os.path.join(HOMEPATH</span><span class="s3">, </span><span class="s1">CONF[</span><span class="s4">'specnm'</span><span class="s1">]</span><span class="s3">, </span><span class="s1">os.path.basename(distpath))</span>
+    <span class="s1">CONF[</span><span class="s4">'distpath'</span><span class="s1">] = distpath</span>
+    <span class="s3">if </span><span class="s1">os.path.dirname(workpath) == HOMEPATH:</span>
+        <span class="s1">workpath = os.path.join(HOMEPATH</span><span class="s3">, </span><span class="s1">CONF[</span><span class="s4">'specnm'</span><span class="s1">]</span><span class="s3">, </span><span class="s1">os.path.basename(workpath)</span><span class="s3">, </span><span class="s1">CONF[</span><span class="s4">'specnm'</span><span class="s1">])</span>
+    <span class="s3">else</span><span class="s1">:</span>
+        <span class="s1">workpath = os.path.join(workpath</span><span class="s3">, </span><span class="s1">CONF[</span><span class="s4">'specnm'</span><span class="s1">])</span>
+
+    <span class="s1">CONF[</span><span class="s4">'warnfile'</span><span class="s1">] = os.path.join(workpath</span><span class="s3">, </span><span class="s4">'warn-%s.txt' </span><span class="s1">% CONF[</span><span class="s4">'specnm'</span><span class="s1">])</span>
+    <span class="s1">CONF[</span><span class="s4">'dot-file'</span><span class="s1">] = os.path.join(workpath</span><span class="s3">, </span><span class="s4">'graph-%s.dot' </span><span class="s1">% CONF[</span><span class="s4">'specnm'</span><span class="s1">])</span>
+    <span class="s1">CONF[</span><span class="s4">'xref-file'</span><span class="s1">] = os.path.join(workpath</span><span class="s3">, </span><span class="s4">'xref-%s.html' </span><span class="s1">% CONF[</span><span class="s4">'specnm'</span><span class="s1">])</span>
+
+    <span class="s0"># Clean PyInstaller cache (CONF['cachedir']) and temporary files (workpath) to be able start a clean build.</span>
+    <span class="s3">if </span><span class="s1">clean_build:</span>
+        <span class="s1">logger.info(</span><span class="s4">'Removing temporary files and cleaning cache in %s'</span><span class="s3">, </span><span class="s1">CONF[</span><span class="s4">'cachedir'</span><span class="s1">])</span>
+        <span class="s3">for </span><span class="s1">pth </span><span class="s3">in </span><span class="s1">(CONF[</span><span class="s4">'cachedir'</span><span class="s1">]</span><span class="s3">, </span><span class="s1">workpath):</span>
+            <span class="s3">if </span><span class="s1">os.path.exists(pth):</span>
+                <span class="s0"># Remove all files in 'pth'.</span>
+                <span class="s3">for </span><span class="s1">f </span><span class="s3">in </span><span class="s1">glob.glob(pth + </span><span class="s4">'/*'</span><span class="s1">):</span>
+                    <span class="s0"># Remove dirs recursively.</span>
+                    <span class="s3">if </span><span class="s1">os.path.isdir(f):</span>
+                        <span class="s1">shutil.rmtree(f)</span>
+                    <span class="s3">else</span><span class="s1">:</span>
+                        <span class="s1">os.remove(f)</span>
+
+    <span class="s0"># Create DISTPATH and workpath if they does not exist.</span>
+    <span class="s3">for </span><span class="s1">pth </span><span class="s3">in </span><span class="s1">(CONF[</span><span class="s4">'distpath'</span><span class="s1">]</span><span class="s3">, </span><span class="s1">workpath):</span>
+        <span class="s1">os.makedirs(pth</span><span class="s3">, </span><span class="s1">exist_ok=</span><span class="s3">True</span><span class="s1">)</span>
+
+    <span class="s0"># Construct NAMESPACE for running the Python code from .SPEC file.</span>
+    <span class="s0"># NOTE: Passing NAMESPACE allows to avoid having global variables in this module and makes isolated environment for</span>
+    <span class="s0">#       running tests.</span>
+    <span class="s0"># NOTE: Defining NAMESPACE allows to map any class to a apecific name for .SPEC.</span>
+    <span class="s0"># FIXME: Some symbols might be missing. Add them if there are some failures.</span>
+    <span class="s0"># TODO: What from this .spec API is deprecated and could be removed?</span>
+    <span class="s1">spec_namespace = {</span>
+        <span class="s0"># Set of global variables that can be used while processing .spec file. Some of them act as configuration</span>
+        <span class="s0"># options.</span>
+        <span class="s4">'DISTPATH'</span><span class="s1">: CONF[</span><span class="s4">'distpath'</span><span class="s1">]</span><span class="s3">,</span>
+        <span class="s4">'HOMEPATH'</span><span class="s1">: HOMEPATH</span><span class="s3">,</span>
+        <span class="s4">'SPEC'</span><span class="s1">: CONF[</span><span class="s4">'spec'</span><span class="s1">]</span><span class="s3">,</span>
+        <span class="s4">'specnm'</span><span class="s1">: CONF[</span><span class="s4">'specnm'</span><span class="s1">]</span><span class="s3">,</span>
+        <span class="s4">'SPECPATH'</span><span class="s1">: CONF[</span><span class="s4">'specpath'</span><span class="s1">]</span><span class="s3">,</span>
+        <span class="s4">'WARNFILE'</span><span class="s1">: CONF[</span><span class="s4">'warnfile'</span><span class="s1">]</span><span class="s3">,</span>
+        <span class="s4">'workpath'</span><span class="s1">: workpath</span><span class="s3">,</span>
+        <span class="s0"># PyInstaller classes for .spec.</span>
+        <span class="s4">'TOC'</span><span class="s1">: TOC</span><span class="s3">,</span>
+        <span class="s4">'Analysis'</span><span class="s1">: Analysis</span><span class="s3">,</span>
+        <span class="s4">'BUNDLE'</span><span class="s1">: BUNDLE</span><span class="s3">,</span>
+        <span class="s4">'COLLECT'</span><span class="s1">: COLLECT</span><span class="s3">,</span>
+        <span class="s4">'EXE'</span><span class="s1">: EXE</span><span class="s3">,</span>
+        <span class="s4">'MERGE'</span><span class="s1">: MERGE</span><span class="s3">,</span>
+        <span class="s4">'PYZ'</span><span class="s1">: PYZ</span><span class="s3">,</span>
+        <span class="s4">'Tree'</span><span class="s1">: Tree</span><span class="s3">,</span>
+        <span class="s4">'Splash'</span><span class="s1">: Splash</span><span class="s3">,</span>
+        <span class="s0"># Python modules available for .spec.</span>
+        <span class="s4">'os'</span><span class="s1">: os</span><span class="s3">,</span>
+        <span class="s4">'pyi_crypto'</span><span class="s1">: pyz_crypto</span><span class="s3">,</span>
+    <span class="s1">}</span>
+
+    <span class="s0"># Set up module PyInstaller.config for passing some arguments to 'exec' function.</span>
+    <span class="s3">from </span><span class="s1">PyInstaller.config </span><span class="s3">import </span><span class="s1">CONF</span>
+    <span class="s1">CONF[</span><span class="s4">'workpath'</span><span class="s1">] = workpath</span>
+
+    <span class="s0"># Execute the specfile. Read it as a binary file...</span>
+    <span class="s3">try</span><span class="s1">:</span>
+        <span class="s3">with </span><span class="s1">open(spec</span><span class="s3">, </span><span class="s4">'rb'</span><span class="s1">) </span><span class="s3">as </span><span class="s1">f:</span>
+            <span class="s0"># ... then let Python determine the encoding, since ``compile`` accepts byte strings.</span>
+            <span class="s1">code = compile(f.read()</span><span class="s3">, </span><span class="s1">spec</span><span class="s3">, </span><span class="s4">'exec'</span><span class="s1">)</span>
+    <span class="s3">except </span><span class="s1">FileNotFoundError:</span>
+        <span class="s3">raise </span><span class="s1">SystemExit(</span><span class="s4">'spec &quot;{}&quot; not found'</span><span class="s1">.format(spec))</span>
+    <span class="s1">exec(code</span><span class="s3">, </span><span class="s1">spec_namespace)</span>
+
+
+<span class="s3">def </span><span class="s1">__add_options(parser):</span>
+    <span class="s1">parser.add_argument(</span>
+        <span class="s4">&quot;--distpath&quot;</span><span class="s3">,</span>
+        <span class="s1">metavar=</span><span class="s4">&quot;DIR&quot;</span><span class="s3">,</span>
+        <span class="s1">default=DEFAULT_DISTPATH</span><span class="s3">,</span>
+        <span class="s1">help=</span><span class="s4">&quot;Where to put the bundled app (default: ./dist)&quot;</span><span class="s3">,</span>
+    <span class="s1">)</span>
+    <span class="s1">parser.add_argument(</span>
+        <span class="s4">'--workpath'</span><span class="s3">,</span>
+        <span class="s1">default=DEFAULT_WORKPATH</span><span class="s3">,</span>
+        <span class="s1">help=</span><span class="s4">&quot;Where to put all the temporary work files, .log, .pyz and etc. (default: ./build)&quot;</span><span class="s3">,</span>
+    <span class="s1">)</span>
+    <span class="s1">parser.add_argument(</span>
+        <span class="s4">'-y'</span><span class="s3">,</span>
+        <span class="s4">'--noconfirm'</span><span class="s3">,</span>
+        <span class="s1">action=</span><span class="s4">&quot;store_true&quot;</span><span class="s3">,</span>
+        <span class="s1">default=</span><span class="s3">False,</span>
+        <span class="s1">help=</span><span class="s4">&quot;Replace output directory (default: %s) without asking for confirmation&quot; </span><span class="s1">%</span>
+        <span class="s1">os.path.join(</span><span class="s4">'SPECPATH'</span><span class="s3">, </span><span class="s4">'dist'</span><span class="s3">, </span><span class="s4">'SPECNAME'</span><span class="s1">)</span><span class="s3">,</span>
+    <span class="s1">)</span>
+    <span class="s1">parser.add_argument(</span>
+        <span class="s4">'--upx-dir'</span><span class="s3">,</span>
+        <span class="s1">default=</span><span class="s3">None,</span>
+        <span class="s1">help=</span><span class="s4">&quot;Path to UPX utility (default: search the execution path)&quot;</span><span class="s3">,</span>
+    <span class="s1">)</span>
+    <span class="s1">parser.add_argument(</span>
+        <span class="s4">&quot;-a&quot;</span><span class="s3">,</span>
+        <span class="s4">&quot;--ascii&quot;</span><span class="s3">,</span>
+        <span class="s1">action=</span><span class="s4">&quot;store_true&quot;</span><span class="s3">,</span>
+        <span class="s1">help=</span><span class="s4">&quot;Do not include unicode encoding support (default: included if available)&quot;</span><span class="s3">,</span>
+    <span class="s1">)</span>
+    <span class="s1">parser.add_argument(</span>
+        <span class="s4">'--clean'</span><span class="s3">,</span>
+        <span class="s1">dest=</span><span class="s4">'clean_build'</span><span class="s3">,</span>
+        <span class="s1">action=</span><span class="s4">'store_true'</span><span class="s3">,</span>
+        <span class="s1">default=</span><span class="s3">False,</span>
+        <span class="s1">help=</span><span class="s4">&quot;Clean PyInstaller cache and remove temporary files before building.&quot;</span><span class="s3">,</span>
+    <span class="s1">)</span>
+
+
+<span class="s3">def </span><span class="s1">main(</span>
+    <span class="s1">pyi_config</span><span class="s3">,</span>
+    <span class="s1">specfile</span><span class="s3">,</span>
+    <span class="s1">noconfirm=</span><span class="s3">False,</span>
+    <span class="s1">ascii=</span><span class="s3">False,</span>
+    <span class="s1">distpath=DEFAULT_DISTPATH</span><span class="s3">,</span>
+    <span class="s1">workpath=DEFAULT_WORKPATH</span><span class="s3">,</span>
+    <span class="s1">upx_dir=</span><span class="s3">None,</span>
+    <span class="s1">clean_build=</span><span class="s3">False,</span>
+    <span class="s1">**kw</span>
+<span class="s1">):</span>
+    <span class="s3">from </span><span class="s1">PyInstaller.config </span><span class="s3">import </span><span class="s1">CONF</span>
+    <span class="s1">CONF[</span><span class="s4">'noconfirm'</span><span class="s1">] = noconfirm</span>
+
+    <span class="s0"># Some modules are included if they are detected at build-time or if a command-line argument is specified</span>
+    <span class="s0"># (e.g., --ascii).</span>
+    <span class="s3">if </span><span class="s1">CONF.get(</span><span class="s4">'hiddenimports'</span><span class="s1">) </span><span class="s3">is None</span><span class="s1">:</span>
+        <span class="s1">CONF[</span><span class="s4">'hiddenimports'</span><span class="s1">] = []</span>
+    <span class="s0"># Test unicode support.</span>
+    <span class="s3">if not </span><span class="s1">ascii:</span>
+        <span class="s1">CONF[</span><span class="s4">'hiddenimports'</span><span class="s1">].extend(get_unicode_modules())</span>
+
+    <span class="s0"># If configuration dict is supplied - skip configuration step.</span>
+    <span class="s3">if </span><span class="s1">pyi_config </span><span class="s3">is None</span><span class="s1">:</span>
+        <span class="s3">import </span><span class="s1">PyInstaller.configure </span><span class="s3">as </span><span class="s1">configure</span>
+        <span class="s1">CONF.update(configure.get_config(upx_dir))</span>
+    <span class="s3">else</span><span class="s1">:</span>
+        <span class="s1">CONF.update(pyi_config)</span>
+
+    <span class="s3">if </span><span class="s1">CONF[</span><span class="s4">'hasUPX'</span><span class="s1">]:</span>
+        <span class="s1">setupUPXFlags()</span>
+
+    <span class="s1">CONF[</span><span class="s4">'ui_admin'</span><span class="s1">] = kw.get(</span><span class="s4">'ui_admin'</span><span class="s3">, False</span><span class="s1">)</span>
+    <span class="s1">CONF[</span><span class="s4">'ui_access'</span><span class="s1">] = kw.get(</span><span class="s4">'ui_uiaccess'</span><span class="s3">, False</span><span class="s1">)</span>
+
+    <span class="s1">build(specfile</span><span class="s3">, </span><span class="s1">distpath</span><span class="s3">, </span><span class="s1">workpath</span><span class="s3">, </span><span class="s1">clean_build)</span>
+</pre>
+</body>
+</html>

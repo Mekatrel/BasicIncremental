@@ -1,0 +1,668 @@
+<html>
+<head>
+<title>auto.tcl</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #a9b7c6;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+auto.tcl</font>
+</center></td></tr></table>
+<pre><span class="s0"># auto.tcl --</span>
+<span class="s0">#</span>
+<span class="s0"># utility procs formerly in init.tcl dealing with auto execution of commands</span>
+<span class="s0"># and can be auto loaded themselves.</span>
+<span class="s0">#</span>
+<span class="s0"># Copyright (c) 1991-1993 The Regents of the University of California.</span>
+<span class="s0"># Copyright (c) 1994-1998 Sun Microsystems, Inc.</span>
+<span class="s0">#</span>
+<span class="s0"># See the file &quot;license.terms&quot; for information on usage and redistribution of</span>
+<span class="s0"># this file, and for a DISCLAIMER OF ALL WARRANTIES.</span>
+<span class="s0">#</span>
+
+<span class="s0"># auto_reset --</span>
+<span class="s0">#</span>
+<span class="s0"># Destroy all cached information for auto-loading and auto-execution, so that</span>
+<span class="s0"># the information gets recomputed the next time it's needed.  Also delete any</span>
+<span class="s0"># commands that are listed in the auto-load index.</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0"># None.</span>
+
+<span class="s0">proc auto_reset {} {</span>
+    <span class="s0">global auto_execs auto_index auto_path</span>
+    <span class="s0">if {[array exists auto_index]} {</span>
+	<span class="s0">foreach cmdName [array names auto_index] {</span>
+	    <span class="s0">set fqcn [namespace which $cmdName]</span>
+	    <span class="s0">if {$fqcn eq &quot;&quot;} {</span>
+		<span class="s0">continue</span>
+	    <span class="s0">}</span>
+	    <span class="s0">rename $fqcn {}</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+    <span class="s0">unset -nocomplain auto_execs auto_index ::tcl::auto_oldpath</span>
+    <span class="s0">if {[catch {llength $auto_path}]} {</span>
+	<span class="s0">set auto_path [list [info library]]</span>
+    <span class="s0">} elseif {[info library] ni $auto_path} {</span>
+	<span class="s0">lappend auto_path [info library]</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+
+<span class="s0"># tcl_findLibrary --</span>
+<span class="s0">#</span>
+<span class="s0">#	This is a utility for extensions that searches for a library directory</span>
+<span class="s0">#	using a canonical searching algorithm. A side effect is to source the</span>
+<span class="s0">#	initialization script and set a global library variable.</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0"># 	basename	Prefix of the directory name, (e.g., &quot;tk&quot;)</span>
+<span class="s0">#	version		Version number of the package, (e.g., &quot;8.0&quot;)</span>
+<span class="s0">#	patch		Patchlevel of the package, (e.g., &quot;8.0.3&quot;)</span>
+<span class="s0">#	initScript	Initialization script to source (e.g., tk.tcl)</span>
+<span class="s0">#	enVarName	environment variable to honor (e.g., TK_LIBRARY)</span>
+<span class="s0">#	varName		Global variable to set when done (e.g., tk_library)</span>
+
+<span class="s0">proc tcl_findLibrary {basename version patch initScript enVarName varName} {</span>
+    <span class="s0">upvar #0 $varName the_library</span>
+    <span class="s0">global auto_path env tcl_platform</span>
+
+    <span class="s0">set dirs {}</span>
+    <span class="s0">set errors {}</span>
+
+    <span class="s0"># The C application may have hardwired a path, which we honor</span>
+
+    <span class="s0">if {[info exists the_library] &amp;&amp; $the_library ne &quot;&quot;} {</span>
+	<span class="s0">lappend dirs $the_library</span>
+    <span class="s0">} else {</span>
+	<span class="s0"># Do the canonical search</span>
+
+	<span class="s0"># 1. From an environment variable, if it exists.  Placing this first</span>
+	<span class="s0">#    gives the end-user ultimate control to work-around any bugs, or</span>
+	<span class="s0">#    to customize.</span>
+
+        <span class="s0">if {[info exists env($enVarName)]} {</span>
+            <span class="s0">lappend dirs $env($enVarName)</span>
+        <span class="s0">}</span>
+
+	<span class="s0"># 2. In the package script directory registered within the</span>
+	<span class="s0">#    configuration of the package itself.</span>
+
+	<span class="s0">catch {</span>
+	    <span class="s0">lappend dirs [::${basename}::pkgconfig get scriptdir,runtime]</span>
+	<span class="s0">}</span>
+
+	<span class="s0"># 3. Relative to auto_path directories.  This checks relative to the</span>
+	<span class="s0"># Tcl library as well as allowing loading of libraries added to the</span>
+	<span class="s0"># auto_path that is not relative to the core library or binary paths.</span>
+	<span class="s0">foreach d $auto_path {</span>
+	    <span class="s0">lappend dirs [file join $d $basename$version]</span>
+	    <span class="s0">if {$tcl_platform(platform) eq &quot;unix&quot;</span>
+		    <span class="s0">&amp;&amp; $tcl_platform(os) eq &quot;Darwin&quot;} {</span>
+		<span class="s0"># 4. On MacOSX, check the Resources/Scripts subdir too</span>
+		<span class="s0">lappend dirs [file join $d $basename$version Resources Scripts]</span>
+	    <span class="s0">}</span>
+	<span class="s0">}</span>
+
+	<span class="s0"># 3. Various locations relative to the executable</span>
+	<span class="s0"># ../lib/foo1.0		(From bin directory in install hierarchy)</span>
+	<span class="s0"># ../../lib/foo1.0	(From bin/arch directory in install hierarchy)</span>
+	<span class="s0"># ../library		(From unix directory in build hierarchy)</span>
+	<span class="s0">#</span>
+	<span class="s0"># Remaining locations are out of date (when relevant, they ought to be</span>
+	<span class="s0"># covered by the $::auto_path seach above) and disabled.</span>
+	<span class="s0">#</span>
+	<span class="s0"># ../../library		(From unix/arch directory in build hierarchy)</span>
+	<span class="s0"># ../../foo1.0.1/library</span>
+	<span class="s0">#		(From unix directory in parallel build hierarchy)</span>
+	<span class="s0"># ../../../foo1.0.1/library</span>
+	<span class="s0">#		(From unix/arch directory in parallel build hierarchy)</span>
+
+        <span class="s0">set parentDir [file dirname [file dirname [info nameofexecutable]]]</span>
+        <span class="s0">set grandParentDir [file dirname $parentDir]</span>
+        <span class="s0">lappend dirs [file join $parentDir lib $basename$version]</span>
+        <span class="s0">lappend dirs [file join $grandParentDir lib $basename$version]</span>
+        <span class="s0">lappend dirs [file join $parentDir library]</span>
+	<span class="s0">if {0} {</span>
+	    <span class="s0">lappend dirs [file join $grandParentDir library]</span>
+	    <span class="s0">lappend dirs [file join $grandParentDir $basename$patch library]</span>
+	    <span class="s0">lappend dirs [file join [file dirname $grandParentDir] \</span>
+			      <span class="s0">$basename$patch library]</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+    <span class="s0"># uniquify $dirs in order</span>
+    <span class="s0">array set seen {}</span>
+    <span class="s0">foreach i $dirs {</span>
+	<span class="s0"># Take note that the [file normalize] below has been noted to cause</span>
+	<span class="s0"># difficulties for the freewrap utility.  See Bug 1072136.  Until</span>
+	<span class="s0"># freewrap resolves the matter, one might work around the problem by</span>
+	<span class="s0"># disabling that branch.</span>
+	<span class="s0">if {[interp issafe]} {</span>
+	    <span class="s0">set norm $i</span>
+	<span class="s0">} else {</span>
+	    <span class="s0">set norm [file normalize $i]</span>
+	<span class="s0">}</span>
+	<span class="s0">if {[info exists seen($norm)]} {</span>
+	    <span class="s0">continue</span>
+	<span class="s0">}</span>
+	<span class="s0">set seen($norm) {}</span>
+	<span class="s0">lappend uniqdirs $i</span>
+    <span class="s0">}</span>
+    <span class="s0">set dirs $uniqdirs</span>
+    <span class="s0">foreach i $dirs {</span>
+        <span class="s0">set the_library $i</span>
+        <span class="s0">set file [file join $i $initScript]</span>
+
+	<span class="s0"># source everything when in a safe interpreter because we have a</span>
+	<span class="s0"># source command, but no file exists command</span>
+
+        <span class="s0">if {[interp issafe] || [file exists $file]} {</span>
+            <span class="s0">if {![catch {uplevel #0 [list source $file]} msg opts]} {</span>
+                <span class="s0">return</span>
+            <span class="s0">}</span>
+	    <span class="s0">append errors &quot;$file: $msg\n&quot;</span>
+	    <span class="s0">append errors [dict get $opts -errorinfo]\n</span>
+        <span class="s0">}</span>
+    <span class="s0">}</span>
+    <span class="s0">unset -nocomplain the_library</span>
+    <span class="s0">set msg &quot;Can't find a usable $initScript in the following directories: \n&quot;</span>
+    <span class="s0">append msg &quot;    $dirs\n\n&quot;</span>
+    <span class="s0">append msg &quot;$errors\n\n&quot;</span>
+    <span class="s0">append msg &quot;This probably means that $basename wasn't installed properly.\n&quot;</span>
+    <span class="s0">error $msg</span>
+<span class="s0">}</span>
+
+
+<span class="s0"># ----------------------------------------------------------------------</span>
+<span class="s0"># auto_mkindex</span>
+<span class="s0"># ----------------------------------------------------------------------</span>
+<span class="s0"># The following procedures are used to generate the tclIndex file from Tcl</span>
+<span class="s0"># source files.  They use a special safe interpreter to parse Tcl source</span>
+<span class="s0"># files, writing out index entries as &quot;proc&quot; commands are encountered.  This</span>
+<span class="s0"># implementation won't work in a safe interpreter, since a safe interpreter</span>
+<span class="s0"># can't create the special parser and mess with its commands.</span>
+
+<span class="s0">if {[interp issafe]} {</span>
+    <span class="s0">return	;# Stop sourcing the file here</span>
+<span class="s0">}</span>
+
+<span class="s0"># auto_mkindex --</span>
+<span class="s0"># Regenerate a tclIndex file from Tcl source files.  Takes as argument the</span>
+<span class="s0"># name of the directory in which the tclIndex file is to be placed, followed</span>
+<span class="s0"># by any number of glob patterns to use in that directory to locate all of the</span>
+<span class="s0"># relevant files.</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0"># dir -		Name of the directory in which to create an index.</span>
+
+<span class="s0"># args -	Any number of additional arguments giving the names of files</span>
+<span class="s0">#		within dir.  If no additional are given auto_mkindex will look</span>
+<span class="s0">#		for *.tcl.</span>
+
+<span class="s0">proc auto_mkindex {dir args} {</span>
+    <span class="s0">if {[interp issafe]} {</span>
+        <span class="s0">error &quot;can't generate index within safe interpreter&quot;</span>
+    <span class="s0">}</span>
+
+    <span class="s0">set oldDir [pwd]</span>
+    <span class="s0">cd $dir</span>
+
+    <span class="s0">append index &quot;# Tcl autoload index file, version 2.0\n&quot;</span>
+    <span class="s0">append index &quot;# This file is generated by the \&quot;auto_mkindex\&quot; command\n&quot;</span>
+    <span class="s0">append index &quot;# and sourced to set up indexing information for one or\n&quot;</span>
+    <span class="s0">append index &quot;# more commands.  Typically each line is a command that\n&quot;</span>
+    <span class="s0">append index &quot;# sets an element in the auto_index array, where the\n&quot;</span>
+    <span class="s0">append index &quot;# element name is the name of a command and the value is\n&quot;</span>
+    <span class="s0">append index &quot;# a script that loads the command.\n\n&quot;</span>
+    <span class="s0">if {![llength $args]} {</span>
+	<span class="s0">set args *.tcl</span>
+    <span class="s0">}</span>
+
+    <span class="s0">auto_mkindex_parser::init</span>
+    <span class="s0">foreach file [glob -- {*}$args] {</span>
+	<span class="s0">try {</span>
+	    <span class="s0">append index [auto_mkindex_parser::mkindex $file]</span>
+	<span class="s0">} on error {msg opts} {</span>
+	    <span class="s0">cd $oldDir</span>
+	    <span class="s0">return -options $opts $msg</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+    <span class="s0">auto_mkindex_parser::cleanup</span>
+
+    <span class="s0">set fid [open &quot;tclIndex&quot; w]</span>
+    <span class="s0">puts -nonewline $fid $index</span>
+    <span class="s0">close $fid</span>
+    <span class="s0">cd $oldDir</span>
+<span class="s0">}</span>
+
+<span class="s0"># Original version of auto_mkindex that just searches the source code for</span>
+<span class="s0"># &quot;proc&quot; at the beginning of the line.</span>
+
+<span class="s0">proc auto_mkindex_old {dir args} {</span>
+    <span class="s0">set oldDir [pwd]</span>
+    <span class="s0">cd $dir</span>
+    <span class="s0">set dir [pwd]</span>
+    <span class="s0">append index &quot;# Tcl autoload index file, version 2.0\n&quot;</span>
+    <span class="s0">append index &quot;# This file is generated by the \&quot;auto_mkindex\&quot; command\n&quot;</span>
+    <span class="s0">append index &quot;# and sourced to set up indexing information for one or\n&quot;</span>
+    <span class="s0">append index &quot;# more commands.  Typically each line is a command that\n&quot;</span>
+    <span class="s0">append index &quot;# sets an element in the auto_index array, where the\n&quot;</span>
+    <span class="s0">append index &quot;# element name is the name of a command and the value is\n&quot;</span>
+    <span class="s0">append index &quot;# a script that loads the command.\n\n&quot;</span>
+    <span class="s0">if {![llength $args]} {</span>
+	<span class="s0">set args *.tcl</span>
+    <span class="s0">}</span>
+    <span class="s0">foreach file [glob -- {*}$args] {</span>
+	<span class="s0">set f &quot;&quot;</span>
+	<span class="s0">set error [catch {</span>
+	    <span class="s0">set f [open $file]</span>
+	    <span class="s0">while {[gets $f line] &gt;= 0} {</span>
+		<span class="s0">if {[regexp {^proc[ 	]+([^ 	]*)} $line match procName]} {</span>
+		    <span class="s0">set procName [lindex [auto_qualify $procName &quot;::&quot;] 0]</span>
+		    <span class="s0">append index &quot;set [list auto_index($procName)]&quot;</span>
+		    <span class="s0">append index &quot; \[list source \[file join \$dir [list $file]\]\]\n&quot;</span>
+		<span class="s0">}</span>
+	    <span class="s0">}</span>
+	    <span class="s0">close $f</span>
+	<span class="s0">} msg opts]</span>
+	<span class="s0">if {$error} {</span>
+	    <span class="s0">catch {close $f}</span>
+	    <span class="s0">cd $oldDir</span>
+	    <span class="s0">return -options $opts $msg</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+    <span class="s0">set f &quot;&quot;</span>
+    <span class="s0">set error [catch {</span>
+	<span class="s0">set f [open tclIndex w]</span>
+	<span class="s0">puts -nonewline $f $index</span>
+	<span class="s0">close $f</span>
+	<span class="s0">cd $oldDir</span>
+    <span class="s0">} msg opts]</span>
+    <span class="s0">if {$error} {</span>
+	<span class="s0">catch {close $f}</span>
+	<span class="s0">cd $oldDir</span>
+	<span class="s0">error $msg $info $code</span>
+	<span class="s0">return -options $opts $msg</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+
+<span class="s0"># Create a safe interpreter that can be used to parse Tcl source files</span>
+<span class="s0"># generate a tclIndex file for autoloading.  This interp contains commands for</span>
+<span class="s0"># things that need index entries.  Each time a command is executed, it writes</span>
+<span class="s0"># an entry out to the index file.</span>
+
+<span class="s0">namespace eval auto_mkindex_parser {</span>
+    <span class="s0">variable parser &quot;&quot;          ;# parser used to build index</span>
+    <span class="s0">variable index &quot;&quot;           ;# maintains index as it is built</span>
+    <span class="s0">variable scriptFile &quot;&quot;      ;# name of file being processed</span>
+    <span class="s0">variable contextStack &quot;&quot;    ;# stack of namespace scopes</span>
+    <span class="s0">variable imports &quot;&quot;         ;# keeps track of all imported cmds</span>
+    <span class="s0">variable initCommands       ;# list of commands that create aliases</span>
+    <span class="s0">if {![info exists initCommands]} {</span>
+	<span class="s0">set initCommands [list]</span>
+    <span class="s0">}</span>
+
+    <span class="s0">proc init {} {</span>
+	<span class="s0">variable parser</span>
+	<span class="s0">variable initCommands</span>
+
+	<span class="s0">if {![interp issafe]} {</span>
+	    <span class="s0">set parser [interp create -safe]</span>
+	    <span class="s0">$parser hide info</span>
+	    <span class="s0">$parser hide rename</span>
+	    <span class="s0">$parser hide proc</span>
+	    <span class="s0">$parser hide namespace</span>
+	    <span class="s0">$parser hide eval</span>
+	    <span class="s0">$parser hide puts</span>
+	    <span class="s0">foreach ns [$parser invokehidden namespace children ::] {</span>
+		<span class="s0"># MUST NOT DELETE &quot;::tcl&quot; OR BAD THINGS HAPPEN!</span>
+		<span class="s0">if {$ns eq &quot;::tcl&quot;} continue</span>
+		<span class="s0">$parser invokehidden namespace delete $ns</span>
+	    <span class="s0">}</span>
+	    <span class="s0">foreach cmd [$parser invokehidden info commands ::*] {</span>
+		<span class="s0">$parser invokehidden rename $cmd {}</span>
+	    <span class="s0">}</span>
+	    <span class="s0">$parser invokehidden proc unknown {args} {}</span>
+
+	    <span class="s0"># We'll need access to the &quot;namespace&quot; command within the</span>
+	    <span class="s0"># interp.  Put it back, but move it out of the way.</span>
+
+	    <span class="s0">$parser expose namespace</span>
+	    <span class="s0">$parser invokehidden rename namespace _%@namespace</span>
+	    <span class="s0">$parser expose eval</span>
+	    <span class="s0">$parser invokehidden rename eval _%@eval</span>
+
+	    <span class="s0"># Install all the registered psuedo-command implementations</span>
+
+	    <span class="s0">foreach cmd $initCommands {</span>
+		<span class="s0">eval $cmd</span>
+	    <span class="s0">}</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+    <span class="s0">proc cleanup {} {</span>
+	<span class="s0">variable parser</span>
+	<span class="s0">interp delete $parser</span>
+	<span class="s0">unset parser</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+
+<span class="s0"># auto_mkindex_parser::mkindex --</span>
+<span class="s0">#</span>
+<span class="s0"># Used by the &quot;auto_mkindex&quot; command to create a &quot;tclIndex&quot; file for the given</span>
+<span class="s0"># Tcl source file.  Executes the commands in the file, and handles things like</span>
+<span class="s0"># the &quot;proc&quot; command by adding an entry for the index file.  Returns a string</span>
+<span class="s0"># that represents the index file.</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0">#	file	Name of Tcl source file to be indexed.</span>
+
+<span class="s0">proc auto_mkindex_parser::mkindex {file} {</span>
+    <span class="s0">variable parser</span>
+    <span class="s0">variable index</span>
+    <span class="s0">variable scriptFile</span>
+    <span class="s0">variable contextStack</span>
+    <span class="s0">variable imports</span>
+
+    <span class="s0">set scriptFile $file</span>
+
+    <span class="s0">set fid [open $file]</span>
+    <span class="s0">set contents [read $fid]</span>
+    <span class="s0">close $fid</span>
+
+    <span class="s0"># There is one problem with sourcing files into the safe interpreter:</span>
+    <span class="s0"># references like &quot;$x&quot; will fail since code is not really being executed</span>
+    <span class="s0"># and variables do not really exist.  To avoid this, we replace all $ with</span>
+    <span class="s0"># \0 (literally, the null char) later, when getting proc names we will</span>
+    <span class="s0"># have to reverse this replacement, in case there were any $ in the proc</span>
+    <span class="s0"># name.  This will cause a problem if somebody actually tries to have a \0</span>
+    <span class="s0"># in their proc name.  Too bad for them.</span>
+    <span class="s0">set contents [string map [list \$ \0] $contents]</span>
+
+    <span class="s0">set index &quot;&quot;</span>
+    <span class="s0">set contextStack &quot;&quot;</span>
+    <span class="s0">set imports &quot;&quot;</span>
+
+    <span class="s0">$parser eval $contents</span>
+
+    <span class="s0">foreach name $imports {</span>
+        <span class="s0">catch {$parser eval [list _%@namespace forget $name]}</span>
+    <span class="s0">}</span>
+    <span class="s0">return $index</span>
+<span class="s0">}</span>
+
+<span class="s0"># auto_mkindex_parser::hook command</span>
+<span class="s0">#</span>
+<span class="s0"># Registers a Tcl command to evaluate when initializing the slave interpreter</span>
+<span class="s0"># used by the mkindex parser.  The command is evaluated in the master</span>
+<span class="s0"># interpreter, and can use the variable auto_mkindex_parser::parser to get to</span>
+<span class="s0"># the slave</span>
+
+<span class="s0">proc auto_mkindex_parser::hook {cmd} {</span>
+    <span class="s0">variable initCommands</span>
+
+    <span class="s0">lappend initCommands $cmd</span>
+<span class="s0">}</span>
+
+<span class="s0"># auto_mkindex_parser::slavehook command</span>
+<span class="s0">#</span>
+<span class="s0"># Registers a Tcl command to evaluate when initializing the slave interpreter</span>
+<span class="s0"># used by the mkindex parser.  The command is evaluated in the slave</span>
+<span class="s0"># interpreter.</span>
+
+<span class="s0">proc auto_mkindex_parser::slavehook {cmd} {</span>
+    <span class="s0">variable initCommands</span>
+
+    <span class="s0"># The $parser variable is defined to be the name of the slave interpreter</span>
+    <span class="s0"># when this command is used later.</span>
+
+    <span class="s0">lappend initCommands &quot;\$parser eval [list $cmd]&quot;</span>
+<span class="s0">}</span>
+
+<span class="s0"># auto_mkindex_parser::command --</span>
+<span class="s0">#</span>
+<span class="s0"># Registers a new command with the &quot;auto_mkindex_parser&quot; interpreter that</span>
+<span class="s0"># parses Tcl files.  These commands are fake versions of things like the</span>
+<span class="s0"># &quot;proc&quot; command.  When you execute them, they simply write out an entry to a</span>
+<span class="s0"># &quot;tclIndex&quot; file for auto-loading.</span>
+<span class="s0">#</span>
+<span class="s0"># This procedure allows extensions to register their own commands with the</span>
+<span class="s0"># auto_mkindex facility.  For example, a package like [incr Tcl] might</span>
+<span class="s0"># register a &quot;class&quot; command so that class definitions could be added to a</span>
+<span class="s0"># &quot;tclIndex&quot; file for auto-loading.</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0">#	name 	Name of command recognized in Tcl files.</span>
+<span class="s0">#	arglist	Argument list for command.</span>
+<span class="s0">#	body 	Implementation of command to handle indexing.</span>
+
+<span class="s0">proc auto_mkindex_parser::command {name arglist body} {</span>
+    <span class="s0">hook [list auto_mkindex_parser::commandInit $name $arglist $body]</span>
+<span class="s0">}</span>
+
+<span class="s0"># auto_mkindex_parser::commandInit --</span>
+<span class="s0">#</span>
+<span class="s0"># This does the actual work set up by auto_mkindex_parser::command. This is</span>
+<span class="s0"># called when the interpreter used by the parser is created.</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0">#	name 	Name of command recognized in Tcl files.</span>
+<span class="s0">#	arglist	Argument list for command.</span>
+<span class="s0">#	body 	Implementation of command to handle indexing.</span>
+
+<span class="s0">proc auto_mkindex_parser::commandInit {name arglist body} {</span>
+    <span class="s0">variable parser</span>
+
+    <span class="s0">set ns [namespace qualifiers $name]</span>
+    <span class="s0">set tail [namespace tail $name]</span>
+    <span class="s0">if {$ns eq &quot;&quot;} {</span>
+        <span class="s0">set fakeName [namespace current]::_%@fake_$tail</span>
+    <span class="s0">} else {</span>
+        <span class="s0">set fakeName [namespace current]::[string map {:: _} _%@fake_$name]</span>
+    <span class="s0">}</span>
+    <span class="s0">proc $fakeName $arglist $body</span>
+
+    <span class="s0"># YUK!  Tcl won't let us alias fully qualified command names, so we can't</span>
+    <span class="s0"># handle names like &quot;::itcl::class&quot;.  Instead, we have to build procs with</span>
+    <span class="s0"># the fully qualified names, and have the procs point to the aliases.</span>
+
+    <span class="s0">if {[string match *::* $name]} {</span>
+        <span class="s0">set exportCmd [list _%@namespace export [namespace tail $name]]</span>
+        <span class="s0">$parser eval [list _%@namespace eval $ns $exportCmd]</span>
+
+	<span class="s0"># The following proc definition does not work if you want to tolerate</span>
+	<span class="s0"># space or something else diabolical in the procedure name, (i.e.,</span>
+	<span class="s0"># space in $alias). The following does not work:</span>
+	<span class="s0">#   &quot;_%@eval {$alias} \$args&quot;</span>
+	<span class="s0"># because $alias gets concat'ed to $args.  The following does not work</span>
+	<span class="s0"># because $cmd is somehow undefined</span>
+	<span class="s0">#   &quot;set cmd {$alias} \; _%@eval {\$cmd} \$args&quot;</span>
+	<span class="s0"># A gold star to someone that can make test autoMkindex-3.3 work</span>
+	<span class="s0"># properly</span>
+
+        <span class="s0">set alias [namespace tail $fakeName]</span>
+        <span class="s0">$parser invokehidden proc $name {args} &quot;_%@eval {$alias} \$args&quot;</span>
+        <span class="s0">$parser alias $alias $fakeName</span>
+    <span class="s0">} else {</span>
+        <span class="s0">$parser alias $name $fakeName</span>
+    <span class="s0">}</span>
+    <span class="s0">return</span>
+<span class="s0">}</span>
+
+<span class="s0"># auto_mkindex_parser::fullname --</span>
+<span class="s0">#</span>
+<span class="s0"># Used by commands like &quot;proc&quot; within the auto_mkindex parser.  Returns the</span>
+<span class="s0"># qualified namespace name for the &quot;name&quot; argument.  If the &quot;name&quot; does not</span>
+<span class="s0"># start with &quot;::&quot;, elements are added from the current namespace stack to</span>
+<span class="s0"># produce a qualified name.  Then, the name is examined to see whether or not</span>
+<span class="s0"># it should really be qualified.  If the name has more than the leading &quot;::&quot;,</span>
+<span class="s0"># it is returned as a fully qualified name.  Otherwise, it is returned as a</span>
+<span class="s0"># simple name.  That way, the Tcl autoloader will recognize it properly.</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0"># name -		Name that is being added to index.</span>
+
+<span class="s0">proc auto_mkindex_parser::fullname {name} {</span>
+    <span class="s0">variable contextStack</span>
+
+    <span class="s0">if {![string match ::* $name]} {</span>
+        <span class="s0">foreach ns $contextStack {</span>
+            <span class="s0">set name &quot;${ns}::$name&quot;</span>
+            <span class="s0">if {[string match ::* $name]} {</span>
+                <span class="s0">break</span>
+            <span class="s0">}</span>
+        <span class="s0">}</span>
+    <span class="s0">}</span>
+
+    <span class="s0">if {[namespace qualifiers $name] eq &quot;&quot;} {</span>
+        <span class="s0">set name [namespace tail $name]</span>
+    <span class="s0">} elseif {![string match ::* $name]} {</span>
+        <span class="s0">set name &quot;::$name&quot;</span>
+    <span class="s0">}</span>
+
+    <span class="s0"># Earlier, mkindex replaced all $'s with \0.  Now, we have to reverse that</span>
+    <span class="s0"># replacement.</span>
+    <span class="s0">return [string map [list \0 \$] $name]</span>
+<span class="s0">}</span>
+
+<span class="s0"># auto_mkindex_parser::indexEntry --</span>
+<span class="s0">#</span>
+<span class="s0"># Used by commands like &quot;proc&quot; within the auto_mkindex parser to add a</span>
+<span class="s0"># correctly-quoted entry to the index. This is shared code so it is done</span>
+<span class="s0"># *right*, in one place.</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0"># name -		Name that is being added to index.</span>
+
+<span class="s0">proc auto_mkindex_parser::indexEntry {name} {</span>
+    <span class="s0">variable index</span>
+    <span class="s0">variable scriptFile</span>
+
+    <span class="s0"># We convert all metacharacters to their backslashed form, and pre-split</span>
+    <span class="s0"># the file name that we know about (which will be a proper list, and so</span>
+    <span class="s0"># correctly quoted).</span>
+
+    <span class="s0">set name [string range [list \}[fullname $name]] 2 end]</span>
+    <span class="s0">set filenameParts [file split $scriptFile]</span>
+
+    <span class="s0">append index [format \</span>
+	    <span class="s0">{set auto_index(%s) [list source [file join $dir %s]]%s} \</span>
+	    <span class="s0">$name $filenameParts \n]</span>
+    <span class="s0">return</span>
+<span class="s0">}</span>
+
+<span class="s0">if {[llength $::auto_mkindex_parser::initCommands]} {</span>
+    <span class="s0">return</span>
+<span class="s0">}</span>
+
+<span class="s0"># Register all of the procedures for the auto_mkindex parser that will build</span>
+<span class="s0"># the &quot;tclIndex&quot; file.</span>
+
+<span class="s0"># AUTO MKINDEX:  proc name arglist body</span>
+<span class="s0"># Adds an entry to the auto index list for the given procedure name.</span>
+
+<span class="s0">auto_mkindex_parser::command proc {name args} {</span>
+    <span class="s0">indexEntry $name</span>
+<span class="s0">}</span>
+
+<span class="s0"># Conditionally add support for Tcl byte code files.  There are some tricky</span>
+<span class="s0"># details here.  First, we need to get the tbcload library initialized in the</span>
+<span class="s0"># current interpreter.  We cannot load tbcload into the slave until we have</span>
+<span class="s0"># done so because it needs access to the tcl_patchLevel variable.  Second,</span>
+<span class="s0"># because the package index file may defer loading the library until we invoke</span>
+<span class="s0"># a command, we need to explicitly invoke auto_load to force it to be loaded.</span>
+<span class="s0"># This should be a noop if the package has already been loaded</span>
+
+<span class="s0">auto_mkindex_parser::hook {</span>
+    <span class="s0">try {</span>
+	<span class="s0">package require tbcload</span>
+    <span class="s0">} on error {} {</span>
+	<span class="s0"># OK, don't have it so do nothing</span>
+    <span class="s0">} on ok {} {</span>
+	<span class="s0">if {[namespace which -command tbcload::bcproc] eq &quot;&quot;} {</span>
+	    <span class="s0">auto_load tbcload::bcproc</span>
+	<span class="s0">}</span>
+	<span class="s0">load {} tbcload $auto_mkindex_parser::parser</span>
+
+	<span class="s0"># AUTO MKINDEX:  tbcload::bcproc name arglist body</span>
+	<span class="s0"># Adds an entry to the auto index list for the given pre-compiled</span>
+	<span class="s0"># procedure name.</span>
+
+	<span class="s0">auto_mkindex_parser::commandInit tbcload::bcproc {name args} {</span>
+	    <span class="s0">indexEntry $name</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+
+<span class="s0"># AUTO MKINDEX:  namespace eval name command ?arg arg...?</span>
+<span class="s0"># Adds the namespace name onto the context stack and evaluates the associated</span>
+<span class="s0"># body of commands.</span>
+<span class="s0">#</span>
+<span class="s0"># AUTO MKINDEX:  namespace import ?-force? pattern ?pattern...?</span>
+<span class="s0"># Performs the &quot;import&quot; action in the parser interpreter.  This is important</span>
+<span class="s0"># for any commands contained in a namespace that affect the index.  For</span>
+<span class="s0"># example, a script may say &quot;itcl::class ...&quot;, or it may import &quot;itcl::*&quot; and</span>
+<span class="s0"># then say &quot;class ...&quot;.  This procedure does the import operation, but keeps</span>
+<span class="s0"># track of imported patterns so we can remove the imports later.</span>
+
+<span class="s0">auto_mkindex_parser::command namespace {op args} {</span>
+    <span class="s0">switch -- $op {</span>
+        <span class="s0">eval {</span>
+            <span class="s0">variable parser</span>
+            <span class="s0">variable contextStack</span>
+
+            <span class="s0">set name [lindex $args 0]</span>
+            <span class="s0">set args [lrange $args 1 end]</span>
+
+            <span class="s0">set contextStack [linsert $contextStack 0 $name]</span>
+	    <span class="s0">$parser eval [list _%@namespace eval $name] $args</span>
+            <span class="s0">set contextStack [lrange $contextStack 1 end]</span>
+        <span class="s0">}</span>
+        <span class="s0">import {</span>
+            <span class="s0">variable parser</span>
+            <span class="s0">variable imports</span>
+            <span class="s0">foreach pattern $args {</span>
+                <span class="s0">if {$pattern ne &quot;-force&quot;} {</span>
+                    <span class="s0">lappend imports $pattern</span>
+                <span class="s0">}</span>
+            <span class="s0">}</span>
+            <span class="s0">catch {$parser eval &quot;_%@namespace import $args&quot;}</span>
+        <span class="s0">}</span>
+	<span class="s0">ensemble {</span>
+	    <span class="s0">variable parser</span>
+	    <span class="s0">variable contextStack</span>
+	    <span class="s0">if {[lindex $args 0] eq &quot;create&quot;} {</span>
+		<span class="s0">set name ::[join [lreverse $contextStack] ::]</span>
+		<span class="s0">catch {</span>
+		    <span class="s0">set name [dict get [lrange $args 1 end] -command]</span>
+		    <span class="s0">if {![string match ::* $name]} {</span>
+			<span class="s0">set name ::[join [lreverse $contextStack] ::]$name</span>
+		    <span class="s0">}</span>
+		    <span class="s0">regsub -all ::+ $name :: name</span>
+		<span class="s0">}</span>
+		<span class="s0"># create artifical proc to force an entry in the tclIndex</span>
+		<span class="s0">$parser eval [list ::proc $name {} {}]</span>
+	    <span class="s0">}</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+
+<span class="s0"># AUTO MKINDEX:  oo::class create name ?definition?</span>
+<span class="s0"># Adds an entry to the auto index list for the given class name.</span>
+<span class="s0">auto_mkindex_parser::command oo::class {op name {body &quot;&quot;}} {</span>
+    <span class="s0">if {$op eq &quot;create&quot;} {</span>
+	<span class="s0">indexEntry $name</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+<span class="s0">auto_mkindex_parser::command class {op name {body &quot;&quot;}} {</span>
+    <span class="s0">if {$op eq &quot;create&quot;} {</span>
+	<span class="s0">indexEntry $name</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+
+<span class="s0">return</span>
+</pre>
+</body>
+</html>

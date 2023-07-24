@@ -1,0 +1,462 @@
+<html>
+<head>
+<title>baseserver.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #629755; font-style: italic;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #808080;}
+.s3 { color: #cc7832;}
+.s4 { color: #6a8759;}
+.s5 { color: #6897bb;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+baseserver.py</font>
+</center></td></tr></table>
+<pre><span class="s0">&quot;&quot;&quot;Base class for implementing servers&quot;&quot;&quot;</span>
+<span class="s2"># Copyright (c) 2009-2012 Denis Bilenko. See LICENSE for details.</span>
+<span class="s3">from </span><span class="s1">__future__ </span><span class="s3">import </span><span class="s1">print_function</span>
+<span class="s3">from </span><span class="s1">__future__ </span><span class="s3">import </span><span class="s1">absolute_import</span>
+<span class="s3">from </span><span class="s1">__future__ </span><span class="s3">import </span><span class="s1">division</span>
+
+<span class="s3">import </span><span class="s1">sys</span>
+<span class="s3">import </span><span class="s1">_socket</span>
+<span class="s3">import </span><span class="s1">errno</span>
+
+<span class="s3">from </span><span class="s1">gevent.greenlet </span><span class="s3">import </span><span class="s1">Greenlet</span>
+<span class="s3">from </span><span class="s1">gevent.event </span><span class="s3">import </span><span class="s1">Event</span>
+<span class="s3">from </span><span class="s1">gevent.hub </span><span class="s3">import </span><span class="s1">get_hub</span>
+<span class="s3">from </span><span class="s1">gevent._compat </span><span class="s3">import </span><span class="s1">string_types</span>
+<span class="s3">from </span><span class="s1">gevent._compat </span><span class="s3">import </span><span class="s1">integer_types</span>
+<span class="s3">from </span><span class="s1">gevent._compat </span><span class="s3">import </span><span class="s1">xrange</span>
+
+
+
+<span class="s1">__all__ = [</span><span class="s4">'BaseServer'</span><span class="s1">]</span>
+
+
+<span class="s2"># We define a helper function to handle closing the socket in</span>
+<span class="s2"># do_handle; We'd like to bind it to a kwarg to avoid *any* lookups at</span>
+<span class="s2"># all, but that's incompatible with the calling convention of</span>
+<span class="s2"># do_handle. On CPython, this is ~20% faster than creating and calling</span>
+<span class="s2"># a closure and ~10% faster than using a @staticmethod. (In theory, we</span>
+<span class="s2"># could create a closure only once in set_handle, to wrap self._handle,</span>
+<span class="s2"># but this is safer from a  backwards compat standpoint.)</span>
+<span class="s2"># we also avoid unpacking the *args tuple when calling/spawning this object</span>
+<span class="s2"># for a tiny improvement (benchmark shows a wash)</span>
+<span class="s3">def </span><span class="s1">_handle_and_close_when_done(handle</span><span class="s3">, </span><span class="s1">close</span><span class="s3">, </span><span class="s1">args_tuple):</span>
+    <span class="s3">try</span><span class="s1">:</span>
+        <span class="s3">return </span><span class="s1">handle(*args_tuple)</span>
+    <span class="s3">finally</span><span class="s1">:</span>
+        <span class="s1">close(*args_tuple)</span>
+
+
+<span class="s3">class </span><span class="s1">BaseServer(object):</span>
+    <span class="s0">&quot;&quot;&quot; 
+    An abstract base class that implements some common functionality for the servers in gevent. 
+ 
+    :param listener: Either be an address that the server should bind 
+        on or a :class:`gevent.socket.socket` instance that is already 
+        bound (and put into listening mode in case of TCP socket). 
+ 
+    :keyword handle: If given, the request handler. The request 
+        handler can be defined in a few ways. Most commonly, 
+        subclasses will implement a ``handle`` method as an 
+        instance method. Alternatively, a function can be passed 
+        as the ``handle`` argument to the constructor. In either 
+        case, the handler can later be changed by calling 
+        :meth:`set_handle`. 
+ 
+        When the request handler returns, the socket used for the 
+        request will be closed. Therefore, the handler must not return if 
+        the socket is still in use (for example, by manually spawned greenlets). 
+ 
+    :keyword spawn: If provided, is called to create a new 
+        greenlet to run the handler. By default, 
+        :func:`gevent.spawn` is used (meaning there is no 
+        artificial limit on the number of concurrent requests). Possible values for *spawn*: 
+ 
+        - a :class:`gevent.pool.Pool` instance -- ``handle`` will be executed 
+          using :meth:`gevent.pool.Pool.spawn` only if the pool is not full. 
+          While it is full, no new connections are accepted; 
+        - :func:`gevent.spawn_raw` -- ``handle`` will be executed in a raw 
+          greenlet which has a little less overhead then :class:`gevent.Greenlet` instances spawned by default; 
+        - ``None`` -- ``handle`` will be executed right away, in the :class:`Hub` greenlet. 
+          ``handle`` cannot use any blocking functions as it would mean switching to the :class:`Hub`. 
+        - an integer -- a shortcut for ``gevent.pool.Pool(integer)`` 
+ 
+    .. versionchanged:: 1.1a1 
+       When the *handle* function returns from processing a connection, 
+       the client socket will be closed. This resolves the non-deterministic 
+       closing of the socket, fixing ResourceWarnings under Python 3 and PyPy. 
+    .. versionchanged:: 1.5 
+       Now a context manager that returns itself and calls :meth:`stop` on exit. 
+ 
+    &quot;&quot;&quot;</span>
+    <span class="s2"># pylint: disable=too-many-instance-attributes,bare-except,broad-except</span>
+
+    <span class="s2">#: the number of seconds to sleep in case there was an error in accept() call</span>
+    <span class="s2">#: for consecutive errors the delay will double until it reaches max_delay</span>
+    <span class="s2">#: when accept() finally succeeds the delay will be reset to min_delay again</span>
+    <span class="s1">min_delay = </span><span class="s5">0.01</span>
+    <span class="s1">max_delay = </span><span class="s5">1</span>
+
+    <span class="s2">#: Sets the maximum number of consecutive accepts that a process may perform on</span>
+    <span class="s2">#: a single wake up. High values give higher priority to high connection rates,</span>
+    <span class="s2">#: while lower values give higher priority to already established connections.</span>
+    <span class="s2">#: Default is 100.</span>
+    <span class="s2">#:</span>
+    <span class="s2">#: Note that, in case of multiple working processes on the same</span>
+    <span class="s2">#: listening socket, it should be set to a lower value. (pywsgi.WSGIServer sets it</span>
+    <span class="s2">#: to 1 when ``environ[&quot;wsgi.multiprocess&quot;]`` is true)</span>
+    <span class="s2">#:</span>
+    <span class="s2">#: This is equivalent to libuv's `uv_tcp_simultaneous_accepts</span>
+    <span class="s2">#: &lt;http://docs.libuv.org/en/v1.x/tcp.html#c.uv_tcp_simultaneous_accepts&gt;`_</span>
+    <span class="s2">#: value. Setting the environment variable UV_TCP_SINGLE_ACCEPT to a true value</span>
+    <span class="s2">#: (usually 1) changes the default to 1 (in libuv only; this does not affect gevent).</span>
+    <span class="s1">max_accept = </span><span class="s5">100</span>
+
+    <span class="s1">_spawn = Greenlet.spawn</span>
+
+    <span class="s2">#: the default timeout that we wait for the client connections to close in stop()</span>
+    <span class="s1">stop_timeout = </span><span class="s5">1</span>
+
+    <span class="s1">fatal_errors = (errno.EBADF</span><span class="s3">, </span><span class="s1">errno.EINVAL</span><span class="s3">, </span><span class="s1">errno.ENOTSOCK)</span>
+
+    <span class="s3">def </span><span class="s1">__init__(self</span><span class="s3">, </span><span class="s1">listener</span><span class="s3">, </span><span class="s1">handle=</span><span class="s3">None, </span><span class="s1">spawn=</span><span class="s4">'default'</span><span class="s1">):</span>
+        <span class="s1">self._stop_event = Event()</span>
+        <span class="s1">self._stop_event.set()</span>
+        <span class="s1">self._watcher = </span><span class="s3">None</span>
+        <span class="s1">self._timer = </span><span class="s3">None</span>
+        <span class="s1">self._handle = </span><span class="s3">None</span>
+        <span class="s2"># XXX: FIXME: Subclasses rely on the presence or absence of the</span>
+        <span class="s2"># `socket` attribute to determine whether we are open/should be opened.</span>
+        <span class="s2"># Instead, have it be None.</span>
+        <span class="s2"># XXX: In general, the state management here is confusing. Lots of stuff is</span>
+        <span class="s2"># deferred until the various ``set_`` methods are called, and it's not documented</span>
+        <span class="s2"># when it's safe to call those</span>
+        <span class="s1">self.pool = </span><span class="s3">None </span><span class="s2"># can be set from ``spawn``; overrides self.full()</span>
+        <span class="s3">try</span><span class="s1">:</span>
+            <span class="s1">self.set_listener(listener)</span>
+            <span class="s1">self.set_spawn(spawn)</span>
+            <span class="s1">self.set_handle(handle)</span>
+            <span class="s1">self.delay = self.min_delay</span>
+            <span class="s1">self.loop = get_hub().loop</span>
+            <span class="s3">if </span><span class="s1">self.max_accept &lt; </span><span class="s5">1</span><span class="s1">:</span>
+                <span class="s3">raise </span><span class="s1">ValueError(</span><span class="s4">'max_accept must be positive int: %r' </span><span class="s1">% (self.max_accept</span><span class="s3">, </span><span class="s1">))</span>
+        <span class="s3">except</span><span class="s1">:</span>
+            <span class="s1">self.close()</span>
+            <span class="s3">raise</span>
+
+    <span class="s3">def </span><span class="s1">__enter__(self):</span>
+        <span class="s3">return </span><span class="s1">self</span>
+
+    <span class="s3">def </span><span class="s1">__exit__(self</span><span class="s3">, </span><span class="s1">*args):</span>
+        <span class="s1">self.stop()</span>
+
+    <span class="s3">def </span><span class="s1">set_listener(self</span><span class="s3">, </span><span class="s1">listener):</span>
+        <span class="s3">if </span><span class="s1">hasattr(listener</span><span class="s3">, </span><span class="s4">'accept'</span><span class="s1">):</span>
+            <span class="s3">if </span><span class="s1">hasattr(listener</span><span class="s3">, </span><span class="s4">'do_handshake'</span><span class="s1">):</span>
+                <span class="s3">raise </span><span class="s1">TypeError(</span><span class="s4">'Expected a regular socket, not SSLSocket: %r' </span><span class="s1">% (listener</span><span class="s3">, </span><span class="s1">))</span>
+            <span class="s1">self.family = listener.family</span>
+            <span class="s1">self.address = listener.getsockname()</span>
+            <span class="s1">self.socket = listener</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s1">self.family</span><span class="s3">, </span><span class="s1">self.address = parse_address(listener)</span>
+
+    <span class="s3">def </span><span class="s1">set_spawn(self</span><span class="s3">, </span><span class="s1">spawn):</span>
+        <span class="s3">if </span><span class="s1">spawn == </span><span class="s4">'default'</span><span class="s1">:</span>
+            <span class="s1">self.pool = </span><span class="s3">None</span>
+            <span class="s1">self._spawn = self._spawn</span>
+        <span class="s3">elif </span><span class="s1">hasattr(spawn</span><span class="s3">, </span><span class="s4">'spawn'</span><span class="s1">):</span>
+            <span class="s1">self.pool = spawn</span>
+            <span class="s1">self._spawn = spawn.spawn</span>
+        <span class="s3">elif </span><span class="s1">isinstance(spawn</span><span class="s3">, </span><span class="s1">integer_types):</span>
+            <span class="s3">from </span><span class="s1">gevent.pool </span><span class="s3">import </span><span class="s1">Pool</span>
+            <span class="s1">self.pool = Pool(spawn)</span>
+            <span class="s1">self._spawn = self.pool.spawn</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s1">self.pool = </span><span class="s3">None</span>
+            <span class="s1">self._spawn = spawn</span>
+        <span class="s3">if </span><span class="s1">hasattr(self.pool</span><span class="s3">, </span><span class="s4">'full'</span><span class="s1">):</span>
+            <span class="s1">self.full = self.pool.full</span>
+        <span class="s3">if </span><span class="s1">self.pool </span><span class="s3">is not None</span><span class="s1">:</span>
+            <span class="s1">self.pool._semaphore.rawlink(self._start_accepting_if_started)</span>
+
+    <span class="s3">def </span><span class="s1">set_handle(self</span><span class="s3">, </span><span class="s1">handle):</span>
+        <span class="s3">if </span><span class="s1">handle </span><span class="s3">is not None</span><span class="s1">:</span>
+            <span class="s1">self.handle = handle</span>
+        <span class="s3">if </span><span class="s1">hasattr(self</span><span class="s3">, </span><span class="s4">'handle'</span><span class="s1">):</span>
+            <span class="s1">self._handle = self.handle</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s3">raise </span><span class="s1">TypeError(</span><span class="s4">&quot;'handle' must be provided&quot;</span><span class="s1">)</span>
+
+    <span class="s3">def </span><span class="s1">_start_accepting_if_started(self</span><span class="s3">, </span><span class="s1">_event=</span><span class="s3">None</span><span class="s1">):</span>
+        <span class="s3">if </span><span class="s1">self.started:</span>
+            <span class="s1">self.start_accepting()</span>
+
+    <span class="s3">def </span><span class="s1">start_accepting(self):</span>
+        <span class="s3">if </span><span class="s1">self._watcher </span><span class="s3">is None</span><span class="s1">:</span>
+            <span class="s2"># just stop watcher without creating a new one?</span>
+            <span class="s1">self._watcher = self.loop.io(self.socket.fileno()</span><span class="s3">, </span><span class="s5">1</span><span class="s1">)</span>
+            <span class="s1">self._watcher.start(self._do_read)</span>
+
+    <span class="s3">def </span><span class="s1">stop_accepting(self):</span>
+        <span class="s3">if </span><span class="s1">self._watcher </span><span class="s3">is not None</span><span class="s1">:</span>
+            <span class="s1">self._watcher.stop()</span>
+            <span class="s1">self._watcher.close()</span>
+            <span class="s1">self._watcher = </span><span class="s3">None</span>
+        <span class="s3">if </span><span class="s1">self._timer </span><span class="s3">is not None</span><span class="s1">:</span>
+            <span class="s1">self._timer.stop()</span>
+            <span class="s1">self._timer.close()</span>
+            <span class="s1">self._timer = </span><span class="s3">None</span>
+
+    <span class="s3">def </span><span class="s1">do_handle(self</span><span class="s3">, </span><span class="s1">*args):</span>
+        <span class="s1">spawn = self._spawn</span>
+        <span class="s1">handle = self._handle</span>
+        <span class="s1">close = self.do_close</span>
+
+        <span class="s3">try</span><span class="s1">:</span>
+            <span class="s3">if </span><span class="s1">spawn </span><span class="s3">is None</span><span class="s1">:</span>
+                <span class="s1">_handle_and_close_when_done(handle</span><span class="s3">, </span><span class="s1">close</span><span class="s3">, </span><span class="s1">args)</span>
+            <span class="s3">else</span><span class="s1">:</span>
+                <span class="s1">spawn(_handle_and_close_when_done</span><span class="s3">, </span><span class="s1">handle</span><span class="s3">, </span><span class="s1">close</span><span class="s3">, </span><span class="s1">args)</span>
+        <span class="s3">except</span><span class="s1">:</span>
+            <span class="s1">close(*args)</span>
+            <span class="s3">raise</span>
+
+    <span class="s3">def </span><span class="s1">do_close(self</span><span class="s3">, </span><span class="s1">*args):</span>
+        <span class="s3">pass</span>
+
+    <span class="s3">def </span><span class="s1">do_read(self):</span>
+        <span class="s3">raise </span><span class="s1">NotImplementedError()</span>
+
+    <span class="s3">def </span><span class="s1">_do_read(self):</span>
+        <span class="s3">for </span><span class="s1">_ </span><span class="s3">in </span><span class="s1">xrange(self.max_accept):</span>
+            <span class="s3">if </span><span class="s1">self.full():</span>
+                <span class="s1">self.stop_accepting()</span>
+                <span class="s3">if </span><span class="s1">self.pool </span><span class="s3">is not None</span><span class="s1">:</span>
+                    <span class="s1">self.pool._semaphore.rawlink(self._start_accepting_if_started)</span>
+                <span class="s3">return</span>
+            <span class="s3">try</span><span class="s1">:</span>
+                <span class="s1">args = self.do_read()</span>
+                <span class="s1">self.delay = self.min_delay</span>
+                <span class="s3">if not </span><span class="s1">args:</span>
+                    <span class="s3">return</span>
+            <span class="s3">except</span><span class="s1">:</span>
+                <span class="s1">self.loop.handle_error(self</span><span class="s3">, </span><span class="s1">*sys.exc_info())</span>
+                <span class="s1">ex = sys.exc_info()[</span><span class="s5">1</span><span class="s1">]</span>
+                <span class="s3">if </span><span class="s1">self.is_fatal_error(ex):</span>
+                    <span class="s1">self.close()</span>
+                    <span class="s1">sys.stderr.write(</span><span class="s4">'ERROR: %s failed with %s</span><span class="s3">\n</span><span class="s4">' </span><span class="s1">% (self</span><span class="s3">, </span><span class="s1">str(ex) </span><span class="s3">or </span><span class="s1">repr(ex)))</span>
+                    <span class="s3">return</span>
+                <span class="s3">if </span><span class="s1">self.delay &gt;= </span><span class="s5">0</span><span class="s1">:</span>
+                    <span class="s1">self.stop_accepting()</span>
+                    <span class="s1">self._timer = self.loop.timer(self.delay)</span>
+                    <span class="s1">self._timer.start(self._start_accepting_if_started)</span>
+                    <span class="s1">self.delay = min(self.max_delay</span><span class="s3">, </span><span class="s1">self.delay * </span><span class="s5">2</span><span class="s1">)</span>
+                <span class="s3">break</span>
+            <span class="s3">else</span><span class="s1">:</span>
+                <span class="s3">try</span><span class="s1">:</span>
+                    <span class="s1">self.do_handle(*args)</span>
+                <span class="s3">except</span><span class="s1">:</span>
+                    <span class="s1">self.loop.handle_error((args[</span><span class="s5">1</span><span class="s1">:]</span><span class="s3">, </span><span class="s1">self)</span><span class="s3">, </span><span class="s1">*sys.exc_info())</span>
+                    <span class="s3">if </span><span class="s1">self.delay &gt;= </span><span class="s5">0</span><span class="s1">:</span>
+                        <span class="s1">self.stop_accepting()</span>
+                        <span class="s1">self._timer = self.loop.timer(self.delay)</span>
+                        <span class="s1">self._timer.start(self._start_accepting_if_started)</span>
+                        <span class="s1">self.delay = min(self.max_delay</span><span class="s3">, </span><span class="s1">self.delay * </span><span class="s5">2</span><span class="s1">)</span>
+                    <span class="s3">break</span>
+
+    <span class="s3">def </span><span class="s1">full(self): </span><span class="s2"># pylint: disable=method-hidden</span>
+        <span class="s2"># If a Pool is given for to ``set_spawn`` (the *spawn* argument</span>
+        <span class="s2"># of the constructor) it will replace this method.</span>
+        <span class="s3">return False</span>
+
+    <span class="s3">def </span><span class="s1">__repr__(self):</span>
+        <span class="s3">return </span><span class="s4">'&lt;%s at %s %s&gt;' </span><span class="s1">% (type(self).__name__</span><span class="s3">, </span><span class="s1">hex(id(self))</span><span class="s3">, </span><span class="s1">self._formatinfo())</span>
+
+    <span class="s3">def </span><span class="s1">__str__(self):</span>
+        <span class="s3">return </span><span class="s4">'&lt;%s %s&gt;' </span><span class="s1">% (type(self).__name__</span><span class="s3">, </span><span class="s1">self._formatinfo())</span>
+
+    <span class="s3">def </span><span class="s1">_formatinfo(self):</span>
+        <span class="s3">if </span><span class="s1">hasattr(self</span><span class="s3">, </span><span class="s4">'socket'</span><span class="s1">):</span>
+            <span class="s3">try</span><span class="s1">:</span>
+                <span class="s1">fileno = self.socket.fileno()</span>
+            <span class="s3">except </span><span class="s1">Exception </span><span class="s3">as </span><span class="s1">ex:</span>
+                <span class="s1">fileno = str(ex)</span>
+            <span class="s1">result = </span><span class="s4">'fileno=%s ' </span><span class="s1">% fileno</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s1">result = </span><span class="s4">''</span>
+        <span class="s3">try</span><span class="s1">:</span>
+            <span class="s3">if </span><span class="s1">isinstance(self.address</span><span class="s3">, </span><span class="s1">tuple) </span><span class="s3">and </span><span class="s1">len(self.address) == </span><span class="s5">2</span><span class="s1">:</span>
+                <span class="s1">result += </span><span class="s4">'address=%s:%s' </span><span class="s1">% self.address</span>
+            <span class="s3">else</span><span class="s1">:</span>
+                <span class="s1">result += </span><span class="s4">'address=%s' </span><span class="s1">% (self.address</span><span class="s3">, </span><span class="s1">)</span>
+        <span class="s3">except </span><span class="s1">Exception </span><span class="s3">as </span><span class="s1">ex:</span>
+            <span class="s1">result += str(ex) </span><span class="s3">or </span><span class="s4">'&lt;error&gt;'</span>
+
+        <span class="s1">handle = self.__dict__.get(</span><span class="s4">'handle'</span><span class="s1">)</span>
+        <span class="s3">if </span><span class="s1">handle </span><span class="s3">is not None</span><span class="s1">:</span>
+            <span class="s1">fself = getattr(handle</span><span class="s3">, </span><span class="s4">'__self__'</span><span class="s3">, None</span><span class="s1">)</span>
+            <span class="s3">try</span><span class="s1">:</span>
+                <span class="s3">if </span><span class="s1">fself </span><span class="s3">is </span><span class="s1">self:</span>
+                    <span class="s2"># Checks the __self__ of the handle in case it is a bound</span>
+                    <span class="s2"># method of self to prevent recursively defined reprs.</span>
+                    <span class="s1">handle_repr = </span><span class="s4">'&lt;bound method %s.%s of self&gt;' </span><span class="s1">% (</span>
+                        <span class="s1">self.__class__.__name__</span><span class="s3">,</span>
+                        <span class="s1">handle.__name__</span><span class="s3">,</span>
+                    <span class="s1">)</span>
+                <span class="s3">else</span><span class="s1">:</span>
+                    <span class="s1">handle_repr = repr(handle)</span>
+
+                <span class="s1">result += </span><span class="s4">' handle=' </span><span class="s1">+ handle_repr</span>
+            <span class="s3">except </span><span class="s1">Exception </span><span class="s3">as </span><span class="s1">ex:</span>
+                <span class="s1">result += str(ex) </span><span class="s3">or </span><span class="s4">'&lt;error&gt;'</span>
+
+        <span class="s3">return </span><span class="s1">result</span>
+
+    <span class="s1">@property</span>
+    <span class="s3">def </span><span class="s1">server_host(self):</span>
+        <span class="s0">&quot;&quot;&quot;IP address that the server is bound to (string).&quot;&quot;&quot;</span>
+        <span class="s3">if </span><span class="s1">isinstance(self.address</span><span class="s3">, </span><span class="s1">tuple):</span>
+            <span class="s3">return </span><span class="s1">self.address[</span><span class="s5">0</span><span class="s1">]</span>
+
+    <span class="s1">@property</span>
+    <span class="s3">def </span><span class="s1">server_port(self):</span>
+        <span class="s0">&quot;&quot;&quot;Port that the server is bound to (an integer).&quot;&quot;&quot;</span>
+        <span class="s3">if </span><span class="s1">isinstance(self.address</span><span class="s3">, </span><span class="s1">tuple):</span>
+            <span class="s3">return </span><span class="s1">self.address[</span><span class="s5">1</span><span class="s1">]</span>
+
+    <span class="s3">def </span><span class="s1">init_socket(self):</span>
+        <span class="s0">&quot;&quot;&quot; 
+        If the user initialized the server with an address rather than 
+        socket, then this function must create a socket, bind it, and 
+        put it into listening mode. 
+ 
+        It is not supposed to be called by the user, it is called by :meth:`start` before starting 
+        the accept loop. 
+        &quot;&quot;&quot;</span>
+
+    <span class="s1">@property</span>
+    <span class="s3">def </span><span class="s1">started(self):</span>
+        <span class="s3">return not </span><span class="s1">self._stop_event.is_set()</span>
+
+    <span class="s3">def </span><span class="s1">start(self):</span>
+        <span class="s0">&quot;&quot;&quot;Start accepting the connections. 
+ 
+        If an address was provided in the constructor, then also create a socket, 
+        bind it and put it into the listening mode. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">self.init_socket()</span>
+        <span class="s1">self._stop_event.clear()</span>
+        <span class="s3">try</span><span class="s1">:</span>
+            <span class="s1">self.start_accepting()</span>
+        <span class="s3">except</span><span class="s1">:</span>
+            <span class="s1">self.close()</span>
+            <span class="s3">raise</span>
+
+    <span class="s3">def </span><span class="s1">close(self):</span>
+        <span class="s0">&quot;&quot;&quot;Close the listener socket and stop accepting.&quot;&quot;&quot;</span>
+        <span class="s1">self._stop_event.set()</span>
+        <span class="s3">try</span><span class="s1">:</span>
+            <span class="s1">self.stop_accepting()</span>
+        <span class="s3">finally</span><span class="s1">:</span>
+            <span class="s3">try</span><span class="s1">:</span>
+                <span class="s1">self.socket.close()</span>
+            <span class="s3">except </span><span class="s1">Exception:</span>
+                <span class="s3">pass</span>
+            <span class="s3">finally</span><span class="s1">:</span>
+                <span class="s1">self.__dict__.pop(</span><span class="s4">'socket'</span><span class="s3">, None</span><span class="s1">)</span>
+                <span class="s1">self.__dict__.pop(</span><span class="s4">'handle'</span><span class="s3">, None</span><span class="s1">)</span>
+                <span class="s1">self.__dict__.pop(</span><span class="s4">'_handle'</span><span class="s3">, None</span><span class="s1">)</span>
+                <span class="s1">self.__dict__.pop(</span><span class="s4">'_spawn'</span><span class="s3">, None</span><span class="s1">)</span>
+                <span class="s1">self.__dict__.pop(</span><span class="s4">'full'</span><span class="s3">, None</span><span class="s1">)</span>
+                <span class="s3">if </span><span class="s1">self.pool </span><span class="s3">is not None</span><span class="s1">:</span>
+                    <span class="s1">self.pool._semaphore.unlink(self._start_accepting_if_started)</span>
+                    <span class="s2"># If the pool's semaphore had a notifier already started,</span>
+                    <span class="s2"># there's a reference cycle we're a part of</span>
+                    <span class="s2"># (self-&gt;pool-&gt;semaphere-hub callback-&gt;semaphore)</span>
+                    <span class="s2"># But we can't destroy self.pool, because self.stop()</span>
+                    <span class="s2"># calls this method, and then wants to join self.pool()</span>
+
+    <span class="s1">@property</span>
+    <span class="s3">def </span><span class="s1">closed(self):</span>
+        <span class="s3">return not </span><span class="s1">hasattr(self</span><span class="s3">, </span><span class="s4">'socket'</span><span class="s1">)</span>
+
+    <span class="s3">def </span><span class="s1">stop(self</span><span class="s3">, </span><span class="s1">timeout=</span><span class="s3">None</span><span class="s1">):</span>
+        <span class="s0">&quot;&quot;&quot; 
+        Stop accepting the connections and close the listening socket. 
+ 
+        If the server uses a pool to spawn the requests, then 
+        :meth:`stop` also waits for all the handlers to exit. If there 
+        are still handlers executing after *timeout* has expired 
+        (default 1 second, :attr:`stop_timeout`), then the currently 
+        running handlers in the pool are killed. 
+ 
+        If the server does not use a pool, then this merely stops accepting connections; 
+        any spawned greenlets that are handling requests continue running until 
+        they naturally complete. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">self.close()</span>
+        <span class="s3">if </span><span class="s1">timeout </span><span class="s3">is None</span><span class="s1">:</span>
+            <span class="s1">timeout = self.stop_timeout</span>
+        <span class="s3">if </span><span class="s1">self.pool:</span>
+            <span class="s1">self.pool.join(timeout=timeout)</span>
+            <span class="s1">self.pool.kill(block=</span><span class="s3">True, </span><span class="s1">timeout=</span><span class="s5">1</span><span class="s1">)</span>
+
+
+    <span class="s3">def </span><span class="s1">serve_forever(self</span><span class="s3">, </span><span class="s1">stop_timeout=</span><span class="s3">None</span><span class="s1">):</span>
+        <span class="s0">&quot;&quot;&quot;Start the server if it hasn't been already started and wait until it's stopped.&quot;&quot;&quot;</span>
+        <span class="s2"># add test that serve_forever exists on stop()</span>
+        <span class="s3">if not </span><span class="s1">self.started:</span>
+            <span class="s1">self.start()</span>
+        <span class="s3">try</span><span class="s1">:</span>
+            <span class="s1">self._stop_event.wait()</span>
+        <span class="s3">finally</span><span class="s1">:</span>
+            <span class="s1">Greenlet.spawn(self.stop</span><span class="s3">, </span><span class="s1">timeout=stop_timeout).join()</span>
+
+    <span class="s3">def </span><span class="s1">is_fatal_error(self</span><span class="s3">, </span><span class="s1">ex):</span>
+        <span class="s3">return </span><span class="s1">isinstance(ex</span><span class="s3">, </span><span class="s1">_socket.error) </span><span class="s3">and </span><span class="s1">ex.args[</span><span class="s5">0</span><span class="s1">] </span><span class="s3">in </span><span class="s1">self.fatal_errors</span>
+
+
+<span class="s3">def </span><span class="s1">_extract_family(host):</span>
+    <span class="s3">if </span><span class="s1">host.startswith(</span><span class="s4">'['</span><span class="s1">) </span><span class="s3">and </span><span class="s1">host.endswith(</span><span class="s4">']'</span><span class="s1">):</span>
+        <span class="s1">host = host[</span><span class="s5">1</span><span class="s1">:-</span><span class="s5">1</span><span class="s1">]</span>
+        <span class="s3">return </span><span class="s1">_socket.AF_INET6</span><span class="s3">, </span><span class="s1">host</span>
+    <span class="s3">return </span><span class="s1">_socket.AF_INET</span><span class="s3">, </span><span class="s1">host</span>
+
+
+<span class="s3">def </span><span class="s1">_parse_address(address):</span>
+    <span class="s3">if </span><span class="s1">isinstance(address</span><span class="s3">, </span><span class="s1">tuple):</span>
+        <span class="s3">if not </span><span class="s1">address[</span><span class="s5">0</span><span class="s1">] </span><span class="s3">or </span><span class="s4">':' </span><span class="s3">in </span><span class="s1">address[</span><span class="s5">0</span><span class="s1">]:</span>
+            <span class="s3">return </span><span class="s1">_socket.AF_INET6</span><span class="s3">, </span><span class="s1">address</span>
+        <span class="s3">return </span><span class="s1">_socket.AF_INET</span><span class="s3">, </span><span class="s1">address</span>
+
+    <span class="s3">if </span><span class="s1">((isinstance(address</span><span class="s3">, </span><span class="s1">string_types) </span><span class="s3">and </span><span class="s4">':' </span><span class="s3">not in </span><span class="s1">address)</span>
+            <span class="s3">or </span><span class="s1">isinstance(address</span><span class="s3">, </span><span class="s1">integer_types)): </span><span class="s2"># noqa (pep8 E129)</span>
+        <span class="s2"># Just a port</span>
+        <span class="s3">return </span><span class="s1">_socket.AF_INET6</span><span class="s3">, </span><span class="s1">(</span><span class="s4">''</span><span class="s3">, </span><span class="s1">int(address))</span>
+
+    <span class="s3">if not </span><span class="s1">isinstance(address</span><span class="s3">, </span><span class="s1">string_types):</span>
+        <span class="s3">raise </span><span class="s1">TypeError(</span><span class="s4">'Expected tuple or string, got %s' </span><span class="s1">% type(address))</span>
+
+    <span class="s1">host</span><span class="s3">, </span><span class="s1">port = address.rsplit(</span><span class="s4">':'</span><span class="s3">, </span><span class="s5">1</span><span class="s1">)</span>
+    <span class="s1">family</span><span class="s3">, </span><span class="s1">host = _extract_family(host)</span>
+    <span class="s3">if </span><span class="s1">host == </span><span class="s4">'*'</span><span class="s1">:</span>
+        <span class="s1">host = </span><span class="s4">''</span>
+    <span class="s3">return </span><span class="s1">family</span><span class="s3">, </span><span class="s1">(host</span><span class="s3">, </span><span class="s1">int(port))</span>
+
+
+<span class="s3">def </span><span class="s1">parse_address(address):</span>
+    <span class="s3">try</span><span class="s1">:</span>
+        <span class="s3">return </span><span class="s1">_parse_address(address)</span>
+    <span class="s3">except </span><span class="s1">ValueError </span><span class="s3">as </span><span class="s1">ex: </span><span class="s2"># pylint:disable=try-except-raise</span>
+        <span class="s3">raise </span><span class="s1">ValueError(</span><span class="s4">'Failed to parse address %r: %s' </span><span class="s1">% (address</span><span class="s3">, </span><span class="s1">ex))</span>
+</pre>
+</body>
+</html>

@@ -1,0 +1,1040 @@
+<html>
+<head>
+<title>adapter.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #629755; font-style: italic;}
+.s3 { color: #cc7832;}
+.s4 { color: #6a8759;}
+.s5 { color: #6897bb;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+adapter.py</font>
+</center></td></tr></table>
+<pre><span class="s0">##############################################################################</span>
+<span class="s0">#</span>
+<span class="s0"># Copyright (c) 2004 Zope Foundation and Contributors.</span>
+<span class="s0"># All Rights Reserved.</span>
+<span class="s0">#</span>
+<span class="s0"># This software is subject to the provisions of the Zope Public License,</span>
+<span class="s0"># Version 2.1 (ZPL).  A copy of the ZPL should accompany this distribution.</span>
+<span class="s0"># THIS SOFTWARE IS PROVIDED &quot;AS IS&quot; AND ANY AND ALL EXPRESS OR IMPLIED</span>
+<span class="s0"># WARRANTIES ARE DISCLAIMED, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED</span>
+<span class="s0"># WARRANTIES OF TITLE, MERCHANTABILITY, AGAINST INFRINGEMENT, AND FITNESS</span>
+<span class="s0"># FOR A PARTICULAR PURPOSE.</span>
+<span class="s0">#</span>
+<span class="s0">##############################################################################</span>
+<span class="s2">&quot;&quot;&quot;Adapter management 
+&quot;&quot;&quot;</span>
+<span class="s3">import </span><span class="s1">itertools</span>
+<span class="s3">import </span><span class="s1">weakref</span>
+
+<span class="s3">from </span><span class="s1">zope.interface </span><span class="s3">import </span><span class="s1">implementer</span>
+<span class="s3">from </span><span class="s1">zope.interface </span><span class="s3">import </span><span class="s1">providedBy</span>
+<span class="s3">from </span><span class="s1">zope.interface </span><span class="s3">import </span><span class="s1">Interface</span>
+<span class="s3">from </span><span class="s1">zope.interface </span><span class="s3">import </span><span class="s1">ro</span>
+<span class="s3">from </span><span class="s1">zope.interface.interfaces </span><span class="s3">import </span><span class="s1">IAdapterRegistry</span>
+
+<span class="s3">from </span><span class="s1">zope.interface._compat </span><span class="s3">import </span><span class="s1">_normalize_name</span>
+<span class="s3">from </span><span class="s1">zope.interface._compat </span><span class="s3">import </span><span class="s1">STRING_TYPES</span>
+<span class="s3">from </span><span class="s1">zope.interface._compat </span><span class="s3">import </span><span class="s1">_use_c_impl</span>
+
+<span class="s1">__all__ = [</span>
+    <span class="s4">'AdapterRegistry'</span><span class="s3">,</span>
+    <span class="s4">'VerifyingAdapterRegistry'</span><span class="s3">,</span>
+<span class="s1">]</span>
+
+<span class="s0"># In the CPython implementation,</span>
+<span class="s0"># ``tuple`` and ``list`` cooperate so that ``tuple([some list])``</span>
+<span class="s0"># directly allocates and iterates at the C level without using a</span>
+<span class="s0"># Python iterator. That's not the case for</span>
+<span class="s0"># ``tuple(generator_expression)`` or ``tuple(map(func, it))``.</span>
+<span class="s0">##</span>
+<span class="s0"># 3.8</span>
+<span class="s0"># ``tuple([t for t in range(10)])``      -&gt; 610ns</span>
+<span class="s0"># ``tuple(t for t in range(10))``        -&gt; 696ns</span>
+<span class="s0"># ``tuple(map(lambda t: t, range(10)))`` -&gt; 881ns</span>
+<span class="s0">##</span>
+<span class="s0"># 2.7</span>
+<span class="s0"># ``tuple([t fon t in range(10)])``      -&gt; 625ns</span>
+<span class="s0"># ``tuple(t for t in range(10))``        -&gt; 665ns</span>
+<span class="s0"># ``tuple(map(lambda t: t, range(10)))`` -&gt; 958ns</span>
+<span class="s0">#</span>
+<span class="s0"># All three have substantial variance.</span>
+<span class="s0">##</span>
+<span class="s0"># On PyPy, this is also the best option.</span>
+<span class="s0">##</span>
+<span class="s0"># PyPy 2.7.18-7.3.3</span>
+<span class="s0"># ``tuple([t fon t in range(10)])``      -&gt; 128ns</span>
+<span class="s0"># ``tuple(t for t in range(10))``        -&gt; 175ns</span>
+<span class="s0"># ``tuple(map(lambda t: t, range(10)))`` -&gt; 153ns</span>
+<span class="s0">##</span>
+<span class="s0"># PyPy 3.7.9 7.3.3-beta</span>
+<span class="s0"># ``tuple([t fon t in range(10)])``      -&gt;  82ns</span>
+<span class="s0"># ``tuple(t for t in range(10))``        -&gt; 177ns</span>
+<span class="s0"># ``tuple(map(lambda t: t, range(10)))`` -&gt; 168ns</span>
+<span class="s0">#</span>
+
+<span class="s3">class </span><span class="s1">BaseAdapterRegistry(object):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    A basic implementation of the data storage and algorithms required 
+    for a :class:`zope.interface.interfaces.IAdapterRegistry`. 
+ 
+    Subclasses can set the following attributes to control how the data 
+    is stored; in particular, these hooks can be helpful for ZODB 
+    persistence. They can be class attributes that are the named (or similar) type, or 
+    they can be methods that act as a constructor for an object that behaves 
+    like the types defined here; this object will not assume that they are type 
+    objects, but subclasses are free to do so: 
+ 
+    _sequenceType = list 
+      This is the type used for our two mutable top-level &quot;byorder&quot; sequences. 
+      Must support mutation operations like ``append()`` and ``del seq[index]``. 
+      These are usually small (&lt; 10). Although at least one of them is 
+      accessed when performing lookups or queries on this object, the other 
+      is untouched. In many common scenarios, both are only required when 
+      mutating registrations and subscriptions (like what 
+      :meth:`zope.interface.interfaces.IComponents.registerUtility` does). 
+      This use pattern makes it an ideal candidate to be a 
+      :class:`~persistent.list.PersistentList`. 
+    _leafSequenceType = tuple 
+      This is the type used for the leaf sequences of subscribers. 
+      It could be set to a ``PersistentList`` to avoid many unnecessary data 
+      loads when subscribers aren't being used. Mutation operations are directed 
+      through :meth:`_addValueToLeaf` and :meth:`_removeValueFromLeaf`; if you use 
+      a mutable type, you'll need to override those. 
+    _mappingType = dict 
+      This is the mutable mapping type used for the keyed mappings. 
+      A :class:`~persistent.mapping.PersistentMapping` 
+      could be used to help reduce the number of data loads when the registry is large 
+      and parts of it are rarely used. Further reductions in data loads can come from 
+      using a :class:`~BTrees.OOBTree.OOBTree`, but care is required 
+      to be sure that all required/provided 
+      values are fully ordered (e.g., no required or provided values that are classes 
+      can be used). 
+    _providedType = dict 
+      This is the mutable mapping type used for the ``_provided`` mapping. 
+      This is separate from the generic mapping type because the values 
+      are always integers, so one might choose to use a more optimized data 
+      structure such as a :class:`~BTrees.OIBTree.OIBTree`. 
+      The same caveats regarding key types 
+      apply as for ``_mappingType``. 
+ 
+    It is possible to also set these on an instance, but because of the need to 
+    potentially also override :meth:`_addValueToLeaf` and :meth:`_removeValueFromLeaf`, 
+    this may be less useful in a persistent scenario; using a subclass is recommended. 
+ 
+    .. versionchanged:: 5.3.0 
+        Add support for customizing the way internal data 
+        structures are created. 
+    .. versionchanged:: 5.3.0 
+        Add methods :meth:`rebuild`, :meth:`allRegistrations` 
+        and :meth:`allSubscriptions`. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s0"># List of methods copied from lookup sub-objects:</span>
+    <span class="s1">_delegated = (</span><span class="s4">'lookup'</span><span class="s3">, </span><span class="s4">'queryMultiAdapter'</span><span class="s3">, </span><span class="s4">'lookup1'</span><span class="s3">, </span><span class="s4">'queryAdapter'</span><span class="s3">,</span>
+                  <span class="s4">'adapter_hook'</span><span class="s3">, </span><span class="s4">'lookupAll'</span><span class="s3">, </span><span class="s4">'names'</span><span class="s3">,</span>
+                  <span class="s4">'subscriptions'</span><span class="s3">, </span><span class="s4">'subscribers'</span><span class="s1">)</span>
+
+    <span class="s0"># All registries maintain a generation that can be used by verifying</span>
+    <span class="s0"># registries</span>
+    <span class="s1">_generation = </span><span class="s5">0</span>
+
+    <span class="s3">def </span><span class="s1">__init__(self</span><span class="s3">, </span><span class="s1">bases=()):</span>
+
+        <span class="s0"># The comments here could be improved. Possibly this bit needs</span>
+        <span class="s0"># explaining in a separate document, as the comments here can</span>
+        <span class="s0"># be quite confusing. /regebro</span>
+
+        <span class="s0"># {order -&gt; {required -&gt; {provided -&gt; {name -&gt; value}}}}</span>
+        <span class="s0"># Here &quot;order&quot; is actually an index in a list, &quot;required&quot; and</span>
+        <span class="s0"># &quot;provided&quot; are interfaces, and &quot;required&quot; is really a nested</span>
+        <span class="s0"># key.  So, for example:</span>
+        <span class="s0"># for order == 0 (that is, self._adapters[0]), we have:</span>
+        <span class="s0">#   {provided -&gt; {name -&gt; value}}</span>
+        <span class="s0"># but for order == 2 (that is, self._adapters[2]), we have:</span>
+        <span class="s0">#   {r1 -&gt; {r2 -&gt; {provided -&gt; {name -&gt; value}}}}</span>
+        <span class="s0">#</span>
+        <span class="s1">self._adapters = self._sequenceType()</span>
+
+        <span class="s0"># {order -&gt; {required -&gt; {provided -&gt; {name -&gt; [value]}}}}</span>
+        <span class="s0"># where the remarks about adapters above apply</span>
+        <span class="s1">self._subscribers = self._sequenceType()</span>
+
+        <span class="s0"># Set, with a reference count, keeping track of the interfaces</span>
+        <span class="s0"># for which we have provided components:</span>
+        <span class="s1">self._provided = self._providedType()</span>
+
+        <span class="s0"># Create ``_v_lookup`` object to perform lookup.  We make this a</span>
+        <span class="s0"># separate object to to make it easier to implement just the</span>
+        <span class="s0"># lookup functionality in C.  This object keeps track of cache</span>
+        <span class="s0"># invalidation data in two kinds of registries.</span>
+
+        <span class="s0">#   Invalidating registries have caches that are invalidated</span>
+        <span class="s0">#     when they or their base registies change.  An invalidating</span>
+        <span class="s0">#     registry can only have invalidating registries as bases.</span>
+        <span class="s0">#     See LookupBaseFallback below for the pertinent logic.</span>
+
+        <span class="s0">#   Verifying registies can't rely on getting invalidation messages,</span>
+        <span class="s0">#     so have to check the generations of base registries to determine</span>
+        <span class="s0">#     if their cache data are current.  See VerifyingBasePy below</span>
+        <span class="s0">#     for the pertinent object.</span>
+        <span class="s1">self._createLookup()</span>
+
+        <span class="s0"># Setting the bases causes the registries described above</span>
+        <span class="s0"># to be initialized (self._setBases -&gt; self.changed -&gt;</span>
+        <span class="s0"># self._v_lookup.changed).</span>
+
+        <span class="s1">self.__bases__ = bases</span>
+
+    <span class="s3">def </span><span class="s1">_setBases(self</span><span class="s3">, </span><span class="s1">bases):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        If subclasses need to track when ``__bases__`` changes, they 
+        can override this method. 
+ 
+        Subclasses must still call this method. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">self.__dict__[</span><span class="s4">'__bases__'</span><span class="s1">] = bases</span>
+        <span class="s1">self.ro = ro.ro(self)</span>
+        <span class="s1">self.changed(self)</span>
+
+    <span class="s1">__bases__ = property(</span><span class="s3">lambda </span><span class="s1">self: self.__dict__[</span><span class="s4">'__bases__'</span><span class="s1">]</span><span class="s3">,</span>
+                         <span class="s3">lambda </span><span class="s1">self</span><span class="s3">, </span><span class="s1">bases: self._setBases(bases)</span><span class="s3">,</span>
+                         <span class="s1">)</span>
+
+    <span class="s3">def </span><span class="s1">_createLookup(self):</span>
+        <span class="s1">self._v_lookup = self.LookupClass(self)</span>
+        <span class="s3">for </span><span class="s1">name </span><span class="s3">in </span><span class="s1">self._delegated:</span>
+            <span class="s1">self.__dict__[name] = getattr(self._v_lookup</span><span class="s3">, </span><span class="s1">name)</span>
+
+    <span class="s0"># Hooks for subclasses to define the types of objects used in</span>
+    <span class="s0"># our data structures.</span>
+    <span class="s0"># These have to be documented in the docstring, instead of local</span>
+    <span class="s0"># comments, because Sphinx autodoc ignores the comment and just writes</span>
+    <span class="s0"># &quot;alias of list&quot;</span>
+    <span class="s1">_sequenceType = list</span>
+    <span class="s1">_leafSequenceType = tuple</span>
+    <span class="s1">_mappingType = dict</span>
+    <span class="s1">_providedType = dict</span>
+
+    <span class="s3">def </span><span class="s1">_addValueToLeaf(self</span><span class="s3">, </span><span class="s1">existing_leaf_sequence</span><span class="s3">, </span><span class="s1">new_item):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Add the value *new_item* to the *existing_leaf_sequence*, which may 
+        be ``None``. 
+ 
+        Subclasses that redefine `_leafSequenceType` should override this method. 
+ 
+        :param existing_leaf_sequence: 
+            If *existing_leaf_sequence* is not *None*, it will be an instance 
+            of `_leafSequenceType`. (Unless the object has been unpickled 
+            from an old pickle and the class definition has changed, in which case 
+            it may be an instance of a previous definition, commonly a `tuple`.) 
+ 
+        :return: 
+           This method returns the new value to be stored. It may mutate the 
+           sequence in place if it was not ``None`` and the type is mutable, but 
+           it must also return it. 
+ 
+        .. versionadded:: 5.3.0 
+        &quot;&quot;&quot;</span>
+        <span class="s3">if </span><span class="s1">existing_leaf_sequence </span><span class="s3">is None</span><span class="s1">:</span>
+            <span class="s3">return </span><span class="s1">(new_item</span><span class="s3">,</span><span class="s1">)</span>
+        <span class="s3">return </span><span class="s1">existing_leaf_sequence + (new_item</span><span class="s3">,</span><span class="s1">)</span>
+
+    <span class="s3">def </span><span class="s1">_removeValueFromLeaf(self</span><span class="s3">, </span><span class="s1">existing_leaf_sequence</span><span class="s3">, </span><span class="s1">to_remove):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Remove the item *to_remove* from the (non-``None``, non-empty) 
+        *existing_leaf_sequence* and return the mutated sequence. 
+ 
+        If there is more than one item that is equal to *to_remove* 
+        they must all be removed. 
+ 
+        Subclasses that redefine `_leafSequenceType` should override 
+        this method. Note that they can call this method to help 
+        in their implementation; this implementation will always 
+        return a new tuple constructed by iterating across 
+        the *existing_leaf_sequence* and omitting items equal to *to_remove*. 
+ 
+        :param existing_leaf_sequence: 
+           As for `_addValueToLeaf`, probably an instance of 
+           `_leafSequenceType` but possibly an older type; never `None`. 
+        :return: 
+           A version of *existing_leaf_sequence* with all items equal to 
+           *to_remove* removed. Must not return `None`. However, 
+           returning an empty 
+           object, even of another type such as the empty tuple, ``()`` is 
+           explicitly allowed; such an object will never be stored. 
+ 
+        .. versionadded:: 5.3.0 
+        &quot;&quot;&quot;</span>
+        <span class="s3">return </span><span class="s1">tuple([v </span><span class="s3">for </span><span class="s1">v </span><span class="s3">in </span><span class="s1">existing_leaf_sequence </span><span class="s3">if </span><span class="s1">v != to_remove])</span>
+
+    <span class="s3">def </span><span class="s1">changed(self</span><span class="s3">, </span><span class="s1">originally_changed):</span>
+        <span class="s1">self._generation += </span><span class="s5">1</span>
+        <span class="s1">self._v_lookup.changed(originally_changed)</span>
+
+    <span class="s3">def </span><span class="s1">register(self</span><span class="s3">, </span><span class="s1">required</span><span class="s3">, </span><span class="s1">provided</span><span class="s3">, </span><span class="s1">name</span><span class="s3">, </span><span class="s1">value):</span>
+        <span class="s3">if not </span><span class="s1">isinstance(name</span><span class="s3">, </span><span class="s1">STRING_TYPES):</span>
+            <span class="s3">raise </span><span class="s1">ValueError(</span><span class="s4">'name is not a string'</span><span class="s1">)</span>
+        <span class="s3">if </span><span class="s1">value </span><span class="s3">is None</span><span class="s1">:</span>
+            <span class="s1">self.unregister(required</span><span class="s3">, </span><span class="s1">provided</span><span class="s3">, </span><span class="s1">name</span><span class="s3">, </span><span class="s1">value)</span>
+            <span class="s3">return</span>
+
+        <span class="s1">required = tuple([_convert_None_to_Interface(r) </span><span class="s3">for </span><span class="s1">r </span><span class="s3">in </span><span class="s1">required])</span>
+        <span class="s1">name = _normalize_name(name)</span>
+        <span class="s1">order = len(required)</span>
+        <span class="s1">byorder = self._adapters</span>
+        <span class="s3">while </span><span class="s1">len(byorder) &lt;= order:</span>
+            <span class="s1">byorder.append(self._mappingType())</span>
+        <span class="s1">components = byorder[order]</span>
+        <span class="s1">key = required + (provided</span><span class="s3">,</span><span class="s1">)</span>
+
+        <span class="s3">for </span><span class="s1">k </span><span class="s3">in </span><span class="s1">key:</span>
+            <span class="s1">d = components.get(k)</span>
+            <span class="s3">if </span><span class="s1">d </span><span class="s3">is None</span><span class="s1">:</span>
+                <span class="s1">d = self._mappingType()</span>
+                <span class="s1">components[k] = d</span>
+            <span class="s1">components = d</span>
+
+        <span class="s3">if </span><span class="s1">components.get(name) </span><span class="s3">is </span><span class="s1">value:</span>
+            <span class="s3">return</span>
+
+        <span class="s1">components[name] = value</span>
+
+        <span class="s1">n = self._provided.get(provided</span><span class="s3">, </span><span class="s5">0</span><span class="s1">) + </span><span class="s5">1</span>
+        <span class="s1">self._provided[provided] = n</span>
+        <span class="s3">if </span><span class="s1">n == </span><span class="s5">1</span><span class="s1">:</span>
+            <span class="s1">self._v_lookup.add_extendor(provided)</span>
+
+        <span class="s1">self.changed(self)</span>
+
+    <span class="s3">def </span><span class="s1">_find_leaf(self</span><span class="s3">, </span><span class="s1">byorder</span><span class="s3">, </span><span class="s1">required</span><span class="s3">, </span><span class="s1">provided</span><span class="s3">, </span><span class="s1">name):</span>
+        <span class="s0"># Find the leaf value, if any, in the *byorder* list</span>
+        <span class="s0"># for the interface sequence *required* and the interface</span>
+        <span class="s0"># *provided*, given the already normalized *name*.</span>
+        <span class="s0">#</span>
+        <span class="s0"># If no such leaf value exists, returns ``None``</span>
+        <span class="s1">required = tuple([_convert_None_to_Interface(r) </span><span class="s3">for </span><span class="s1">r </span><span class="s3">in </span><span class="s1">required])</span>
+        <span class="s1">order = len(required)</span>
+        <span class="s3">if </span><span class="s1">len(byorder) &lt;= order:</span>
+            <span class="s3">return None</span>
+
+        <span class="s1">components = byorder[order]</span>
+        <span class="s1">key = required + (provided</span><span class="s3">,</span><span class="s1">)</span>
+
+        <span class="s3">for </span><span class="s1">k </span><span class="s3">in </span><span class="s1">key:</span>
+            <span class="s1">d = components.get(k)</span>
+            <span class="s3">if </span><span class="s1">d </span><span class="s3">is None</span><span class="s1">:</span>
+                <span class="s3">return None</span>
+            <span class="s1">components = d</span>
+
+        <span class="s3">return </span><span class="s1">components.get(name)</span>
+
+    <span class="s3">def </span><span class="s1">registered(self</span><span class="s3">, </span><span class="s1">required</span><span class="s3">, </span><span class="s1">provided</span><span class="s3">, </span><span class="s1">name=</span><span class="s4">u''</span><span class="s1">):</span>
+        <span class="s3">return </span><span class="s1">self._find_leaf(</span>
+            <span class="s1">self._adapters</span><span class="s3">,</span>
+            <span class="s1">required</span><span class="s3">,</span>
+            <span class="s1">provided</span><span class="s3">,</span>
+            <span class="s1">_normalize_name(name)</span>
+        <span class="s1">)</span>
+
+    <span class="s1">@classmethod</span>
+    <span class="s3">def </span><span class="s1">_allKeys(cls</span><span class="s3">, </span><span class="s1">components</span><span class="s3">, </span><span class="s1">i</span><span class="s3">, </span><span class="s1">parent_k=()):</span>
+        <span class="s3">if </span><span class="s1">i == </span><span class="s5">0</span><span class="s1">:</span>
+            <span class="s3">for </span><span class="s1">k</span><span class="s3">, </span><span class="s1">v </span><span class="s3">in </span><span class="s1">components.items():</span>
+                <span class="s3">yield </span><span class="s1">parent_k + (k</span><span class="s3">,</span><span class="s1">)</span><span class="s3">, </span><span class="s1">v</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s3">for </span><span class="s1">k</span><span class="s3">, </span><span class="s1">v </span><span class="s3">in </span><span class="s1">components.items():</span>
+                <span class="s1">new_parent_k = parent_k + (k</span><span class="s3">,</span><span class="s1">)</span>
+                <span class="s3">for </span><span class="s1">x</span><span class="s3">, </span><span class="s1">y </span><span class="s3">in </span><span class="s1">cls._allKeys(v</span><span class="s3">, </span><span class="s1">i - </span><span class="s5">1</span><span class="s3">, </span><span class="s1">new_parent_k):</span>
+                    <span class="s3">yield </span><span class="s1">x</span><span class="s3">, </span><span class="s1">y</span>
+
+    <span class="s3">def </span><span class="s1">_all_entries(self</span><span class="s3">, </span><span class="s1">byorder):</span>
+        <span class="s0"># Recurse through the mapping levels of the `byorder` sequence,</span>
+        <span class="s0"># reconstructing a flattened sequence of ``(required, provided, name, value)``</span>
+        <span class="s0"># tuples that can be used to reconstruct the sequence with the appropriate</span>
+        <span class="s0"># registration methods.</span>
+        <span class="s0">#</span>
+        <span class="s0"># Locally reference the `byorder` data; it might be replaced while</span>
+        <span class="s0"># this method is running (see ``rebuild``).</span>
+        <span class="s3">for </span><span class="s1">i</span><span class="s3">, </span><span class="s1">components </span><span class="s3">in </span><span class="s1">enumerate(byorder):</span>
+            <span class="s0"># We will have *i* levels of dictionaries to go before</span>
+            <span class="s0"># we get to the leaf.</span>
+            <span class="s3">for </span><span class="s1">key</span><span class="s3">, </span><span class="s1">value </span><span class="s3">in </span><span class="s1">self._allKeys(components</span><span class="s3">, </span><span class="s1">i + </span><span class="s5">1</span><span class="s1">):</span>
+                <span class="s3">assert </span><span class="s1">len(key) == i + </span><span class="s5">2</span>
+                <span class="s1">required = key[:i]</span>
+                <span class="s1">provided = key[-</span><span class="s5">2</span><span class="s1">]</span>
+                <span class="s1">name = key[-</span><span class="s5">1</span><span class="s1">]</span>
+                <span class="s3">yield </span><span class="s1">(required</span><span class="s3">, </span><span class="s1">provided</span><span class="s3">, </span><span class="s1">name</span><span class="s3">, </span><span class="s1">value)</span>
+
+    <span class="s3">def </span><span class="s1">allRegistrations(self):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Yields tuples ``(required, provided, name, value)`` for all 
+        the registrations that this object holds. 
+ 
+        These tuples could be passed as the arguments to the 
+        :meth:`register` method on another adapter registry to 
+        duplicate the registrations this object holds. 
+ 
+        .. versionadded:: 5.3.0 
+        &quot;&quot;&quot;</span>
+        <span class="s3">for </span><span class="s1">t </span><span class="s3">in </span><span class="s1">self._all_entries(self._adapters):</span>
+            <span class="s3">yield </span><span class="s1">t</span>
+
+    <span class="s3">def </span><span class="s1">unregister(self</span><span class="s3">, </span><span class="s1">required</span><span class="s3">, </span><span class="s1">provided</span><span class="s3">, </span><span class="s1">name</span><span class="s3">, </span><span class="s1">value=</span><span class="s3">None</span><span class="s1">):</span>
+        <span class="s1">required = tuple([_convert_None_to_Interface(r) </span><span class="s3">for </span><span class="s1">r </span><span class="s3">in </span><span class="s1">required])</span>
+        <span class="s1">order = len(required)</span>
+        <span class="s1">byorder = self._adapters</span>
+        <span class="s3">if </span><span class="s1">order &gt;= len(byorder):</span>
+            <span class="s3">return False</span>
+        <span class="s1">components = byorder[order]</span>
+        <span class="s1">key = required + (provided</span><span class="s3">,</span><span class="s1">)</span>
+
+        <span class="s0"># Keep track of how we got to `components`:</span>
+        <span class="s1">lookups = []</span>
+        <span class="s3">for </span><span class="s1">k </span><span class="s3">in </span><span class="s1">key:</span>
+            <span class="s1">d = components.get(k)</span>
+            <span class="s3">if </span><span class="s1">d </span><span class="s3">is None</span><span class="s1">:</span>
+                <span class="s3">return</span>
+            <span class="s1">lookups.append((components</span><span class="s3">, </span><span class="s1">k))</span>
+            <span class="s1">components = d</span>
+
+        <span class="s1">old = components.get(name)</span>
+        <span class="s3">if </span><span class="s1">old </span><span class="s3">is None</span><span class="s1">:</span>
+            <span class="s3">return</span>
+        <span class="s3">if </span><span class="s1">(value </span><span class="s3">is not None</span><span class="s1">) </span><span class="s3">and </span><span class="s1">(old </span><span class="s3">is not </span><span class="s1">value):</span>
+            <span class="s3">return</span>
+
+        <span class="s3">del </span><span class="s1">components[name]</span>
+        <span class="s3">if not </span><span class="s1">components:</span>
+            <span class="s0"># Clean out empty containers, since we don't want our keys</span>
+            <span class="s0"># to reference global objects (interfaces) unnecessarily.</span>
+            <span class="s0"># This is often a problem when an interface is slated for</span>
+            <span class="s0"># removal; a hold-over entry in the registry can make it</span>
+            <span class="s0"># difficult to remove such interfaces.</span>
+            <span class="s3">for </span><span class="s1">comp</span><span class="s3">, </span><span class="s1">k </span><span class="s3">in </span><span class="s1">reversed(lookups):</span>
+                <span class="s1">d = comp[k]</span>
+                <span class="s3">if </span><span class="s1">d:</span>
+                    <span class="s3">break</span>
+                <span class="s3">else</span><span class="s1">:</span>
+                    <span class="s3">del </span><span class="s1">comp[k]</span>
+            <span class="s3">while </span><span class="s1">byorder </span><span class="s3">and not </span><span class="s1">byorder[-</span><span class="s5">1</span><span class="s1">]:</span>
+                <span class="s3">del </span><span class="s1">byorder[-</span><span class="s5">1</span><span class="s1">]</span>
+        <span class="s1">n = self._provided[provided] - </span><span class="s5">1</span>
+        <span class="s3">if </span><span class="s1">n == </span><span class="s5">0</span><span class="s1">:</span>
+            <span class="s3">del </span><span class="s1">self._provided[provided]</span>
+            <span class="s1">self._v_lookup.remove_extendor(provided)</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s1">self._provided[provided] = n</span>
+
+        <span class="s1">self.changed(self)</span>
+
+    <span class="s3">def </span><span class="s1">subscribe(self</span><span class="s3">, </span><span class="s1">required</span><span class="s3">, </span><span class="s1">provided</span><span class="s3">, </span><span class="s1">value):</span>
+        <span class="s1">required = tuple([_convert_None_to_Interface(r) </span><span class="s3">for </span><span class="s1">r </span><span class="s3">in </span><span class="s1">required])</span>
+        <span class="s1">name = </span><span class="s4">u''</span>
+        <span class="s1">order = len(required)</span>
+        <span class="s1">byorder = self._subscribers</span>
+        <span class="s3">while </span><span class="s1">len(byorder) &lt;= order:</span>
+            <span class="s1">byorder.append(self._mappingType())</span>
+        <span class="s1">components = byorder[order]</span>
+        <span class="s1">key = required + (provided</span><span class="s3">,</span><span class="s1">)</span>
+
+        <span class="s3">for </span><span class="s1">k </span><span class="s3">in </span><span class="s1">key:</span>
+            <span class="s1">d = components.get(k)</span>
+            <span class="s3">if </span><span class="s1">d </span><span class="s3">is None</span><span class="s1">:</span>
+                <span class="s1">d = self._mappingType()</span>
+                <span class="s1">components[k] = d</span>
+            <span class="s1">components = d</span>
+
+        <span class="s1">components[name] = self._addValueToLeaf(components.get(name)</span><span class="s3">, </span><span class="s1">value)</span>
+
+        <span class="s3">if </span><span class="s1">provided </span><span class="s3">is not None</span><span class="s1">:</span>
+            <span class="s1">n = self._provided.get(provided</span><span class="s3">, </span><span class="s5">0</span><span class="s1">) + </span><span class="s5">1</span>
+            <span class="s1">self._provided[provided] = n</span>
+            <span class="s3">if </span><span class="s1">n == </span><span class="s5">1</span><span class="s1">:</span>
+                <span class="s1">self._v_lookup.add_extendor(provided)</span>
+
+        <span class="s1">self.changed(self)</span>
+
+    <span class="s3">def </span><span class="s1">subscribed(self</span><span class="s3">, </span><span class="s1">required</span><span class="s3">, </span><span class="s1">provided</span><span class="s3">, </span><span class="s1">subscriber):</span>
+        <span class="s1">subscribers = self._find_leaf(</span>
+            <span class="s1">self._subscribers</span><span class="s3">,</span>
+            <span class="s1">required</span><span class="s3">,</span>
+            <span class="s1">provided</span><span class="s3">,</span>
+            <span class="s4">u''</span>
+        <span class="s1">) </span><span class="s3">or </span><span class="s1">()</span>
+        <span class="s3">return </span><span class="s1">subscriber </span><span class="s3">if </span><span class="s1">subscriber </span><span class="s3">in </span><span class="s1">subscribers </span><span class="s3">else None</span>
+
+    <span class="s3">def </span><span class="s1">allSubscriptions(self):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Yields tuples ``(required, provided, value)`` for all the 
+        subscribers that this object holds. 
+ 
+        These tuples could be passed as the arguments to the 
+        :meth:`subscribe` method on another adapter registry to 
+        duplicate the registrations this object holds. 
+ 
+        .. versionadded:: 5.3.0 
+        &quot;&quot;&quot;</span>
+        <span class="s3">for </span><span class="s1">required</span><span class="s3">, </span><span class="s1">provided</span><span class="s3">, </span><span class="s1">_name</span><span class="s3">, </span><span class="s1">value </span><span class="s3">in </span><span class="s1">self._all_entries(self._subscribers):</span>
+            <span class="s3">for </span><span class="s1">v </span><span class="s3">in </span><span class="s1">value:</span>
+                <span class="s3">yield </span><span class="s1">(required</span><span class="s3">, </span><span class="s1">provided</span><span class="s3">, </span><span class="s1">v)</span>
+
+    <span class="s3">def </span><span class="s1">unsubscribe(self</span><span class="s3">, </span><span class="s1">required</span><span class="s3">, </span><span class="s1">provided</span><span class="s3">, </span><span class="s1">value=</span><span class="s3">None</span><span class="s1">):</span>
+        <span class="s1">required = tuple([_convert_None_to_Interface(r) </span><span class="s3">for </span><span class="s1">r </span><span class="s3">in </span><span class="s1">required])</span>
+        <span class="s1">order = len(required)</span>
+        <span class="s1">byorder = self._subscribers</span>
+        <span class="s3">if </span><span class="s1">order &gt;= len(byorder):</span>
+            <span class="s3">return</span>
+        <span class="s1">components = byorder[order]</span>
+        <span class="s1">key = required + (provided</span><span class="s3">,</span><span class="s1">)</span>
+
+        <span class="s0"># Keep track of how we got to `components`:</span>
+        <span class="s1">lookups = []</span>
+        <span class="s3">for </span><span class="s1">k </span><span class="s3">in </span><span class="s1">key:</span>
+            <span class="s1">d = components.get(k)</span>
+            <span class="s3">if </span><span class="s1">d </span><span class="s3">is None</span><span class="s1">:</span>
+                <span class="s3">return</span>
+            <span class="s1">lookups.append((components</span><span class="s3">, </span><span class="s1">k))</span>
+            <span class="s1">components = d</span>
+
+        <span class="s1">old = components.get(</span><span class="s4">u''</span><span class="s1">)</span>
+        <span class="s3">if not </span><span class="s1">old:</span>
+            <span class="s0"># this is belt-and-suspenders against the failure of cleanup below</span>
+            <span class="s3">return  </span><span class="s0"># pragma: no cover</span>
+        <span class="s1">len_old = len(old)</span>
+        <span class="s3">if </span><span class="s1">value </span><span class="s3">is None</span><span class="s1">:</span>
+            <span class="s0"># Removing everything; note that the type of ``new`` won't</span>
+            <span class="s0"># necessarily match the ``_leafSequenceType``, but that's</span>
+            <span class="s0"># OK because we're about to delete the entire entry</span>
+            <span class="s0"># anyway.</span>
+            <span class="s1">new = ()</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s1">new = self._removeValueFromLeaf(old</span><span class="s3">, </span><span class="s1">value)</span>
+        <span class="s0"># ``new`` may be the same object as ``old``, just mutated in place,</span>
+        <span class="s0"># so we cannot compare it to ``old`` to check for changes. Remove</span>
+        <span class="s0"># our reference to it now to avoid trying to do so below.</span>
+        <span class="s3">del </span><span class="s1">old</span>
+
+        <span class="s3">if </span><span class="s1">len(new) == len_old:</span>
+            <span class="s0"># No changes, so nothing could have been removed.</span>
+            <span class="s3">return</span>
+
+        <span class="s3">if </span><span class="s1">new:</span>
+            <span class="s1">components[</span><span class="s4">u''</span><span class="s1">] = new</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s0"># Instead of setting components[u''] = new, we clean out</span>
+            <span class="s0"># empty containers, since we don't want our keys to</span>
+            <span class="s0"># reference global objects (interfaces) unnecessarily.  This</span>
+            <span class="s0"># is often a problem when an interface is slated for</span>
+            <span class="s0"># removal; a hold-over entry in the registry can make it</span>
+            <span class="s0"># difficult to remove such interfaces.</span>
+            <span class="s3">del </span><span class="s1">components[</span><span class="s4">u''</span><span class="s1">]</span>
+            <span class="s3">for </span><span class="s1">comp</span><span class="s3">, </span><span class="s1">k </span><span class="s3">in </span><span class="s1">reversed(lookups):</span>
+                <span class="s1">d = comp[k]</span>
+                <span class="s3">if </span><span class="s1">d:</span>
+                    <span class="s3">break</span>
+                <span class="s3">else</span><span class="s1">:</span>
+                    <span class="s3">del </span><span class="s1">comp[k]</span>
+            <span class="s3">while </span><span class="s1">byorder </span><span class="s3">and not </span><span class="s1">byorder[-</span><span class="s5">1</span><span class="s1">]:</span>
+                <span class="s3">del </span><span class="s1">byorder[-</span><span class="s5">1</span><span class="s1">]</span>
+
+        <span class="s3">if </span><span class="s1">provided </span><span class="s3">is not None</span><span class="s1">:</span>
+            <span class="s1">n = self._provided[provided] + len(new) - len_old</span>
+            <span class="s3">if </span><span class="s1">n == </span><span class="s5">0</span><span class="s1">:</span>
+                <span class="s3">del </span><span class="s1">self._provided[provided]</span>
+                <span class="s1">self._v_lookup.remove_extendor(provided)</span>
+            <span class="s3">else</span><span class="s1">:</span>
+                <span class="s1">self._provided[provided] = n</span>
+
+        <span class="s1">self.changed(self)</span>
+
+    <span class="s3">def </span><span class="s1">rebuild(self):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Rebuild (and replace) all the internal data structures of this 
+        object. 
+ 
+        This is useful, especially for persistent implementations, if 
+        you suspect an issue with reference counts keeping interfaces 
+        alive even though they are no longer used. 
+ 
+        It is also useful if you or a subclass change the data types 
+        (``_mappingType`` and friends) that are to be used. 
+ 
+        This method replaces all internal data structures with new objects; 
+        it specifically does not re-use any storage. 
+ 
+        .. versionadded:: 5.3.0 
+        &quot;&quot;&quot;</span>
+
+        <span class="s0"># Grab the iterators, we're about to discard their data.</span>
+        <span class="s1">registrations = self.allRegistrations()</span>
+        <span class="s1">subscriptions = self.allSubscriptions()</span>
+
+        <span class="s3">def </span><span class="s1">buffer(it):</span>
+            <span class="s0"># The generator doesn't actually start running until we</span>
+            <span class="s0"># ask for its next(), by which time the attributes will change</span>
+            <span class="s0"># unless we do so before calling __init__.</span>
+            <span class="s3">try</span><span class="s1">:</span>
+                <span class="s1">first = next(it)</span>
+            <span class="s3">except </span><span class="s1">StopIteration:</span>
+                <span class="s3">return </span><span class="s1">iter(())</span>
+
+            <span class="s3">return </span><span class="s1">itertools.chain((first</span><span class="s3">,</span><span class="s1">)</span><span class="s3">, </span><span class="s1">it)</span>
+
+        <span class="s1">registrations = buffer(registrations)</span>
+        <span class="s1">subscriptions = buffer(subscriptions)</span>
+
+
+        <span class="s0"># Replace the base data structures as well as _v_lookup.</span>
+        <span class="s1">self.__init__(self.__bases__)</span>
+        <span class="s0"># Re-register everything previously registered and subscribed.</span>
+        <span class="s0">#</span>
+        <span class="s0"># XXX: This is going to call ``self.changed()`` a lot, all of</span>
+        <span class="s0"># which is unnecessary (because ``self.__init__`` just</span>
+        <span class="s0"># re-created those dependent objects and also called</span>
+        <span class="s0"># ``self.changed()``). Is this a bottleneck that needs fixed?</span>
+        <span class="s0"># (We could do ``self.changed = lambda _: None`` before</span>
+        <span class="s0"># beginning and remove it after to disable the presumably expensive</span>
+        <span class="s0"># part of passing that notification to the change of objects.)</span>
+        <span class="s3">for </span><span class="s1">args </span><span class="s3">in </span><span class="s1">registrations:</span>
+            <span class="s1">self.register(*args)</span>
+        <span class="s3">for </span><span class="s1">args </span><span class="s3">in </span><span class="s1">subscriptions:</span>
+            <span class="s1">self.subscribe(*args)</span>
+
+    <span class="s0"># XXX hack to fake out twisted's use of a private api.  We need to get them</span>
+    <span class="s0"># to use the new registered method.</span>
+    <span class="s3">def </span><span class="s1">get(self</span><span class="s3">, </span><span class="s1">_): </span><span class="s0"># pragma: no cover</span>
+        <span class="s3">class </span><span class="s1">XXXTwistedFakeOut:</span>
+            <span class="s1">selfImplied = {}</span>
+        <span class="s3">return </span><span class="s1">XXXTwistedFakeOut</span>
+
+
+<span class="s1">_not_in_mapping = object()</span>
+
+<span class="s1">@_use_c_impl</span>
+<span class="s3">class </span><span class="s1">LookupBase(object):</span>
+
+    <span class="s3">def </span><span class="s1">__init__(self):</span>
+        <span class="s1">self._cache = {}</span>
+        <span class="s1">self._mcache = {}</span>
+        <span class="s1">self._scache = {}</span>
+
+    <span class="s3">def </span><span class="s1">changed(self</span><span class="s3">, </span><span class="s1">ignored=</span><span class="s3">None</span><span class="s1">):</span>
+        <span class="s1">self._cache.clear()</span>
+        <span class="s1">self._mcache.clear()</span>
+        <span class="s1">self._scache.clear()</span>
+
+    <span class="s3">def </span><span class="s1">_getcache(self</span><span class="s3">, </span><span class="s1">provided</span><span class="s3">, </span><span class="s1">name):</span>
+        <span class="s1">cache = self._cache.get(provided)</span>
+        <span class="s3">if </span><span class="s1">cache </span><span class="s3">is None</span><span class="s1">:</span>
+            <span class="s1">cache = {}</span>
+            <span class="s1">self._cache[provided] = cache</span>
+        <span class="s3">if </span><span class="s1">name:</span>
+            <span class="s1">c = cache.get(name)</span>
+            <span class="s3">if </span><span class="s1">c </span><span class="s3">is None</span><span class="s1">:</span>
+                <span class="s1">c = {}</span>
+                <span class="s1">cache[name] = c</span>
+            <span class="s1">cache = c</span>
+        <span class="s3">return </span><span class="s1">cache</span>
+
+    <span class="s3">def </span><span class="s1">lookup(self</span><span class="s3">, </span><span class="s1">required</span><span class="s3">, </span><span class="s1">provided</span><span class="s3">, </span><span class="s1">name=</span><span class="s4">u''</span><span class="s3">, </span><span class="s1">default=</span><span class="s3">None</span><span class="s1">):</span>
+        <span class="s3">if not </span><span class="s1">isinstance(name</span><span class="s3">, </span><span class="s1">STRING_TYPES):</span>
+            <span class="s3">raise </span><span class="s1">ValueError(</span><span class="s4">'name is not a string'</span><span class="s1">)</span>
+        <span class="s1">cache = self._getcache(provided</span><span class="s3">, </span><span class="s1">name)</span>
+        <span class="s1">required = tuple(required)</span>
+        <span class="s3">if </span><span class="s1">len(required) == </span><span class="s5">1</span><span class="s1">:</span>
+            <span class="s1">result = cache.get(required[</span><span class="s5">0</span><span class="s1">]</span><span class="s3">, </span><span class="s1">_not_in_mapping)</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s1">result = cache.get(tuple(required)</span><span class="s3">, </span><span class="s1">_not_in_mapping)</span>
+
+        <span class="s3">if </span><span class="s1">result </span><span class="s3">is </span><span class="s1">_not_in_mapping:</span>
+            <span class="s1">result = self._uncached_lookup(required</span><span class="s3">, </span><span class="s1">provided</span><span class="s3">, </span><span class="s1">name)</span>
+            <span class="s3">if </span><span class="s1">len(required) == </span><span class="s5">1</span><span class="s1">:</span>
+                <span class="s1">cache[required[</span><span class="s5">0</span><span class="s1">]] = result</span>
+            <span class="s3">else</span><span class="s1">:</span>
+                <span class="s1">cache[tuple(required)] = result</span>
+
+        <span class="s3">if </span><span class="s1">result </span><span class="s3">is None</span><span class="s1">:</span>
+            <span class="s3">return </span><span class="s1">default</span>
+
+        <span class="s3">return </span><span class="s1">result</span>
+
+    <span class="s3">def </span><span class="s1">lookup1(self</span><span class="s3">, </span><span class="s1">required</span><span class="s3">, </span><span class="s1">provided</span><span class="s3">, </span><span class="s1">name=</span><span class="s4">u''</span><span class="s3">, </span><span class="s1">default=</span><span class="s3">None</span><span class="s1">):</span>
+        <span class="s3">if not </span><span class="s1">isinstance(name</span><span class="s3">, </span><span class="s1">STRING_TYPES):</span>
+            <span class="s3">raise </span><span class="s1">ValueError(</span><span class="s4">'name is not a string'</span><span class="s1">)</span>
+        <span class="s1">cache = self._getcache(provided</span><span class="s3">, </span><span class="s1">name)</span>
+        <span class="s1">result = cache.get(required</span><span class="s3">, </span><span class="s1">_not_in_mapping)</span>
+        <span class="s3">if </span><span class="s1">result </span><span class="s3">is </span><span class="s1">_not_in_mapping:</span>
+            <span class="s3">return </span><span class="s1">self.lookup((required</span><span class="s3">, </span><span class="s1">)</span><span class="s3">, </span><span class="s1">provided</span><span class="s3">, </span><span class="s1">name</span><span class="s3">, </span><span class="s1">default)</span>
+
+        <span class="s3">if </span><span class="s1">result </span><span class="s3">is None</span><span class="s1">:</span>
+            <span class="s3">return </span><span class="s1">default</span>
+
+        <span class="s3">return </span><span class="s1">result</span>
+
+    <span class="s3">def </span><span class="s1">queryAdapter(self</span><span class="s3">, </span><span class="s1">object</span><span class="s3">, </span><span class="s1">provided</span><span class="s3">, </span><span class="s1">name=</span><span class="s4">u''</span><span class="s3">, </span><span class="s1">default=</span><span class="s3">None</span><span class="s1">):</span>
+        <span class="s3">return </span><span class="s1">self.adapter_hook(provided</span><span class="s3">, </span><span class="s1">object</span><span class="s3">, </span><span class="s1">name</span><span class="s3">, </span><span class="s1">default)</span>
+
+    <span class="s3">def </span><span class="s1">adapter_hook(self</span><span class="s3">, </span><span class="s1">provided</span><span class="s3">, </span><span class="s1">object</span><span class="s3">, </span><span class="s1">name=</span><span class="s4">u''</span><span class="s3">, </span><span class="s1">default=</span><span class="s3">None</span><span class="s1">):</span>
+        <span class="s3">if not </span><span class="s1">isinstance(name</span><span class="s3">, </span><span class="s1">STRING_TYPES):</span>
+            <span class="s3">raise </span><span class="s1">ValueError(</span><span class="s4">'name is not a string'</span><span class="s1">)</span>
+        <span class="s1">required = providedBy(object)</span>
+        <span class="s1">cache = self._getcache(provided</span><span class="s3">, </span><span class="s1">name)</span>
+        <span class="s1">factory = cache.get(required</span><span class="s3">, </span><span class="s1">_not_in_mapping)</span>
+        <span class="s3">if </span><span class="s1">factory </span><span class="s3">is </span><span class="s1">_not_in_mapping:</span>
+            <span class="s1">factory = self.lookup((required</span><span class="s3">, </span><span class="s1">)</span><span class="s3">, </span><span class="s1">provided</span><span class="s3">, </span><span class="s1">name)</span>
+
+        <span class="s3">if </span><span class="s1">factory </span><span class="s3">is not None</span><span class="s1">:</span>
+            <span class="s3">if </span><span class="s1">isinstance(object</span><span class="s3">, </span><span class="s1">super):</span>
+                <span class="s1">object = object.__self__</span>
+            <span class="s1">result = factory(object)</span>
+            <span class="s3">if </span><span class="s1">result </span><span class="s3">is not None</span><span class="s1">:</span>
+                <span class="s3">return </span><span class="s1">result</span>
+
+        <span class="s3">return </span><span class="s1">default</span>
+
+    <span class="s3">def </span><span class="s1">lookupAll(self</span><span class="s3">, </span><span class="s1">required</span><span class="s3">, </span><span class="s1">provided):</span>
+        <span class="s1">cache = self._mcache.get(provided)</span>
+        <span class="s3">if </span><span class="s1">cache </span><span class="s3">is None</span><span class="s1">:</span>
+            <span class="s1">cache = {}</span>
+            <span class="s1">self._mcache[provided] = cache</span>
+
+        <span class="s1">required = tuple(required)</span>
+        <span class="s1">result = cache.get(required</span><span class="s3">, </span><span class="s1">_not_in_mapping)</span>
+        <span class="s3">if </span><span class="s1">result </span><span class="s3">is </span><span class="s1">_not_in_mapping:</span>
+            <span class="s1">result = self._uncached_lookupAll(required</span><span class="s3">, </span><span class="s1">provided)</span>
+            <span class="s1">cache[required] = result</span>
+
+        <span class="s3">return </span><span class="s1">result</span>
+
+
+    <span class="s3">def </span><span class="s1">subscriptions(self</span><span class="s3">, </span><span class="s1">required</span><span class="s3">, </span><span class="s1">provided):</span>
+        <span class="s1">cache = self._scache.get(provided)</span>
+        <span class="s3">if </span><span class="s1">cache </span><span class="s3">is None</span><span class="s1">:</span>
+            <span class="s1">cache = {}</span>
+            <span class="s1">self._scache[provided] = cache</span>
+
+        <span class="s1">required = tuple(required)</span>
+        <span class="s1">result = cache.get(required</span><span class="s3">, </span><span class="s1">_not_in_mapping)</span>
+        <span class="s3">if </span><span class="s1">result </span><span class="s3">is </span><span class="s1">_not_in_mapping:</span>
+            <span class="s1">result = self._uncached_subscriptions(required</span><span class="s3">, </span><span class="s1">provided)</span>
+            <span class="s1">cache[required] = result</span>
+
+        <span class="s3">return </span><span class="s1">result</span>
+
+
+<span class="s1">@_use_c_impl</span>
+<span class="s3">class </span><span class="s1">VerifyingBase(LookupBaseFallback):</span>
+    <span class="s0"># Mixin for lookups against registries which &quot;chain&quot; upwards, and</span>
+    <span class="s0"># whose lookups invalidate their own caches whenever a parent registry</span>
+    <span class="s0"># bumps its own '_generation' counter.  E.g., used by</span>
+    <span class="s0"># zope.component.persistentregistry</span>
+
+    <span class="s3">def </span><span class="s1">changed(self</span><span class="s3">, </span><span class="s1">originally_changed):</span>
+        <span class="s1">LookupBaseFallback.changed(self</span><span class="s3">, </span><span class="s1">originally_changed)</span>
+        <span class="s1">self._verify_ro = self._registry.ro[</span><span class="s5">1</span><span class="s1">:]</span>
+        <span class="s1">self._verify_generations = [r._generation </span><span class="s3">for </span><span class="s1">r </span><span class="s3">in </span><span class="s1">self._verify_ro]</span>
+
+    <span class="s3">def </span><span class="s1">_verify(self):</span>
+        <span class="s3">if </span><span class="s1">([r._generation </span><span class="s3">for </span><span class="s1">r </span><span class="s3">in </span><span class="s1">self._verify_ro]</span>
+            <span class="s1">!= self._verify_generations):</span>
+            <span class="s1">self.changed(</span><span class="s3">None</span><span class="s1">)</span>
+
+    <span class="s3">def </span><span class="s1">_getcache(self</span><span class="s3">, </span><span class="s1">provided</span><span class="s3">, </span><span class="s1">name):</span>
+        <span class="s1">self._verify()</span>
+        <span class="s3">return </span><span class="s1">LookupBaseFallback._getcache(self</span><span class="s3">, </span><span class="s1">provided</span><span class="s3">, </span><span class="s1">name)</span>
+
+    <span class="s3">def </span><span class="s1">lookupAll(self</span><span class="s3">, </span><span class="s1">required</span><span class="s3">, </span><span class="s1">provided):</span>
+        <span class="s1">self._verify()</span>
+        <span class="s3">return </span><span class="s1">LookupBaseFallback.lookupAll(self</span><span class="s3">, </span><span class="s1">required</span><span class="s3">, </span><span class="s1">provided)</span>
+
+    <span class="s3">def </span><span class="s1">subscriptions(self</span><span class="s3">, </span><span class="s1">required</span><span class="s3">, </span><span class="s1">provided):</span>
+        <span class="s1">self._verify()</span>
+        <span class="s3">return </span><span class="s1">LookupBaseFallback.subscriptions(self</span><span class="s3">, </span><span class="s1">required</span><span class="s3">, </span><span class="s1">provided)</span>
+
+
+<span class="s3">class </span><span class="s1">AdapterLookupBase(object):</span>
+
+    <span class="s3">def </span><span class="s1">__init__(self</span><span class="s3">, </span><span class="s1">registry):</span>
+        <span class="s1">self._registry = registry</span>
+        <span class="s1">self._required = {}</span>
+        <span class="s1">self.init_extendors()</span>
+        <span class="s1">super(AdapterLookupBase</span><span class="s3">, </span><span class="s1">self).__init__()</span>
+
+    <span class="s3">def </span><span class="s1">changed(self</span><span class="s3">, </span><span class="s1">ignored=</span><span class="s3">None</span><span class="s1">):</span>
+        <span class="s1">super(AdapterLookupBase</span><span class="s3">, </span><span class="s1">self).changed(</span><span class="s3">None</span><span class="s1">)</span>
+        <span class="s3">for </span><span class="s1">r </span><span class="s3">in </span><span class="s1">self._required.keys():</span>
+            <span class="s1">r = r()</span>
+            <span class="s3">if </span><span class="s1">r </span><span class="s3">is not None</span><span class="s1">:</span>
+                <span class="s1">r.unsubscribe(self)</span>
+        <span class="s1">self._required.clear()</span>
+
+
+    <span class="s0"># Extendors</span>
+    <span class="s0"># ---------</span>
+
+    <span class="s0"># When given an target interface for an adapter lookup, we need to consider</span>
+    <span class="s0"># adapters for interfaces that extend the target interface.  This is</span>
+    <span class="s0"># what the extendors dictionary is about.  It tells us all of the</span>
+    <span class="s0"># interfaces that extend an interface for which there are adapters</span>
+    <span class="s0"># registered.</span>
+
+    <span class="s0"># We could separate this by order and name, thus reducing the</span>
+    <span class="s0"># number of provided interfaces to search at run time.  The tradeoff,</span>
+    <span class="s0"># however, is that we have to store more information.  For example,</span>
+    <span class="s0"># if the same interface is provided for multiple names and if the</span>
+    <span class="s0"># interface extends many interfaces, we'll have to keep track of</span>
+    <span class="s0"># a fair bit of information for each name.  It's better to</span>
+    <span class="s0"># be space efficient here and be time efficient in the cache</span>
+    <span class="s0"># implementation.</span>
+
+    <span class="s0"># TODO: add invalidation when a provided interface changes, in case</span>
+    <span class="s0"># the interface's __iro__ has changed.  This is unlikely enough that</span>
+    <span class="s0"># we'll take our chances for now.</span>
+
+    <span class="s3">def </span><span class="s1">init_extendors(self):</span>
+        <span class="s1">self._extendors = {}</span>
+        <span class="s3">for </span><span class="s1">p </span><span class="s3">in </span><span class="s1">self._registry._provided:</span>
+            <span class="s1">self.add_extendor(p)</span>
+
+    <span class="s3">def </span><span class="s1">add_extendor(self</span><span class="s3">, </span><span class="s1">provided):</span>
+        <span class="s1">_extendors = self._extendors</span>
+        <span class="s3">for </span><span class="s1">i </span><span class="s3">in </span><span class="s1">provided.__iro__:</span>
+            <span class="s1">extendors = _extendors.get(i</span><span class="s3">, </span><span class="s1">())</span>
+            <span class="s1">_extendors[i] = (</span>
+                <span class="s1">[e </span><span class="s3">for </span><span class="s1">e </span><span class="s3">in </span><span class="s1">extendors </span><span class="s3">if </span><span class="s1">provided.isOrExtends(e)]</span>
+                <span class="s1">+</span>
+                <span class="s1">[provided]</span>
+                <span class="s1">+</span>
+                <span class="s1">[e </span><span class="s3">for </span><span class="s1">e </span><span class="s3">in </span><span class="s1">extendors </span><span class="s3">if not </span><span class="s1">provided.isOrExtends(e)]</span>
+                <span class="s1">)</span>
+
+    <span class="s3">def </span><span class="s1">remove_extendor(self</span><span class="s3">, </span><span class="s1">provided):</span>
+        <span class="s1">_extendors = self._extendors</span>
+        <span class="s3">for </span><span class="s1">i </span><span class="s3">in </span><span class="s1">provided.__iro__:</span>
+            <span class="s1">_extendors[i] = [e </span><span class="s3">for </span><span class="s1">e </span><span class="s3">in </span><span class="s1">_extendors.get(i</span><span class="s3">, </span><span class="s1">())</span>
+                             <span class="s3">if </span><span class="s1">e != provided]</span>
+
+
+    <span class="s3">def </span><span class="s1">_subscribe(self</span><span class="s3">, </span><span class="s1">*required):</span>
+        <span class="s1">_refs = self._required</span>
+        <span class="s3">for </span><span class="s1">r </span><span class="s3">in </span><span class="s1">required:</span>
+            <span class="s1">ref = r.weakref()</span>
+            <span class="s3">if </span><span class="s1">ref </span><span class="s3">not in </span><span class="s1">_refs:</span>
+                <span class="s1">r.subscribe(self)</span>
+                <span class="s1">_refs[ref] = </span><span class="s5">1</span>
+
+    <span class="s3">def </span><span class="s1">_uncached_lookup(self</span><span class="s3">, </span><span class="s1">required</span><span class="s3">, </span><span class="s1">provided</span><span class="s3">, </span><span class="s1">name=</span><span class="s4">u''</span><span class="s1">):</span>
+        <span class="s1">required = tuple(required)</span>
+        <span class="s1">result = </span><span class="s3">None</span>
+        <span class="s1">order = len(required)</span>
+        <span class="s3">for </span><span class="s1">registry </span><span class="s3">in </span><span class="s1">self._registry.ro:</span>
+            <span class="s1">byorder = registry._adapters</span>
+            <span class="s3">if </span><span class="s1">order &gt;= len(byorder):</span>
+                <span class="s3">continue</span>
+
+            <span class="s1">extendors = registry._v_lookup._extendors.get(provided)</span>
+            <span class="s3">if not </span><span class="s1">extendors:</span>
+                <span class="s3">continue</span>
+
+            <span class="s1">components = byorder[order]</span>
+            <span class="s1">result = _lookup(components</span><span class="s3">, </span><span class="s1">required</span><span class="s3">, </span><span class="s1">extendors</span><span class="s3">, </span><span class="s1">name</span><span class="s3">, </span><span class="s5">0</span><span class="s3">,</span>
+                             <span class="s1">order)</span>
+            <span class="s3">if </span><span class="s1">result </span><span class="s3">is not None</span><span class="s1">:</span>
+                <span class="s3">break</span>
+
+        <span class="s1">self._subscribe(*required)</span>
+
+        <span class="s3">return </span><span class="s1">result</span>
+
+    <span class="s3">def </span><span class="s1">queryMultiAdapter(self</span><span class="s3">, </span><span class="s1">objects</span><span class="s3">, </span><span class="s1">provided</span><span class="s3">, </span><span class="s1">name=</span><span class="s4">u''</span><span class="s3">, </span><span class="s1">default=</span><span class="s3">None</span><span class="s1">):</span>
+        <span class="s1">factory = self.lookup([providedBy(o) </span><span class="s3">for </span><span class="s1">o </span><span class="s3">in </span><span class="s1">objects]</span><span class="s3">, </span><span class="s1">provided</span><span class="s3">, </span><span class="s1">name)</span>
+        <span class="s3">if </span><span class="s1">factory </span><span class="s3">is None</span><span class="s1">:</span>
+            <span class="s3">return </span><span class="s1">default</span>
+
+        <span class="s1">result = factory(*[o.__self__ </span><span class="s3">if </span><span class="s1">isinstance(o</span><span class="s3">, </span><span class="s1">super) </span><span class="s3">else </span><span class="s1">o </span><span class="s3">for </span><span class="s1">o </span><span class="s3">in </span><span class="s1">objects])</span>
+        <span class="s3">if </span><span class="s1">result </span><span class="s3">is None</span><span class="s1">:</span>
+            <span class="s3">return </span><span class="s1">default</span>
+
+        <span class="s3">return </span><span class="s1">result</span>
+
+    <span class="s3">def </span><span class="s1">_uncached_lookupAll(self</span><span class="s3">, </span><span class="s1">required</span><span class="s3">, </span><span class="s1">provided):</span>
+        <span class="s1">required = tuple(required)</span>
+        <span class="s1">order = len(required)</span>
+        <span class="s1">result = {}</span>
+        <span class="s3">for </span><span class="s1">registry </span><span class="s3">in </span><span class="s1">reversed(self._registry.ro):</span>
+            <span class="s1">byorder = registry._adapters</span>
+            <span class="s3">if </span><span class="s1">order &gt;= len(byorder):</span>
+                <span class="s3">continue</span>
+            <span class="s1">extendors = registry._v_lookup._extendors.get(provided)</span>
+            <span class="s3">if not </span><span class="s1">extendors:</span>
+                <span class="s3">continue</span>
+            <span class="s1">components = byorder[order]</span>
+            <span class="s1">_lookupAll(components</span><span class="s3">, </span><span class="s1">required</span><span class="s3">, </span><span class="s1">extendors</span><span class="s3">, </span><span class="s1">result</span><span class="s3">, </span><span class="s5">0</span><span class="s3">, </span><span class="s1">order)</span>
+
+        <span class="s1">self._subscribe(*required)</span>
+
+        <span class="s3">return </span><span class="s1">tuple(result.items())</span>
+
+    <span class="s3">def </span><span class="s1">names(self</span><span class="s3">, </span><span class="s1">required</span><span class="s3">, </span><span class="s1">provided):</span>
+        <span class="s3">return </span><span class="s1">[c[</span><span class="s5">0</span><span class="s1">] </span><span class="s3">for </span><span class="s1">c </span><span class="s3">in </span><span class="s1">self.lookupAll(required</span><span class="s3">, </span><span class="s1">provided)]</span>
+
+    <span class="s3">def </span><span class="s1">_uncached_subscriptions(self</span><span class="s3">, </span><span class="s1">required</span><span class="s3">, </span><span class="s1">provided):</span>
+        <span class="s1">required = tuple(required)</span>
+        <span class="s1">order = len(required)</span>
+        <span class="s1">result = []</span>
+        <span class="s3">for </span><span class="s1">registry </span><span class="s3">in </span><span class="s1">reversed(self._registry.ro):</span>
+            <span class="s1">byorder = registry._subscribers</span>
+            <span class="s3">if </span><span class="s1">order &gt;= len(byorder):</span>
+                <span class="s3">continue</span>
+
+            <span class="s3">if </span><span class="s1">provided </span><span class="s3">is None</span><span class="s1">:</span>
+                <span class="s1">extendors = (provided</span><span class="s3">, </span><span class="s1">)</span>
+            <span class="s3">else</span><span class="s1">:</span>
+                <span class="s1">extendors = registry._v_lookup._extendors.get(provided)</span>
+                <span class="s3">if </span><span class="s1">extendors </span><span class="s3">is None</span><span class="s1">:</span>
+                    <span class="s3">continue</span>
+
+            <span class="s1">_subscriptions(byorder[order]</span><span class="s3">, </span><span class="s1">required</span><span class="s3">, </span><span class="s1">extendors</span><span class="s3">, </span><span class="s4">u''</span><span class="s3">,</span>
+                           <span class="s1">result</span><span class="s3">, </span><span class="s5">0</span><span class="s3">, </span><span class="s1">order)</span>
+
+        <span class="s1">self._subscribe(*required)</span>
+
+        <span class="s3">return </span><span class="s1">result</span>
+
+    <span class="s3">def </span><span class="s1">subscribers(self</span><span class="s3">, </span><span class="s1">objects</span><span class="s3">, </span><span class="s1">provided):</span>
+        <span class="s1">subscriptions = self.subscriptions([providedBy(o) </span><span class="s3">for </span><span class="s1">o </span><span class="s3">in </span><span class="s1">objects]</span><span class="s3">, </span><span class="s1">provided)</span>
+        <span class="s3">if </span><span class="s1">provided </span><span class="s3">is None</span><span class="s1">:</span>
+            <span class="s1">result = ()</span>
+            <span class="s3">for </span><span class="s1">subscription </span><span class="s3">in </span><span class="s1">subscriptions:</span>
+                <span class="s1">subscription(*objects)</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s1">result = []</span>
+            <span class="s3">for </span><span class="s1">subscription </span><span class="s3">in </span><span class="s1">subscriptions:</span>
+                <span class="s1">subscriber = subscription(*objects)</span>
+                <span class="s3">if </span><span class="s1">subscriber </span><span class="s3">is not None</span><span class="s1">:</span>
+                    <span class="s1">result.append(subscriber)</span>
+        <span class="s3">return </span><span class="s1">result</span>
+
+<span class="s3">class </span><span class="s1">AdapterLookup(AdapterLookupBase</span><span class="s3">, </span><span class="s1">LookupBase):</span>
+    <span class="s3">pass</span>
+
+<span class="s1">@implementer(IAdapterRegistry)</span>
+<span class="s3">class </span><span class="s1">AdapterRegistry(BaseAdapterRegistry):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    A full implementation of ``IAdapterRegistry`` that adds support for 
+    sub-registries. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s1">LookupClass = AdapterLookup</span>
+
+    <span class="s3">def </span><span class="s1">__init__(self</span><span class="s3">, </span><span class="s1">bases=()):</span>
+        <span class="s0"># AdapterRegisties are invalidating registries, so</span>
+        <span class="s0"># we need to keep track of our invalidating subregistries.</span>
+        <span class="s1">self._v_subregistries = weakref.WeakKeyDictionary()</span>
+
+        <span class="s1">super(AdapterRegistry</span><span class="s3">, </span><span class="s1">self).__init__(bases)</span>
+
+    <span class="s3">def </span><span class="s1">_addSubregistry(self</span><span class="s3">, </span><span class="s1">r):</span>
+        <span class="s1">self._v_subregistries[r] = </span><span class="s5">1</span>
+
+    <span class="s3">def </span><span class="s1">_removeSubregistry(self</span><span class="s3">, </span><span class="s1">r):</span>
+        <span class="s3">if </span><span class="s1">r </span><span class="s3">in </span><span class="s1">self._v_subregistries:</span>
+            <span class="s3">del </span><span class="s1">self._v_subregistries[r]</span>
+
+    <span class="s3">def </span><span class="s1">_setBases(self</span><span class="s3">, </span><span class="s1">bases):</span>
+        <span class="s1">old = self.__dict__.get(</span><span class="s4">'__bases__'</span><span class="s3">, </span><span class="s1">())</span>
+        <span class="s3">for </span><span class="s1">r </span><span class="s3">in </span><span class="s1">old:</span>
+            <span class="s3">if </span><span class="s1">r </span><span class="s3">not in </span><span class="s1">bases:</span>
+                <span class="s1">r._removeSubregistry(self)</span>
+        <span class="s3">for </span><span class="s1">r </span><span class="s3">in </span><span class="s1">bases:</span>
+            <span class="s3">if </span><span class="s1">r </span><span class="s3">not in </span><span class="s1">old:</span>
+                <span class="s1">r._addSubregistry(self)</span>
+
+        <span class="s1">super(AdapterRegistry</span><span class="s3">, </span><span class="s1">self)._setBases(bases)</span>
+
+    <span class="s3">def </span><span class="s1">changed(self</span><span class="s3">, </span><span class="s1">originally_changed):</span>
+        <span class="s1">super(AdapterRegistry</span><span class="s3">, </span><span class="s1">self).changed(originally_changed)</span>
+
+        <span class="s3">for </span><span class="s1">sub </span><span class="s3">in </span><span class="s1">self._v_subregistries.keys():</span>
+            <span class="s1">sub.changed(originally_changed)</span>
+
+
+<span class="s3">class </span><span class="s1">VerifyingAdapterLookup(AdapterLookupBase</span><span class="s3">, </span><span class="s1">VerifyingBase):</span>
+    <span class="s3">pass</span>
+
+<span class="s1">@implementer(IAdapterRegistry)</span>
+<span class="s3">class </span><span class="s1">VerifyingAdapterRegistry(BaseAdapterRegistry):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    The most commonly-used adapter registry. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s1">LookupClass = VerifyingAdapterLookup</span>
+
+<span class="s3">def </span><span class="s1">_convert_None_to_Interface(x):</span>
+    <span class="s3">if </span><span class="s1">x </span><span class="s3">is None</span><span class="s1">:</span>
+        <span class="s3">return </span><span class="s1">Interface</span>
+    <span class="s3">else</span><span class="s1">:</span>
+        <span class="s3">return </span><span class="s1">x</span>
+
+<span class="s3">def </span><span class="s1">_lookup(components</span><span class="s3">, </span><span class="s1">specs</span><span class="s3">, </span><span class="s1">provided</span><span class="s3">, </span><span class="s1">name</span><span class="s3">, </span><span class="s1">i</span><span class="s3">, </span><span class="s1">l):</span>
+    <span class="s0"># this function is called very often.</span>
+    <span class="s0"># The components.get in loops is executed 100 of 1000s times.</span>
+    <span class="s0"># by loading get into a local variable the bytecode</span>
+    <span class="s0"># &quot;LOAD_FAST 0 (components)&quot; in the loop can be eliminated.</span>
+    <span class="s1">components_get = components.get</span>
+    <span class="s3">if </span><span class="s1">i &lt; l:</span>
+        <span class="s3">for </span><span class="s1">spec </span><span class="s3">in </span><span class="s1">specs[i].__sro__:</span>
+            <span class="s1">comps = components_get(spec)</span>
+            <span class="s3">if </span><span class="s1">comps:</span>
+                <span class="s1">r = _lookup(comps</span><span class="s3">, </span><span class="s1">specs</span><span class="s3">, </span><span class="s1">provided</span><span class="s3">, </span><span class="s1">name</span><span class="s3">, </span><span class="s1">i+</span><span class="s5">1</span><span class="s3">, </span><span class="s1">l)</span>
+                <span class="s3">if </span><span class="s1">r </span><span class="s3">is not None</span><span class="s1">:</span>
+                    <span class="s3">return </span><span class="s1">r</span>
+    <span class="s3">else</span><span class="s1">:</span>
+        <span class="s3">for </span><span class="s1">iface </span><span class="s3">in </span><span class="s1">provided:</span>
+            <span class="s1">comps = components_get(iface)</span>
+            <span class="s3">if </span><span class="s1">comps:</span>
+                <span class="s1">r = comps.get(name)</span>
+                <span class="s3">if </span><span class="s1">r </span><span class="s3">is not None</span><span class="s1">:</span>
+                    <span class="s3">return </span><span class="s1">r</span>
+
+    <span class="s3">return None</span>
+
+<span class="s3">def </span><span class="s1">_lookupAll(components</span><span class="s3">, </span><span class="s1">specs</span><span class="s3">, </span><span class="s1">provided</span><span class="s3">, </span><span class="s1">result</span><span class="s3">, </span><span class="s1">i</span><span class="s3">, </span><span class="s1">l):</span>
+    <span class="s1">components_get = components.get  </span><span class="s0"># see _lookup above</span>
+    <span class="s3">if </span><span class="s1">i &lt; l:</span>
+        <span class="s3">for </span><span class="s1">spec </span><span class="s3">in </span><span class="s1">reversed(specs[i].__sro__):</span>
+            <span class="s1">comps = components_get(spec)</span>
+            <span class="s3">if </span><span class="s1">comps:</span>
+                <span class="s1">_lookupAll(comps</span><span class="s3">, </span><span class="s1">specs</span><span class="s3">, </span><span class="s1">provided</span><span class="s3">, </span><span class="s1">result</span><span class="s3">, </span><span class="s1">i+</span><span class="s5">1</span><span class="s3">, </span><span class="s1">l)</span>
+    <span class="s3">else</span><span class="s1">:</span>
+        <span class="s3">for </span><span class="s1">iface </span><span class="s3">in </span><span class="s1">reversed(provided):</span>
+            <span class="s1">comps = components_get(iface)</span>
+            <span class="s3">if </span><span class="s1">comps:</span>
+                <span class="s1">result.update(comps)</span>
+
+<span class="s3">def </span><span class="s1">_subscriptions(components</span><span class="s3">, </span><span class="s1">specs</span><span class="s3">, </span><span class="s1">provided</span><span class="s3">, </span><span class="s1">name</span><span class="s3">, </span><span class="s1">result</span><span class="s3">, </span><span class="s1">i</span><span class="s3">, </span><span class="s1">l):</span>
+    <span class="s1">components_get = components.get  </span><span class="s0"># see _lookup above</span>
+    <span class="s3">if </span><span class="s1">i &lt; l:</span>
+        <span class="s3">for </span><span class="s1">spec </span><span class="s3">in </span><span class="s1">reversed(specs[i].__sro__):</span>
+            <span class="s1">comps = components_get(spec)</span>
+            <span class="s3">if </span><span class="s1">comps:</span>
+                <span class="s1">_subscriptions(comps</span><span class="s3">, </span><span class="s1">specs</span><span class="s3">, </span><span class="s1">provided</span><span class="s3">, </span><span class="s1">name</span><span class="s3">, </span><span class="s1">result</span><span class="s3">, </span><span class="s1">i+</span><span class="s5">1</span><span class="s3">, </span><span class="s1">l)</span>
+    <span class="s3">else</span><span class="s1">:</span>
+        <span class="s3">for </span><span class="s1">iface </span><span class="s3">in </span><span class="s1">reversed(provided):</span>
+            <span class="s1">comps = components_get(iface)</span>
+            <span class="s3">if </span><span class="s1">comps:</span>
+                <span class="s1">comps = comps.get(name)</span>
+                <span class="s3">if </span><span class="s1">comps:</span>
+                    <span class="s1">result.extend(comps)</span>
+</pre>
+</body>
+</html>

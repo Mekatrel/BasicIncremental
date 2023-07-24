@@ -1,0 +1,861 @@
+<html>
+<head>
+<title>analysis.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #629755; font-style: italic;}
+.s3 { color: #cc7832;}
+.s4 { color: #6897bb;}
+.s5 { color: #6a8759;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+analysis.py</font>
+</center></td></tr></table>
+<pre><span class="s0">#-----------------------------------------------------------------------------</span>
+<span class="s0"># Copyright (c) 2005-2021, PyInstaller Development Team.</span>
+<span class="s0">#</span>
+<span class="s0"># Distributed under the terms of the GNU General Public License (version 2</span>
+<span class="s0"># or later) with exception for distributing the bootloader.</span>
+<span class="s0">#</span>
+<span class="s0"># The full license is in the file COPYING.txt, distributed with this software.</span>
+<span class="s0">#</span>
+<span class="s0"># SPDX-License-Identifier: (GPL-2.0-or-later WITH Bootloader-exception)</span>
+<span class="s0">#-----------------------------------------------------------------------------</span>
+<span class="s2">&quot;&quot;&quot; 
+Define a modified ModuleGraph that can return its contents as a TOC and in other ways act like the old ImpTracker. 
+TODO: This class, along with TOC and Tree, should be in a separate module. 
+ 
+For reference, the ModuleGraph node types and their contents: 
+ 
+ nodetype         identifier        filename 
+ 
+ Script           full path to .py  full path to .py 
+ SourceModule     basename          full path to .py 
+ BuiltinModule    basename          None 
+ CompiledModule   basename          full path to .pyc 
+ Extension        basename          full path to .so 
+ MissingModule    basename          None 
+ Package          basename          full path to __init__.py 
+        packagepath is ['path to package'] 
+        globalnames is set of global names __init__.py defines 
+ ExtensionPackage basename          full path to __init__.{so,dll} 
+        packagepath is ['path to package'] 
+ 
+The main extension here over ModuleGraph is a method to extract nodes from the flattened graph and return them as a 
+TOC, or added to a TOC. Other added methods look up nodes by identifier and return facts about them, replacing what 
+the old ImpTracker list could do. 
+&quot;&quot;&quot;</span>
+
+<span class="s3">import </span><span class="s1">ast</span>
+<span class="s3">import </span><span class="s1">os</span>
+<span class="s3">import </span><span class="s1">re</span>
+<span class="s3">import </span><span class="s1">sys</span>
+<span class="s3">import </span><span class="s1">traceback</span>
+<span class="s3">from </span><span class="s1">collections </span><span class="s3">import </span><span class="s1">defaultdict</span>
+<span class="s3">from </span><span class="s1">copy </span><span class="s3">import </span><span class="s1">deepcopy</span>
+
+<span class="s3">from </span><span class="s1">PyInstaller </span><span class="s3">import </span><span class="s1">HOMEPATH</span><span class="s3">, </span><span class="s1">PACKAGEPATH</span><span class="s3">, </span><span class="s1">compat</span>
+<span class="s3">from </span><span class="s1">PyInstaller </span><span class="s3">import </span><span class="s1">log </span><span class="s3">as </span><span class="s1">logging</span>
+<span class="s3">from </span><span class="s1">PyInstaller.building.datastruct </span><span class="s3">import </span><span class="s1">TOC</span>
+<span class="s3">from </span><span class="s1">PyInstaller.compat </span><span class="s3">import </span><span class="s1">(</span>
+    <span class="s1">BAD_MODULE_TYPES</span><span class="s3">, </span><span class="s1">BINARY_MODULE_TYPES</span><span class="s3">, </span><span class="s1">MODULE_TYPES_TO_TOC_DICT</span><span class="s3">, </span><span class="s1">PURE_PYTHON_MODULE_TYPES</span><span class="s3">, </span><span class="s1">PY3_BASE_MODULES</span><span class="s3">,</span>
+    <span class="s1">VALID_MODULE_TYPES</span><span class="s3">, </span><span class="s1">importlib_load_source</span>
+<span class="s1">)</span>
+<span class="s3">from </span><span class="s1">PyInstaller.depend </span><span class="s3">import </span><span class="s1">bytecode</span>
+<span class="s3">from </span><span class="s1">PyInstaller.depend.imphook </span><span class="s3">import </span><span class="s1">AdditionalFilesCache</span><span class="s3">, </span><span class="s1">ModuleHookCache</span>
+<span class="s3">from </span><span class="s1">PyInstaller.depend.imphookapi </span><span class="s3">import </span><span class="s1">(PreFindModulePathAPI</span><span class="s3">, </span><span class="s1">PreSafeImportModuleAPI)</span>
+<span class="s3">from </span><span class="s1">PyInstaller.lib.modulegraph.find_modules </span><span class="s3">import </span><span class="s1">get_implies</span>
+<span class="s3">from </span><span class="s1">PyInstaller.lib.modulegraph.modulegraph </span><span class="s3">import </span><span class="s1">ModuleGraph</span>
+<span class="s3">from </span><span class="s1">PyInstaller.log </span><span class="s3">import </span><span class="s1">DEBUG</span><span class="s3">, </span><span class="s1">INFO</span><span class="s3">, </span><span class="s1">TRACE</span>
+<span class="s3">from </span><span class="s1">PyInstaller.utils.hooks </span><span class="s3">import </span><span class="s1">collect_submodules</span><span class="s3">, </span><span class="s1">is_package</span>
+
+<span class="s1">logger = logging.getLogger(__name__)</span>
+
+
+<span class="s3">class </span><span class="s1">PyiModuleGraph(ModuleGraph):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Directed graph whose nodes represent modules and edges represent dependencies between these modules. 
+ 
+    This high-level subclass wraps the lower-level `ModuleGraph` class with support for graph and runtime hooks. 
+    While each instance of `ModuleGraph` represents a set of disconnected trees, each instance of this class *only* 
+    represents a single connected tree whose root node is the Python script originally passed by the user on the 
+    command line. For that reason, while there may (and typically do) exist more than one `ModuleGraph` instance, 
+    there typically exists only a singleton instance of this class. 
+ 
+    Attributes 
+    ---------- 
+    _hooks : ModuleHookCache 
+        Dictionary mapping the fully-qualified names of all modules with normal (post-graph) hooks to the absolute paths 
+        of such hooks. See the the `_find_module_path()` method for details. 
+    _hooks_pre_find_module_path : ModuleHookCache 
+        Dictionary mapping the fully-qualified names of all modules with pre-find module path hooks to the absolute 
+        paths of such hooks. See the the `_find_module_path()` method for details. 
+    _hooks_pre_safe_import_module : ModuleHookCache 
+        Dictionary mapping the fully-qualified names of all modules with pre-safe import module hooks to the absolute 
+        paths of such hooks. See the `_safe_import_module()` method for details. 
+    _user_hook_dirs : list 
+        List of the absolute paths of all directories containing user-defined hooks for the current application. 
+    _excludes : list 
+        List of module names to be excluded when searching for dependencies. 
+    _additional_files_cache : AdditionalFilesCache 
+        Cache of all external dependencies (e.g., binaries, datas) listed in hook scripts for imported modules. 
+    _base_modules: list 
+        Dependencies for `base_library.zip` (which remain the same for every executable). 
+    &quot;&quot;&quot;</span>
+
+    <span class="s0"># Note: these levels are completely arbitrary and may be adjusted if needed.</span>
+    <span class="s1">LOG_LEVEL_MAPPING = {</span><span class="s4">0</span><span class="s1">: INFO</span><span class="s3">, </span><span class="s4">1</span><span class="s1">: DEBUG</span><span class="s3">, </span><span class="s4">2</span><span class="s1">: TRACE</span><span class="s3">, </span><span class="s4">3</span><span class="s1">: TRACE</span><span class="s3">, </span><span class="s4">4</span><span class="s1">: TRACE}</span>
+
+    <span class="s3">def </span><span class="s1">__init__(self</span><span class="s3">, </span><span class="s1">pyi_homepath</span><span class="s3">, </span><span class="s1">user_hook_dirs=()</span><span class="s3">, </span><span class="s1">excludes=()</span><span class="s3">, </span><span class="s1">**kwargs):</span>
+        <span class="s1">super().__init__(excludes=excludes</span><span class="s3">, </span><span class="s1">**kwargs)</span>
+        <span class="s0"># Homepath to the place where is PyInstaller located.</span>
+        <span class="s1">self._homepath = pyi_homepath</span>
+        <span class="s0"># modulegraph Node for the main python script that is analyzed by PyInstaller.</span>
+        <span class="s1">self._top_script_node = </span><span class="s3">None</span>
+
+        <span class="s0"># Absolute paths of all user-defined hook directories.</span>
+        <span class="s1">self._excludes = excludes</span>
+        <span class="s1">self._reset(user_hook_dirs)</span>
+        <span class="s1">self._analyze_base_modules()</span>
+
+    <span class="s3">def </span><span class="s1">_reset(self</span><span class="s3">, </span><span class="s1">user_hook_dirs):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Reset for another set of scripts. This is primary required for running the test-suite. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">self._top_script_node = </span><span class="s3">None</span>
+        <span class="s1">self._additional_files_cache = AdditionalFilesCache()</span>
+        <span class="s0"># Command line, Entry Point, and then builtin hook dirs.</span>
+        <span class="s1">self._user_hook_dirs = [*user_hook_dirs</span><span class="s3">, </span><span class="s1">os.path.join(PACKAGEPATH</span><span class="s3">, </span><span class="s5">'hooks'</span><span class="s1">)]</span>
+        <span class="s0"># Hook-specific lookup tables. These need to reset when reusing cached PyiModuleGraph to avoid hooks to refer to</span>
+        <span class="s0"># files or data from another test-case.</span>
+        <span class="s1">logger.info(</span><span class="s5">'Caching module graph hooks...'</span><span class="s1">)</span>
+        <span class="s1">self._hooks = self._cache_hooks(</span><span class="s5">&quot;&quot;</span><span class="s1">)</span>
+        <span class="s1">self._hooks_pre_safe_import_module = self._cache_hooks(</span><span class="s5">'pre_safe_import_module'</span><span class="s1">)</span>
+        <span class="s1">self._hooks_pre_find_module_path = self._cache_hooks(</span><span class="s5">'pre_find_module_path'</span><span class="s1">)</span>
+
+        <span class="s0"># Search for run-time hooks in all hook directories.</span>
+        <span class="s1">self._available_rthooks = defaultdict(list)</span>
+        <span class="s3">for </span><span class="s1">uhd </span><span class="s3">in </span><span class="s1">self._user_hook_dirs:</span>
+            <span class="s1">uhd_path = os.path.abspath(os.path.join(uhd</span><span class="s3">, </span><span class="s5">'rthooks.dat'</span><span class="s1">))</span>
+            <span class="s3">try</span><span class="s1">:</span>
+                <span class="s3">with </span><span class="s1">open(uhd_path</span><span class="s3">, </span><span class="s5">'r'</span><span class="s3">, </span><span class="s1">encoding=</span><span class="s5">'utf-8'</span><span class="s1">) </span><span class="s3">as </span><span class="s1">f:</span>
+                    <span class="s1">rthooks = ast.literal_eval(f.read())</span>
+            <span class="s3">except </span><span class="s1">FileNotFoundError:</span>
+                <span class="s0"># Ignore if this hook path doesn't have run-time hooks.</span>
+                <span class="s3">continue</span>
+            <span class="s3">except </span><span class="s1">Exception </span><span class="s3">as </span><span class="s1">e:</span>
+                <span class="s1">logger.error(</span><span class="s5">'Unable to read run-time hooks from %r: %s' </span><span class="s1">% (uhd_path</span><span class="s3">, </span><span class="s1">e))</span>
+                <span class="s3">continue</span>
+
+            <span class="s1">self._merge_rthooks(rthooks</span><span class="s3">, </span><span class="s1">uhd</span><span class="s3">, </span><span class="s1">uhd_path)</span>
+
+        <span class="s0"># Convert back to a standard dict.</span>
+        <span class="s1">self._available_rthooks = dict(self._available_rthooks)</span>
+
+    <span class="s3">def </span><span class="s1">_merge_rthooks(self</span><span class="s3">, </span><span class="s1">rthooks</span><span class="s3">, </span><span class="s1">uhd</span><span class="s3">, </span><span class="s1">uhd_path):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        The expected data structure for a run-time hook file is a Python dictionary of type ``Dict[str, List[str]]``, 
+        where the dictionary keys are module names and the sequence strings are Python file names. 
+ 
+        Check then merge this data structure, updating the file names to be absolute. 
+        &quot;&quot;&quot;</span>
+        <span class="s0"># Check that the root element is a dict.</span>
+        <span class="s3">assert </span><span class="s1">isinstance(rthooks</span><span class="s3">, </span><span class="s1">dict)</span><span class="s3">, </span><span class="s5">'The root element in %s must be a dict.' </span><span class="s1">% uhd_path</span>
+        <span class="s3">for </span><span class="s1">module_name</span><span class="s3">, </span><span class="s1">python_file_name_list </span><span class="s3">in </span><span class="s1">rthooks.items():</span>
+            <span class="s0"># Ensure the key is a string.</span>
+            <span class="s3">assert </span><span class="s1">isinstance(module_name</span><span class="s3">, </span><span class="s1">compat.string_types)</span><span class="s3">, </span><span class="s1">\</span>
+                <span class="s5">'%s must be a dict whose keys are strings; %s is not a string.' </span><span class="s1">% (uhd_path</span><span class="s3">, </span><span class="s1">module_name)</span>
+            <span class="s0"># Ensure the value is a list.</span>
+            <span class="s3">assert </span><span class="s1">isinstance(python_file_name_list</span><span class="s3">, </span><span class="s1">list)</span><span class="s3">, </span><span class="s1">\</span>
+                <span class="s5">'The value of %s key %s must be a list.' </span><span class="s1">% (uhd_path</span><span class="s3">, </span><span class="s1">module_name)</span>
+            <span class="s3">if </span><span class="s1">module_name </span><span class="s3">in </span><span class="s1">self._available_rthooks:</span>
+                <span class="s1">logger.warning(</span>
+                    <span class="s5">'Runtime hooks for %s have already been defined. Skipping the runtime hooks for %s that are '</span>
+                    <span class="s5">'defined in %s.'</span><span class="s3">, </span><span class="s1">module_name</span><span class="s3">, </span><span class="s1">module_name</span><span class="s3">, </span><span class="s1">os.path.join(uhd</span><span class="s3">, </span><span class="s5">'rthooks'</span><span class="s1">)</span>
+                <span class="s1">)</span>
+                <span class="s0"># Skip this module</span>
+                <span class="s3">continue</span>
+            <span class="s0"># Merge this with existing run-time hooks.</span>
+            <span class="s3">for </span><span class="s1">python_file_name </span><span class="s3">in </span><span class="s1">python_file_name_list:</span>
+                <span class="s0"># Ensure each item in the list is a string.</span>
+                <span class="s3">assert </span><span class="s1">isinstance(python_file_name</span><span class="s3">, </span><span class="s1">compat.string_types)</span><span class="s3">, </span><span class="s1">\</span>
+                    <span class="s5">'%s key %s, item %r must be a string.' </span><span class="s1">% (uhd_path</span><span class="s3">, </span><span class="s1">module_name</span><span class="s3">, </span><span class="s1">python_file_name)</span>
+                <span class="s0"># Transform it into an absolute path.</span>
+                <span class="s1">abs_path = os.path.join(uhd</span><span class="s3">, </span><span class="s5">'rthooks'</span><span class="s3">, </span><span class="s1">python_file_name)</span>
+                <span class="s0"># Make sure this file exists.</span>
+                <span class="s3">assert </span><span class="s1">os.path.exists(abs_path)</span><span class="s3">, </span><span class="s1">\</span>
+                    <span class="s5">'In %s, key %s, the file %r expected to be located at %r does not exist.' </span><span class="s1">% \</span>
+                    <span class="s1">(uhd_path</span><span class="s3">, </span><span class="s1">module_name</span><span class="s3">, </span><span class="s1">python_file_name</span><span class="s3">, </span><span class="s1">abs_path)</span>
+                <span class="s0"># Merge it.</span>
+                <span class="s1">self._available_rthooks[module_name].append(abs_path)</span>
+
+    <span class="s1">@staticmethod</span>
+    <span class="s3">def </span><span class="s1">_findCaller(*args</span><span class="s3">, </span><span class="s1">**kwargs):</span>
+        <span class="s0"># Used to add an additional stack-frame above logger.findCaller. findCaller expects the caller to be three</span>
+        <span class="s0"># stack-frames above itself.</span>
+        <span class="s3">return </span><span class="s1">logger.findCaller(*args</span><span class="s3">, </span><span class="s1">**kwargs)</span>
+
+    <span class="s3">def </span><span class="s1">msg(self</span><span class="s3">, </span><span class="s1">level</span><span class="s3">, </span><span class="s1">s</span><span class="s3">, </span><span class="s1">*args):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Print a debug message with the given level. 
+ 
+        1. Map the msg log level to a logger log level. 
+        2. Generate the message format (the same format as ModuleGraph) 
+        3. Find the caller, which findCaller expects three stack-frames above itself: 
+            [3] caller -&gt; [2] msg (here) -&gt; [1] _findCaller -&gt; [0] logger.findCaller 
+        4. Create a logRecord with the caller's information. 
+        5. Handle the logRecord. 
+        &quot;&quot;&quot;</span>
+        <span class="s3">try</span><span class="s1">:</span>
+            <span class="s1">level = self.LOG_LEVEL_MAPPING[level]</span>
+        <span class="s3">except </span><span class="s1">KeyError:</span>
+            <span class="s3">return</span>
+        <span class="s3">if not </span><span class="s1">logger.isEnabledFor(level):</span>
+            <span class="s3">return</span>
+
+        <span class="s1">msg = </span><span class="s5">&quot;%s %s&quot; </span><span class="s1">% (s</span><span class="s3">, </span><span class="s5">' '</span><span class="s1">.join(map(repr</span><span class="s3">, </span><span class="s1">args)))</span>
+
+        <span class="s3">try</span><span class="s1">:</span>
+            <span class="s1">fn</span><span class="s3">, </span><span class="s1">lno</span><span class="s3">, </span><span class="s1">func</span><span class="s3">, </span><span class="s1">sinfo = self._findCaller()</span>
+        <span class="s3">except </span><span class="s1">ValueError:  </span><span class="s0"># pragma: no cover</span>
+            <span class="s1">fn</span><span class="s3">, </span><span class="s1">lno</span><span class="s3">, </span><span class="s1">func</span><span class="s3">, </span><span class="s1">sinfo = </span><span class="s5">&quot;(unknown file)&quot;</span><span class="s3">, </span><span class="s4">0</span><span class="s3">, </span><span class="s5">&quot;(unknown function)&quot;</span><span class="s3">, None</span>
+        <span class="s1">record = logger.makeRecord(logger.name</span><span class="s3">, </span><span class="s1">level</span><span class="s3">, </span><span class="s1">fn</span><span class="s3">, </span><span class="s1">lno</span><span class="s3">, </span><span class="s1">msg</span><span class="s3">, </span><span class="s1">[]</span><span class="s3">, None, </span><span class="s1">func</span><span class="s3">, None, </span><span class="s1">sinfo)</span>
+
+        <span class="s1">logger.handle(record)</span>
+
+    <span class="s0"># Set logging methods so that the stack is correctly detected.</span>
+    <span class="s1">msgin = msg</span>
+    <span class="s1">msgout = msg</span>
+
+    <span class="s3">def </span><span class="s1">_cache_hooks(self</span><span class="s3">, </span><span class="s1">hook_type):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Get a cache of all hooks of the passed type. 
+ 
+        The cache will include all official hooks defined by the PyInstaller codebase _and_ all unofficial hooks 
+        defined for the current application. 
+ 
+        Parameters 
+        ---------- 
+        hook_type : str 
+            Type of hooks to be cached, equivalent to the basename of the subpackage of the `PyInstaller.hooks` 
+            package containing such hooks (e.g., `post_create_package` for post-create package hooks). 
+        &quot;&quot;&quot;</span>
+        <span class="s0"># Cache of this type of hooks.</span>
+        <span class="s1">hook_dirs = []</span>
+        <span class="s3">for </span><span class="s1">user_hook_dir </span><span class="s3">in </span><span class="s1">self._user_hook_dirs:</span>
+            <span class="s0"># Absolute path of the user-defined subdirectory of this hook type. If this directory exists, add it to the</span>
+            <span class="s0"># list to be cached.</span>
+            <span class="s1">user_hook_type_dir = os.path.join(user_hook_dir</span><span class="s3">, </span><span class="s1">hook_type)</span>
+            <span class="s3">if </span><span class="s1">os.path.isdir(user_hook_type_dir):</span>
+                <span class="s1">hook_dirs.append(user_hook_type_dir)</span>
+
+        <span class="s3">return </span><span class="s1">ModuleHookCache(self</span><span class="s3">, </span><span class="s1">hook_dirs)</span>
+
+    <span class="s3">def </span><span class="s1">_analyze_base_modules(self):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Analyze dependencies of the the modules in base_library.zip. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">logger.info(</span><span class="s5">'Analyzing base_library.zip ...'</span><span class="s1">)</span>
+        <span class="s1">required_mods = []</span>
+        <span class="s0"># Collect submodules from required modules in base_library.zip.</span>
+        <span class="s3">for </span><span class="s1">m </span><span class="s3">in </span><span class="s1">PY3_BASE_MODULES:</span>
+            <span class="s3">if </span><span class="s1">is_package(m):</span>
+                <span class="s1">required_mods += collect_submodules(m)</span>
+            <span class="s3">else</span><span class="s1">:</span>
+                <span class="s1">required_mods.append(m)</span>
+        <span class="s0"># Initialize ModuleGraph.</span>
+        <span class="s1">self._base_modules = [mod </span><span class="s3">for </span><span class="s1">req </span><span class="s3">in </span><span class="s1">required_mods </span><span class="s3">for </span><span class="s1">mod </span><span class="s3">in </span><span class="s1">self.import_hook(req)]</span>
+
+    <span class="s3">def </span><span class="s1">add_script(self</span><span class="s3">, </span><span class="s1">pathname</span><span class="s3">, </span><span class="s1">caller=</span><span class="s3">None</span><span class="s1">):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Wrap the parent's 'run_script' method and create graph from the first script in the analysis, and save its 
+        node to use as the &quot;caller&quot; node for all others. This gives a connected graph rather than a collection of 
+        unrelated trees. 
+        &quot;&quot;&quot;</span>
+        <span class="s3">if </span><span class="s1">self._top_script_node </span><span class="s3">is None</span><span class="s1">:</span>
+            <span class="s0"># Remember the node for the first script.</span>
+            <span class="s3">try</span><span class="s1">:</span>
+                <span class="s1">self._top_script_node = super().add_script(pathname)</span>
+            <span class="s3">except </span><span class="s1">SyntaxError:</span>
+                <span class="s1">print(</span><span class="s5">&quot;</span><span class="s3">\n</span><span class="s5">Syntax error in&quot;</span><span class="s3">, </span><span class="s1">pathname</span><span class="s3">, </span><span class="s1">file=sys.stderr)</span>
+                <span class="s1">formatted_lines = traceback.format_exc().splitlines(</span><span class="s3">True</span><span class="s1">)</span>
+                <span class="s1">print(*formatted_lines[-</span><span class="s4">4</span><span class="s1">:]</span><span class="s3">, </span><span class="s1">file=sys.stderr)</span>
+                <span class="s1">sys.exit(</span><span class="s4">1</span><span class="s1">)</span>
+            <span class="s0"># Create references from the top script to the base_modules in graph.</span>
+            <span class="s3">for </span><span class="s1">node </span><span class="s3">in </span><span class="s1">self._base_modules:</span>
+                <span class="s1">self.add_edge(self._top_script_node</span><span class="s3">, </span><span class="s1">node)</span>
+            <span class="s0"># Return top-level script node.</span>
+            <span class="s3">return </span><span class="s1">self._top_script_node</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s3">if not </span><span class="s1">caller:</span>
+                <span class="s0"># Defaults to as any additional script is called from the top-level script.</span>
+                <span class="s1">caller = self._top_script_node</span>
+            <span class="s3">return </span><span class="s1">super().add_script(pathname</span><span class="s3">, </span><span class="s1">caller=caller)</span>
+
+    <span class="s3">def </span><span class="s1">process_post_graph_hooks(self</span><span class="s3">, </span><span class="s1">analysis):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        For each imported module, run this module's post-graph hooks if any. 
+ 
+        Parameters 
+        ---------- 
+        analysis: build_main.Analysis 
+            The Analysis that calls the hooks 
+ 
+        &quot;&quot;&quot;</span>
+        <span class="s0"># For each iteration of the infinite &quot;while&quot; loop below:</span>
+        <span class="s0">#</span>
+        <span class="s0"># 1. All hook() functions defined in cached hooks for imported modules are called. This may result in new</span>
+        <span class="s0">#    modules being imported (e.g., as hidden imports) that were ignored earlier in the current iteration: if</span>
+        <span class="s0">#    this is the case, all hook() functions defined in cached hooks for these modules will be called by the next</span>
+        <span class="s0">#    iteration.</span>
+        <span class="s0"># 2. All cached hooks whose hook() functions were called are removed from this cache. If this cache is empty, no</span>
+        <span class="s0">#    hook() functions will be called by the next iteration and this loop will be terminated.</span>
+        <span class="s0"># 3. If no hook() functions were called, this loop is terminated.</span>
+        <span class="s1">logger.info(</span><span class="s5">'Processing module hooks...'</span><span class="s1">)</span>
+        <span class="s3">while True</span><span class="s1">:</span>
+            <span class="s0"># Set of the names of all imported modules whose post-graph hooks are run by this iteration, preventing the</span>
+            <span class="s0"># next iteration from re- running these hooks. If still empty at the end of this iteration, no post-graph</span>
+            <span class="s0"># hooks were run; thus, this loop will be terminated.</span>
+            <span class="s1">hooked_module_names = set()</span>
+
+            <span class="s0"># For each remaining hookable module and corresponding hooks...</span>
+            <span class="s3">for </span><span class="s1">module_name</span><span class="s3">, </span><span class="s1">module_hooks </span><span class="s3">in </span><span class="s1">self._hooks.items():</span>
+                <span class="s0"># Graph node for this module if imported or &quot;None&quot; otherwise.</span>
+                <span class="s1">module_node = self.find_node(module_name</span><span class="s3">, </span><span class="s1">create_nspkg=</span><span class="s3">False</span><span class="s1">)</span>
+
+                <span class="s0"># If this module has not been imported, temporarily ignore it. This module is retained in the cache, as</span>
+                <span class="s0"># a subsequently run post-graph hook could import this module as a hidden import.</span>
+                <span class="s3">if </span><span class="s1">module_node </span><span class="s3">is None</span><span class="s1">:</span>
+                    <span class="s3">continue</span>
+
+                <span class="s0"># If this module is unimportable, permanently ignore it.</span>
+                <span class="s3">if </span><span class="s1">type(module_node).__name__ </span><span class="s3">not in </span><span class="s1">VALID_MODULE_TYPES:</span>
+                    <span class="s1">hooked_module_names.add(module_name)</span>
+                    <span class="s3">continue</span>
+
+                <span class="s0"># For each hook script for this module...</span>
+                <span class="s3">for </span><span class="s1">module_hook </span><span class="s3">in </span><span class="s1">module_hooks:</span>
+                    <span class="s0"># Run this script's post-graph hook.</span>
+                    <span class="s1">module_hook.post_graph(analysis)</span>
+
+                    <span class="s0"># Cache all external dependencies listed by this script after running this hook, which could add</span>
+                    <span class="s0"># dependencies.</span>
+                    <span class="s1">self._additional_files_cache.add(module_name</span><span class="s3">, </span><span class="s1">module_hook.binaries</span><span class="s3">, </span><span class="s1">module_hook.datas)</span>
+
+                <span class="s0"># Prevent this module's hooks from being run again.</span>
+                <span class="s1">hooked_module_names.add(module_name)</span>
+
+            <span class="s0"># Prevent all post-graph hooks run above from being run again by the next iteration.</span>
+            <span class="s1">self._hooks.remove_modules(*hooked_module_names)</span>
+
+            <span class="s0"># If no post-graph hooks were run, terminate iteration.</span>
+            <span class="s3">if not </span><span class="s1">hooked_module_names:</span>
+                <span class="s3">break</span>
+
+    <span class="s3">def </span><span class="s1">_safe_import_module(self</span><span class="s3">, </span><span class="s1">module_basename</span><span class="s3">, </span><span class="s1">module_name</span><span class="s3">, </span><span class="s1">parent_package):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Create a new graph node for the module with the passed name under the parent package signified by the passed 
+        graph node. 
+ 
+        This method wraps the superclass method with support for pre-import module hooks. If such a hook exists for 
+        this module (e.g., a script `PyInstaller.hooks.hook-{module_name}` containing a function 
+        `pre_safe_import_module()`), that hook will be run _before_ the superclass method is called. 
+ 
+        Pre-Safe-Import-Hooks are performed just *prior* to importing the module. When running the hook, the modules 
+        parent package has already been imported and ti's `__path__` is set up. But the module is just about to be 
+        imported. 
+ 
+        See the superclass method for description of parameters and return value. 
+        &quot;&quot;&quot;</span>
+        <span class="s0"># If this module has pre-safe import module hooks, run these first.</span>
+        <span class="s3">if </span><span class="s1">module_name </span><span class="s3">in </span><span class="s1">self._hooks_pre_safe_import_module:</span>
+            <span class="s0"># For the absolute path of each such hook...</span>
+            <span class="s3">for </span><span class="s1">hook </span><span class="s3">in </span><span class="s1">self._hooks_pre_safe_import_module[module_name]:</span>
+                <span class="s0"># Dynamically import this hook as a fabricated module.</span>
+                <span class="s1">logger.info(</span><span class="s5">'Processing pre-safe import module hook %s from %r.'</span><span class="s3">, </span><span class="s1">module_name</span><span class="s3">, </span><span class="s1">hook.hook_filename)</span>
+                <span class="s1">hook_module_name = </span><span class="s5">'PyInstaller_hooks_pre_safe_import_module_' </span><span class="s1">+ module_name.replace(</span><span class="s5">'.'</span><span class="s3">, </span><span class="s5">'_'</span><span class="s1">)</span>
+                <span class="s1">hook_module = importlib_load_source(hook_module_name</span><span class="s3">, </span><span class="s1">hook.hook_filename)</span>
+
+                <span class="s0"># Object communicating changes made by this hook back to us.</span>
+                <span class="s1">hook_api = PreSafeImportModuleAPI(</span>
+                    <span class="s1">module_graph=self</span><span class="s3">,</span>
+                    <span class="s1">module_basename=module_basename</span><span class="s3">,</span>
+                    <span class="s1">module_name=module_name</span><span class="s3">,</span>
+                    <span class="s1">parent_package=parent_package</span><span class="s3">,</span>
+                <span class="s1">)</span>
+
+                <span class="s0"># Run this hook, passed this object.</span>
+                <span class="s3">if not </span><span class="s1">hasattr(hook_module</span><span class="s3">, </span><span class="s5">'pre_safe_import_module'</span><span class="s1">):</span>
+                    <span class="s3">raise </span><span class="s1">NameError(</span><span class="s5">'pre_safe_import_module() function not defined by hook %r.' </span><span class="s1">% hook_module)</span>
+                <span class="s1">hook_module.pre_safe_import_module(hook_api)</span>
+
+                <span class="s0"># Respect method call changes requested by this hook.</span>
+                <span class="s1">module_basename = hook_api.module_basename</span>
+                <span class="s1">module_name = hook_api.module_name</span>
+
+            <span class="s0"># Prevent subsequent calls from rerunning these hooks.</span>
+            <span class="s3">del </span><span class="s1">self._hooks_pre_safe_import_module[module_name]</span>
+
+        <span class="s0"># Call the superclass method.</span>
+        <span class="s3">return </span><span class="s1">super()._safe_import_module(module_basename</span><span class="s3">, </span><span class="s1">module_name</span><span class="s3">, </span><span class="s1">parent_package)</span>
+
+    <span class="s3">def </span><span class="s1">_find_module_path(self</span><span class="s3">, </span><span class="s1">fullname</span><span class="s3">, </span><span class="s1">module_name</span><span class="s3">, </span><span class="s1">search_dirs):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Get a 3-tuple detailing the physical location of the module with the passed name if that module exists _or_ 
+        raise `ImportError` otherwise. 
+ 
+        This method wraps the superclass method with support for pre-find module path hooks. If such a hook exists 
+        for this module (e.g., a script `PyInstaller.hooks.hook-{module_name}` containing a function 
+        `pre_find_module_path()`), that hook will be run _before_ the superclass method is called. 
+ 
+        See superclass method for parameter and return value descriptions. 
+        &quot;&quot;&quot;</span>
+        <span class="s0"># If this module has pre-find module path hooks, run these first.</span>
+        <span class="s3">if </span><span class="s1">fullname </span><span class="s3">in </span><span class="s1">self._hooks_pre_find_module_path:</span>
+            <span class="s0"># For the absolute path of each such hook...</span>
+            <span class="s3">for </span><span class="s1">hook </span><span class="s3">in </span><span class="s1">self._hooks_pre_find_module_path[fullname]:</span>
+                <span class="s0"># Dynamically import this hook as a fabricated module.</span>
+                <span class="s1">logger.info(</span><span class="s5">'Processing pre-find module path hook %s from %r.'</span><span class="s3">, </span><span class="s1">fullname</span><span class="s3">, </span><span class="s1">hook.hook_filename)</span>
+                <span class="s1">hook_fullname = </span><span class="s5">'PyInstaller_hooks_pre_find_module_path_' </span><span class="s1">+ fullname.replace(</span><span class="s5">'.'</span><span class="s3">, </span><span class="s5">'_'</span><span class="s1">)</span>
+                <span class="s1">hook_module = importlib_load_source(hook_fullname</span><span class="s3">, </span><span class="s1">hook.hook_filename)</span>
+
+                <span class="s0"># Object communicating changes made by this hook back to us.</span>
+                <span class="s1">hook_api = PreFindModulePathAPI(</span>
+                    <span class="s1">module_graph=self</span><span class="s3">,</span>
+                    <span class="s1">module_name=fullname</span><span class="s3">,</span>
+                    <span class="s1">search_dirs=search_dirs</span><span class="s3">,</span>
+                <span class="s1">)</span>
+
+                <span class="s0"># Run this hook, passed this object.</span>
+                <span class="s3">if not </span><span class="s1">hasattr(hook_module</span><span class="s3">, </span><span class="s5">'pre_find_module_path'</span><span class="s1">):</span>
+                    <span class="s3">raise </span><span class="s1">NameError(</span><span class="s5">'pre_find_module_path() function not defined by hook %r.' </span><span class="s1">% hook_module)</span>
+                <span class="s1">hook_module.pre_find_module_path(hook_api)</span>
+
+                <span class="s0"># Respect method call changes requested by this hook.</span>
+                <span class="s1">search_dirs = hook_api.search_dirs</span>
+
+            <span class="s0"># Prevent subsequent calls from rerunning these hooks.</span>
+            <span class="s3">del </span><span class="s1">self._hooks_pre_find_module_path[fullname]</span>
+
+        <span class="s0"># Call the superclass method.</span>
+        <span class="s3">return </span><span class="s1">super()._find_module_path(fullname</span><span class="s3">, </span><span class="s1">module_name</span><span class="s3">, </span><span class="s1">search_dirs)</span>
+
+    <span class="s3">def </span><span class="s1">get_code_objects(self):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Get code objects from ModuleGraph for pure Python modules. This allows to avoid writing .pyc/pyo files to hdd 
+        at later stage. 
+ 
+        :return: Dict with module name and code object. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">code_dict = {}</span>
+        <span class="s1">mod_types = PURE_PYTHON_MODULE_TYPES</span>
+        <span class="s3">for </span><span class="s1">node </span><span class="s3">in </span><span class="s1">self.iter_graph(start=self._top_script_node):</span>
+            <span class="s0"># TODO This is terrible. To allow subclassing, types should never be directly compared. Use isinstance()</span>
+            <span class="s0"># instead, which is safer, simpler, and accepts sets. Most other calls to type() in the codebase should also</span>
+            <span class="s0"># be refactored to call isinstance() instead.</span>
+
+            <span class="s0"># get node type e.g. Script</span>
+            <span class="s1">mg_type = type(node).__name__</span>
+            <span class="s3">if </span><span class="s1">mg_type </span><span class="s3">in </span><span class="s1">mod_types:</span>
+                <span class="s3">if </span><span class="s1">node.code:</span>
+                    <span class="s1">code_dict[node.identifier] = node.code</span>
+        <span class="s3">return </span><span class="s1">code_dict</span>
+
+    <span class="s3">def </span><span class="s1">_make_toc(self</span><span class="s3">, </span><span class="s1">typecode=</span><span class="s3">None, </span><span class="s1">existing_TOC=</span><span class="s3">None</span><span class="s1">):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Return the name, path and type of selected nodes as a TOC, or appended to a TOC. The selection is via a list 
+        of PyInstaller TOC typecodes. If that list is empty we return the complete flattened graph as a TOC with the 
+        ModuleGraph note types in place of typecodes -- meant for debugging only. Normally we return ModuleGraph 
+        nodes whose types map to the requested PyInstaller typecode(s) as indicated in the MODULE_TYPES_TO_TOC_DICT. 
+ 
+        We use the ModuleGraph (really, ObjectGraph) flatten() method to scan all the nodes. This is patterned after 
+        ModuleGraph.report(). 
+        &quot;&quot;&quot;</span>
+        <span class="s0"># Construct regular expression for matching modules that should be excluded because they are bundled in</span>
+        <span class="s0"># base_library.zip.</span>
+        <span class="s0">#</span>
+        <span class="s0"># This expression matches the base module name, optionally followed by a period and then any number of</span>
+        <span class="s0"># characters. This matches the module name and the fully qualified names of any of its submodules.</span>
+        <span class="s1">regex_str = </span><span class="s5">'(' </span><span class="s1">+ </span><span class="s5">'|'</span><span class="s1">.join(PY3_BASE_MODULES) + </span><span class="s5">r')(\.|$)'</span>
+        <span class="s1">module_filter = re.compile(regex_str)</span>
+
+        <span class="s1">result = existing_TOC </span><span class="s3">or </span><span class="s1">TOC()</span>
+        <span class="s3">for </span><span class="s1">node </span><span class="s3">in </span><span class="s1">self.iter_graph(start=self._top_script_node):</span>
+            <span class="s0"># Skip modules that are in base_library.zip.</span>
+            <span class="s3">if </span><span class="s1">module_filter.match(node.identifier):</span>
+                <span class="s3">continue</span>
+            <span class="s1">entry = self._node_to_toc(node</span><span class="s3">, </span><span class="s1">typecode)</span>
+            <span class="s3">if </span><span class="s1">entry </span><span class="s3">is not None</span><span class="s1">:</span>
+                <span class="s0"># TOC.append the data. This checks for a pre-existing name and skips it if it exists.</span>
+                <span class="s1">result.append(entry)</span>
+        <span class="s3">return </span><span class="s1">result</span>
+
+    <span class="s3">def </span><span class="s1">make_pure_toc(self):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Return all pure Python modules formatted as TOC. 
+        &quot;&quot;&quot;</span>
+        <span class="s0"># PyInstaller should handle special module types without code object.</span>
+        <span class="s3">return </span><span class="s1">self._make_toc(PURE_PYTHON_MODULE_TYPES)</span>
+
+    <span class="s3">def </span><span class="s1">make_binaries_toc(self</span><span class="s3">, </span><span class="s1">existing_toc):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Return all binary Python modules formatted as TOC. 
+        &quot;&quot;&quot;</span>
+        <span class="s3">return </span><span class="s1">self._make_toc(BINARY_MODULE_TYPES</span><span class="s3">, </span><span class="s1">existing_toc)</span>
+
+    <span class="s3">def </span><span class="s1">make_missing_toc(self):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Return all MISSING Python modules formatted as TOC. 
+        &quot;&quot;&quot;</span>
+        <span class="s3">return </span><span class="s1">self._make_toc(BAD_MODULE_TYPES)</span>
+
+    <span class="s1">@staticmethod</span>
+    <span class="s3">def </span><span class="s1">_node_to_toc(node</span><span class="s3">, </span><span class="s1">typecode=</span><span class="s3">None</span><span class="s1">):</span>
+        <span class="s0"># TODO This is terrible. Everything in Python has a type. It is nonsensical to even speak of &quot;nodes [that] are</span>
+        <span class="s0"># not typed.&quot; How would that even occur? After all, even &quot;None&quot; has a type! (It is &quot;NoneType&quot;, for the curious.)</span>
+        <span class="s0"># Remove this, please.</span>
+
+        <span class="s0"># Get node type, e.g., Script</span>
+        <span class="s1">mg_type = type(node).__name__</span>
+        <span class="s3">assert </span><span class="s1">mg_type </span><span class="s3">is not None</span>
+
+        <span class="s3">if </span><span class="s1">typecode </span><span class="s3">and not </span><span class="s1">(mg_type </span><span class="s3">in </span><span class="s1">typecode):</span>
+            <span class="s0"># Type is not a to be selected one, skip this one</span>
+            <span class="s3">return None</span>
+        <span class="s0"># Extract the identifier and a path if any.</span>
+        <span class="s3">if </span><span class="s1">mg_type == </span><span class="s5">'Script'</span><span class="s1">:</span>
+            <span class="s0"># for Script nodes only, identifier is a whole path</span>
+            <span class="s1">(name</span><span class="s3">, </span><span class="s1">ext) = os.path.splitext(node.filename)</span>
+            <span class="s1">name = os.path.basename(name)</span>
+        <span class="s3">elif </span><span class="s1">mg_type == </span><span class="s5">'ExtensionPackage'</span><span class="s1">:</span>
+            <span class="s0"># Package with __init__ module being an extension module. This needs to end up as e.g. 'mypkg/__init__.so'.</span>
+            <span class="s0"># Convert the packages name ('mypkg') into the module name ('mypkg.__init__') *here* to keep special cases</span>
+            <span class="s0"># away elsewhere (where the module name is converted to a filename).</span>
+            <span class="s1">name = node.identifier + </span><span class="s5">&quot;.__init__&quot;</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s1">name = node.identifier</span>
+        <span class="s1">path = node.filename </span><span class="s3">if </span><span class="s1">node.filename </span><span class="s3">is not None else </span><span class="s5">''</span>
+        <span class="s0"># Ensure name is really 'str'. Module graph might return object type 'modulegraph.Alias' which inherits fromm</span>
+        <span class="s0"># 'str'. But 'marshal.dumps()' function is able to marshal only 'str'. Otherwise on Windows PyInstaller might</span>
+        <span class="s0"># fail with message like:</span>
+        <span class="s0">#   ValueError: unmarshallable object</span>
+        <span class="s1">name = str(name)</span>
+        <span class="s0"># Translate to the corresponding TOC typecode.</span>
+        <span class="s1">toc_type = MODULE_TYPES_TO_TOC_DICT[mg_type]</span>
+        <span class="s3">return </span><span class="s1">name</span><span class="s3">, </span><span class="s1">path</span><span class="s3">, </span><span class="s1">toc_type</span>
+
+    <span class="s3">def </span><span class="s1">nodes_to_toc(self</span><span class="s3">, </span><span class="s1">node_list</span><span class="s3">, </span><span class="s1">existing_TOC=</span><span class="s3">None</span><span class="s1">):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Given a list of nodes, create a TOC representing those nodes. This is mainly used to initialize a TOC of 
+        scripts with the ones that are runtime hooks. The process is almost the same as _make_toc(), but the caller 
+        guarantees the nodes are valid, so minimal checking. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">result = existing_TOC </span><span class="s3">or </span><span class="s1">TOC()</span>
+        <span class="s3">for </span><span class="s1">node </span><span class="s3">in </span><span class="s1">node_list:</span>
+            <span class="s1">result.append(self._node_to_toc(node))</span>
+        <span class="s3">return </span><span class="s1">result</span>
+
+    <span class="s0"># Return true if the named item is in the graph as a BuiltinModule node. The passed name is a basename.</span>
+    <span class="s3">def </span><span class="s1">is_a_builtin(self</span><span class="s3">, </span><span class="s1">name):</span>
+        <span class="s1">node = self.find_node(name)</span>
+        <span class="s3">if </span><span class="s1">node </span><span class="s3">is None</span><span class="s1">:</span>
+            <span class="s3">return False</span>
+        <span class="s3">return </span><span class="s1">type(node).__name__ == </span><span class="s5">'BuiltinModule'</span>
+
+    <span class="s3">def </span><span class="s1">get_importers(self</span><span class="s3">, </span><span class="s1">name):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        List all modules importing the module with the passed name. 
+ 
+        Returns a list of (identifier, DependencyIinfo)-tuples. If the names module has not yet been imported, this 
+        method returns an empty list. 
+ 
+        Parameters 
+        ---------- 
+        name : str 
+            Fully-qualified name of the module to be examined. 
+ 
+        Returns 
+        ---------- 
+        list 
+            List of (fully-qualified names, DependencyIinfo)-tuples of all modules importing the module with the passed 
+            fully-qualified name. 
+ 
+        &quot;&quot;&quot;</span>
+        <span class="s3">def </span><span class="s1">get_importer_edge_data(importer):</span>
+            <span class="s1">edge = self.graph.edge_by_node(importer</span><span class="s3">, </span><span class="s1">name)</span>
+            <span class="s0"># edge might be None in case an AliasModule was added.</span>
+            <span class="s3">if </span><span class="s1">edge </span><span class="s3">is not None</span><span class="s1">:</span>
+                <span class="s3">return </span><span class="s1">self.graph.edge_data(edge)</span>
+
+        <span class="s1">node = self.find_node(name)</span>
+        <span class="s3">if </span><span class="s1">node </span><span class="s3">is None</span><span class="s1">:</span>
+            <span class="s3">return </span><span class="s1">[]</span>
+        <span class="s1">_</span><span class="s3">, </span><span class="s1">importers = self.get_edges(node)</span>
+        <span class="s1">importers = (importer.identifier </span><span class="s3">for </span><span class="s1">importer </span><span class="s3">in </span><span class="s1">importers </span><span class="s3">if </span><span class="s1">importer </span><span class="s3">is not None</span><span class="s1">)</span>
+        <span class="s3">return </span><span class="s1">[(importer</span><span class="s3">, </span><span class="s1">get_importer_edge_data(importer)) </span><span class="s3">for </span><span class="s1">importer </span><span class="s3">in </span><span class="s1">importers]</span>
+
+    <span class="s0"># TODO: create a class from this function.</span>
+    <span class="s3">def </span><span class="s1">analyze_runtime_hooks(self</span><span class="s3">, </span><span class="s1">custom_runhooks):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Analyze custom run-time hooks and run-time hooks implied by found modules. 
+ 
+        :return : list of Graph nodes. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">rthooks_nodes = []</span>
+        <span class="s1">logger.info(</span><span class="s5">'Analyzing run-time hooks ...'</span><span class="s1">)</span>
+        <span class="s0"># Process custom runtime hooks (from --runtime-hook options). The runtime hooks are order dependent. First hooks</span>
+        <span class="s0"># in the list are executed first. Put their graph nodes at the head of the priority_scripts list Pyinstaller</span>
+        <span class="s0"># defined rthooks and thus they are executed first.</span>
+        <span class="s3">if </span><span class="s1">custom_runhooks:</span>
+            <span class="s3">for </span><span class="s1">hook_file </span><span class="s3">in </span><span class="s1">custom_runhooks:</span>
+                <span class="s1">logger.info(</span><span class="s5">&quot;Including custom run-time hook %r&quot;</span><span class="s3">, </span><span class="s1">hook_file)</span>
+                <span class="s1">hook_file = os.path.abspath(hook_file)</span>
+                <span class="s0"># Not using &quot;try&quot; here because the path is supposed to exist, if it does not, the raised error will</span>
+                <span class="s0"># explain.</span>
+                <span class="s1">rthooks_nodes.append(self.add_script(hook_file))</span>
+
+        <span class="s0"># Find runtime hooks that are implied by packages already imported. Get a temporary TOC listing all the scripts</span>
+        <span class="s0"># and packages graphed so far. Assuming that runtime hooks apply only to modules and packages.</span>
+        <span class="s1">temp_toc = self._make_toc(VALID_MODULE_TYPES)</span>
+        <span class="s3">for </span><span class="s1">(mod_name</span><span class="s3">, </span><span class="s1">path</span><span class="s3">, </span><span class="s1">typecode) </span><span class="s3">in </span><span class="s1">temp_toc:</span>
+            <span class="s0"># Look if there is any run-time hook for given module.</span>
+            <span class="s3">if </span><span class="s1">mod_name </span><span class="s3">in </span><span class="s1">self._available_rthooks:</span>
+                <span class="s0"># There could be several run-time hooks for a module.</span>
+                <span class="s3">for </span><span class="s1">abs_path </span><span class="s3">in </span><span class="s1">self._available_rthooks[mod_name]:</span>
+                    <span class="s1">logger.info(</span><span class="s5">&quot;Including run-time hook %r&quot;</span><span class="s3">, </span><span class="s1">abs_path)</span>
+                    <span class="s1">rthooks_nodes.append(self.add_script(abs_path))</span>
+
+        <span class="s3">return </span><span class="s1">rthooks_nodes</span>
+
+    <span class="s3">def </span><span class="s1">add_hiddenimports(self</span><span class="s3">, </span><span class="s1">module_list):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Add hidden imports that are either supplied as CLI option --hidden-import=MODULENAME or as dependencies from 
+        some PyInstaller features when enabled (e.g., crypto feature). 
+        &quot;&quot;&quot;</span>
+        <span class="s3">assert </span><span class="s1">self._top_script_node </span><span class="s3">is not None</span>
+        <span class="s0"># Analyze the script's hidden imports (named on the command line).</span>
+        <span class="s3">for </span><span class="s1">modnm </span><span class="s3">in </span><span class="s1">module_list:</span>
+            <span class="s1">node = self.find_node(modnm)</span>
+            <span class="s3">if </span><span class="s1">node </span><span class="s3">is not None</span><span class="s1">:</span>
+                <span class="s1">logger.debug(</span><span class="s5">'Hidden import %r already found'</span><span class="s3">, </span><span class="s1">modnm)</span>
+            <span class="s3">else</span><span class="s1">:</span>
+                <span class="s1">logger.info(</span><span class="s5">&quot;Analyzing hidden import %r&quot;</span><span class="s3">, </span><span class="s1">modnm)</span>
+                <span class="s0"># ModuleGraph throws ImportError if import not found.</span>
+                <span class="s3">try</span><span class="s1">:</span>
+                    <span class="s1">nodes = self.import_hook(modnm)</span>
+                    <span class="s3">assert </span><span class="s1">len(nodes) == </span><span class="s4">1</span>
+                    <span class="s1">node = nodes[</span><span class="s4">0</span><span class="s1">]</span>
+                <span class="s3">except </span><span class="s1">ImportError:</span>
+                    <span class="s1">logger.error(</span><span class="s5">&quot;Hidden import %r not found&quot;</span><span class="s3">, </span><span class="s1">modnm)</span>
+                    <span class="s3">continue</span>
+            <span class="s0"># Create references from the top script to the hidden import, even if found otherwise. Do not waste time</span>
+            <span class="s0"># checking whether it is actually added by this (test-) script.</span>
+            <span class="s1">self.add_edge(self._top_script_node</span><span class="s3">, </span><span class="s1">node)</span>
+
+    <span class="s3">def </span><span class="s1">get_code_using(self</span><span class="s3">, </span><span class="s1">module: str) -&gt; dict:</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Find modules that import a given **module**. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">co_dict = {}</span>
+        <span class="s1">pure_python_module_types = PURE_PYTHON_MODULE_TYPES | {</span>
+            <span class="s5">'Script'</span><span class="s3">,</span>
+        <span class="s1">}</span>
+        <span class="s1">node = self.find_node(module)</span>
+        <span class="s3">if </span><span class="s1">node:</span>
+            <span class="s1">referrers = self.incoming(node)</span>
+            <span class="s3">for </span><span class="s1">r </span><span class="s3">in </span><span class="s1">referrers:</span>
+                <span class="s0"># Under python 3.7 and earlier, if `module` is added to hidden imports, one of referrers ends up being</span>
+                <span class="s0"># None, causing #3825. Work around it.</span>
+                <span class="s3">if </span><span class="s1">r </span><span class="s3">is None</span><span class="s1">:</span>
+                    <span class="s3">continue</span>
+                <span class="s0"># Ensure that modulegraph objects have 'code' attribute.</span>
+                <span class="s3">if </span><span class="s1">type(r).__name__ </span><span class="s3">not in </span><span class="s1">pure_python_module_types:</span>
+                    <span class="s3">continue</span>
+                <span class="s1">identifier = r.identifier</span>
+                <span class="s3">if </span><span class="s1">identifier == module </span><span class="s3">or </span><span class="s1">identifier.startswith(module + </span><span class="s5">'.'</span><span class="s1">):</span>
+                    <span class="s0"># Skip self references or references from `modules`'s own submodules.</span>
+                    <span class="s3">continue</span>
+                <span class="s1">co_dict[r.identifier] = r.code</span>
+        <span class="s3">return </span><span class="s1">co_dict</span>
+
+    <span class="s3">def </span><span class="s1">metadata_required(self) -&gt; set:</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Collect metadata for all packages that appear to need it. 
+        &quot;&quot;&quot;</span>
+
+        <span class="s0"># List every function that we can think of which is known to require metadata.</span>
+        <span class="s1">out = set()</span>
+
+        <span class="s1">out |= self._metadata_from(</span>
+            <span class="s5">&quot;pkg_resources&quot;</span><span class="s3">,</span>
+            <span class="s1">[</span><span class="s5">&quot;get_distribution&quot;</span><span class="s1">]</span><span class="s3">,  </span><span class="s0"># Requires metadata for one distribution.</span>
+            <span class="s1">[</span><span class="s5">&quot;require&quot;</span><span class="s1">]</span><span class="s3">,  </span><span class="s0"># Requires metadata for all dependencies.</span>
+        <span class="s1">)</span>
+
+        <span class="s0"># importlib.metadata is often `import ... as`  aliased to importlib_metadata for compatibility with &lt; py38.</span>
+        <span class="s0"># Assume both are valid.</span>
+        <span class="s3">for </span><span class="s1">importlib_metadata </span><span class="s3">in </span><span class="s1">[</span><span class="s5">&quot;importlib.metadata&quot;</span><span class="s3">, </span><span class="s5">&quot;importlib_metadata&quot;</span><span class="s1">]:</span>
+            <span class="s1">out |= self._metadata_from(</span>
+                <span class="s1">importlib_metadata</span><span class="s3">,</span>
+                <span class="s1">[</span><span class="s5">&quot;metadata&quot;</span><span class="s3">, </span><span class="s5">&quot;distribution&quot;</span><span class="s3">, </span><span class="s5">&quot;version&quot;</span><span class="s3">, </span><span class="s5">&quot;files&quot;</span><span class="s3">, </span><span class="s5">&quot;requires&quot;</span><span class="s1">]</span><span class="s3">,</span>
+                <span class="s1">[]</span><span class="s3">,</span>
+            <span class="s1">)</span>
+
+        <span class="s3">return </span><span class="s1">out</span>
+
+    <span class="s3">def </span><span class="s1">_metadata_from(self</span><span class="s3">, </span><span class="s1">package</span><span class="s3">, </span><span class="s1">methods=()</span><span class="s3">, </span><span class="s1">recursive_methods=()) -&gt; set:</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Collect metadata whose requirements are implied by given function names. 
+ 
+        Args: 
+            package: 
+                The module name that must be imported in a source file to trigger the search. 
+            methods: 
+                Function names from **package** which take a distribution name as an argument and imply that metadata 
+                is required for that distribution. 
+            recursive_methods: 
+                Like **methods** but also implies that a distribution's dependencies' metadata must be collected too. 
+        Returns: 
+            Required metadata in hook data ``(source, dest)`` format as returned by 
+            :func:`PyInstaller.utils.hooks.copy_metadata()`. 
+ 
+        Scan all source code to be included for usage of particular *key* functions which imply that that code will 
+        require metadata for some distribution (which may not be its own) at runtime. In the case of a match, 
+        collect the required metadata. 
+        &quot;&quot;&quot;</span>
+        <span class="s3">from </span><span class="s1">pkg_resources </span><span class="s3">import </span><span class="s1">DistributionNotFound</span>
+
+        <span class="s3">from </span><span class="s1">PyInstaller.utils.hooks </span><span class="s3">import </span><span class="s1">copy_metadata</span>
+
+        <span class="s0"># Generate sets of possible function names to search for.</span>
+        <span class="s1">need_metadata = set()</span>
+        <span class="s1">need_recursive_metadata = set()</span>
+        <span class="s3">for </span><span class="s1">method </span><span class="s3">in </span><span class="s1">methods:</span>
+            <span class="s1">need_metadata.update(bytecode.any_alias(package + </span><span class="s5">&quot;.&quot; </span><span class="s1">+ method))</span>
+        <span class="s3">for </span><span class="s1">method </span><span class="s3">in </span><span class="s1">recursive_methods:</span>
+            <span class="s1">need_metadata.update(bytecode.any_alias(package + </span><span class="s5">&quot;.&quot; </span><span class="s1">+ method))</span>
+
+        <span class="s1">out = set()</span>
+
+        <span class="s3">for </span><span class="s1">name</span><span class="s3">, </span><span class="s1">code </span><span class="s3">in </span><span class="s1">self.get_code_using(package).items():</span>
+            <span class="s3">for </span><span class="s1">calls </span><span class="s3">in </span><span class="s1">bytecode.recursive_function_calls(code).values():</span>
+                <span class="s3">for </span><span class="s1">function_name</span><span class="s3">, </span><span class="s1">args </span><span class="s3">in </span><span class="s1">calls:</span>
+                    <span class="s0"># Only consider function calls taking one argument.</span>
+                    <span class="s3">if </span><span class="s1">len(args) != </span><span class="s4">1</span><span class="s1">:</span>
+                        <span class="s3">continue</span>
+                    <span class="s1">package = args[</span><span class="s4">0</span><span class="s1">]</span>
+                    <span class="s3">try</span><span class="s1">:</span>
+                        <span class="s3">if </span><span class="s1">function_name </span><span class="s3">in </span><span class="s1">need_metadata:</span>
+                            <span class="s1">out.update(copy_metadata(package))</span>
+                        <span class="s3">elif </span><span class="s1">function_name </span><span class="s3">in </span><span class="s1">need_recursive_metadata:</span>
+                            <span class="s1">out.update(copy_metadata(package</span><span class="s3">, </span><span class="s1">recursive=</span><span class="s3">True</span><span class="s1">))</span>
+
+                    <span class="s3">except </span><span class="s1">DistributionNotFound:</span>
+                        <span class="s0"># Currently, we opt to silently skip over missing metadata.</span>
+                        <span class="s3">continue</span>
+
+        <span class="s3">return </span><span class="s1">out</span>
+
+
+<span class="s1">_cached_module_graph_ = </span><span class="s3">None</span>
+
+
+<span class="s3">def </span><span class="s1">initialize_modgraph(excludes=()</span><span class="s3">, </span><span class="s1">user_hook_dirs=()):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Create the cached module graph. 
+ 
+    This function might appear weird but is necessary for speeding up test runtime because it allows caching basic 
+    ModuleGraph object that gets created for 'base_library.zip'. 
+ 
+    Parameters 
+    ---------- 
+    excludes : list 
+        List of the fully-qualified names of all modules to be &quot;excluded&quot; and hence _not_ frozen into the executable. 
+    user_hook_dirs : list 
+        List of the absolute paths of all directories containing user-defined hooks for the current application or 
+        `None` if no such directories were specified. 
+ 
+    Returns 
+    ---------- 
+    PyiModuleGraph 
+        Module graph with core dependencies. 
+    &quot;&quot;&quot;</span>
+    <span class="s0"># Normalize parameters to ensure tuples and make comparison work.</span>
+    <span class="s1">user_hook_dirs = user_hook_dirs </span><span class="s3">or </span><span class="s1">()</span>
+    <span class="s1">excludes = excludes </span><span class="s3">or </span><span class="s1">()</span>
+
+    <span class="s0"># If there is a graph cached with the same excludes, reuse it. See ``PyiModulegraph._reset()`` for what is</span>
+    <span class="s0"># reset. This cache is used primarily to speed up the test-suite. Fixture `pyi_modgraph` calls this function with</span>
+    <span class="s0"># empty excludes, creating a graph suitable for the huge majority of tests.</span>
+    <span class="s3">global </span><span class="s1">_cached_module_graph_</span>
+    <span class="s3">if </span><span class="s1">_cached_module_graph_ </span><span class="s3">and </span><span class="s1">_cached_module_graph_._excludes == excludes:</span>
+        <span class="s1">logger.info(</span><span class="s5">'Reusing cached module dependency graph...'</span><span class="s1">)</span>
+        <span class="s1">graph = deepcopy(_cached_module_graph_)</span>
+        <span class="s1">graph._reset(user_hook_dirs)</span>
+        <span class="s3">return </span><span class="s1">graph</span>
+
+    <span class="s1">logger.info(</span><span class="s5">'Initializing module dependency graph...'</span><span class="s1">)</span>
+
+    <span class="s0"># Construct the initial module graph by analyzing all import statements.</span>
+    <span class="s1">graph = PyiModuleGraph(</span>
+        <span class="s1">HOMEPATH</span><span class="s3">,</span>
+        <span class="s1">excludes=excludes</span><span class="s3">,</span>
+        <span class="s0"># get_implies() are hidden imports known by modulgraph.</span>
+        <span class="s1">implies=get_implies()</span><span class="s3">,</span>
+        <span class="s1">user_hook_dirs=user_hook_dirs</span><span class="s3">,</span>
+    <span class="s1">)</span>
+
+    <span class="s3">if not </span><span class="s1">_cached_module_graph_:</span>
+        <span class="s0"># Only cache the first graph, see above for explanation.</span>
+        <span class="s1">logger.info(</span><span class="s5">'Caching module dependency graph...'</span><span class="s1">)</span>
+        <span class="s0"># cache a deep copy of the graph</span>
+        <span class="s1">_cached_module_graph_ = deepcopy(graph)</span>
+        <span class="s0"># Clear data which does not need to be copied from teh cached graph since it will be reset by</span>
+        <span class="s0"># ``PyiModulegraph._reset()`` anyway.</span>
+        <span class="s1">_cached_module_graph_._hooks = </span><span class="s3">None</span>
+        <span class="s1">_cached_module_graph_._hooks_pre_safe_import_module = </span><span class="s3">None</span>
+        <span class="s1">_cached_module_graph_._hooks_pre_find_module_path = </span><span class="s3">None</span>
+
+    <span class="s3">return </span><span class="s1">graph</span>
+
+
+<span class="s3">def </span><span class="s1">get_bootstrap_modules():</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Get TOC with the bootstrapping modules and their dependencies. 
+    :return: TOC with modules 
+    &quot;&quot;&quot;</span>
+    <span class="s0"># Import 'struct' modules to get real paths to module file names.</span>
+    <span class="s1">mod_struct = __import__(</span><span class="s5">'struct'</span><span class="s1">)</span>
+    <span class="s0"># Basic modules necessary for the bootstrap process.</span>
+    <span class="s1">loader_mods = TOC()</span>
+    <span class="s1">loaderpath = os.path.join(HOMEPATH</span><span class="s3">, </span><span class="s5">'PyInstaller'</span><span class="s3">, </span><span class="s5">'loader'</span><span class="s1">)</span>
+    <span class="s0"># On some platforms (Windows, Debian/Ubuntu) '_struct' and zlib modules are built-in modules (linked statically)</span>
+    <span class="s0"># and thus does not have attribute __file__. 'struct' module is required for reading Python bytecode from</span>
+    <span class="s0"># executable. 'zlib' is required to decompress this bytecode.</span>
+    <span class="s3">for </span><span class="s1">mod_name </span><span class="s3">in </span><span class="s1">[</span><span class="s5">'_struct'</span><span class="s3">, </span><span class="s5">'zlib'</span><span class="s1">]:</span>
+        <span class="s1">mod = __import__(mod_name)  </span><span class="s0"># C extension.</span>
+        <span class="s3">if </span><span class="s1">hasattr(mod</span><span class="s3">, </span><span class="s5">'__file__'</span><span class="s1">):</span>
+            <span class="s1">mod_file = os.path.abspath(mod.__file__)</span>
+            <span class="s3">if </span><span class="s1">os.path.basename(os.path.dirname(mod_file)) == </span><span class="s5">'lib-dynload'</span><span class="s1">:</span>
+                <span class="s0"># Divert extensions originating from python's lib-dynload directory, to match behavior of #5604.</span>
+                <span class="s1">mod_name = os.path.join(</span><span class="s5">'lib-dynload'</span><span class="s3">, </span><span class="s1">mod_name)</span>
+            <span class="s1">loader_mods.append((mod_name</span><span class="s3">, </span><span class="s1">mod_file</span><span class="s3">, </span><span class="s5">'EXTENSION'</span><span class="s1">))</span>
+    <span class="s0"># NOTE:These modules should be kept simple without any complicated dependencies.</span>
+    <span class="s1">loader_mods += [</span>
+        <span class="s1">(</span><span class="s5">'struct'</span><span class="s3">, </span><span class="s1">os.path.abspath(mod_struct.__file__)</span><span class="s3">, </span><span class="s5">'PYMODULE'</span><span class="s1">)</span><span class="s3">,</span>
+        <span class="s1">(</span><span class="s5">'pyimod01_os_path'</span><span class="s3">, </span><span class="s1">os.path.join(loaderpath</span><span class="s3">, </span><span class="s5">'pyimod01_os_path.pyc'</span><span class="s1">)</span><span class="s3">, </span><span class="s5">'PYMODULE'</span><span class="s1">)</span><span class="s3">,</span>
+        <span class="s1">(</span><span class="s5">'pyimod02_archive'</span><span class="s3">, </span><span class="s1">os.path.join(loaderpath</span><span class="s3">, </span><span class="s5">'pyimod02_archive.pyc'</span><span class="s1">)</span><span class="s3">, </span><span class="s5">'PYMODULE'</span><span class="s1">)</span><span class="s3">,</span>
+        <span class="s1">(</span><span class="s5">'pyimod03_importers'</span><span class="s3">, </span><span class="s1">os.path.join(loaderpath</span><span class="s3">, </span><span class="s5">'pyimod03_importers.pyc'</span><span class="s1">)</span><span class="s3">, </span><span class="s5">'PYMODULE'</span><span class="s1">)</span><span class="s3">,</span>
+        <span class="s1">(</span><span class="s5">'pyimod04_ctypes'</span><span class="s3">, </span><span class="s1">os.path.join(loaderpath</span><span class="s3">, </span><span class="s5">'pyimod04_ctypes.pyc'</span><span class="s1">)</span><span class="s3">, </span><span class="s5">'PYMODULE'</span><span class="s1">)</span><span class="s3">,</span>
+        <span class="s1">(</span><span class="s5">'pyiboot01_bootstrap'</span><span class="s3">, </span><span class="s1">os.path.join(loaderpath</span><span class="s3">, </span><span class="s5">'pyiboot01_bootstrap.py'</span><span class="s1">)</span><span class="s3">, </span><span class="s5">'PYSOURCE'</span><span class="s1">)</span><span class="s3">,</span>
+    <span class="s1">]</span>
+    <span class="s3">return </span><span class="s1">loader_mods</span>
+</pre>
+</body>
+</html>

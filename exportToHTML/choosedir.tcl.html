@@ -1,0 +1,325 @@
+<html>
+<head>
+<title>choosedir.tcl</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #a9b7c6;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+choosedir.tcl</font>
+</center></td></tr></table>
+<pre><span class="s0"># choosedir.tcl --</span>
+<span class="s0">#</span>
+<span class="s0">#	Choose directory dialog implementation for Unix/Mac.</span>
+<span class="s0">#</span>
+<span class="s0"># Copyright (c) 1998-2000 by Scriptics Corporation.</span>
+<span class="s0"># All rights reserved.</span>
+
+<span class="s0"># Make sure the tk::dialog namespace, in which all dialogs should live, exists</span>
+<span class="s0">namespace eval ::tk::dialog {}</span>
+<span class="s0">namespace eval ::tk::dialog::file {}</span>
+
+<span class="s0"># Make the chooseDir namespace inside the dialog namespace</span>
+<span class="s0">namespace eval ::tk::dialog::file::chooseDir {</span>
+    <span class="s0">namespace import -force ::tk::msgcat::*</span>
+<span class="s0">}</span>
+
+<span class="s0"># ::tk::dialog::file::chooseDir:: --</span>
+<span class="s0">#</span>
+<span class="s0">#	Implements the TK directory selection dialog.</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0">#	args		Options parsed by the procedure.</span>
+<span class="s0">#</span>
+<span class="s0">proc ::tk::dialog::file::chooseDir:: {args} {</span>
+    <span class="s0">variable ::tk::Priv</span>
+    <span class="s0">set dataName __tk_choosedir</span>
+    <span class="s0">upvar ::tk::dialog::file::$dataName data</span>
+    <span class="s0">Config $dataName $args</span>
+
+    <span class="s0">if {$data(-parent) eq &quot;.&quot;} {</span>
+        <span class="s0">set w .$dataName</span>
+    <span class="s0">} else {</span>
+        <span class="s0">set w $data(-parent).$dataName</span>
+    <span class="s0">}</span>
+
+    <span class="s0"># (re)create the dialog box if necessary</span>
+    <span class="s0">#</span>
+    <span class="s0">if {![winfo exists $w]} {</span>
+	<span class="s0">::tk::dialog::file::Create $w TkChooseDir</span>
+    <span class="s0">} elseif {[winfo class $w] ne &quot;TkChooseDir&quot;} {</span>
+	<span class="s0">destroy $w</span>
+	<span class="s0">::tk::dialog::file::Create $w TkChooseDir</span>
+    <span class="s0">} else {</span>
+	<span class="s0">set data(dirMenuBtn) $w.contents.f1.menu</span>
+	<span class="s0">set data(dirMenu) $w.contents.f1.menu.menu</span>
+	<span class="s0">set data(upBtn) $w.contents.f1.up</span>
+	<span class="s0">set data(icons) $w.contents.icons</span>
+	<span class="s0">set data(ent) $w.contents.f2.ent</span>
+	<span class="s0">set data(okBtn) $w.contents.f2.ok</span>
+	<span class="s0">set data(cancelBtn) $w.contents.f2.cancel</span>
+	<span class="s0">set data(hiddenBtn) $w.contents.f2.hidden</span>
+    <span class="s0">}</span>
+    <span class="s0">if {$::tk::dialog::file::showHiddenBtn} {</span>
+	<span class="s0">$data(hiddenBtn) configure -state normal</span>
+	<span class="s0">grid $data(hiddenBtn)</span>
+    <span class="s0">} else {</span>
+	<span class="s0">$data(hiddenBtn) configure -state disabled</span>
+	<span class="s0">grid remove $data(hiddenBtn)</span>
+    <span class="s0">}</span>
+
+    <span class="s0"># When using -mustexist, manage the OK button state for validity</span>
+    <span class="s0">$data(okBtn) configure -state normal</span>
+    <span class="s0">if {$data(-mustexist)} {</span>
+	<span class="s0">$data(ent) configure -validate key \</span>
+	    <span class="s0">-validatecommand [list ::tk::dialog::file::chooseDir::IsOK? $w %P]</span>
+    <span class="s0">} else {</span>
+	<span class="s0">$data(ent) configure -validate none</span>
+    <span class="s0">}</span>
+
+    <span class="s0"># Dialog boxes should be transient with respect to their parent,</span>
+    <span class="s0"># so that they will always stay on top of their parent window.  However,</span>
+    <span class="s0"># some window managers will create the window as withdrawn if the parent</span>
+    <span class="s0"># window is withdrawn or iconified.  Combined with the grab we put on the</span>
+    <span class="s0"># window, this can hang the entire application.  Therefore we only make</span>
+    <span class="s0"># the dialog transient if the parent is viewable.</span>
+
+    <span class="s0">if {[winfo viewable [winfo toplevel $data(-parent)]] } {</span>
+	<span class="s0">wm transient $w $data(-parent)</span>
+    <span class="s0">}</span>
+
+    <span class="s0">trace add variable data(selectPath) write \</span>
+	    <span class="s0">[list ::tk::dialog::file::SetPath $w]</span>
+    <span class="s0">$data(dirMenuBtn) configure \</span>
+	    <span class="s0">-textvariable ::tk::dialog::file::${dataName}(selectPath)</span>
+
+    <span class="s0">set data(filter) &quot;*&quot;</span>
+    <span class="s0">set data(previousEntryText) &quot;&quot;</span>
+    <span class="s0">::tk::dialog::file::UpdateWhenIdle $w</span>
+
+    <span class="s0"># Withdraw the window, then update all the geometry information</span>
+    <span class="s0"># so we know how big it wants to be, then center the window in the</span>
+    <span class="s0"># display (Motif style) and de-iconify it.</span>
+
+    <span class="s0">::tk::PlaceWindow $w widget $data(-parent)</span>
+    <span class="s0">wm title $w $data(-title)</span>
+
+    <span class="s0"># Set a grab and claim the focus too.</span>
+
+    <span class="s0">::tk::SetFocusGrab $w $data(ent)</span>
+    <span class="s0">$data(ent) delete 0 end</span>
+    <span class="s0">$data(ent) insert 0 $data(selectPath)</span>
+    <span class="s0">$data(ent) selection range 0 end</span>
+    <span class="s0">$data(ent) icursor end</span>
+
+    <span class="s0"># Wait for the user to respond, then restore the focus and</span>
+    <span class="s0"># return the index of the selected button.  Restore the focus</span>
+    <span class="s0"># before deleting the window, since otherwise the window manager</span>
+    <span class="s0"># may take the focus away so we can't redirect it.  Finally,</span>
+    <span class="s0"># restore any grab that was in effect.</span>
+
+    <span class="s0">vwait ::tk::Priv(selectFilePath)</span>
+
+    <span class="s0">::tk::RestoreFocusGrab $w $data(ent) withdraw</span>
+
+    <span class="s0"># Cleanup traces on selectPath variable</span>
+    <span class="s0">#</span>
+
+    <span class="s0">foreach trace [trace info variable data(selectPath)] {</span>
+	<span class="s0">trace remove variable data(selectPath) [lindex $trace 0] [lindex $trace 1]</span>
+    <span class="s0">}</span>
+    <span class="s0">$data(dirMenuBtn) configure -textvariable {}</span>
+
+    <span class="s0"># Return value to user</span>
+    <span class="s0">#</span>
+
+    <span class="s0">return $Priv(selectFilePath)</span>
+<span class="s0">}</span>
+
+<span class="s0"># ::tk::dialog::file::chooseDir::Config --</span>
+<span class="s0">#</span>
+<span class="s0">#	Configures the Tk choosedir dialog according to the argument list</span>
+<span class="s0">#</span>
+<span class="s0">proc ::tk::dialog::file::chooseDir::Config {dataName argList} {</span>
+    <span class="s0">upvar ::tk::dialog::file::$dataName data</span>
+
+    <span class="s0"># 0: Delete all variable that were set on data(selectPath) the</span>
+    <span class="s0"># last time the file dialog is used. The traces may cause troubles</span>
+    <span class="s0"># if the dialog is now used with a different -parent option.</span>
+    <span class="s0">#</span>
+    <span class="s0">foreach trace [trace info variable data(selectPath)] {</span>
+	<span class="s0">trace remove variable data(selectPath) [lindex $trace 0] [lindex $trace 1]</span>
+    <span class="s0">}</span>
+
+    <span class="s0"># 1: the configuration specs</span>
+    <span class="s0">#</span>
+    <span class="s0">set specs {</span>
+	<span class="s0">{-mustexist &quot;&quot; &quot;&quot; 0}</span>
+	<span class="s0">{-initialdir &quot;&quot; &quot;&quot; &quot;&quot;}</span>
+	<span class="s0">{-parent &quot;&quot; &quot;&quot; &quot;.&quot;}</span>
+	<span class="s0">{-title &quot;&quot; &quot;&quot; &quot;&quot;}</span>
+    <span class="s0">}</span>
+
+    <span class="s0"># 2: default values depending on the type of the dialog</span>
+    <span class="s0">#</span>
+    <span class="s0">if {![info exists data(selectPath)]} {</span>
+	<span class="s0"># first time the dialog has been popped up</span>
+	<span class="s0">set data(selectPath) [pwd]</span>
+    <span class="s0">}</span>
+
+    <span class="s0"># 3: parse the arguments</span>
+    <span class="s0">#</span>
+    <span class="s0">tclParseConfigSpec ::tk::dialog::file::$dataName $specs &quot;&quot; $argList</span>
+
+    <span class="s0">if {$data(-title) eq &quot;&quot;} {</span>
+	<span class="s0">set data(-title) &quot;[mc &quot;Choose Directory&quot;]&quot;</span>
+    <span class="s0">}</span>
+
+    <span class="s0"># Stub out the -multiple value for the dialog; it doesn't make sense for</span>
+    <span class="s0"># choose directory dialogs, but we have to have something there because we</span>
+    <span class="s0"># share so much code with the file dialogs.</span>
+    <span class="s0">set data(-multiple) 0</span>
+
+    <span class="s0"># 4: set the default directory and selection according to the -initial</span>
+    <span class="s0">#    settings</span>
+    <span class="s0">#</span>
+    <span class="s0">if {$data(-initialdir) ne &quot;&quot;} {</span>
+	<span class="s0"># Ensure that initialdir is an absolute path name.</span>
+	<span class="s0">if {[file isdirectory $data(-initialdir)]} {</span>
+	    <span class="s0">set old [pwd]</span>
+	    <span class="s0">cd $data(-initialdir)</span>
+	    <span class="s0">set data(selectPath) [pwd]</span>
+	    <span class="s0">cd $old</span>
+	<span class="s0">} else {</span>
+	    <span class="s0">set data(selectPath) [pwd]</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+
+    <span class="s0">if {![winfo exists $data(-parent)]} {</span>
+	<span class="s0">return -code error -errorcode [list TK LOOKUP WINDOW $data(-parent)] \</span>
+	    <span class="s0">&quot;bad window path name \&quot;$data(-parent)\&quot;&quot;</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+
+<span class="s0"># Gets called when user presses Return in the &quot;Selection&quot; entry or presses OK.</span>
+<span class="s0">#</span>
+<span class="s0">proc ::tk::dialog::file::chooseDir::OkCmd {w} {</span>
+    <span class="s0">upvar ::tk::dialog::file::[winfo name $w] data</span>
+
+    <span class="s0"># This is the brains behind selecting non-existant directories.  Here's</span>
+    <span class="s0"># the flowchart:</span>
+    <span class="s0"># 1.  If the icon list has a selection, join it with the current dir,</span>
+    <span class="s0">#     and return that value.</span>
+    <span class="s0"># 1a.  If the icon list does not have a selection ...</span>
+    <span class="s0"># 2.  If the entry is empty, do nothing.</span>
+    <span class="s0"># 3.  If the entry contains an invalid directory, then...</span>
+    <span class="s0"># 3a.   If the value is the same as last time through here, end dialog.</span>
+    <span class="s0"># 3b.   If the value is different than last time, save it and return.</span>
+    <span class="s0"># 4.  If entry contains a valid directory, then...</span>
+    <span class="s0"># 4a.   If the value is the same as the current directory, end dialog.</span>
+    <span class="s0"># 4b.   If the value is different from the current directory, change to</span>
+    <span class="s0">#       that directory.</span>
+
+    <span class="s0">set selection [$data(icons) selection get]</span>
+    <span class="s0">if {[llength $selection] != 0} {</span>
+	<span class="s0">set iconText [$data(icons) get [lindex $selection 0]]</span>
+	<span class="s0">set iconText [file join $data(selectPath) $iconText]</span>
+	<span class="s0">Done $w $iconText</span>
+    <span class="s0">} else {</span>
+	<span class="s0">set text [$data(ent) get]</span>
+	<span class="s0">if {$text eq &quot;&quot;} {</span>
+	    <span class="s0">return</span>
+	<span class="s0">}</span>
+	<span class="s0">set text [file join {*}[file split [string trim $text]]]</span>
+	<span class="s0">if {![file exists $text] || ![file isdirectory $text]} {</span>
+	    <span class="s0"># Entry contains an invalid directory.  If it's the same as the</span>
+	    <span class="s0"># last time they came through here, reset the saved value and end</span>
+	    <span class="s0"># the dialog.  Otherwise, save the value (so we can do this test</span>
+	    <span class="s0"># next time).</span>
+	    <span class="s0">if {$text eq $data(previousEntryText)} {</span>
+		<span class="s0">set data(previousEntryText) &quot;&quot;</span>
+		<span class="s0">Done $w $text</span>
+	    <span class="s0">} else {</span>
+		<span class="s0">set data(previousEntryText) $text</span>
+	    <span class="s0">}</span>
+	<span class="s0">} else {</span>
+	    <span class="s0"># Entry contains a valid directory.  If it is the same as the</span>
+	    <span class="s0"># current directory, end the dialog.  Otherwise, change to that</span>
+	    <span class="s0"># directory.</span>
+	    <span class="s0">if {$text eq $data(selectPath)} {</span>
+		<span class="s0">Done $w $text</span>
+	    <span class="s0">} else {</span>
+		<span class="s0">set data(selectPath) $text</span>
+	    <span class="s0">}</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+    <span class="s0">return</span>
+<span class="s0">}</span>
+
+<span class="s0"># Change state of OK button to match -mustexist correctness of entry</span>
+<span class="s0">#</span>
+<span class="s0">proc ::tk::dialog::file::chooseDir::IsOK? {w text} {</span>
+    <span class="s0">upvar ::tk::dialog::file::[winfo name $w] data</span>
+
+    <span class="s0">set ok [file isdirectory $text]</span>
+    <span class="s0">$data(okBtn) configure -state [expr {$ok ? &quot;normal&quot; : &quot;disabled&quot;}]</span>
+
+    <span class="s0"># always return 1</span>
+    <span class="s0">return 1</span>
+<span class="s0">}</span>
+
+<span class="s0">proc ::tk::dialog::file::chooseDir::DblClick {w} {</span>
+    <span class="s0">upvar ::tk::dialog::file::[winfo name $w] data</span>
+    <span class="s0">set selection [$data(icons) selection get]</span>
+    <span class="s0">if {[llength $selection] != 0} {</span>
+	<span class="s0">set filenameFragment [$data(icons) get [lindex $selection 0]]</span>
+	<span class="s0">set file $data(selectPath)</span>
+	<span class="s0">if {[file isdirectory $file]} {</span>
+	    <span class="s0">::tk::dialog::file::ListInvoke $w [list $filenameFragment]</span>
+	    <span class="s0">return</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+
+<span class="s0"># Gets called when user browses the IconList widget (dragging mouse, arrow</span>
+<span class="s0"># keys, etc)</span>
+<span class="s0">#</span>
+<span class="s0">proc ::tk::dialog::file::chooseDir::ListBrowse {w text} {</span>
+    <span class="s0">upvar ::tk::dialog::file::[winfo name $w] data</span>
+
+    <span class="s0">if {$text eq &quot;&quot;} {</span>
+	<span class="s0">return</span>
+    <span class="s0">}</span>
+
+    <span class="s0">set file [::tk::dialog::file::JoinFile $data(selectPath) $text]</span>
+    <span class="s0">$data(ent) delete 0 end</span>
+    <span class="s0">$data(ent) insert 0 $file</span>
+<span class="s0">}</span>
+
+<span class="s0"># ::tk::dialog::file::chooseDir::Done --</span>
+<span class="s0">#</span>
+<span class="s0">#	Gets called when user has input a valid filename.  Pops up a</span>
+<span class="s0">#	dialog box to confirm selection when necessary. Sets the</span>
+<span class="s0">#	Priv(selectFilePath) variable, which will break the &quot;vwait&quot;</span>
+<span class="s0">#	loop in tk_chooseDirectory and return the selected filename to the</span>
+<span class="s0">#	script that calls tk_getOpenFile or tk_getSaveFile</span>
+<span class="s0">#</span>
+<span class="s0">proc ::tk::dialog::file::chooseDir::Done {w {selectFilePath &quot;&quot;}} {</span>
+    <span class="s0">upvar ::tk::dialog::file::[winfo name $w] data</span>
+    <span class="s0">variable ::tk::Priv</span>
+
+    <span class="s0">if {$selectFilePath eq &quot;&quot;} {</span>
+	<span class="s0">set selectFilePath $data(selectPath)</span>
+    <span class="s0">}</span>
+    <span class="s0">if {$data(-mustexist) &amp;&amp; ![file isdirectory $selectFilePath]} {</span>
+	<span class="s0">return</span>
+    <span class="s0">}</span>
+    <span class="s0">set Priv(selectFilePath) $selectFilePath</span>
+<span class="s0">}</span>
+</pre>
+</body>
+</html>

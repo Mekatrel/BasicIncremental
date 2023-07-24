@@ -1,0 +1,273 @@
+<html>
+<head>
+<title>bytecode.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #629755; font-style: italic;}
+.s3 { color: #cc7832;}
+.s4 { color: #6a8759;}
+.s5 { color: #a5c261;}
+.s6 { color: #6897bb;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+bytecode.py</font>
+</center></td></tr></table>
+<pre><span class="s0"># -*- coding: utf-8 -*-</span>
+<span class="s2">&quot;&quot;&quot; 
+Tools for searching bytecode for key statements that indicate the need for additional resources, such as data files 
+and package metadata. 
+ 
+By *bytecode* I mean the ``code`` object given by ``compile()``, accessible from the ``__code__`` attribute of any 
+non-builtin function or, in PyInstallerLand, the ``PyiModuleGraph.node(&quot;some.module&quot;).code`` attribute. The best 
+guide for bytecode format I have found is the disassembler reference: https://docs.python.org/3/library/dis.html 
+ 
+This parser implementation aims to combine the flexibility and speed of regex with the clarity of the output of 
+``dis.dis(code)``. It has not achieved the 2nd, but C'est la vie... 
+ 
+The biggest clarity killer here is the ``EXTENDED_ARG`` opcode which can appear almost anywhere and therefore needs 
+to be tiptoed around at every step. If this code needs to expand significantly, I would recommend an upgrade to a 
+regex-based grammar parsing library such as Reparse. This way, little steps like unpacking ``EXTENDED_ARGS`` can be 
+defined once then simply referenced forming a nice hierarchy rather than copied everywhere its needed. 
+&quot;&quot;&quot;</span>
+
+<span class="s3">import </span><span class="s1">dis</span>
+<span class="s3">import </span><span class="s1">re</span>
+<span class="s3">from </span><span class="s1">types </span><span class="s3">import </span><span class="s1">CodeType</span>
+<span class="s3">from </span><span class="s1">typing </span><span class="s3">import </span><span class="s1">Pattern</span>
+
+
+<span class="s3">def </span><span class="s1">_instruction_to_regex(x: str):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Get a regex-escaped opcode byte from its human readable name. 
+    &quot;&quot;&quot;</span>
+    <span class="s3">if </span><span class="s1">x </span><span class="s3">not in </span><span class="s1">dis.opname:  </span><span class="s0"># pragma: no cover</span>
+        <span class="s0"># These opcodes are available only in Python &gt;=3.7. For our purposes, these aliases will do.</span>
+        <span class="s3">if </span><span class="s1">x == </span><span class="s4">&quot;LOAD_METHOD&quot;</span><span class="s1">:</span>
+            <span class="s1">x = </span><span class="s4">&quot;LOAD_ATTR&quot;</span>
+        <span class="s3">elif </span><span class="s1">x == </span><span class="s4">&quot;CALL_METHOD&quot;</span><span class="s1">:</span>
+            <span class="s1">x = </span><span class="s4">&quot;CALL_FUNCTION&quot;</span>
+    <span class="s3">return </span><span class="s1">re.escape(bytes([dis.opmap[x]]))</span>
+
+
+<span class="s3">def </span><span class="s1">bytecode_regex(pattern: bytes</span><span class="s3">, </span><span class="s1">flags=re.VERBOSE | re.DOTALL):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    A regex-powered Python bytecode matcher. 
+ 
+    ``bytecode_regex`` provides a very thin wrapper around :func:`re.compile`. 
+ 
+      * Any opcode names wrapped in backticks are substituted for their corresponding opcode bytes. 
+      * Patterns are compiled in VERBOSE mode by default so that whitespace and comments may be used. 
+ 
+    This aims to mirror the output of :func:`dis.dis`, which is far more readable than looking at raw byte strings. 
+    &quot;&quot;&quot;</span>
+    <span class="s3">assert </span><span class="s1">isinstance(pattern</span><span class="s3">, </span><span class="s1">bytes)</span>
+
+    <span class="s0"># Replace anything wrapped in backticks with regex-escaped opcodes.</span>
+    <span class="s1">pattern = re.sub(</span>
+        <span class="s5">rb&quot;`(\w+)`&quot;</span><span class="s3">,</span>
+        <span class="s3">lambda </span><span class="s1">m: _instruction_to_regex(m[</span><span class="s6">1</span><span class="s1">].decode())</span><span class="s3">,</span>
+        <span class="s1">pattern</span><span class="s3">,</span>
+    <span class="s1">)</span>
+    <span class="s3">return </span><span class="s1">re.compile(pattern</span><span class="s3">, </span><span class="s1">flags=flags)</span>
+
+
+<span class="s3">def </span><span class="s1">finditer(pattern: Pattern</span><span class="s3">, </span><span class="s1">string):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Call ``pattern.finditer(string)``, but remove any matches beginning on an odd byte (i.e., matches where 
+    match.start() is not a multiple of 2). 
+ 
+    This should be used to avoid false positive matches where a bytecode pair's argument is mistaken for an opcode. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">matches = pattern.finditer(string)</span>
+    <span class="s3">while True</span><span class="s1">:</span>
+        <span class="s3">for </span><span class="s1">match </span><span class="s3">in </span><span class="s1">matches:</span>
+            <span class="s3">if </span><span class="s1">match.start() % </span><span class="s6">2 </span><span class="s1">== </span><span class="s6">0</span><span class="s1">:</span>
+                <span class="s0"># All is good. This match starts on an OPCODE.</span>
+                <span class="s3">yield </span><span class="s1">match</span>
+            <span class="s3">else</span><span class="s1">:</span>
+                <span class="s0"># This match has started on an odd byte, meaning that it is a false positive and should be skipped.</span>
+                <span class="s0"># There is a very slim chance that a genuine match overlaps this one and, because re.finditer() does not</span>
+                <span class="s0"># allow overlapping matches, it would be lost. To avoid that, restart the regex scan, starting at the</span>
+                <span class="s0"># next even byte.</span>
+                <span class="s1">matches = pattern.finditer(string</span><span class="s3">, </span><span class="s1">match.start() + </span><span class="s6">1</span><span class="s1">)</span>
+                <span class="s3">break</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s3">break</span>
+
+
+<span class="s0"># language=PythonVerboseRegExp</span>
+<span class="s1">_call_function_bytecode = bytecode_regex(</span>
+    <span class="s5">rb&quot;&quot;&quot; 
+    # Matches `global_function('some', 'constant', 'arguments')`. 
+ 
+    # Load the global function. In code with &gt;256 of names, this may require extended name references. 
+    ((?:`EXTENDED_ARG`.)* 
+     (?:`LOAD_NAME`|`LOAD_GLOBAL`|`LOAD_FAST`).) 
+ 
+    # For foo.bar.whizz(), the above is the 'foo', below is the 'bar.whizz'. 
+    ((?:(?:`EXTENDED_ARG`.)* 
+     (?:`LOAD_METHOD`|`LOAD_ATTR`).)*) 
+ 
+    # Load however many arguments it takes. These (for now) must all be constants. 
+    # Again, code with &gt;256 constants may need extended enumeration. 
+    ((?:(?:`EXTENDED_ARG`.)* 
+     `LOAD_CONST`.)*) 
+ 
+    # Call the function. The parameter is the argument count (which may also be &gt;256) if CALL_FUNCTION or CALL_METHOD 
+    # are used. For CALL_FUNCTION_EX, the parameter are flags. 
+    ((?:`EXTENDED_ARG`.)* 
+     (?:`CALL_FUNCTION`|`CALL_METHOD`|`CALL_FUNCTION_EX`).) 
+&quot;&quot;&quot;</span>
+<span class="s1">)</span>
+
+<span class="s0"># language=PythonVerboseRegExp</span>
+<span class="s1">_extended_arg_bytecode = bytecode_regex(</span>
+    <span class="s5">rb&quot;&quot;&quot;( 
+    # Arbitrary number of EXTENDED_ARG pairs. 
+    (?:`EXTENDED_ARG`.)* 
+ 
+    # Followed by some other instruction (usually a LOAD). 
+    [^`EXTENDED_ARG`]. 
+)&quot;&quot;&quot;</span>
+<span class="s1">)</span>
+
+
+<span class="s3">def </span><span class="s1">extended_arguments(extended_args: bytes):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Unpack the (extended) integer used to reference names or constants. 
+ 
+    The input should be a bytecode snippet of the following form:: 
+ 
+        EXTENDED_ARG    ?      # Repeated 0-4 times. 
+        LOAD_xxx        ?      # Any of LOAD_NAME/LOAD_CONST/LOAD_METHOD/... 
+ 
+    Each ? byte combined together gives the number we want. 
+    &quot;&quot;&quot;</span>
+    <span class="s3">return </span><span class="s1">int.from_bytes(extended_args[</span><span class="s6">1</span><span class="s1">::</span><span class="s6">2</span><span class="s1">]</span><span class="s3">, </span><span class="s4">&quot;big&quot;</span><span class="s1">)</span>
+
+
+<span class="s3">def </span><span class="s1">load(raw: bytes</span><span class="s3">, </span><span class="s1">code: CodeType) -&gt; str:</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Parse an (extended) LOAD_xxx instruction. 
+    &quot;&quot;&quot;</span>
+    <span class="s0"># Get the enumeration.</span>
+    <span class="s1">index = extended_arguments(raw)</span>
+
+    <span class="s0"># Work out what that enumeration was for (constant/local var/global var).</span>
+
+    <span class="s0"># If the last instruction byte is a LOAD_FAST:</span>
+    <span class="s3">if </span><span class="s1">raw[-</span><span class="s6">2</span><span class="s1">] == dis.opmap[</span><span class="s4">&quot;LOAD_FAST&quot;</span><span class="s1">]:</span>
+        <span class="s0"># Then this is a local variable.</span>
+        <span class="s3">return </span><span class="s1">code.co_varnames[index]</span>
+    <span class="s0"># Or if it is a LOAD_CONST:</span>
+    <span class="s3">if </span><span class="s1">raw[-</span><span class="s6">2</span><span class="s1">] == dis.opmap[</span><span class="s4">&quot;LOAD_CONST&quot;</span><span class="s1">]:</span>
+        <span class="s0"># Then this is a literal.</span>
+        <span class="s3">return </span><span class="s1">code.co_consts[index]</span>
+    <span class="s0"># Otherwise, it is a global name.</span>
+    <span class="s3">return </span><span class="s1">code.co_names[index]</span>
+
+
+<span class="s3">def </span><span class="s1">loads(raw: bytes</span><span class="s3">, </span><span class="s1">code: CodeType) -&gt; list:</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Parse multiple consecutive LOAD_xxx instructions. Or load() in a for loop. 
+ 
+    May be used to unpack a function's parameters or nested attributes ``(foo.bar.pop.whack)``. 
+    &quot;&quot;&quot;</span>
+    <span class="s3">return </span><span class="s1">[load(i</span><span class="s3">, </span><span class="s1">code) </span><span class="s3">for </span><span class="s1">i </span><span class="s3">in </span><span class="s1">_extended_arg_bytecode.findall(raw)]</span>
+
+
+<span class="s3">def </span><span class="s1">function_calls(code: CodeType) -&gt; list:</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Scan a code object for all function calls on constant arguments. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">match: re.Match</span>
+    <span class="s1">out = []</span>
+
+    <span class="s3">for </span><span class="s1">match </span><span class="s3">in </span><span class="s1">finditer(_call_function_bytecode</span><span class="s3">, </span><span class="s1">code.co_code):</span>
+        <span class="s1">function_root</span><span class="s3">, </span><span class="s1">methods</span><span class="s3">, </span><span class="s1">args</span><span class="s3">, </span><span class="s1">function_call = match.groups()</span>
+
+        <span class="s0"># For foo():</span>
+        <span class="s0">#   `function_root` contains 'foo' and `methods` is empty.</span>
+        <span class="s0"># For foo.bar.whizz():</span>
+        <span class="s0">#   `function_root` contains 'foo' and `methods` contains the rest.</span>
+        <span class="s1">function_root = load(function_root</span><span class="s3">, </span><span class="s1">code)</span>
+        <span class="s1">methods = loads(methods</span><span class="s3">, </span><span class="s1">code)</span>
+        <span class="s1">function = </span><span class="s4">&quot;.&quot;</span><span class="s1">.join([function_root] + methods)</span>
+
+        <span class="s1">args = loads(args</span><span class="s3">, </span><span class="s1">code)</span>
+        <span class="s3">if </span><span class="s1">function_call[</span><span class="s6">0</span><span class="s1">] == dis.opmap[</span><span class="s4">'CALL_FUNCTION_EX'</span><span class="s1">]:</span>
+            <span class="s1">flags = extended_arguments(function_call)</span>
+            <span class="s3">if </span><span class="s1">flags != </span><span class="s6">0</span><span class="s1">:</span>
+                <span class="s0"># Keyword arguments present. Unhandled at the moment.</span>
+                <span class="s3">continue</span>
+            <span class="s0"># In calls with const arguments, args contains a single</span>
+            <span class="s0"># tuple with all values.</span>
+            <span class="s3">if </span><span class="s1">len(args) != </span><span class="s6">1 </span><span class="s3">or not </span><span class="s1">isinstance(args[</span><span class="s6">0</span><span class="s1">]</span><span class="s3">, </span><span class="s1">tuple):</span>
+                <span class="s3">continue</span>
+            <span class="s1">args = list(args[</span><span class="s6">0</span><span class="s1">])</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s1">arg_count = extended_arguments(function_call)</span>
+
+            <span class="s3">if </span><span class="s1">arg_count != len(args):</span>
+                <span class="s0"># This happens if there are variable or keyword arguments. Bail out in either case.</span>
+                <span class="s3">continue</span>
+
+        <span class="s1">out.append((function</span><span class="s3">, </span><span class="s1">args))</span>
+
+    <span class="s3">return </span><span class="s1">out</span>
+
+
+<span class="s3">def </span><span class="s1">search_recursively(search: callable</span><span class="s3">, </span><span class="s1">code: CodeType</span><span class="s3">, </span><span class="s1">_memo=</span><span class="s3">None</span><span class="s1">) -&gt; dict:</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Apply a search function to a code object, recursing into child code objects (function definitions). 
+    &quot;&quot;&quot;</span>
+    <span class="s3">if </span><span class="s1">_memo </span><span class="s3">is None</span><span class="s1">:</span>
+        <span class="s1">_memo = {}</span>
+    <span class="s3">if </span><span class="s1">code </span><span class="s3">not in </span><span class="s1">_memo:</span>
+        <span class="s1">_memo[code] = search(code)</span>
+        <span class="s3">for </span><span class="s1">const </span><span class="s3">in </span><span class="s1">code.co_consts:</span>
+            <span class="s3">if </span><span class="s1">isinstance(const</span><span class="s3">, </span><span class="s1">CodeType):</span>
+                <span class="s1">search_recursively(search</span><span class="s3">, </span><span class="s1">const</span><span class="s3">, </span><span class="s1">_memo)</span>
+    <span class="s3">return </span><span class="s1">_memo</span>
+
+
+<span class="s3">def </span><span class="s1">recursive_function_calls(code: CodeType) -&gt; dict:</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Scan a code object for function calls on constant arguments, recursing into function definitions and bodies of 
+    comprehension loops. 
+    &quot;&quot;&quot;</span>
+    <span class="s3">return </span><span class="s1">search_recursively(function_calls</span><span class="s3">, </span><span class="s1">code)</span>
+
+
+<span class="s3">def </span><span class="s1">any_alias(full_name: str):</span>
+    <span class="s2">&quot;&quot;&quot;List possible aliases of a fully qualified Python name. 
+ 
+        &gt;&gt;&gt; list(any_alias(&quot;foo.bar.wizz&quot;)) 
+        ['foo.bar.wizz', 'bar.wizz', 'wizz'] 
+ 
+    This crudely allows us to capture uses of wizz() under any of 
+    :: 
+        import foo 
+        foo.bar.wizz() 
+    :: 
+        from foo import bar 
+        bar.wizz() 
+    :: 
+        from foo.bar import wizz 
+        wizz() 
+ 
+    However, it will fail for any form of aliases and quite likely find false matches. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">parts = full_name.split(</span><span class="s4">'.'</span><span class="s1">)</span>
+    <span class="s3">while </span><span class="s1">parts:</span>
+        <span class="s3">yield </span><span class="s4">&quot;.&quot;</span><span class="s1">.join(parts)</span>
+        <span class="s1">parts = parts[</span><span class="s6">1</span><span class="s1">:]</span>
+</pre>
+</body>
+</html>

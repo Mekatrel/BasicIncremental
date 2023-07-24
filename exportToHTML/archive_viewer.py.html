@@ -1,0 +1,294 @@
+<html>
+<head>
+<title>archive_viewer.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #629755; font-style: italic;}
+.s3 { color: #cc7832;}
+.s4 { color: #6a8759;}
+.s5 { color: #6897bb;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+archive_viewer.py</font>
+</center></td></tr></table>
+<pre><span class="s0">#-----------------------------------------------------------------------------</span>
+<span class="s0"># Copyright (c) 2013-2021, PyInstaller Development Team.</span>
+<span class="s0">#</span>
+<span class="s0"># Distributed under the terms of the GNU General Public License (version 2</span>
+<span class="s0"># or later) with exception for distributing the bootloader.</span>
+<span class="s0">#</span>
+<span class="s0"># The full license is in the file COPYING.txt, distributed with this software.</span>
+<span class="s0">#</span>
+<span class="s0"># SPDX-License-Identifier: (GPL-2.0-or-later WITH Bootloader-exception)</span>
+<span class="s0">#-----------------------------------------------------------------------------</span>
+<span class="s2">&quot;&quot;&quot; 
+Viewer for archives packaged by archive.py. 
+&quot;&quot;&quot;</span>
+
+<span class="s3">import </span><span class="s1">argparse</span>
+<span class="s3">import </span><span class="s1">os</span>
+<span class="s3">import </span><span class="s1">pprint</span>
+<span class="s3">import </span><span class="s1">sys</span>
+<span class="s3">import </span><span class="s1">tempfile</span>
+<span class="s3">import </span><span class="s1">zlib</span>
+
+<span class="s3">import </span><span class="s1">PyInstaller.log</span>
+<span class="s3">from </span><span class="s1">PyInstaller.archive.readers </span><span class="s3">import </span><span class="s1">CArchiveReader</span><span class="s3">, </span><span class="s1">NotAnArchiveError</span>
+<span class="s3">from </span><span class="s1">PyInstaller.compat </span><span class="s3">import </span><span class="s1">stdin_input</span>
+<span class="s3">from </span><span class="s1">PyInstaller.loader </span><span class="s3">import </span><span class="s1">pyimod02_archive</span>
+
+<span class="s1">stack = []</span>
+<span class="s1">cleanup = []</span>
+
+
+<span class="s3">def </span><span class="s1">main(name</span><span class="s3">, </span><span class="s1">brief</span><span class="s3">, </span><span class="s1">debug</span><span class="s3">, </span><span class="s1">rec_debug</span><span class="s3">, </span><span class="s1">**unused_options):</span>
+    <span class="s3">global </span><span class="s1">stack</span>
+
+    <span class="s3">if not </span><span class="s1">os.path.isfile(name):</span>
+        <span class="s1">print(name</span><span class="s3">, </span><span class="s4">&quot;is an invalid file name!&quot;</span><span class="s3">, </span><span class="s1">file=sys.stderr)</span>
+        <span class="s3">return </span><span class="s5">1</span>
+
+    <span class="s1">arch = get_archive(name)</span>
+    <span class="s1">stack.append((name</span><span class="s3">, </span><span class="s1">arch))</span>
+    <span class="s3">if </span><span class="s1">debug </span><span class="s3">or </span><span class="s1">brief:</span>
+        <span class="s1">show_log(arch</span><span class="s3">, </span><span class="s1">rec_debug</span><span class="s3">, </span><span class="s1">brief)</span>
+        <span class="s3">raise </span><span class="s1">SystemExit(</span><span class="s5">0</span><span class="s1">)</span>
+    <span class="s3">else</span><span class="s1">:</span>
+        <span class="s1">show(name</span><span class="s3">, </span><span class="s1">arch)</span>
+
+    <span class="s3">while </span><span class="s5">1</span><span class="s1">:</span>
+        <span class="s3">try</span><span class="s1">:</span>
+            <span class="s1">toks = stdin_input(</span><span class="s4">'? '</span><span class="s1">).split(</span><span class="s3">None, </span><span class="s5">1</span><span class="s1">)</span>
+        <span class="s3">except </span><span class="s1">EOFError:</span>
+            <span class="s0"># Ctrl-D</span>
+            <span class="s1">print(file=sys.stderr)  </span><span class="s0"># Clear line.</span>
+            <span class="s3">break</span>
+        <span class="s3">if not </span><span class="s1">toks:</span>
+            <span class="s1">usage()</span>
+            <span class="s3">continue</span>
+        <span class="s3">if </span><span class="s1">len(toks) == </span><span class="s5">1</span><span class="s1">:</span>
+            <span class="s1">cmd = toks[</span><span class="s5">0</span><span class="s1">]</span>
+            <span class="s1">arg = </span><span class="s4">''</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s1">cmd</span><span class="s3">, </span><span class="s1">arg = toks</span>
+        <span class="s1">cmd = cmd.upper()</span>
+        <span class="s3">if </span><span class="s1">cmd == </span><span class="s4">'U'</span><span class="s1">:</span>
+            <span class="s3">if </span><span class="s1">len(stack) &gt; </span><span class="s5">1</span><span class="s1">:</span>
+                <span class="s1">arch = stack[-</span><span class="s5">1</span><span class="s1">][</span><span class="s5">1</span><span class="s1">]</span>
+                <span class="s3">del </span><span class="s1">stack[-</span><span class="s5">1</span><span class="s1">]</span>
+            <span class="s1">name</span><span class="s3">, </span><span class="s1">arch = stack[-</span><span class="s5">1</span><span class="s1">]</span>
+            <span class="s1">show(name</span><span class="s3">, </span><span class="s1">arch)</span>
+        <span class="s3">elif </span><span class="s1">cmd == </span><span class="s4">'O'</span><span class="s1">:</span>
+            <span class="s3">if not </span><span class="s1">arg:</span>
+                <span class="s1">arg = stdin_input(</span><span class="s4">'open name? '</span><span class="s1">)</span>
+            <span class="s1">arg = arg.strip()</span>
+            <span class="s3">try</span><span class="s1">:</span>
+                <span class="s1">arch = get_archive(arg)</span>
+            <span class="s3">except </span><span class="s1">NotAnArchiveError </span><span class="s3">as </span><span class="s1">e:</span>
+                <span class="s1">print(e</span><span class="s3">, </span><span class="s1">file=sys.stderr)</span>
+                <span class="s3">continue</span>
+            <span class="s3">if </span><span class="s1">arch </span><span class="s3">is None</span><span class="s1">:</span>
+                <span class="s1">print(arg</span><span class="s3">, </span><span class="s4">&quot;not found&quot;</span><span class="s3">, </span><span class="s1">file=sys.stderr)</span>
+                <span class="s3">continue</span>
+            <span class="s1">stack.append((arg</span><span class="s3">, </span><span class="s1">arch))</span>
+            <span class="s1">show(arg</span><span class="s3">, </span><span class="s1">arch)</span>
+        <span class="s3">elif </span><span class="s1">cmd == </span><span class="s4">'X'</span><span class="s1">:</span>
+            <span class="s3">if not </span><span class="s1">arg:</span>
+                <span class="s1">arg = stdin_input(</span><span class="s4">'extract name? '</span><span class="s1">)</span>
+            <span class="s1">arg = arg.strip()</span>
+            <span class="s1">data = get_data(arg</span><span class="s3">, </span><span class="s1">arch)</span>
+            <span class="s3">if </span><span class="s1">data </span><span class="s3">is None</span><span class="s1">:</span>
+                <span class="s1">print(</span><span class="s4">&quot;Not found&quot;</span><span class="s3">, </span><span class="s1">file=sys.stderr)</span>
+                <span class="s3">continue</span>
+            <span class="s1">filename = stdin_input(</span><span class="s4">'to filename? '</span><span class="s1">)</span>
+            <span class="s3">if not </span><span class="s1">filename:</span>
+                <span class="s1">print(repr(data))</span>
+            <span class="s3">else</span><span class="s1">:</span>
+                <span class="s3">with </span><span class="s1">open(filename</span><span class="s3">, </span><span class="s4">'wb'</span><span class="s1">) </span><span class="s3">as </span><span class="s1">fp:</span>
+                    <span class="s1">fp.write(data)</span>
+        <span class="s3">elif </span><span class="s1">cmd == </span><span class="s4">'Q'</span><span class="s1">:</span>
+            <span class="s3">break</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s1">usage()</span>
+    <span class="s1">do_cleanup()</span>
+
+
+<span class="s3">def </span><span class="s1">do_cleanup():</span>
+    <span class="s3">global </span><span class="s1">stack</span><span class="s3">, </span><span class="s1">cleanup</span>
+    <span class="s1">stack = []</span>
+    <span class="s3">for </span><span class="s1">filename </span><span class="s3">in </span><span class="s1">cleanup:</span>
+        <span class="s3">try</span><span class="s1">:</span>
+            <span class="s1">os.remove(filename)</span>
+        <span class="s3">except </span><span class="s1">Exception </span><span class="s3">as </span><span class="s1">e:</span>
+            <span class="s1">print(</span><span class="s4">&quot;could not delete&quot;</span><span class="s3">, </span><span class="s1">filename</span><span class="s3">, </span><span class="s1">e.args</span><span class="s3">, </span><span class="s1">file=sys.stderr)</span>
+    <span class="s1">cleanup = []</span>
+
+
+<span class="s3">def </span><span class="s1">usage():</span>
+    <span class="s1">print(</span><span class="s4">&quot;U: go up one level&quot;</span><span class="s3">, </span><span class="s1">file=sys.stderr)</span>
+    <span class="s1">print(</span><span class="s4">&quot;O &lt;name&gt;: open embedded archive name&quot;</span><span class="s3">, </span><span class="s1">file=sys.stderr)</span>
+    <span class="s1">print(</span><span class="s4">&quot;X &lt;name&gt;: extract name&quot;</span><span class="s3">, </span><span class="s1">file=sys.stderr)</span>
+    <span class="s1">print(</span><span class="s4">&quot;Q: quit&quot;</span><span class="s3">, </span><span class="s1">file=sys.stderr)</span>
+
+
+<span class="s3">def </span><span class="s1">get_archive(name):</span>
+    <span class="s3">if not </span><span class="s1">stack:</span>
+        <span class="s3">if </span><span class="s1">name[-</span><span class="s5">4</span><span class="s1">:].lower() == </span><span class="s4">'.pyz'</span><span class="s1">:</span>
+            <span class="s3">return </span><span class="s1">ZlibArchive(name)</span>
+        <span class="s3">return </span><span class="s1">CArchiveReader(name)</span>
+    <span class="s1">parent = stack[-</span><span class="s5">1</span><span class="s1">][</span><span class="s5">1</span><span class="s1">]</span>
+    <span class="s3">try</span><span class="s1">:</span>
+        <span class="s3">return </span><span class="s1">parent.openEmbedded(name)</span>
+    <span class="s3">except </span><span class="s1">KeyError:</span>
+        <span class="s3">return None</span>
+    <span class="s3">except </span><span class="s1">(ValueError</span><span class="s3">, </span><span class="s1">RuntimeError):</span>
+        <span class="s1">ndx = parent.toc.find(name)</span>
+        <span class="s1">dpos</span><span class="s3">, </span><span class="s1">dlen</span><span class="s3">, </span><span class="s1">ulen</span><span class="s3">, </span><span class="s1">flag</span><span class="s3">, </span><span class="s1">typcd</span><span class="s3">, </span><span class="s1">name = parent.toc[ndx]</span>
+        <span class="s1">x</span><span class="s3">, </span><span class="s1">data = parent.extract(ndx)</span>
+        <span class="s1">tempfilename = tempfile.mktemp()</span>
+        <span class="s1">cleanup.append(tempfilename)</span>
+        <span class="s3">with </span><span class="s1">open(tempfilename</span><span class="s3">, </span><span class="s4">'wb'</span><span class="s1">) </span><span class="s3">as </span><span class="s1">fp:</span>
+            <span class="s1">fp.write(data)</span>
+        <span class="s3">if </span><span class="s1">typcd == </span><span class="s4">'z'</span><span class="s1">:</span>
+            <span class="s3">return </span><span class="s1">ZlibArchive(tempfilename)</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s3">return </span><span class="s1">CArchiveReader(tempfilename)</span>
+
+
+<span class="s3">def </span><span class="s1">get_data(name</span><span class="s3">, </span><span class="s1">arch):</span>
+    <span class="s3">if </span><span class="s1">isinstance(arch.toc</span><span class="s3">, </span><span class="s1">dict):</span>
+        <span class="s1">(ispkg</span><span class="s3">, </span><span class="s1">pos</span><span class="s3">, </span><span class="s1">length) = arch.toc.get(name</span><span class="s3">, </span><span class="s1">(</span><span class="s5">0</span><span class="s3">, None, </span><span class="s5">0</span><span class="s1">))</span>
+        <span class="s3">if </span><span class="s1">pos </span><span class="s3">is None</span><span class="s1">:</span>
+            <span class="s3">return None</span>
+        <span class="s3">with </span><span class="s1">arch.lib:</span>
+            <span class="s1">arch.lib.seek(arch.start + pos)</span>
+            <span class="s3">return </span><span class="s1">zlib.decompress(arch.lib.read(length))</span>
+    <span class="s1">ndx = arch.toc.find(name)</span>
+    <span class="s1">dpos</span><span class="s3">, </span><span class="s1">dlen</span><span class="s3">, </span><span class="s1">ulen</span><span class="s3">, </span><span class="s1">flag</span><span class="s3">, </span><span class="s1">typcd</span><span class="s3">, </span><span class="s1">name = arch.toc[ndx]</span>
+    <span class="s1">x</span><span class="s3">, </span><span class="s1">data = arch.extract(ndx)</span>
+    <span class="s3">return </span><span class="s1">data</span>
+
+
+<span class="s3">def </span><span class="s1">show(name</span><span class="s3">, </span><span class="s1">arch):</span>
+    <span class="s3">if </span><span class="s1">isinstance(arch.toc</span><span class="s3">, </span><span class="s1">dict):</span>
+        <span class="s1">print(</span><span class="s4">&quot; Name: (ispkg, pos, len)&quot;</span><span class="s1">)</span>
+        <span class="s1">toc = arch.toc</span>
+    <span class="s3">else</span><span class="s1">:</span>
+        <span class="s1">print(</span><span class="s4">&quot; pos, length, uncompressed, iscompressed, type, name&quot;</span><span class="s1">)</span>
+        <span class="s1">toc = arch.toc.data</span>
+    <span class="s1">pprint.pprint(toc)</span>
+
+
+<span class="s3">def </span><span class="s1">get_content(arch</span><span class="s3">, </span><span class="s1">recursive</span><span class="s3">, </span><span class="s1">brief</span><span class="s3">, </span><span class="s1">output):</span>
+    <span class="s3">if </span><span class="s1">isinstance(arch.toc</span><span class="s3">, </span><span class="s1">dict):</span>
+        <span class="s1">toc = arch.toc</span>
+        <span class="s3">if </span><span class="s1">brief:</span>
+            <span class="s3">for </span><span class="s1">name</span><span class="s3">, </span><span class="s1">_ </span><span class="s3">in </span><span class="s1">toc.items():</span>
+                <span class="s1">output.append(name)</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s1">output.append(toc)</span>
+    <span class="s3">else</span><span class="s1">:</span>
+        <span class="s1">toc = arch.toc.data</span>
+        <span class="s3">for </span><span class="s1">el </span><span class="s3">in </span><span class="s1">toc:</span>
+            <span class="s3">if </span><span class="s1">brief:</span>
+                <span class="s1">output.append(el[</span><span class="s5">5</span><span class="s1">])</span>
+            <span class="s3">else</span><span class="s1">:</span>
+                <span class="s1">output.append(el)</span>
+            <span class="s3">if </span><span class="s1">recursive:</span>
+                <span class="s3">if </span><span class="s1">el[</span><span class="s5">4</span><span class="s1">] </span><span class="s3">in </span><span class="s1">(</span><span class="s4">'z'</span><span class="s3">, </span><span class="s4">'a'</span><span class="s1">):</span>
+                    <span class="s1">get_content(get_archive(el[</span><span class="s5">5</span><span class="s1">])</span><span class="s3">, </span><span class="s1">recursive</span><span class="s3">, </span><span class="s1">brief</span><span class="s3">, </span><span class="s1">output)</span>
+                    <span class="s1">stack.pop()</span>
+
+
+<span class="s3">def </span><span class="s1">show_log(arch</span><span class="s3">, </span><span class="s1">recursive</span><span class="s3">, </span><span class="s1">brief):</span>
+    <span class="s1">output = []</span>
+    <span class="s1">get_content(arch</span><span class="s3">, </span><span class="s1">recursive</span><span class="s3">, </span><span class="s1">brief</span><span class="s3">, </span><span class="s1">output)</span>
+    <span class="s0"># first print all TOCs</span>
+    <span class="s3">for </span><span class="s1">out </span><span class="s3">in </span><span class="s1">output:</span>
+        <span class="s3">if </span><span class="s1">isinstance(out</span><span class="s3">, </span><span class="s1">dict):</span>
+            <span class="s1">pprint.pprint(out)</span>
+    <span class="s0"># then print the other entries</span>
+    <span class="s1">pprint.pprint([out </span><span class="s3">for </span><span class="s1">out </span><span class="s3">in </span><span class="s1">output </span><span class="s3">if not </span><span class="s1">isinstance(out</span><span class="s3">, </span><span class="s1">dict)])</span>
+
+
+<span class="s3">def </span><span class="s1">get_archive_content(filename):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Get a list of the (recursive) content of archive `filename`. 
+ 
+    This function is primary meant to be used by runtests. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">archive = get_archive(filename)</span>
+    <span class="s1">stack.append((filename</span><span class="s3">, </span><span class="s1">archive))</span>
+    <span class="s1">output = []</span>
+    <span class="s1">get_content(archive</span><span class="s3">, </span><span class="s1">recursive=</span><span class="s3">True, </span><span class="s1">brief=</span><span class="s3">True, </span><span class="s1">output=output)</span>
+    <span class="s1">do_cleanup()</span>
+    <span class="s3">return </span><span class="s1">output</span>
+
+
+<span class="s3">class </span><span class="s1">ZlibArchive(pyimod02_archive.ZlibArchiveReader):</span>
+    <span class="s3">def </span><span class="s1">checkmagic(self):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Overridable. 
+        Check to see if the file object self.lib actually has a file we understand. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">self.lib.seek(self.start)  </span><span class="s0"># default - magic is at start of file.</span>
+        <span class="s3">if </span><span class="s1">self.lib.read(len(self.MAGIC)) != self.MAGIC:</span>
+            <span class="s3">raise </span><span class="s1">RuntimeError(</span><span class="s4">&quot;%s is not a valid %s archive file&quot; </span><span class="s1">% (self.path</span><span class="s3">, </span><span class="s1">self.__class__.__name__))</span>
+        <span class="s3">if </span><span class="s1">self.lib.read(len(self.pymagic)) != self.pymagic:</span>
+            <span class="s1">print(</span><span class="s4">&quot;Warning: pyz is from a different Python version&quot;</span><span class="s3">, </span><span class="s1">file=sys.stderr)</span>
+        <span class="s1">self.lib.read(</span><span class="s5">4</span><span class="s1">)</span>
+
+
+<span class="s3">def </span><span class="s1">run():</span>
+    <span class="s1">parser = argparse.ArgumentParser()</span>
+    <span class="s1">parser.add_argument(</span>
+        <span class="s4">'-l'</span><span class="s3">,</span>
+        <span class="s4">'--log'</span><span class="s3">,</span>
+        <span class="s1">default=</span><span class="s3">False,</span>
+        <span class="s1">action=</span><span class="s4">'store_true'</span><span class="s3">,</span>
+        <span class="s1">dest=</span><span class="s4">'debug'</span><span class="s3">,</span>
+        <span class="s1">help=</span><span class="s4">'Print an archive log (default: %(default)s)'</span><span class="s3">,</span>
+    <span class="s1">)</span>
+    <span class="s1">parser.add_argument(</span>
+        <span class="s4">'-r'</span><span class="s3">,</span>
+        <span class="s4">'--recursive'</span><span class="s3">,</span>
+        <span class="s1">default=</span><span class="s3">False,</span>
+        <span class="s1">action=</span><span class="s4">'store_true'</span><span class="s3">,</span>
+        <span class="s1">dest=</span><span class="s4">'rec_debug'</span><span class="s3">,</span>
+        <span class="s1">help=</span><span class="s4">'Recursively print an archive log (default: %(default)s). Can be combined with -r'</span><span class="s3">,</span>
+    <span class="s1">)</span>
+    <span class="s1">parser.add_argument(</span>
+        <span class="s4">'-b'</span><span class="s3">,</span>
+        <span class="s4">'--brief'</span><span class="s3">,</span>
+        <span class="s1">default=</span><span class="s3">False,</span>
+        <span class="s1">action=</span><span class="s4">'store_true'</span><span class="s3">,</span>
+        <span class="s1">dest=</span><span class="s4">'brief'</span><span class="s3">,</span>
+        <span class="s1">help=</span><span class="s4">'Print only file name. (default: %(default)s). Can be combined with -r'</span><span class="s3">,</span>
+    <span class="s1">)</span>
+    <span class="s1">PyInstaller.log.__add_options(parser)</span>
+    <span class="s1">parser.add_argument(</span>
+        <span class="s4">'name'</span><span class="s3">,</span>
+        <span class="s1">metavar=</span><span class="s4">'pyi_archive'</span><span class="s3">,</span>
+        <span class="s1">help=</span><span class="s4">&quot;PyInstaller archive to show content of&quot;</span><span class="s3">,</span>
+    <span class="s1">)</span>
+
+    <span class="s1">args = parser.parse_args()</span>
+    <span class="s1">PyInstaller.log.__process_options(parser</span><span class="s3">, </span><span class="s1">args)</span>
+
+    <span class="s3">try</span><span class="s1">:</span>
+        <span class="s3">raise </span><span class="s1">SystemExit(main(**vars(args)))</span>
+    <span class="s3">except </span><span class="s1">KeyboardInterrupt:</span>
+        <span class="s3">raise </span><span class="s1">SystemExit(</span><span class="s4">&quot;Aborted by user request.&quot;</span><span class="s1">)</span>
+
+
+<span class="s3">if </span><span class="s1">__name__ == </span><span class="s4">'__main__'</span><span class="s1">:</span>
+    <span class="s1">run()</span>
+</pre>
+</body>
+</html>

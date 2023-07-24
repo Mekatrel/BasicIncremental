@@ -1,0 +1,431 @@
+<html>
+<head>
+<title>charset.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #cc7832;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #808080;}
+.s3 { color: #6a8759;}
+.s4 { color: #6897bb;}
+.s5 { color: #629755; font-style: italic;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+charset.py</font>
+</center></td></tr></table>
+<pre><span class="s0">from </span><span class="s1">__future__ </span><span class="s0">import </span><span class="s1">unicode_literals</span>
+<span class="s0">from </span><span class="s1">__future__ </span><span class="s0">import </span><span class="s1">division</span>
+<span class="s0">from </span><span class="s1">__future__ </span><span class="s0">import </span><span class="s1">absolute_import</span>
+<span class="s0">from </span><span class="s1">future.builtins </span><span class="s0">import </span><span class="s1">str</span>
+<span class="s0">from </span><span class="s1">future.builtins </span><span class="s0">import </span><span class="s1">next</span>
+
+<span class="s2"># Copyright (C) 2001-2007 Python Software Foundation</span>
+<span class="s2"># Author: Ben Gertzfield, Barry Warsaw</span>
+<span class="s2"># Contact: email-sig@python.org</span>
+
+<span class="s1">__all__ = [</span>
+    <span class="s3">'Charset'</span><span class="s0">,</span>
+    <span class="s3">'add_alias'</span><span class="s0">,</span>
+    <span class="s3">'add_charset'</span><span class="s0">,</span>
+    <span class="s3">'add_codec'</span><span class="s0">,</span>
+    <span class="s1">]</span>
+
+<span class="s0">from </span><span class="s1">functools </span><span class="s0">import </span><span class="s1">partial</span>
+
+<span class="s0">from </span><span class="s1">future.backports </span><span class="s0">import </span><span class="s1">email</span>
+<span class="s0">from </span><span class="s1">future.backports.email </span><span class="s0">import </span><span class="s1">errors</span>
+<span class="s0">from </span><span class="s1">future.backports.email.encoders </span><span class="s0">import </span><span class="s1">encode_7or8bit</span>
+
+
+<span class="s2"># Flags for types of header encodings</span>
+<span class="s1">QP          = </span><span class="s4">1 </span><span class="s2"># Quoted-Printable</span>
+<span class="s1">BASE64      = </span><span class="s4">2 </span><span class="s2"># Base64</span>
+<span class="s1">SHORTEST    = </span><span class="s4">3 </span><span class="s2"># the shorter of QP and base64, but only for headers</span>
+
+<span class="s2"># In &quot;=?charset?q?hello_world?=&quot;, the =?, ?q?, and ?= add up to 7</span>
+<span class="s1">RFC2047_CHROME_LEN = </span><span class="s4">7</span>
+
+<span class="s1">DEFAULT_CHARSET = </span><span class="s3">'us-ascii'</span>
+<span class="s1">UNKNOWN8BIT = </span><span class="s3">'unknown-8bit'</span>
+<span class="s1">EMPTYSTRING = </span><span class="s3">''</span>
+
+
+<span class="s2"># Defaults</span>
+<span class="s1">CHARSETS = {</span>
+    <span class="s2"># input        header enc  body enc output conv</span>
+    <span class="s3">'iso-8859-1'</span><span class="s1">:  (QP</span><span class="s0">,        </span><span class="s1">QP</span><span class="s0">,      None</span><span class="s1">)</span><span class="s0">,</span>
+    <span class="s3">'iso-8859-2'</span><span class="s1">:  (QP</span><span class="s0">,        </span><span class="s1">QP</span><span class="s0">,      None</span><span class="s1">)</span><span class="s0">,</span>
+    <span class="s3">'iso-8859-3'</span><span class="s1">:  (QP</span><span class="s0">,        </span><span class="s1">QP</span><span class="s0">,      None</span><span class="s1">)</span><span class="s0">,</span>
+    <span class="s3">'iso-8859-4'</span><span class="s1">:  (QP</span><span class="s0">,        </span><span class="s1">QP</span><span class="s0">,      None</span><span class="s1">)</span><span class="s0">,</span>
+    <span class="s2"># iso-8859-5 is Cyrillic, and not especially used</span>
+    <span class="s2"># iso-8859-6 is Arabic, also not particularly used</span>
+    <span class="s2"># iso-8859-7 is Greek, QP will not make it readable</span>
+    <span class="s2"># iso-8859-8 is Hebrew, QP will not make it readable</span>
+    <span class="s3">'iso-8859-9'</span><span class="s1">:  (QP</span><span class="s0">,        </span><span class="s1">QP</span><span class="s0">,      None</span><span class="s1">)</span><span class="s0">,</span>
+    <span class="s3">'iso-8859-10'</span><span class="s1">: (QP</span><span class="s0">,        </span><span class="s1">QP</span><span class="s0">,      None</span><span class="s1">)</span><span class="s0">,</span>
+    <span class="s2"># iso-8859-11 is Thai, QP will not make it readable</span>
+    <span class="s3">'iso-8859-13'</span><span class="s1">: (QP</span><span class="s0">,        </span><span class="s1">QP</span><span class="s0">,      None</span><span class="s1">)</span><span class="s0">,</span>
+    <span class="s3">'iso-8859-14'</span><span class="s1">: (QP</span><span class="s0">,        </span><span class="s1">QP</span><span class="s0">,      None</span><span class="s1">)</span><span class="s0">,</span>
+    <span class="s3">'iso-8859-15'</span><span class="s1">: (QP</span><span class="s0">,        </span><span class="s1">QP</span><span class="s0">,      None</span><span class="s1">)</span><span class="s0">,</span>
+    <span class="s3">'iso-8859-16'</span><span class="s1">: (QP</span><span class="s0">,        </span><span class="s1">QP</span><span class="s0">,      None</span><span class="s1">)</span><span class="s0">,</span>
+    <span class="s3">'windows-1252'</span><span class="s1">:(QP</span><span class="s0">,        </span><span class="s1">QP</span><span class="s0">,      None</span><span class="s1">)</span><span class="s0">,</span>
+    <span class="s3">'viscii'</span><span class="s1">:      (QP</span><span class="s0">,        </span><span class="s1">QP</span><span class="s0">,      None</span><span class="s1">)</span><span class="s0">,</span>
+    <span class="s3">'us-ascii'</span><span class="s1">:    (</span><span class="s0">None,      None,    None</span><span class="s1">)</span><span class="s0">,</span>
+    <span class="s3">'big5'</span><span class="s1">:        (BASE64</span><span class="s0">,    </span><span class="s1">BASE64</span><span class="s0">,  None</span><span class="s1">)</span><span class="s0">,</span>
+    <span class="s3">'gb2312'</span><span class="s1">:      (BASE64</span><span class="s0">,    </span><span class="s1">BASE64</span><span class="s0">,  None</span><span class="s1">)</span><span class="s0">,</span>
+    <span class="s3">'euc-jp'</span><span class="s1">:      (BASE64</span><span class="s0">,    None,    </span><span class="s3">'iso-2022-jp'</span><span class="s1">)</span><span class="s0">,</span>
+    <span class="s3">'shift_jis'</span><span class="s1">:   (BASE64</span><span class="s0">,    None,    </span><span class="s3">'iso-2022-jp'</span><span class="s1">)</span><span class="s0">,</span>
+    <span class="s3">'iso-2022-jp'</span><span class="s1">: (BASE64</span><span class="s0">,    None,    None</span><span class="s1">)</span><span class="s0">,</span>
+    <span class="s3">'koi8-r'</span><span class="s1">:      (BASE64</span><span class="s0">,    </span><span class="s1">BASE64</span><span class="s0">,  None</span><span class="s1">)</span><span class="s0">,</span>
+    <span class="s3">'utf-8'</span><span class="s1">:       (SHORTEST</span><span class="s0">,  </span><span class="s1">BASE64</span><span class="s0">, </span><span class="s3">'utf-8'</span><span class="s1">)</span><span class="s0">,</span>
+    <span class="s1">}</span>
+
+<span class="s2"># Aliases for other commonly-used names for character sets.  Map</span>
+<span class="s2"># them to the real ones used in email.</span>
+<span class="s1">ALIASES = {</span>
+    <span class="s3">'latin_1'</span><span class="s1">: </span><span class="s3">'iso-8859-1'</span><span class="s0">,</span>
+    <span class="s3">'latin-1'</span><span class="s1">: </span><span class="s3">'iso-8859-1'</span><span class="s0">,</span>
+    <span class="s3">'latin_2'</span><span class="s1">: </span><span class="s3">'iso-8859-2'</span><span class="s0">,</span>
+    <span class="s3">'latin-2'</span><span class="s1">: </span><span class="s3">'iso-8859-2'</span><span class="s0">,</span>
+    <span class="s3">'latin_3'</span><span class="s1">: </span><span class="s3">'iso-8859-3'</span><span class="s0">,</span>
+    <span class="s3">'latin-3'</span><span class="s1">: </span><span class="s3">'iso-8859-3'</span><span class="s0">,</span>
+    <span class="s3">'latin_4'</span><span class="s1">: </span><span class="s3">'iso-8859-4'</span><span class="s0">,</span>
+    <span class="s3">'latin-4'</span><span class="s1">: </span><span class="s3">'iso-8859-4'</span><span class="s0">,</span>
+    <span class="s3">'latin_5'</span><span class="s1">: </span><span class="s3">'iso-8859-9'</span><span class="s0">,</span>
+    <span class="s3">'latin-5'</span><span class="s1">: </span><span class="s3">'iso-8859-9'</span><span class="s0">,</span>
+    <span class="s3">'latin_6'</span><span class="s1">: </span><span class="s3">'iso-8859-10'</span><span class="s0">,</span>
+    <span class="s3">'latin-6'</span><span class="s1">: </span><span class="s3">'iso-8859-10'</span><span class="s0">,</span>
+    <span class="s3">'latin_7'</span><span class="s1">: </span><span class="s3">'iso-8859-13'</span><span class="s0">,</span>
+    <span class="s3">'latin-7'</span><span class="s1">: </span><span class="s3">'iso-8859-13'</span><span class="s0">,</span>
+    <span class="s3">'latin_8'</span><span class="s1">: </span><span class="s3">'iso-8859-14'</span><span class="s0">,</span>
+    <span class="s3">'latin-8'</span><span class="s1">: </span><span class="s3">'iso-8859-14'</span><span class="s0">,</span>
+    <span class="s3">'latin_9'</span><span class="s1">: </span><span class="s3">'iso-8859-15'</span><span class="s0">,</span>
+    <span class="s3">'latin-9'</span><span class="s1">: </span><span class="s3">'iso-8859-15'</span><span class="s0">,</span>
+    <span class="s3">'latin_10'</span><span class="s1">:</span><span class="s3">'iso-8859-16'</span><span class="s0">,</span>
+    <span class="s3">'latin-10'</span><span class="s1">:</span><span class="s3">'iso-8859-16'</span><span class="s0">,</span>
+    <span class="s3">'cp949'</span><span class="s1">:   </span><span class="s3">'ks_c_5601-1987'</span><span class="s0">,</span>
+    <span class="s3">'euc_jp'</span><span class="s1">:  </span><span class="s3">'euc-jp'</span><span class="s0">,</span>
+    <span class="s3">'euc_kr'</span><span class="s1">:  </span><span class="s3">'euc-kr'</span><span class="s0">,</span>
+    <span class="s3">'ascii'</span><span class="s1">:   </span><span class="s3">'us-ascii'</span><span class="s0">,</span>
+    <span class="s1">}</span>
+
+
+<span class="s2"># Map charsets to their Unicode codec strings.</span>
+<span class="s1">CODEC_MAP = {</span>
+    <span class="s3">'gb2312'</span><span class="s1">:      </span><span class="s3">'eucgb2312_cn'</span><span class="s0">,</span>
+    <span class="s3">'big5'</span><span class="s1">:        </span><span class="s3">'big5_tw'</span><span class="s0">,</span>
+    <span class="s2"># Hack: We don't want *any* conversion for stuff marked us-ascii, as all</span>
+    <span class="s2"># sorts of garbage might be sent to us in the guise of 7-bit us-ascii.</span>
+    <span class="s2"># Let that stuff pass through without conversion to/from Unicode.</span>
+    <span class="s3">'us-ascii'</span><span class="s1">:    </span><span class="s0">None,</span>
+    <span class="s1">}</span>
+
+
+<span class="s2"># Convenience functions for extending the above mappings</span>
+<span class="s0">def </span><span class="s1">add_charset(charset</span><span class="s0">, </span><span class="s1">header_enc=</span><span class="s0">None, </span><span class="s1">body_enc=</span><span class="s0">None, </span><span class="s1">output_charset=</span><span class="s0">None</span><span class="s1">):</span>
+    <span class="s5">&quot;&quot;&quot;Add character set properties to the global registry. 
+ 
+    charset is the input character set, and must be the canonical name of a 
+    character set. 
+ 
+    Optional header_enc and body_enc is either Charset.QP for 
+    quoted-printable, Charset.BASE64 for base64 encoding, Charset.SHORTEST for 
+    the shortest of qp or base64 encoding, or None for no encoding.  SHORTEST 
+    is only valid for header_enc.  It describes how message headers and 
+    message bodies in the input charset are to be encoded.  Default is no 
+    encoding. 
+ 
+    Optional output_charset is the character set that the output should be 
+    in.  Conversions will proceed from input charset, to Unicode, to the 
+    output charset when the method Charset.convert() is called.  The default 
+    is to output in the same character set as the input. 
+ 
+    Both input_charset and output_charset must have Unicode codec entries in 
+    the module's charset-to-codec mapping; use add_codec(charset, codecname) 
+    to add codecs the module does not know about.  See the codecs module's 
+    documentation for more information. 
+    &quot;&quot;&quot;</span>
+    <span class="s0">if </span><span class="s1">body_enc == SHORTEST:</span>
+        <span class="s0">raise </span><span class="s1">ValueError(</span><span class="s3">'SHORTEST not allowed for body_enc'</span><span class="s1">)</span>
+    <span class="s1">CHARSETS[charset] = (header_enc</span><span class="s0">, </span><span class="s1">body_enc</span><span class="s0">, </span><span class="s1">output_charset)</span>
+
+
+<span class="s0">def </span><span class="s1">add_alias(alias</span><span class="s0">, </span><span class="s1">canonical):</span>
+    <span class="s5">&quot;&quot;&quot;Add a character set alias. 
+ 
+    alias is the alias name, e.g. latin-1 
+    canonical is the character set's canonical name, e.g. iso-8859-1 
+    &quot;&quot;&quot;</span>
+    <span class="s1">ALIASES[alias] = canonical</span>
+
+
+<span class="s0">def </span><span class="s1">add_codec(charset</span><span class="s0">, </span><span class="s1">codecname):</span>
+    <span class="s5">&quot;&quot;&quot;Add a codec that map characters in the given charset to/from Unicode. 
+ 
+    charset is the canonical name of a character set.  codecname is the name 
+    of a Python codec, as appropriate for the second argument to the unicode() 
+    built-in, or to the encode() method of a Unicode string. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">CODEC_MAP[charset] = codecname</span>
+
+
+<span class="s2"># Convenience function for encoding strings, taking into account</span>
+<span class="s2"># that they might be unknown-8bit (ie: have surrogate-escaped bytes)</span>
+<span class="s0">def </span><span class="s1">_encode(string</span><span class="s0">, </span><span class="s1">codec):</span>
+    <span class="s1">string = str(string)</span>
+    <span class="s0">if </span><span class="s1">codec == UNKNOWN8BIT:</span>
+        <span class="s0">return </span><span class="s1">string.encode(</span><span class="s3">'ascii'</span><span class="s0">, </span><span class="s3">'surrogateescape'</span><span class="s1">)</span>
+    <span class="s0">else</span><span class="s1">:</span>
+        <span class="s0">return </span><span class="s1">string.encode(codec)</span>
+
+
+<span class="s0">class </span><span class="s1">Charset(object):</span>
+    <span class="s5">&quot;&quot;&quot;Map character sets to their email properties. 
+ 
+    This class provides information about the requirements imposed on email 
+    for a specific character set.  It also provides convenience routines for 
+    converting between character sets, given the availability of the 
+    applicable codecs.  Given a character set, it will do its best to provide 
+    information on how to use that character set in an email in an 
+    RFC-compliant way. 
+ 
+    Certain character sets must be encoded with quoted-printable or base64 
+    when used in email headers or bodies.  Certain character sets must be 
+    converted outright, and are not allowed in email.  Instances of this 
+    module expose the following information about a character set: 
+ 
+    input_charset: The initial character set specified.  Common aliases 
+                   are converted to their `official' email names (e.g. latin_1 
+                   is converted to iso-8859-1).  Defaults to 7-bit us-ascii. 
+ 
+    header_encoding: If the character set must be encoded before it can be 
+                     used in an email header, this attribute will be set to 
+                     Charset.QP (for quoted-printable), Charset.BASE64 (for 
+                     base64 encoding), or Charset.SHORTEST for the shortest of 
+                     QP or BASE64 encoding.  Otherwise, it will be None. 
+ 
+    body_encoding: Same as header_encoding, but describes the encoding for the 
+                   mail message's body, which indeed may be different than the 
+                   header encoding.  Charset.SHORTEST is not allowed for 
+                   body_encoding. 
+ 
+    output_charset: Some character sets must be converted before they can be 
+                    used in email headers or bodies.  If the input_charset is 
+                    one of them, this attribute will contain the name of the 
+                    charset output will be converted to.  Otherwise, it will 
+                    be None. 
+ 
+    input_codec: The name of the Python codec used to convert the 
+                 input_charset to Unicode.  If no conversion codec is 
+                 necessary, this attribute will be None. 
+ 
+    output_codec: The name of the Python codec used to convert Unicode 
+                  to the output_charset.  If no conversion codec is necessary, 
+                  this attribute will have the same value as the input_codec. 
+    &quot;&quot;&quot;</span>
+    <span class="s0">def </span><span class="s1">__init__(self</span><span class="s0">, </span><span class="s1">input_charset=DEFAULT_CHARSET):</span>
+        <span class="s2"># RFC 2046, $4.1.2 says charsets are not case sensitive.  We coerce to</span>
+        <span class="s2"># unicode because its .lower() is locale insensitive.  If the argument</span>
+        <span class="s2"># is already a unicode, we leave it at that, but ensure that the</span>
+        <span class="s2"># charset is ASCII, as the standard (RFC XXX) requires.</span>
+        <span class="s0">try</span><span class="s1">:</span>
+            <span class="s0">if </span><span class="s1">isinstance(input_charset</span><span class="s0">, </span><span class="s1">str):</span>
+                <span class="s1">input_charset.encode(</span><span class="s3">'ascii'</span><span class="s1">)</span>
+            <span class="s0">else</span><span class="s1">:</span>
+                <span class="s1">input_charset = str(input_charset</span><span class="s0">, </span><span class="s3">'ascii'</span><span class="s1">)</span>
+        <span class="s0">except </span><span class="s1">UnicodeError:</span>
+            <span class="s0">raise </span><span class="s1">errors.CharsetError(input_charset)</span>
+        <span class="s1">input_charset = input_charset.lower()</span>
+        <span class="s2"># Set the input charset after filtering through the aliases</span>
+        <span class="s1">self.input_charset = ALIASES.get(input_charset</span><span class="s0">, </span><span class="s1">input_charset)</span>
+        <span class="s2"># We can try to guess which encoding and conversion to use by the</span>
+        <span class="s2"># charset_map dictionary.  Try that first, but let the user override</span>
+        <span class="s2"># it.</span>
+        <span class="s1">henc</span><span class="s0">, </span><span class="s1">benc</span><span class="s0">, </span><span class="s1">conv = CHARSETS.get(self.input_charset</span><span class="s0">,</span>
+                                        <span class="s1">(SHORTEST</span><span class="s0">, </span><span class="s1">BASE64</span><span class="s0">, None</span><span class="s1">))</span>
+        <span class="s0">if not </span><span class="s1">conv:</span>
+            <span class="s1">conv = self.input_charset</span>
+        <span class="s2"># Set the attributes, allowing the arguments to override the default.</span>
+        <span class="s1">self.header_encoding = henc</span>
+        <span class="s1">self.body_encoding = benc</span>
+        <span class="s1">self.output_charset = ALIASES.get(conv</span><span class="s0">, </span><span class="s1">conv)</span>
+        <span class="s2"># Now set the codecs.  If one isn't defined for input_charset,</span>
+        <span class="s2"># guess and try a Unicode codec with the same name as input_codec.</span>
+        <span class="s1">self.input_codec = CODEC_MAP.get(self.input_charset</span><span class="s0">,</span>
+                                         <span class="s1">self.input_charset)</span>
+        <span class="s1">self.output_codec = CODEC_MAP.get(self.output_charset</span><span class="s0">,</span>
+                                          <span class="s1">self.output_charset)</span>
+
+    <span class="s0">def </span><span class="s1">__str__(self):</span>
+        <span class="s0">return </span><span class="s1">self.input_charset.lower()</span>
+
+    <span class="s1">__repr__ = __str__</span>
+
+    <span class="s0">def </span><span class="s1">__eq__(self</span><span class="s0">, </span><span class="s1">other):</span>
+        <span class="s0">return </span><span class="s1">str(self) == str(other).lower()</span>
+
+    <span class="s0">def </span><span class="s1">__ne__(self</span><span class="s0">, </span><span class="s1">other):</span>
+        <span class="s0">return not </span><span class="s1">self.__eq__(other)</span>
+
+    <span class="s0">def </span><span class="s1">get_body_encoding(self):</span>
+        <span class="s5">&quot;&quot;&quot;Return the content-transfer-encoding used for body encoding. 
+ 
+        This is either the string `quoted-printable' or `base64' depending on 
+        the encoding used, or it is a function in which case you should call 
+        the function with a single argument, the Message object being 
+        encoded.  The function should then set the Content-Transfer-Encoding 
+        header itself to whatever is appropriate. 
+ 
+        Returns &quot;quoted-printable&quot; if self.body_encoding is QP. 
+        Returns &quot;base64&quot; if self.body_encoding is BASE64. 
+        Returns conversion function otherwise. 
+        &quot;&quot;&quot;</span>
+        <span class="s0">assert </span><span class="s1">self.body_encoding != SHORTEST</span>
+        <span class="s0">if </span><span class="s1">self.body_encoding == QP:</span>
+            <span class="s0">return </span><span class="s3">'quoted-printable'</span>
+        <span class="s0">elif </span><span class="s1">self.body_encoding == BASE64:</span>
+            <span class="s0">return </span><span class="s3">'base64'</span>
+        <span class="s0">else</span><span class="s1">:</span>
+            <span class="s0">return </span><span class="s1">encode_7or8bit</span>
+
+    <span class="s0">def </span><span class="s1">get_output_charset(self):</span>
+        <span class="s5">&quot;&quot;&quot;Return the output character set. 
+ 
+        This is self.output_charset if that is not None, otherwise it is 
+        self.input_charset. 
+        &quot;&quot;&quot;</span>
+        <span class="s0">return </span><span class="s1">self.output_charset </span><span class="s0">or </span><span class="s1">self.input_charset</span>
+
+    <span class="s0">def </span><span class="s1">header_encode(self</span><span class="s0">, </span><span class="s1">string):</span>
+        <span class="s5">&quot;&quot;&quot;Header-encode a string by converting it first to bytes. 
+ 
+        The type of encoding (base64 or quoted-printable) will be based on 
+        this charset's `header_encoding`. 
+ 
+        :param string: A unicode string for the header.  It must be possible 
+            to encode this string to bytes using the character set's 
+            output codec. 
+        :return: The encoded string, with RFC 2047 chrome. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">codec = self.output_codec </span><span class="s0">or </span><span class="s3">'us-ascii'</span>
+        <span class="s1">header_bytes = _encode(string</span><span class="s0">, </span><span class="s1">codec)</span>
+        <span class="s2"># 7bit/8bit encodings return the string unchanged (modulo conversions)</span>
+        <span class="s1">encoder_module = self._get_encoder(header_bytes)</span>
+        <span class="s0">if </span><span class="s1">encoder_module </span><span class="s0">is None</span><span class="s1">:</span>
+            <span class="s0">return </span><span class="s1">string</span>
+        <span class="s0">return </span><span class="s1">encoder_module.header_encode(header_bytes</span><span class="s0">, </span><span class="s1">codec)</span>
+
+    <span class="s0">def </span><span class="s1">header_encode_lines(self</span><span class="s0">, </span><span class="s1">string</span><span class="s0">, </span><span class="s1">maxlengths):</span>
+        <span class="s5">&quot;&quot;&quot;Header-encode a string by converting it first to bytes. 
+ 
+        This is similar to `header_encode()` except that the string is fit 
+        into maximum line lengths as given by the argument. 
+ 
+        :param string: A unicode string for the header.  It must be possible 
+            to encode this string to bytes using the character set's 
+            output codec. 
+        :param maxlengths: Maximum line length iterator.  Each element 
+            returned from this iterator will provide the next maximum line 
+            length.  This parameter is used as an argument to built-in next() 
+            and should never be exhausted.  The maximum line lengths should 
+            not count the RFC 2047 chrome.  These line lengths are only a 
+            hint; the splitter does the best it can. 
+        :return: Lines of encoded strings, each with RFC 2047 chrome. 
+        &quot;&quot;&quot;</span>
+        <span class="s2"># See which encoding we should use.</span>
+        <span class="s1">codec = self.output_codec </span><span class="s0">or </span><span class="s3">'us-ascii'</span>
+        <span class="s1">header_bytes = _encode(string</span><span class="s0">, </span><span class="s1">codec)</span>
+        <span class="s1">encoder_module = self._get_encoder(header_bytes)</span>
+        <span class="s1">encoder = partial(encoder_module.header_encode</span><span class="s0">, </span><span class="s1">charset=codec)</span>
+        <span class="s2"># Calculate the number of characters that the RFC 2047 chrome will</span>
+        <span class="s2"># contribute to each line.</span>
+        <span class="s1">charset = self.get_output_charset()</span>
+        <span class="s1">extra = len(charset) + RFC2047_CHROME_LEN</span>
+        <span class="s2"># Now comes the hard part.  We must encode bytes but we can't split on</span>
+        <span class="s2"># bytes because some character sets are variable length and each</span>
+        <span class="s2"># encoded word must stand on its own.  So the problem is you have to</span>
+        <span class="s2"># encode to bytes to figure out this word's length, but you must split</span>
+        <span class="s2"># on characters.  This causes two problems: first, we don't know how</span>
+        <span class="s2"># many octets a specific substring of unicode characters will get</span>
+        <span class="s2"># encoded to, and second, we don't know how many ASCII characters</span>
+        <span class="s2"># those octets will get encoded to.  Unless we try it.  Which seems</span>
+        <span class="s2"># inefficient.  In the interest of being correct rather than fast (and</span>
+        <span class="s2"># in the hope that there will be few encoded headers in any such</span>
+        <span class="s2"># message), brute force it. :(</span>
+        <span class="s1">lines = []</span>
+        <span class="s1">current_line = []</span>
+        <span class="s1">maxlen = next(maxlengths) - extra</span>
+        <span class="s0">for </span><span class="s1">character </span><span class="s0">in </span><span class="s1">string:</span>
+            <span class="s1">current_line.append(character)</span>
+            <span class="s1">this_line = EMPTYSTRING.join(current_line)</span>
+            <span class="s1">length = encoder_module.header_length(_encode(this_line</span><span class="s0">, </span><span class="s1">charset))</span>
+            <span class="s0">if </span><span class="s1">length &gt; maxlen:</span>
+                <span class="s2"># This last character doesn't fit so pop it off.</span>
+                <span class="s1">current_line.pop()</span>
+                <span class="s2"># Does nothing fit on the first line?</span>
+                <span class="s0">if not </span><span class="s1">lines </span><span class="s0">and not </span><span class="s1">current_line:</span>
+                    <span class="s1">lines.append(</span><span class="s0">None</span><span class="s1">)</span>
+                <span class="s0">else</span><span class="s1">:</span>
+                    <span class="s1">separator = (</span><span class="s3">' ' </span><span class="s0">if </span><span class="s1">lines </span><span class="s0">else </span><span class="s3">''</span><span class="s1">)</span>
+                    <span class="s1">joined_line = EMPTYSTRING.join(current_line)</span>
+                    <span class="s1">header_bytes = _encode(joined_line</span><span class="s0">, </span><span class="s1">codec)</span>
+                    <span class="s1">lines.append(encoder(header_bytes))</span>
+                <span class="s1">current_line = [character]</span>
+                <span class="s1">maxlen = next(maxlengths) - extra</span>
+        <span class="s1">joined_line = EMPTYSTRING.join(current_line)</span>
+        <span class="s1">header_bytes = _encode(joined_line</span><span class="s0">, </span><span class="s1">codec)</span>
+        <span class="s1">lines.append(encoder(header_bytes))</span>
+        <span class="s0">return </span><span class="s1">lines</span>
+
+    <span class="s0">def </span><span class="s1">_get_encoder(self</span><span class="s0">, </span><span class="s1">header_bytes):</span>
+        <span class="s0">if </span><span class="s1">self.header_encoding == BASE64:</span>
+            <span class="s0">return </span><span class="s1">email.base64mime</span>
+        <span class="s0">elif </span><span class="s1">self.header_encoding == QP:</span>
+            <span class="s0">return </span><span class="s1">email.quoprimime</span>
+        <span class="s0">elif </span><span class="s1">self.header_encoding == SHORTEST:</span>
+            <span class="s1">len64 = email.base64mime.header_length(header_bytes)</span>
+            <span class="s1">lenqp = email.quoprimime.header_length(header_bytes)</span>
+            <span class="s0">if </span><span class="s1">len64 &lt; lenqp:</span>
+                <span class="s0">return </span><span class="s1">email.base64mime</span>
+            <span class="s0">else</span><span class="s1">:</span>
+                <span class="s0">return </span><span class="s1">email.quoprimime</span>
+        <span class="s0">else</span><span class="s1">:</span>
+            <span class="s0">return None</span>
+
+    <span class="s0">def </span><span class="s1">body_encode(self</span><span class="s0">, </span><span class="s1">string):</span>
+        <span class="s5">&quot;&quot;&quot;Body-encode a string by converting it first to bytes. 
+ 
+        The type of encoding (base64 or quoted-printable) will be based on 
+        self.body_encoding.  If body_encoding is None, we assume the 
+        output charset is a 7bit encoding, so re-encoding the decoded 
+        string using the ascii codec produces the correct string version 
+        of the content. 
+        &quot;&quot;&quot;</span>
+        <span class="s0">if not </span><span class="s1">string:</span>
+            <span class="s0">return </span><span class="s1">string</span>
+        <span class="s0">if </span><span class="s1">self.body_encoding </span><span class="s0">is </span><span class="s1">BASE64:</span>
+            <span class="s0">if </span><span class="s1">isinstance(string</span><span class="s0">, </span><span class="s1">str):</span>
+                <span class="s1">string = string.encode(self.output_charset)</span>
+            <span class="s0">return </span><span class="s1">email.base64mime.body_encode(string)</span>
+        <span class="s0">elif </span><span class="s1">self.body_encoding </span><span class="s0">is </span><span class="s1">QP:</span>
+            <span class="s2"># quopromime.body_encode takes a string, but operates on it as if</span>
+            <span class="s2"># it were a list of byte codes.  For a (minimal) history on why</span>
+            <span class="s2"># this is so, see changeset 0cf700464177.  To correctly encode a</span>
+            <span class="s2"># character set, then, we must turn it into pseudo bytes via the</span>
+            <span class="s2"># latin1 charset, which will encode any byte as a single code point</span>
+            <span class="s2"># between 0 and 255, which is what body_encode is expecting.</span>
+            <span class="s0">if </span><span class="s1">isinstance(string</span><span class="s0">, </span><span class="s1">str):</span>
+                <span class="s1">string = string.encode(self.output_charset)</span>
+            <span class="s1">string = string.decode(</span><span class="s3">'latin1'</span><span class="s1">)</span>
+            <span class="s0">return </span><span class="s1">email.quoprimime.body_encode(string)</span>
+        <span class="s0">else</span><span class="s1">:</span>
+            <span class="s0">if </span><span class="s1">isinstance(string</span><span class="s0">, </span><span class="s1">str):</span>
+                <span class="s1">string = string.encode(self.output_charset).decode(</span><span class="s3">'ascii'</span><span class="s1">)</span>
+            <span class="s0">return </span><span class="s1">string</span>
+</pre>
+</body>
+</html>

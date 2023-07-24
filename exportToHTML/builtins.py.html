@@ -1,0 +1,157 @@
+<html>
+<head>
+<title>builtins.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #629755; font-style: italic;}
+.s3 { color: #cc7832;}
+.s4 { color: #6a8759;}
+.s5 { color: #6897bb;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+builtins.py</font>
+</center></td></tr></table>
+<pre><span class="s0"># Copyright (c) 2015 gevent contributors. See LICENSE for details.</span>
+<span class="s2">&quot;&quot;&quot;gevent friendly implementations of builtin functions.&quot;&quot;&quot;</span>
+<span class="s3">from </span><span class="s1">__future__ </span><span class="s3">import </span><span class="s1">absolute_import</span>
+
+<span class="s3">import </span><span class="s1">weakref</span>
+
+<span class="s3">from </span><span class="s1">gevent.lock </span><span class="s3">import </span><span class="s1">RLock</span>
+<span class="s3">from </span><span class="s1">gevent._compat </span><span class="s3">import </span><span class="s1">PY3</span>
+<span class="s3">from </span><span class="s1">gevent._compat </span><span class="s3">import </span><span class="s1">imp_acquire_lock</span>
+<span class="s3">from </span><span class="s1">gevent._compat </span><span class="s3">import </span><span class="s1">imp_release_lock</span>
+
+
+<span class="s0"># Normally we'd have the &quot;expected&quot; case inside the try</span>
+<span class="s0"># (Python 3, because Python 3 is the way forward). But</span>
+<span class="s0"># under Python 2, the popular `future` library *also* provides</span>
+<span class="s0"># a `builtins` module---which lacks the __import__ attribute.</span>
+<span class="s0"># So we test for the old, deprecated version first</span>
+
+<span class="s3">try</span><span class="s1">: </span><span class="s0"># Py2</span>
+    <span class="s3">import </span><span class="s1">__builtin__ </span><span class="s3">as </span><span class="s1">__gbuiltins__</span>
+    <span class="s1">_allowed_module_name_types = (basestring</span><span class="s3">,</span><span class="s1">) </span><span class="s0"># pylint:disable=undefined-variable</span>
+    <span class="s1">__target__ = </span><span class="s4">'__builtin__'</span>
+<span class="s3">except </span><span class="s1">ImportError:</span>
+    <span class="s3">import </span><span class="s1">builtins </span><span class="s3">as </span><span class="s1">__gbuiltins__ </span><span class="s0"># pylint: disable=import-error</span>
+    <span class="s1">_allowed_module_name_types = (str</span><span class="s3">,</span><span class="s1">)</span>
+    <span class="s1">__target__ = </span><span class="s4">'builtins'</span>
+
+<span class="s1">_import = __gbuiltins__.__import__</span>
+
+<span class="s0"># We need to protect imports both across threads and across greenlets.</span>
+<span class="s0"># And the order matters. Note that under 3.4, the global import lock</span>
+<span class="s0"># and imp module are deprecated. It seems that in all Py3 versions, a</span>
+<span class="s0"># module lock is used such that this fix is not necessary.</span>
+
+<span class="s0"># We emulate the per-module locking system under Python 2 in order to</span>
+<span class="s0"># avoid issues acquiring locks in multiple-level-deep imports</span>
+<span class="s0"># that attempt to use the gevent blocking API at runtime; using one lock</span>
+<span class="s0"># could lead to a LoopExit error as a greenlet attempts to block on it while</span>
+<span class="s0"># it's already held by the main greenlet (issue #798).</span>
+
+<span class="s0"># We base this approach on a simplification of what `importlib._bootstrap`</span>
+<span class="s0"># does; notably, we don't check for deadlocks</span>
+
+<span class="s1">_g_import_locks = {} </span><span class="s0"># name -&gt; wref of RLock</span>
+
+<span class="s1">__lock_imports = </span><span class="s3">True</span>
+
+
+<span class="s3">def </span><span class="s1">__module_lock(name):</span>
+    <span class="s0"># Return the lock for the given module, creating it if necessary.</span>
+    <span class="s0"># It will be removed when no longer needed.</span>
+    <span class="s0"># Nothing in this function yields, so we're multi-greenlet safe</span>
+    <span class="s0"># (But not multi-threading safe.)</span>
+    <span class="s0"># XXX: What about on PyPy, where the GC is asynchronous (not ref-counting)?</span>
+    <span class="s0"># (Does it stop-the-world first?)</span>
+    <span class="s1">lock = </span><span class="s3">None</span>
+    <span class="s3">try</span><span class="s1">:</span>
+        <span class="s1">lock = _g_import_locks[name]()</span>
+    <span class="s3">except </span><span class="s1">KeyError:</span>
+        <span class="s3">pass</span>
+
+    <span class="s3">if </span><span class="s1">lock </span><span class="s3">is None</span><span class="s1">:</span>
+        <span class="s1">lock = RLock()</span>
+
+        <span class="s3">def </span><span class="s1">cb(_):</span>
+            <span class="s0"># We've seen a KeyError on PyPy on RPi2</span>
+            <span class="s1">_g_import_locks.pop(name</span><span class="s3">, None</span><span class="s1">)</span>
+        <span class="s1">_g_import_locks[name] = weakref.ref(lock</span><span class="s3">, </span><span class="s1">cb)</span>
+    <span class="s3">return </span><span class="s1">lock</span>
+
+
+<span class="s3">def </span><span class="s1">__import__(*args</span><span class="s3">, </span><span class="s1">**kwargs):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    __import__(name, globals=None, locals=None, fromlist=(), level=0) -&gt; object 
+ 
+    Normally python protects imports against concurrency by doing some locking 
+    at the C level (at least, it does that in CPython).  This function just 
+    wraps the normal __import__ functionality in a recursive lock, ensuring that 
+    we're protected against greenlet import concurrency as well. 
+    &quot;&quot;&quot;</span>
+    <span class="s3">if </span><span class="s1">args </span><span class="s3">and not </span><span class="s1">issubclass(type(args[</span><span class="s5">0</span><span class="s1">])</span><span class="s3">, </span><span class="s1">_allowed_module_name_types):</span>
+        <span class="s0"># if a builtin has been acquired as a bound instance method,</span>
+        <span class="s0"># python knows not to pass 'self' when the method is called.</span>
+        <span class="s0"># No such protection exists for monkey-patched builtins,</span>
+        <span class="s0"># however, so this is necessary.</span>
+        <span class="s1">args = args[</span><span class="s5">1</span><span class="s1">:]</span>
+
+    <span class="s3">if not </span><span class="s1">__lock_imports:</span>
+        <span class="s3">return </span><span class="s1">_import(*args</span><span class="s3">, </span><span class="s1">**kwargs)</span>
+
+    <span class="s1">module_lock = __module_lock(args[</span><span class="s5">0</span><span class="s1">]) </span><span class="s0"># Get a lock for the module name</span>
+    <span class="s1">imp_acquire_lock()</span>
+    <span class="s3">try</span><span class="s1">:</span>
+        <span class="s1">module_lock.acquire()</span>
+        <span class="s3">try</span><span class="s1">:</span>
+            <span class="s1">result = _import(*args</span><span class="s3">, </span><span class="s1">**kwargs)</span>
+        <span class="s3">finally</span><span class="s1">:</span>
+            <span class="s1">module_lock.release()</span>
+    <span class="s3">finally</span><span class="s1">:</span>
+        <span class="s1">imp_release_lock()</span>
+    <span class="s3">return </span><span class="s1">result</span>
+
+
+<span class="s3">def </span><span class="s1">_unlock_imports():</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Internal function, called when gevent needs to perform imports 
+    lazily, but does not know the state of the system. It may be impossible 
+    to take the import lock because there are no other running greenlets, for 
+    example. This causes a monkey-patched __import__ to avoid taking any locks. 
+    until the corresponding call to lock_imports. This should only be done for limited 
+    amounts of time and when the set of imports is statically known to be &quot;safe&quot;. 
+    &quot;&quot;&quot;</span>
+    <span class="s3">global </span><span class="s1">__lock_imports</span>
+    <span class="s0"># This could easily become a list that we push/pop from or an integer</span>
+    <span class="s0"># we increment if we need to do this recursively, but we shouldn't get</span>
+    <span class="s0"># that complex.</span>
+    <span class="s1">__lock_imports = </span><span class="s3">False</span>
+
+
+<span class="s3">def </span><span class="s1">_lock_imports():</span>
+    <span class="s3">global </span><span class="s1">__lock_imports</span>
+    <span class="s1">__lock_imports = </span><span class="s3">True</span>
+
+<span class="s3">if </span><span class="s1">PY3:</span>
+    <span class="s1">__implements__ = []</span>
+    <span class="s1">__import__ = _import</span>
+<span class="s3">else</span><span class="s1">:</span>
+    <span class="s1">__implements__ = [</span><span class="s4">'__import__'</span><span class="s1">]</span>
+<span class="s1">__all__ = __implements__</span>
+
+
+<span class="s3">from </span><span class="s1">gevent._util </span><span class="s3">import </span><span class="s1">copy_globals</span>
+
+<span class="s1">__imports__ = copy_globals(__gbuiltins__</span><span class="s3">, </span><span class="s1">globals()</span><span class="s3">,</span>
+                           <span class="s1">names_to_ignore=__implements__)</span>
+</pre>
+</body>
+</html>

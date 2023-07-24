@@ -1,0 +1,969 @@
+<html>
+<head>
+<title>bindepend.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #629755; font-style: italic;}
+.s3 { color: #cc7832;}
+.s4 { color: #6a8759;}
+.s5 { color: #6897bb;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+bindepend.py</font>
+</center></td></tr></table>
+<pre><span class="s0">#-----------------------------------------------------------------------------</span>
+<span class="s0"># Copyright (c) 2013-2021, PyInstaller Development Team.</span>
+<span class="s0">#</span>
+<span class="s0"># Distributed under the terms of the GNU General Public License (version 2</span>
+<span class="s0"># or later) with exception for distributing the bootloader.</span>
+<span class="s0">#</span>
+<span class="s0"># The full license is in the file COPYING.txt, distributed with this software.</span>
+<span class="s0">#</span>
+<span class="s0"># SPDX-License-Identifier: (GPL-2.0-or-later WITH Bootloader-exception)</span>
+<span class="s0">#-----------------------------------------------------------------------------</span>
+<span class="s2">&quot;&quot;&quot; 
+Find external dependencies of binary libraries. 
+&quot;&quot;&quot;</span>
+
+<span class="s3">import </span><span class="s1">collections</span>
+<span class="s3">import </span><span class="s1">ctypes.util</span>
+<span class="s3">import </span><span class="s1">os</span>
+<span class="s3">import </span><span class="s1">re</span>
+<span class="s3">import </span><span class="s1">sys</span>
+<span class="s0"># Required for extracting eggs.</span>
+<span class="s3">import </span><span class="s1">zipfile</span>
+<span class="s3">import </span><span class="s1">subprocess</span>
+
+<span class="s3">from </span><span class="s1">PyInstaller </span><span class="s3">import </span><span class="s1">compat</span>
+<span class="s3">from </span><span class="s1">PyInstaller </span><span class="s3">import </span><span class="s1">log </span><span class="s3">as </span><span class="s1">logging</span>
+<span class="s3">from </span><span class="s1">PyInstaller.depend </span><span class="s3">import </span><span class="s1">dylib</span><span class="s3">, </span><span class="s1">utils</span>
+<span class="s3">from </span><span class="s1">PyInstaller.utils.win32 </span><span class="s3">import </span><span class="s1">winutils</span>
+
+<span class="s1">logger = logging.getLogger(__name__)</span>
+
+<span class="s1">seen = set()</span>
+
+<span class="s0"># Import windows specific stuff.</span>
+<span class="s3">if </span><span class="s1">compat.is_win:</span>
+    <span class="s3">from </span><span class="s1">distutils.sysconfig </span><span class="s3">import </span><span class="s1">get_python_lib</span>
+
+    <span class="s3">import </span><span class="s1">pefile</span>
+
+    <span class="s3">from </span><span class="s1">PyInstaller.utils.win32 </span><span class="s3">import </span><span class="s1">winmanifest</span><span class="s3">, </span><span class="s1">winresource</span>
+
+
+<span class="s3">def </span><span class="s1">getfullnameof(mod</span><span class="s3">, </span><span class="s1">xtrapath=</span><span class="s3">None</span><span class="s1">):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Return the full path name of MOD. 
+ 
+    * MOD is the basename of a dll or pyd. 
+    * XTRAPATH is a path or list of paths to search first. 
+ 
+    Return the full path name of MOD. Will search the full Windows search path, as well as sys.path 
+    &quot;&quot;&quot;</span>
+    <span class="s1">pywin32_paths = []</span>
+    <span class="s3">if </span><span class="s1">compat.is_win:</span>
+        <span class="s1">pywin32_paths = [os.path.join(get_python_lib()</span><span class="s3">, </span><span class="s4">'pywin32_system32'</span><span class="s1">)]</span>
+        <span class="s3">if </span><span class="s1">compat.is_venv:</span>
+            <span class="s1">pywin32_paths.append(os.path.join(compat.base_prefix</span><span class="s3">, </span><span class="s4">'Lib'</span><span class="s3">, </span><span class="s4">'site-packages'</span><span class="s3">, </span><span class="s4">'pywin32_system32'</span><span class="s1">))</span>
+
+    <span class="s1">epath = (</span>
+        <span class="s1">sys.path +  </span><span class="s0"># Search sys.path first!</span>
+        <span class="s1">pywin32_paths + winutils.get_system_path() + compat.getenv(</span><span class="s4">'PATH'</span><span class="s3">, </span><span class="s4">''</span><span class="s1">).split(os.pathsep)</span>
+    <span class="s1">)</span>
+    <span class="s3">if </span><span class="s1">xtrapath </span><span class="s3">is not None</span><span class="s1">:</span>
+        <span class="s3">if </span><span class="s1">isinstance(xtrapath</span><span class="s3">, </span><span class="s1">str):</span>
+            <span class="s1">epath.insert(</span><span class="s5">0</span><span class="s3">, </span><span class="s1">xtrapath)</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s1">epath = xtrapath + epath</span>
+    <span class="s3">for </span><span class="s1">p </span><span class="s3">in </span><span class="s1">epath:</span>
+        <span class="s1">npth = os.path.join(p</span><span class="s3">, </span><span class="s1">mod)</span>
+        <span class="s3">if </span><span class="s1">os.path.exists(npth) </span><span class="s3">and </span><span class="s1">matchDLLArch(npth):</span>
+            <span class="s3">return </span><span class="s1">npth</span>
+    <span class="s3">return </span><span class="s4">''</span>
+
+
+<span class="s3">def </span><span class="s1">_getImports_pe(pth):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Find the binary dependencies of PTH. 
+ 
+    This implementation walks through the PE header and uses library pefile for that and supports 32/64bit Windows 
+    &quot;&quot;&quot;</span>
+    <span class="s1">dlls = set()</span>
+    <span class="s0"># By default, pefile library parses all PE information. We are only interested in the list of dependent dlls.</span>
+    <span class="s0"># Performance is improved by reading only needed information. https://code.google.com/p/pefile/wiki/UsageExamples</span>
+
+    <span class="s1">pe = pefile.PE(pth</span><span class="s3">, </span><span class="s1">fast_load=</span><span class="s3">True</span><span class="s1">)</span>
+    <span class="s1">pe.parse_data_directories(</span>
+        <span class="s1">directories=[</span>
+            <span class="s1">pefile.DIRECTORY_ENTRY[</span><span class="s4">'IMAGE_DIRECTORY_ENTRY_IMPORT'</span><span class="s1">]</span><span class="s3">,</span>
+            <span class="s1">pefile.DIRECTORY_ENTRY[</span><span class="s4">'IMAGE_DIRECTORY_ENTRY_EXPORT'</span><span class="s1">]</span><span class="s3">,</span>
+        <span class="s1">]</span><span class="s3">,</span>
+        <span class="s1">forwarded_exports_only=</span><span class="s3">True,</span>
+        <span class="s1">import_dllnames_only=</span><span class="s3">True,</span>
+    <span class="s1">)</span>
+
+    <span class="s0"># Some libraries have no other binary dependencies. Use empty list in that case. Otherwise pefile would return None.</span>
+    <span class="s0"># e.g., C:\windows\system32\kernel32.dll on Wine</span>
+    <span class="s3">for </span><span class="s1">entry </span><span class="s3">in </span><span class="s1">getattr(pe</span><span class="s3">, </span><span class="s4">'DIRECTORY_ENTRY_IMPORT'</span><span class="s3">, </span><span class="s1">[]):</span>
+        <span class="s1">dll_str = winutils.convert_dll_name_to_str(entry.dll)</span>
+        <span class="s1">dlls.add(dll_str)</span>
+
+    <span class="s0"># We must also read the exports table to find forwarded symbols:</span>
+    <span class="s0"># http://blogs.msdn.com/b/oldnewthing/archive/2006/07/19/671238.aspx</span>
+    <span class="s1">exportSymbols = getattr(pe</span><span class="s3">, </span><span class="s4">'DIRECTORY_ENTRY_EXPORT'</span><span class="s3">, None</span><span class="s1">)</span>
+    <span class="s3">if </span><span class="s1">exportSymbols:</span>
+        <span class="s3">for </span><span class="s1">sym </span><span class="s3">in </span><span class="s1">exportSymbols.symbols:</span>
+            <span class="s3">if </span><span class="s1">sym.forwarder </span><span class="s3">is not None</span><span class="s1">:</span>
+                <span class="s0"># sym.forwarder is a bytes object. Convert it to a string.</span>
+                <span class="s1">forwarder = winutils.convert_dll_name_to_str(sym.forwarder)</span>
+                <span class="s0"># sym.forwarder is for example 'KERNEL32.EnterCriticalSection'</span>
+                <span class="s1">dll = forwarder.split(</span><span class="s4">'.'</span><span class="s1">)[</span><span class="s5">0</span><span class="s1">]</span>
+                <span class="s1">dlls.add(dll + </span><span class="s4">&quot;.dll&quot;</span><span class="s1">)</span>
+
+    <span class="s1">pe.close()</span>
+    <span class="s3">return </span><span class="s1">dlls</span>
+
+
+<span class="s3">def </span><span class="s1">_extract_from_egg(toc):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Ensure all binary modules in zipped eggs get extracted and included with the frozen executable. 
+ 
+    return  modified table of content 
+    &quot;&quot;&quot;</span>
+    <span class="s1">new_toc = []</span>
+    <span class="s3">for </span><span class="s1">item </span><span class="s3">in </span><span class="s1">toc:</span>
+        <span class="s0"># Item is a tupple</span>
+        <span class="s0">#  (mod_name, path, type)</span>
+        <span class="s1">modname</span><span class="s3">, </span><span class="s1">pth</span><span class="s3">, </span><span class="s1">typ = item</span>
+        <span class="s3">if not </span><span class="s1">os.path.isfile(pth):</span>
+            <span class="s1">pth = check_extract_from_egg(pth)[</span><span class="s5">0</span><span class="s1">][</span><span class="s5">0</span><span class="s1">]</span>
+
+        <span class="s0"># Add value to new data structure.</span>
+        <span class="s1">new_toc.append((modname</span><span class="s3">, </span><span class="s1">pth</span><span class="s3">, </span><span class="s1">typ))</span>
+    <span class="s3">return </span><span class="s1">new_toc</span>
+
+
+<span class="s1">BindingRedirect = collections.namedtuple(</span><span class="s4">'BindingRedirect'</span><span class="s3">, </span><span class="s4">'name language arch oldVersion newVersion publicKeyToken'</span><span class="s1">)</span>
+
+
+<span class="s3">def </span><span class="s1">match_binding_redirect(manifest</span><span class="s3">, </span><span class="s1">redirect):</span>
+    <span class="s3">return </span><span class="s1">all([</span>
+        <span class="s1">manifest.name == redirect.name</span><span class="s3">,</span>
+        <span class="s1">manifest.version == redirect.oldVersion</span><span class="s3">,</span>
+        <span class="s1">manifest.language == redirect.language</span><span class="s3">,</span>
+        <span class="s1">manifest.processorArchitecture == redirect.arch</span><span class="s3">,</span>
+        <span class="s1">manifest.publicKeyToken == redirect.publicKeyToken</span><span class="s3">,</span>
+    <span class="s1">])</span>
+
+
+<span class="s1">_exe_machine_type = </span><span class="s3">None</span>
+
+
+<span class="s3">def </span><span class="s1">matchDLLArch(filename):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Return True if the DLL given by filename matches the CPU type/architecture of the Python process running 
+    PyInstaller. 
+ 
+    Always returns True on non-Windows platforms. 
+ 
+    :param filename: 
+    :type filename: 
+    :return: 
+    :rtype: 
+    &quot;&quot;&quot;</span>
+    <span class="s0"># TODO: check machine type on other platforms?</span>
+    <span class="s3">if not </span><span class="s1">compat.is_win:</span>
+        <span class="s3">return True</span>
+
+    <span class="s3">global </span><span class="s1">_exe_machine_type</span>
+    <span class="s3">try</span><span class="s1">:</span>
+        <span class="s3">if </span><span class="s1">_exe_machine_type </span><span class="s3">is None</span><span class="s1">:</span>
+            <span class="s1">pefilename = compat.python_executable  </span><span class="s0"># for exception handling</span>
+            <span class="s1">exe_pe = pefile.PE(pefilename</span><span class="s3">, </span><span class="s1">fast_load=</span><span class="s3">True</span><span class="s1">)</span>
+            <span class="s1">_exe_machine_type = exe_pe.FILE_HEADER.Machine</span>
+            <span class="s1">exe_pe.close()</span>
+
+        <span class="s1">pefilename = filename  </span><span class="s0"># for exception handling</span>
+        <span class="s1">pe = pefile.PE(filename</span><span class="s3">, </span><span class="s1">fast_load=</span><span class="s3">True</span><span class="s1">)</span>
+        <span class="s1">match_arch = pe.FILE_HEADER.Machine == _exe_machine_type</span>
+        <span class="s1">pe.close()</span>
+    <span class="s3">except </span><span class="s1">pefile.PEFormatError </span><span class="s3">as </span><span class="s1">exc:</span>
+        <span class="s3">raise </span><span class="s1">SystemExit(</span><span class="s4">'Cannot get architecture from file: %s</span><span class="s3">\n  </span><span class="s4">Reason: %s' </span><span class="s1">% (pefilename</span><span class="s3">, </span><span class="s1">exc))</span>
+    <span class="s3">return </span><span class="s1">match_arch</span>
+
+
+<span class="s3">def </span><span class="s1">Dependencies(lTOC</span><span class="s3">, </span><span class="s1">xtrapath=</span><span class="s3">None, </span><span class="s1">manifest=</span><span class="s3">None, </span><span class="s1">redirects=</span><span class="s3">None</span><span class="s1">):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Expand LTOC to include all the closure of binary dependencies. 
+ 
+    `LTOC` is a logical table of contents, ie, a seq of tuples (name, path). Return LTOC expanded by all the binary 
+    dependencies of the entries in LTOC, except those listed in the module global EXCLUDES 
+ 
+    `manifest` may be a winmanifest.Manifest instance for a program manifest, so that all dependent assemblies of 
+    python.exe can be added to the built exe. 
+ 
+    `redirects` may be a list. Any assembly redirects found via policy files will be added to the list as 
+    BindingRedirect objects so they can later be used to modify any manifests that reference the redirected assembly. 
+    &quot;&quot;&quot;</span>
+    <span class="s0"># Extract all necessary binary modules from Python eggs to be included directly with PyInstaller.</span>
+    <span class="s1">lTOC = _extract_from_egg(lTOC)</span>
+
+    <span class="s3">for </span><span class="s1">nm</span><span class="s3">, </span><span class="s1">pth</span><span class="s3">, </span><span class="s1">typ </span><span class="s3">in </span><span class="s1">lTOC:</span>
+        <span class="s3">if </span><span class="s1">nm.upper() </span><span class="s3">in </span><span class="s1">seen:</span>
+            <span class="s3">continue</span>
+        <span class="s1">logger.debug(</span><span class="s4">&quot;Analyzing %s&quot;</span><span class="s3">, </span><span class="s1">pth)</span>
+        <span class="s1">seen.add(nm.upper())</span>
+        <span class="s3">if </span><span class="s1">compat.is_win:</span>
+            <span class="s3">for </span><span class="s1">ftocnm</span><span class="s3">, </span><span class="s1">fn </span><span class="s3">in </span><span class="s1">getAssemblyFiles(pth</span><span class="s3">, </span><span class="s1">manifest</span><span class="s3">, </span><span class="s1">redirects):</span>
+                <span class="s1">lTOC.append((ftocnm</span><span class="s3">, </span><span class="s1">fn</span><span class="s3">, </span><span class="s4">'BINARY'</span><span class="s1">))</span>
+        <span class="s3">for </span><span class="s1">lib</span><span class="s3">, </span><span class="s1">npth </span><span class="s3">in </span><span class="s1">selectImports(pth</span><span class="s3">, </span><span class="s1">xtrapath):</span>
+            <span class="s3">if </span><span class="s1">lib.upper() </span><span class="s3">in </span><span class="s1">seen </span><span class="s3">or </span><span class="s1">npth.upper() </span><span class="s3">in </span><span class="s1">seen:</span>
+                <span class="s3">continue</span>
+            <span class="s1">seen.add(npth.upper())</span>
+            <span class="s1">lTOC.append((lib</span><span class="s3">, </span><span class="s1">npth</span><span class="s3">, </span><span class="s4">'BINARY'</span><span class="s1">))</span>
+
+    <span class="s3">return </span><span class="s1">lTOC</span>
+
+
+<span class="s3">def </span><span class="s1">pkg_resources_get_default_cache():</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Determine the default cache location 
+ 
+    This returns the ``PYTHON_EGG_CACHE`` environment variable, if set. Otherwise, on Windows, it returns a 
+    'Python-Eggs' subdirectory of the 'Application Data' directory.  On all other systems, it's '~/.python-eggs'. 
+    &quot;&quot;&quot;</span>
+    <span class="s0"># This function borrowed from setuptools/pkg_resources</span>
+    <span class="s1">egg_cache = compat.getenv(</span><span class="s4">'PYTHON_EGG_CACHE'</span><span class="s1">)</span>
+    <span class="s3">if </span><span class="s1">egg_cache </span><span class="s3">is not None</span><span class="s1">:</span>
+        <span class="s3">return </span><span class="s1">egg_cache</span>
+
+    <span class="s3">if </span><span class="s1">os.name != </span><span class="s4">'nt'</span><span class="s1">:</span>
+        <span class="s3">return </span><span class="s1">os.path.expanduser(</span><span class="s4">'~/.python-eggs'</span><span class="s1">)</span>
+
+    <span class="s1">app_data = </span><span class="s4">'Application Data'  </span><span class="s0"># XXX this may be locale-specific!</span>
+    <span class="s1">app_homes = [</span>
+        <span class="s1">((</span><span class="s4">'APPDATA'</span><span class="s3">,</span><span class="s1">)</span><span class="s3">, None</span><span class="s1">)</span><span class="s3">,  </span><span class="s0"># best option, should be locale-safe</span>
+        <span class="s1">((</span><span class="s4">'USERPROFILE'</span><span class="s3">,</span><span class="s1">)</span><span class="s3">, </span><span class="s1">app_data)</span><span class="s3">,</span>
+        <span class="s1">((</span><span class="s4">'HOMEDRIVE'</span><span class="s3">, </span><span class="s4">'HOMEPATH'</span><span class="s1">)</span><span class="s3">, </span><span class="s1">app_data)</span><span class="s3">,</span>
+        <span class="s1">((</span><span class="s4">'HOMEPATH'</span><span class="s3">,</span><span class="s1">)</span><span class="s3">, </span><span class="s1">app_data)</span><span class="s3">,</span>
+        <span class="s1">((</span><span class="s4">'HOME'</span><span class="s3">,</span><span class="s1">)</span><span class="s3">, None</span><span class="s1">)</span><span class="s3">,</span>
+        <span class="s1">((</span><span class="s4">'WINDIR'</span><span class="s3">,</span><span class="s1">)</span><span class="s3">, </span><span class="s1">app_data)</span><span class="s3">,  </span><span class="s0"># 95/98/ME</span>
+    <span class="s1">]</span>
+
+    <span class="s3">for </span><span class="s1">keys</span><span class="s3">, </span><span class="s1">subdir </span><span class="s3">in </span><span class="s1">app_homes:</span>
+        <span class="s1">dirname = </span><span class="s4">''</span>
+        <span class="s3">for </span><span class="s1">key </span><span class="s3">in </span><span class="s1">keys:</span>
+            <span class="s3">if </span><span class="s1">key </span><span class="s3">in </span><span class="s1">os.environ:</span>
+                <span class="s1">dirname = os.path.join(dirname</span><span class="s3">, </span><span class="s1">compat.getenv(key))</span>
+            <span class="s3">else</span><span class="s1">:</span>
+                <span class="s3">break</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s3">if </span><span class="s1">subdir:</span>
+                <span class="s1">dirname = os.path.join(dirname</span><span class="s3">, </span><span class="s1">subdir)</span>
+            <span class="s3">return </span><span class="s1">os.path.join(dirname</span><span class="s3">, </span><span class="s4">'Python-Eggs'</span><span class="s1">)</span>
+    <span class="s3">else</span><span class="s1">:</span>
+        <span class="s3">raise </span><span class="s1">RuntimeError(</span><span class="s4">&quot;Please set the PYTHON_EGG_CACHE environment variable&quot;</span><span class="s1">)</span>
+
+
+<span class="s3">def </span><span class="s1">check_extract_from_egg(pth</span><span class="s3">, </span><span class="s1">todir=</span><span class="s3">None</span><span class="s1">):</span>
+    <span class="s2">r&quot;&quot;&quot; 
+    Check if path points to a file inside a python egg file, extract the file from the egg to a cache directory ( 
+    following pkg_resources convention) and return [(extracted path, egg file path, relative path inside egg file)]. 
+ 
+    Otherwise, just return [(original path, None, None)]. If path points to an egg file directly, return a list with 
+    all files from the egg formatted like above. 
+ 
+    Example: 
+    &gt;&gt;&gt; check_extract_from_egg(r'C:\Python26\Lib\site-packages\my.egg\mymodule\my.pyd') 
+    [(r'C:\Users\UserName\AppData\Roaming\Python-Eggs\my.egg-tmp\mymodule\my.pyd', 
+    r'C:\Python26\Lib\site-packages\my.egg', r'mymodule/my.pyd')] 
+    &quot;&quot;&quot;</span>
+    <span class="s1">rv = []</span>
+    <span class="s3">if </span><span class="s1">os.path.altsep:</span>
+        <span class="s1">pth = pth.replace(os.path.altsep</span><span class="s3">, </span><span class="s1">os.path.sep)</span>
+    <span class="s1">components = pth.split(os.path.sep)</span>
+    <span class="s3">for </span><span class="s1">i</span><span class="s3">, </span><span class="s1">name </span><span class="s3">in </span><span class="s1">enumerate(components):</span>
+        <span class="s3">if </span><span class="s1">name.lower().endswith(</span><span class="s4">&quot;.egg&quot;</span><span class="s1">):</span>
+            <span class="s1">eggpth = os.path.sep.join(components[:i + </span><span class="s5">1</span><span class="s1">])</span>
+            <span class="s3">if </span><span class="s1">os.path.isfile(eggpth):</span>
+                <span class="s0"># eggs can also be directories!</span>
+                <span class="s3">try</span><span class="s1">:</span>
+                    <span class="s1">egg = zipfile.ZipFile(eggpth)</span>
+                <span class="s3">except </span><span class="s1">zipfile.BadZipfile </span><span class="s3">as </span><span class="s1">e:</span>
+                    <span class="s3">raise </span><span class="s1">SystemExit(</span><span class="s4">&quot;Error: %s %s&quot; </span><span class="s1">% (eggpth</span><span class="s3">, </span><span class="s1">e))</span>
+                <span class="s3">if </span><span class="s1">todir </span><span class="s3">is None</span><span class="s1">:</span>
+                    <span class="s0"># Use the same directory as setuptools/pkg_resources. So, if the specific egg was accessed before</span>
+                    <span class="s0"># (not necessarily by pyinstaller), the extracted contents already exist (pkg_resources puts them</span>
+                    <span class="s0"># there) and can be used.</span>
+                    <span class="s1">todir = os.path.join(pkg_resources_get_default_cache()</span><span class="s3">, </span><span class="s1">name + </span><span class="s4">&quot;-tmp&quot;</span><span class="s1">)</span>
+                <span class="s3">if </span><span class="s1">components[i + </span><span class="s5">1</span><span class="s1">:]:</span>
+                    <span class="s1">members = [</span><span class="s4">&quot;/&quot;</span><span class="s1">.join(components[i + </span><span class="s5">1</span><span class="s1">:])]</span>
+                <span class="s3">else</span><span class="s1">:</span>
+                    <span class="s1">members = egg.namelist()</span>
+                <span class="s3">for </span><span class="s1">member </span><span class="s3">in </span><span class="s1">members:</span>
+                    <span class="s1">pth = os.path.join(todir</span><span class="s3">, </span><span class="s1">member)</span>
+                    <span class="s3">if not </span><span class="s1">os.path.isfile(pth):</span>
+                        <span class="s1">dirname = os.path.dirname(pth)</span>
+                        <span class="s3">if not </span><span class="s1">os.path.isdir(dirname):</span>
+                            <span class="s1">os.makedirs(dirname)</span>
+                        <span class="s3">with </span><span class="s1">open(pth</span><span class="s3">, </span><span class="s4">&quot;wb&quot;</span><span class="s1">) </span><span class="s3">as </span><span class="s1">f:</span>
+                            <span class="s1">f.write(egg.read(member))</span>
+                    <span class="s1">rv.append((pth</span><span class="s3">, </span><span class="s1">eggpth</span><span class="s3">, </span><span class="s1">member))</span>
+                <span class="s3">return </span><span class="s1">rv</span>
+    <span class="s3">return </span><span class="s1">[(pth</span><span class="s3">, None, None</span><span class="s1">)]</span>
+
+
+<span class="s3">def </span><span class="s1">getAssemblies(pth):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    On Windows return the dependent Side-by-Side (SxS) assemblies of a binary as a list of Manifest objects. 
+ 
+    Dependent assemblies are required only by binaries compiled with MSVC 9.0. Python 2.7 and 3.2 are compiled with 
+    MSVC 9.0 and thus depend on Microsoft Redistributable runtime libraries 9.0. 
+ 
+    Python 3.3+ is compiled with version 10.0 and does not use SxS assemblies. 
+ 
+    FIXME: Can this be removed since we now only support Python 3.5+? 
+    FIXME: IS there some test-case covering this? 
+    &quot;&quot;&quot;</span>
+    <span class="s3">if </span><span class="s1">pth.lower().endswith(</span><span class="s4">&quot;.manifest&quot;</span><span class="s1">):</span>
+        <span class="s3">return </span><span class="s1">[]</span>
+    <span class="s0"># check for manifest file</span>
+    <span class="s1">manifestnm = pth + </span><span class="s4">&quot;.manifest&quot;</span>
+    <span class="s3">if </span><span class="s1">os.path.isfile(manifestnm):</span>
+        <span class="s3">with </span><span class="s1">open(manifestnm</span><span class="s3">, </span><span class="s4">&quot;rb&quot;</span><span class="s1">) </span><span class="s3">as </span><span class="s1">fd:</span>
+            <span class="s1">res = {winmanifest.RT_MANIFEST: {</span><span class="s5">1</span><span class="s1">: {</span><span class="s5">0</span><span class="s1">: fd.read()}}}</span>
+    <span class="s3">else</span><span class="s1">:</span>
+        <span class="s0"># check the binary for embedded manifest</span>
+        <span class="s3">try</span><span class="s1">:</span>
+            <span class="s1">res = winmanifest.GetManifestResources(pth)</span>
+        <span class="s3">except </span><span class="s1">winresource.pywintypes.error </span><span class="s3">as </span><span class="s1">exc:</span>
+            <span class="s3">if </span><span class="s1">exc.args[</span><span class="s5">0</span><span class="s1">] == winresource.ERROR_BAD_EXE_FORMAT:</span>
+                <span class="s1">logger.info(</span><span class="s4">'Cannot get manifest resource from non-PE file %s'</span><span class="s3">, </span><span class="s1">pth)</span>
+                <span class="s3">return </span><span class="s1">[]</span>
+            <span class="s3">raise</span>
+    <span class="s1">rv = []</span>
+    <span class="s3">if </span><span class="s1">winmanifest.RT_MANIFEST </span><span class="s3">in </span><span class="s1">res </span><span class="s3">and </span><span class="s1">len(res[winmanifest.RT_MANIFEST]):</span>
+        <span class="s3">for </span><span class="s1">name </span><span class="s3">in </span><span class="s1">res[winmanifest.RT_MANIFEST]:</span>
+            <span class="s3">for </span><span class="s1">language </span><span class="s3">in </span><span class="s1">res[winmanifest.RT_MANIFEST][name]:</span>
+                <span class="s0"># check the manifest for dependent assemblies</span>
+                <span class="s3">try</span><span class="s1">:</span>
+                    <span class="s1">manifest = winmanifest.Manifest()</span>
+                    <span class="s1">manifest.filename = </span><span class="s4">&quot;:&quot;</span><span class="s1">.join([</span>
+                        <span class="s1">pth</span><span class="s3">,</span>
+                        <span class="s1">str(winmanifest.RT_MANIFEST)</span><span class="s3">,</span>
+                        <span class="s1">str(name)</span><span class="s3">,</span>
+                        <span class="s1">str(language)</span><span class="s3">,</span>
+                    <span class="s1">])</span>
+                    <span class="s1">manifest.parse_string(res[winmanifest.RT_MANIFEST][name][language]</span><span class="s3">, False</span><span class="s1">)</span>
+                <span class="s3">except </span><span class="s1">Exception:</span>
+                    <span class="s1">logger.error(</span><span class="s4">&quot;Cannot parse manifest resource %s, %s from %s&quot;</span><span class="s3">, </span><span class="s1">name</span><span class="s3">, </span><span class="s1">language</span><span class="s3">, </span><span class="s1">pth</span><span class="s3">, </span><span class="s1">exc_info=</span><span class="s5">1</span><span class="s1">)</span>
+                <span class="s3">else</span><span class="s1">:</span>
+                    <span class="s3">if </span><span class="s1">manifest.dependentAssemblies:</span>
+                        <span class="s1">logger.debug(</span><span class="s4">&quot;Dependent assemblies of %s:&quot;</span><span class="s3">, </span><span class="s1">pth)</span>
+                        <span class="s1">logger.debug(</span><span class="s4">&quot;, &quot;</span><span class="s1">.join([assembly.getid() </span><span class="s3">for </span><span class="s1">assembly </span><span class="s3">in </span><span class="s1">manifest.dependentAssemblies]))</span>
+                    <span class="s1">rv.extend(manifest.dependentAssemblies)</span>
+    <span class="s3">return </span><span class="s1">rv</span>
+
+
+<span class="s3">def </span><span class="s1">getAssemblyFiles(pth</span><span class="s3">, </span><span class="s1">manifest=</span><span class="s3">None, </span><span class="s1">redirects=</span><span class="s3">None</span><span class="s1">):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Find all assemblies that are dependencies of the given binary and return the files that make up the assemblies as 
+    (name, fullpath) tuples. 
+ 
+    If a WinManifest object is passed as `manifest`, also updates that manifest to reference the returned assemblies. 
+    This is done only to update the built app's .exe with the dependencies of python.exe 
+ 
+    If a list is passed as `redirects`, and binding redirects in policy files are applied when searching for 
+    assemblies, BindingRedirect objects are appended to this list. 
+ 
+    Return a list of pairs (name, fullpath) 
+    &quot;&quot;&quot;</span>
+    <span class="s1">rv = []</span>
+    <span class="s3">if </span><span class="s1">manifest:</span>
+        <span class="s1">_depNames = set(dep.name </span><span class="s3">for </span><span class="s1">dep </span><span class="s3">in </span><span class="s1">manifest.dependentAssemblies)</span>
+    <span class="s3">for </span><span class="s1">assembly </span><span class="s3">in </span><span class="s1">getAssemblies(pth):</span>
+        <span class="s3">if </span><span class="s1">assembly.getid().upper() </span><span class="s3">in </span><span class="s1">seen:</span>
+            <span class="s3">continue</span>
+        <span class="s3">if </span><span class="s1">manifest </span><span class="s3">and </span><span class="s1">assembly.name </span><span class="s3">not in </span><span class="s1">_depNames:</span>
+            <span class="s0"># Add assembly as dependency to our final output exe's manifest</span>
+            <span class="s1">logger.info(</span><span class="s4">&quot;Adding %s to dependent assemblies of final executable</span><span class="s3">\n  </span><span class="s4">required by %s&quot;</span><span class="s3">, </span><span class="s1">assembly.name</span><span class="s3">, </span><span class="s1">pth)</span>
+            <span class="s1">manifest.dependentAssemblies.append(assembly)</span>
+            <span class="s1">_depNames.add(assembly.name)</span>
+        <span class="s3">if not </span><span class="s1">dylib.include_library(assembly.name):</span>
+            <span class="s1">logger.debug(</span><span class="s4">&quot;Skipping assembly %s&quot;</span><span class="s3">, </span><span class="s1">assembly.getid())</span>
+            <span class="s3">continue</span>
+        <span class="s3">if </span><span class="s1">assembly.optional:</span>
+            <span class="s1">logger.debug(</span><span class="s4">&quot;Skipping optional assembly %s&quot;</span><span class="s3">, </span><span class="s1">assembly.getid())</span>
+            <span class="s3">continue</span>
+
+        <span class="s3">from </span><span class="s1">PyInstaller.config </span><span class="s3">import </span><span class="s1">CONF</span>
+        <span class="s3">if </span><span class="s1">CONF.get(</span><span class="s4">&quot;win_no_prefer_redirects&quot;</span><span class="s1">):</span>
+            <span class="s1">files = assembly.find_files()</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s1">files = []</span>
+        <span class="s3">if not </span><span class="s1">len(files):</span>
+            <span class="s0"># If no files were found, it may be the case that the required version of the assembly is not installed, and</span>
+            <span class="s0"># the policy file is redirecting it to a newer version. So, we collect the newer version instead.</span>
+            <span class="s1">files = assembly.find_files(ignore_policies=</span><span class="s3">False</span><span class="s1">)</span>
+            <span class="s3">if </span><span class="s1">len(files) </span><span class="s3">and </span><span class="s1">redirects </span><span class="s3">is not None</span><span class="s1">:</span>
+                <span class="s0"># New version was found, old version was not. Add a redirect in the app configuration.</span>
+                <span class="s1">old_version = assembly.version</span>
+                <span class="s1">new_version = assembly.get_policy_redirect()</span>
+                <span class="s1">logger.info(</span><span class="s4">&quot;Adding redirect %s version %s -&gt; %s&quot;</span><span class="s3">, </span><span class="s1">assembly.name</span><span class="s3">, </span><span class="s1">old_version</span><span class="s3">, </span><span class="s1">new_version)</span>
+                <span class="s1">redirects.append(</span>
+                    <span class="s1">BindingRedirect(</span>
+                        <span class="s1">name=assembly.name</span><span class="s3">,</span>
+                        <span class="s1">language=assembly.language</span><span class="s3">,</span>
+                        <span class="s1">arch=assembly.processorArchitecture</span><span class="s3">,</span>
+                        <span class="s1">publicKeyToken=assembly.publicKeyToken</span><span class="s3">,</span>
+                        <span class="s1">oldVersion=old_version</span><span class="s3">,</span>
+                        <span class="s1">newVersion=new_version</span><span class="s3">,</span>
+                    <span class="s1">)</span>
+                <span class="s1">)</span>
+
+        <span class="s3">if </span><span class="s1">files:</span>
+            <span class="s1">seen.add(assembly.getid().upper())</span>
+            <span class="s3">for </span><span class="s1">fn </span><span class="s3">in </span><span class="s1">files:</span>
+                <span class="s1">fname</span><span class="s3">, </span><span class="s1">fext = os.path.splitext(fn)</span>
+                <span class="s3">if </span><span class="s1">fext.lower() == </span><span class="s4">&quot;.manifest&quot;</span><span class="s1">:</span>
+                    <span class="s1">nm = assembly.name + fext</span>
+                <span class="s3">else</span><span class="s1">:</span>
+                    <span class="s1">nm = os.path.basename(fn)</span>
+                <span class="s1">ftocnm = nm</span>
+                <span class="s3">if </span><span class="s1">assembly.language </span><span class="s3">not in </span><span class="s1">(</span><span class="s3">None, </span><span class="s4">&quot;&quot;</span><span class="s3">, </span><span class="s4">&quot;*&quot;</span><span class="s3">, </span><span class="s4">&quot;neutral&quot;</span><span class="s1">):</span>
+                    <span class="s1">ftocnm = os.path.join(assembly.getlanguage()</span><span class="s3">, </span><span class="s1">ftocnm)</span>
+                <span class="s1">nm</span><span class="s3">, </span><span class="s1">ftocnm</span><span class="s3">, </span><span class="s1">fn = [item.encode(sys.getfilesystemencoding()) </span><span class="s3">for </span><span class="s1">item </span><span class="s3">in </span><span class="s1">(nm</span><span class="s3">, </span><span class="s1">ftocnm</span><span class="s3">, </span><span class="s1">fn)]</span>
+                <span class="s3">if </span><span class="s1">fn.upper() </span><span class="s3">not in </span><span class="s1">seen:</span>
+                    <span class="s1">logger.debug(</span><span class="s4">&quot;Adding %s&quot;</span><span class="s3">, </span><span class="s1">ftocnm)</span>
+                    <span class="s1">seen.add(nm.upper())</span>
+                    <span class="s1">seen.add(fn.upper())</span>
+                    <span class="s1">rv.append((ftocnm</span><span class="s3">, </span><span class="s1">fn))</span>
+                <span class="s3">else</span><span class="s1">:</span>
+                    <span class="s0">#logger.info(&quot;skipping %s part of assembly %s dependency of %s&quot;, ftocnm, assembly.name, pth)</span>
+                    <span class="s3">pass</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s1">logger.error(</span><span class="s4">&quot;Assembly %s not found&quot;</span><span class="s3">, </span><span class="s1">assembly.getid())</span>
+
+    <span class="s0"># Convert items in list from 'bytes' type to 'str' type.</span>
+    <span class="s0"># NOTE: with Python 3 we somehow get type 'bytes' and it then causes other issues and failures with PyInstaller.</span>
+    <span class="s1">new_rv = []</span>
+    <span class="s3">for </span><span class="s1">item </span><span class="s3">in </span><span class="s1">rv:</span>
+        <span class="s1">a = item[</span><span class="s5">0</span><span class="s1">].decode(</span><span class="s4">'ascii'</span><span class="s1">)</span>
+        <span class="s1">b = item[</span><span class="s5">1</span><span class="s1">].decode(</span><span class="s4">'ascii'</span><span class="s1">)</span>
+        <span class="s1">new_rv.append((a</span><span class="s3">, </span><span class="s1">b))</span>
+    <span class="s1">rv = new_rv</span>
+
+    <span class="s3">return </span><span class="s1">rv</span>
+
+
+<span class="s3">def </span><span class="s1">selectImports(pth</span><span class="s3">, </span><span class="s1">xtrapath=</span><span class="s3">None</span><span class="s1">):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Return the dependencies of a binary that should be included. 
+ 
+    Return a list of pairs (name, fullpath) 
+    &quot;&quot;&quot;</span>
+    <span class="s1">rv = []</span>
+    <span class="s3">if </span><span class="s1">xtrapath </span><span class="s3">is None</span><span class="s1">:</span>
+        <span class="s1">xtrapath = [os.path.dirname(pth)]</span>
+    <span class="s3">else</span><span class="s1">:</span>
+        <span class="s3">assert </span><span class="s1">isinstance(xtrapath</span><span class="s3">, </span><span class="s1">list)</span>
+        <span class="s1">xtrapath = [os.path.dirname(pth)] + xtrapath  </span><span class="s0"># make a copy</span>
+    <span class="s1">dlls = getImports(pth)</span>
+    <span class="s3">for </span><span class="s1">lib </span><span class="s3">in </span><span class="s1">dlls:</span>
+        <span class="s3">if </span><span class="s1">lib.upper() </span><span class="s3">in </span><span class="s1">seen:</span>
+            <span class="s3">continue</span>
+        <span class="s3">if not </span><span class="s1">compat.is_win:</span>
+            <span class="s0"># all other platforms</span>
+            <span class="s1">npth = lib</span>
+            <span class="s1">lib = os.path.basename(lib)</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s0"># plain win case</span>
+            <span class="s1">npth = getfullnameof(lib</span><span class="s3">, </span><span class="s1">xtrapath)</span>
+
+        <span class="s0"># Now npth is a candidate lib if found. Check again for excludes, but with regex. FIXME: split the list.</span>
+        <span class="s3">if </span><span class="s1">npth:</span>
+            <span class="s1">candidatelib = npth</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s1">candidatelib = lib</span>
+
+        <span class="s3">if not </span><span class="s1">dylib.include_library(candidatelib):</span>
+            <span class="s3">if </span><span class="s1">candidatelib.find(</span><span class="s4">'libpython'</span><span class="s1">) &lt; </span><span class="s5">0 </span><span class="s3">and </span><span class="s1">candidatelib.find(</span><span class="s4">'Python.framework'</span><span class="s1">) &lt; </span><span class="s5">0</span><span class="s1">:</span>
+                <span class="s0"># skip libs not containing (libpython or Python.framework)</span>
+                <span class="s3">if </span><span class="s1">npth.upper() </span><span class="s3">not in </span><span class="s1">seen:</span>
+                    <span class="s1">logger.debug(</span><span class="s4">&quot;Skipping %s dependency of %s&quot;</span><span class="s3">, </span><span class="s1">lib</span><span class="s3">, </span><span class="s1">os.path.basename(pth))</span>
+                <span class="s3">continue</span>
+            <span class="s3">else</span><span class="s1">:</span>
+                <span class="s3">pass</span>
+
+        <span class="s3">if </span><span class="s1">npth:</span>
+            <span class="s3">if </span><span class="s1">npth.upper() </span><span class="s3">not in </span><span class="s1">seen:</span>
+                <span class="s1">logger.debug(</span><span class="s4">&quot;Adding %s dependency of %s from %s&quot;</span><span class="s3">, </span><span class="s1">lib</span><span class="s3">, </span><span class="s1">os.path.basename(pth)</span><span class="s3">, </span><span class="s1">npth)</span>
+                <span class="s1">rv.append((lib</span><span class="s3">, </span><span class="s1">npth))</span>
+        <span class="s3">elif </span><span class="s1">dylib.warn_missing_lib(lib):</span>
+            <span class="s1">logger.warning(</span><span class="s4">&quot;lib not found: %s dependency of %s&quot;</span><span class="s3">, </span><span class="s1">lib</span><span class="s3">, </span><span class="s1">pth)</span>
+
+    <span class="s3">return </span><span class="s1">rv</span>
+
+
+<span class="s3">def </span><span class="s1">_getImports_ldd(pth):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Find the binary dependencies of PTH. 
+ 
+    This implementation is for ldd platforms (mostly unix). 
+    &quot;&quot;&quot;</span>
+    <span class="s1">rslt = set()</span>
+    <span class="s3">if </span><span class="s1">compat.is_aix:</span>
+        <span class="s0"># Match libs of the form</span>
+        <span class="s0">#   'archivelib.a(objectmember.so/.o)'</span>
+        <span class="s0"># or</span>
+        <span class="s0">#   'sharedlib.so'</span>
+        <span class="s0"># Will not match the fake lib '/unix'</span>
+        <span class="s1">lddPattern = re.compile(</span><span class="s4">r&quot;^\s*(((?P&lt;libarchive&gt;(.*\.a))(?P&lt;objectmember&gt;\(.*\)))|((?P&lt;libshared&gt;(.*\.so))))$&quot;</span><span class="s1">)</span>
+    <span class="s3">elif </span><span class="s1">compat.is_hpux:</span>
+        <span class="s0"># Match libs of the form</span>
+        <span class="s0">#   'sharedlib.so =&gt; full-path-to-lib</span>
+        <span class="s0"># e.g.</span>
+        <span class="s0">#   'libpython2.7.so =&gt;      /usr/local/lib/hpux32/libpython2.7.so'</span>
+        <span class="s1">lddPattern = re.compile(</span><span class="s4">r&quot;^\s+(.*)\s+=&gt;\s+(.*)$&quot;</span><span class="s1">)</span>
+    <span class="s3">elif </span><span class="s1">compat.is_solar:</span>
+        <span class="s0"># Match libs of the form</span>
+        <span class="s0">#   'sharedlib.so =&gt; full-path-to-lib</span>
+        <span class="s0"># e.g.</span>
+        <span class="s0">#   'libpython2.7.so.1.0 =&gt; /usr/local/lib/libpython2.7.so.1.0'</span>
+        <span class="s0"># Will not match the platform specific libs starting with '/platform'</span>
+        <span class="s1">lddPattern = re.compile(</span><span class="s4">r&quot;^\s+(.*)\s+=&gt;\s+(.*)$&quot;</span><span class="s1">)</span>
+    <span class="s3">else</span><span class="s1">:</span>
+        <span class="s1">lddPattern = re.compile(</span><span class="s4">r&quot;\s*(.*?)\s+=&gt;\s+(.*?)\s+\(.*\)&quot;</span><span class="s1">)</span>
+
+    <span class="s1">p = subprocess.run([</span><span class="s4">'ldd'</span><span class="s3">, </span><span class="s1">pth]</span><span class="s3">, </span><span class="s1">stderr=subprocess.PIPE</span><span class="s3">, </span><span class="s1">stdout=subprocess.PIPE</span><span class="s3">, </span><span class="s1">universal_newlines=</span><span class="s3">True</span><span class="s1">)</span>
+
+    <span class="s3">for </span><span class="s1">line </span><span class="s3">in </span><span class="s1">p.stderr.splitlines():</span>
+        <span class="s3">if not </span><span class="s1">line:</span>
+            <span class="s3">continue</span>
+        <span class="s0"># Python extensions (including stdlib ones) are not linked against python.so but rely on Python's symbols having</span>
+        <span class="s0"># already been loaded into symbol space at runtime. musl's ldd issues a series of harmless warnings to stderr</span>
+        <span class="s0"># telling us that those symbols are unfindable. These should be suppressed.</span>
+        <span class="s3">elif </span><span class="s1">line.startswith(</span><span class="s4">&quot;Error relocating &quot;</span><span class="s1">) </span><span class="s3">and </span><span class="s1">line.endswith(</span><span class="s4">&quot; symbol not found&quot;</span><span class="s1">):</span>
+            <span class="s3">continue</span>
+        <span class="s0"># Propagate any other warnings it might have.</span>
+        <span class="s1">print(line</span><span class="s3">, </span><span class="s1">file=sys.stderr)</span>
+
+    <span class="s3">for </span><span class="s1">line </span><span class="s3">in </span><span class="s1">p.stdout.splitlines():</span>
+        <span class="s1">m = lddPattern.search(line)</span>
+        <span class="s3">if </span><span class="s1">m:</span>
+            <span class="s3">if </span><span class="s1">compat.is_aix:</span>
+                <span class="s1">libarchive = m.group(</span><span class="s4">'libarchive'</span><span class="s1">)</span>
+                <span class="s3">if </span><span class="s1">libarchive:</span>
+                    <span class="s0"># We matched an archive lib with a request for a particular embedded shared object.</span>
+                    <span class="s0">#   'archivelib.a(objectmember.so/.o)'</span>
+                    <span class="s1">lib = libarchive</span>
+                    <span class="s1">name = os.path.basename(lib) + m.group(</span><span class="s4">'objectmember'</span><span class="s1">)</span>
+                <span class="s3">else</span><span class="s1">:</span>
+                    <span class="s0"># We matched a stand-alone shared library.</span>
+                    <span class="s0">#   'sharedlib.so'</span>
+                    <span class="s1">lib = m.group(</span><span class="s4">'libshared'</span><span class="s1">)</span>
+                    <span class="s1">name = os.path.basename(lib)</span>
+            <span class="s3">elif </span><span class="s1">compat.is_hpux:</span>
+                <span class="s1">name</span><span class="s3">, </span><span class="s1">lib = m.group(</span><span class="s5">1</span><span class="s1">)</span><span class="s3">, </span><span class="s1">m.group(</span><span class="s5">2</span><span class="s1">)</span>
+            <span class="s3">else</span><span class="s1">:</span>
+                <span class="s1">name</span><span class="s3">, </span><span class="s1">lib = m.group(</span><span class="s5">1</span><span class="s1">)</span><span class="s3">, </span><span class="s1">m.group(</span><span class="s5">2</span><span class="s1">)</span>
+            <span class="s3">if </span><span class="s1">name[:</span><span class="s5">10</span><span class="s1">] </span><span class="s3">in </span><span class="s1">(</span><span class="s4">'linux-gate'</span><span class="s3">, </span><span class="s4">'linux-vdso'</span><span class="s1">):</span>
+                <span class="s0"># linux-gate is a fake library which does not exist and should be ignored. See also:</span>
+                <span class="s0"># http://www.trilithium.com/johan/2005/08/linux-gate/</span>
+                <span class="s3">continue</span>
+
+            <span class="s3">if </span><span class="s1">compat.is_cygwin:</span>
+                <span class="s0"># exclude Windows system library</span>
+                <span class="s3">if </span><span class="s1">lib.lower().startswith(</span><span class="s4">'/cygdrive/c/windows/system'</span><span class="s1">):</span>
+                    <span class="s3">continue</span>
+
+            <span class="s3">if </span><span class="s1">os.path.exists(lib):</span>
+                <span class="s0"># Add lib if it is not already found.</span>
+                <span class="s3">if </span><span class="s1">lib </span><span class="s3">not in </span><span class="s1">rslt:</span>
+                    <span class="s1">rslt.add(lib)</span>
+            <span class="s3">elif </span><span class="s1">dylib.warn_missing_lib(name):</span>
+                <span class="s1">logger.warning(</span><span class="s4">'Cannot find %s in path %s (needed by %s)'</span><span class="s3">, </span><span class="s1">name</span><span class="s3">, </span><span class="s1">lib</span><span class="s3">, </span><span class="s1">pth)</span>
+        <span class="s3">elif </span><span class="s1">line.endswith(</span><span class="s4">&quot;not found&quot;</span><span class="s1">):</span>
+            <span class="s0"># On glibc-based linux distributions, missing libraries are marked with name.so =&gt; not found</span>
+            <span class="s1">tokens = line.split(</span><span class="s4">'=&gt;'</span><span class="s1">)</span>
+            <span class="s3">if </span><span class="s1">len(tokens) != </span><span class="s5">2</span><span class="s1">:</span>
+                <span class="s3">continue</span>
+            <span class="s1">name = tokens[</span><span class="s5">0</span><span class="s1">].strip()</span>
+            <span class="s3">if </span><span class="s1">dylib.warn_missing_lib(name):</span>
+                <span class="s1">logger.warning(</span><span class="s4">'Cannot find %s (needed by %s)'</span><span class="s3">, </span><span class="s1">name</span><span class="s3">, </span><span class="s1">pth)</span>
+    <span class="s3">return </span><span class="s1">rslt</span>
+
+
+<span class="s3">def </span><span class="s1">_getImports_macholib(pth):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Find the binary dependencies of PTH. 
+ 
+    This implementation is for Mac OS X and uses library macholib. 
+    &quot;&quot;&quot;</span>
+    <span class="s3">from </span><span class="s1">macholib.dyld </span><span class="s3">import </span><span class="s1">dyld_find</span>
+    <span class="s3">from </span><span class="s1">macholib.mach_o </span><span class="s3">import </span><span class="s1">LC_RPATH</span>
+    <span class="s3">from </span><span class="s1">macholib.MachO </span><span class="s3">import </span><span class="s1">MachO</span>
+    <span class="s3">from </span><span class="s1">macholib.util </span><span class="s3">import </span><span class="s1">in_system_path</span>
+    <span class="s1">rslt = set()</span>
+    <span class="s1">seen = set()  </span><span class="s0"># Libraries read from binary headers.</span>
+
+    <span class="s0">#- Walk through mach binary headers.</span>
+
+    <span class="s1">m = MachO(pth)</span>
+    <span class="s3">for </span><span class="s1">header </span><span class="s3">in </span><span class="s1">m.headers:</span>
+        <span class="s3">for </span><span class="s1">idx</span><span class="s3">, </span><span class="s1">name</span><span class="s3">, </span><span class="s1">lib </span><span class="s3">in </span><span class="s1">header.walkRelocatables():</span>
+            <span class="s0"># Sometimes libraries are present multiple times.</span>
+            <span class="s3">if </span><span class="s1">lib </span><span class="s3">not in </span><span class="s1">seen:</span>
+                <span class="s1">seen.add(lib)</span>
+
+    <span class="s0"># Walk through mach binary headers and look for LC_RPATH. macholib can't handle @rpath. LC_RPATH has to be read from</span>
+    <span class="s0"># the MachO header.</span>
+    <span class="s0"># TODO Do we need to remove LC_RPATH from MachO load commands? Will it cause any harm to leave them untouched?</span>
+    <span class="s0">#      Removing LC_RPATH should be implemented when getting files from the bincache if it is necessary.</span>
+    <span class="s1">run_paths = set()</span>
+    <span class="s3">for </span><span class="s1">header </span><span class="s3">in </span><span class="s1">m.headers:</span>
+        <span class="s3">for </span><span class="s1">command </span><span class="s3">in </span><span class="s1">header.commands:</span>
+            <span class="s0"># A command is a tupple like:</span>
+            <span class="s0">#   (&lt;macholib.mach_o.load_command object at 0x&gt;,</span>
+            <span class="s0">#    &lt;macholib.mach_o.rpath_command object at 0x&gt;,</span>
+            <span class="s0">#    '../lib\x00\x00')</span>
+            <span class="s1">cmd_type = command[</span><span class="s5">0</span><span class="s1">].cmd</span>
+            <span class="s3">if </span><span class="s1">cmd_type == LC_RPATH:</span>
+                <span class="s1">rpath = command[</span><span class="s5">2</span><span class="s1">].decode(</span><span class="s4">'utf-8'</span><span class="s1">)</span>
+                <span class="s0"># Remove trailing '\x00' characters. E.g., '../lib\x00\x00'</span>
+                <span class="s1">rpath = rpath.rstrip(</span><span class="s4">'</span><span class="s3">\x00</span><span class="s4">'</span><span class="s1">)</span>
+                <span class="s0"># Replace the @executable_path and @loader_path keywords with the actual path to the binary.</span>
+                <span class="s1">executable_path = os.path.dirname(pth)</span>
+                <span class="s1">rpath = re.sub(</span><span class="s4">'^@(executable_path|loader_path|rpath)(/|$)'</span><span class="s3">, </span><span class="s1">executable_path + </span><span class="s4">r'\2'</span><span class="s3">, </span><span class="s1">rpath)</span>
+                <span class="s0"># Make rpath absolute. According to Apple doc LC_RPATH is always relative to the binary location.</span>
+                <span class="s1">rpath = os.path.normpath(os.path.join(executable_path</span><span class="s3">, </span><span class="s1">rpath))</span>
+                <span class="s1">run_paths.update([rpath])</span>
+            <span class="s3">else</span><span class="s1">:</span>
+                <span class="s0"># Frameworks that have this structure Name.framework/Versions/N/Name need to search at the same level</span>
+                <span class="s0"># as the framework dir. This is specifically needed so that the QtWebEngine dependencies can be found.</span>
+                <span class="s3">if </span><span class="s4">'.framework' </span><span class="s3">in </span><span class="s1">pth:</span>
+                    <span class="s1">run_paths.update([</span><span class="s4">'../../../'</span><span class="s1">])</span>
+
+    <span class="s0"># For distributions like Anaconda, all of the dylibs are stored in the lib directory of the Python distribution, not</span>
+    <span class="s0"># alongside of the .so's in each module's subdirectory.</span>
+    <span class="s1">run_paths.add(os.path.join(compat.base_prefix</span><span class="s3">, </span><span class="s4">'lib'</span><span class="s1">))</span>
+
+    <span class="s0">#- Try to find files in file system.</span>
+
+    <span class="s0"># In cases with @loader_path or @executable_path try to look in the same directory as the checked binary is. This</span>
+    <span class="s0"># seems to work in most cases.</span>
+    <span class="s1">exec_path = os.path.abspath(os.path.dirname(pth))</span>
+
+    <span class="s3">for </span><span class="s1">lib </span><span class="s3">in </span><span class="s1">seen:</span>
+        <span class="s0"># Suppose that @rpath is not used for system libraries and using macholib can be avoided. macholib cannot handle</span>
+        <span class="s0"># @rpath.</span>
+        <span class="s3">if </span><span class="s1">lib.startswith(</span><span class="s4">'@rpath'</span><span class="s1">):</span>
+            <span class="s1">lib = lib.replace(</span><span class="s4">'@rpath'</span><span class="s3">, </span><span class="s4">'.'</span><span class="s1">)  </span><span class="s0"># Make path relative.</span>
+            <span class="s1">final_lib = </span><span class="s3">None  </span><span class="s0"># Absolute path to existing lib on disk.</span>
+            <span class="s0"># Try multiple locations.</span>
+            <span class="s3">for </span><span class="s1">run_path </span><span class="s3">in </span><span class="s1">run_paths:</span>
+                <span class="s0"># @rpath may contain relative value. Use exec_path as base path.</span>
+                <span class="s3">if not </span><span class="s1">os.path.isabs(run_path):</span>
+                    <span class="s1">run_path = os.path.join(exec_path</span><span class="s3">, </span><span class="s1">run_path)</span>
+                <span class="s0"># Stop looking for lib when found in first location.</span>
+                <span class="s3">if </span><span class="s1">os.path.exists(os.path.join(run_path</span><span class="s3">, </span><span class="s1">lib)):</span>
+                    <span class="s1">final_lib = os.path.abspath(os.path.join(run_path</span><span class="s3">, </span><span class="s1">lib))</span>
+                    <span class="s1">rslt.add(final_lib)</span>
+                    <span class="s3">break</span>
+            <span class="s0"># Log warning if no existing file found.</span>
+            <span class="s3">if not </span><span class="s1">final_lib </span><span class="s3">and </span><span class="s1">dylib.warn_missing_lib(lib):</span>
+                <span class="s1">logger.warning(</span><span class="s4">'Cannot find path %s (needed by %s)'</span><span class="s3">, </span><span class="s1">lib</span><span class="s3">, </span><span class="s1">pth)</span>
+
+        <span class="s0"># Macholib has to be used to get absolute path to libraries.</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s0"># macholib cannot handle @loader_path. It has to be handled the same way as @executable_path. It is also</span>
+            <span class="s0"># replaced by 'exec_path'.</span>
+            <span class="s3">if </span><span class="s1">lib.startswith(</span><span class="s4">'@loader_path'</span><span class="s1">):</span>
+                <span class="s1">lib = lib.replace(</span><span class="s4">'@loader_path'</span><span class="s3">, </span><span class="s4">'@executable_path'</span><span class="s1">)</span>
+            <span class="s3">try</span><span class="s1">:</span>
+                <span class="s1">lib = dyld_find(lib</span><span class="s3">, </span><span class="s1">executable_path=exec_path)</span>
+                <span class="s1">rslt.add(lib)</span>
+            <span class="s3">except </span><span class="s1">ValueError:</span>
+                <span class="s0"># Starting with Big Sur, system libraries are hidden. And we do not collect system libraries on any</span>
+                <span class="s0"># macOS version anyway, so suppress the corresponding error messages.</span>
+                <span class="s3">if not </span><span class="s1">in_system_path(lib) </span><span class="s3">and </span><span class="s1">dylib.warn_missing_lib(lib):</span>
+                    <span class="s1">logger.warning(</span><span class="s4">'Cannot find path %s (needed by %s)'</span><span class="s3">, </span><span class="s1">lib</span><span class="s3">, </span><span class="s1">pth)</span>
+
+    <span class="s3">return </span><span class="s1">rslt</span>
+
+
+<span class="s3">def </span><span class="s1">getImports(pth):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Forwards to the correct getImports implementation for the platform. 
+    &quot;&quot;&quot;</span>
+    <span class="s3">if </span><span class="s1">compat.is_win:</span>
+        <span class="s3">if </span><span class="s1">pth.lower().endswith(</span><span class="s4">&quot;.manifest&quot;</span><span class="s1">):</span>
+            <span class="s3">return </span><span class="s1">[]</span>
+        <span class="s3">try</span><span class="s1">:</span>
+            <span class="s3">return </span><span class="s1">_getImports_pe(pth)</span>
+        <span class="s3">except </span><span class="s1">Exception </span><span class="s3">as </span><span class="s1">exception:</span>
+            <span class="s0"># Assemblies can pull in files which aren't necessarily PE, but are still needed by the assembly. Any</span>
+            <span class="s0"># additional binary dependencies should already have been handled by selectAssemblies in that case, so just</span>
+            <span class="s0"># warn, return an empty list and continue. For less specific errors also log the traceback.</span>
+            <span class="s1">logger.warning(</span><span class="s4">'Cannot get binary dependencies for file: %s'</span><span class="s3">, </span><span class="s1">pth)</span>
+            <span class="s1">logger.warning(</span><span class="s4">'  Reason: %s'</span><span class="s3">, </span><span class="s1">exception</span><span class="s3">, </span><span class="s1">exc_info=</span><span class="s3">not </span><span class="s1">isinstance(exception</span><span class="s3">, </span><span class="s1">pefile.PEFormatError))</span>
+            <span class="s3">return </span><span class="s1">[]</span>
+    <span class="s3">elif </span><span class="s1">compat.is_darwin:</span>
+        <span class="s3">return </span><span class="s1">_getImports_macholib(pth)</span>
+    <span class="s3">else</span><span class="s1">:</span>
+        <span class="s3">return </span><span class="s1">_getImports_ldd(pth)</span>
+
+
+<span class="s3">def </span><span class="s1">findLibrary(name):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Look for a library in the system. 
+ 
+    Emulate the algorithm used by dlopen. `name` must include the prefix, e.g., ``libpython2.4.so``. 
+    &quot;&quot;&quot;</span>
+    <span class="s3">assert </span><span class="s1">compat.is_unix</span><span class="s3">, </span><span class="s4">&quot;Current implementation for Unix only (Linux, Solaris, AIX, FreeBSD)&quot;</span>
+
+    <span class="s0"># Look in the LD_LIBRARY_PATH according to platform.</span>
+    <span class="s3">if </span><span class="s1">compat.is_aix:</span>
+        <span class="s1">lp = compat.getenv(</span><span class="s4">'LIBPATH'</span><span class="s3">, </span><span class="s4">''</span><span class="s1">)</span>
+    <span class="s3">elif </span><span class="s1">compat.is_darwin:</span>
+        <span class="s1">lp = compat.getenv(</span><span class="s4">'DYLD_LIBRARY_PATH'</span><span class="s3">, </span><span class="s4">''</span><span class="s1">)</span>
+    <span class="s3">else</span><span class="s1">:</span>
+        <span class="s1">lp = compat.getenv(</span><span class="s4">'LD_LIBRARY_PATH'</span><span class="s3">, </span><span class="s4">''</span><span class="s1">)</span>
+    <span class="s1">lib = _which_library(name</span><span class="s3">, </span><span class="s1">filter(</span><span class="s3">None, </span><span class="s1">lp.split(os.pathsep)))</span>
+
+    <span class="s0"># Look in /etc/ld.so.cache</span>
+    <span class="s0"># Solaris does not have /sbin/ldconfig. Just check if this file exists.</span>
+    <span class="s3">if </span><span class="s1">lib </span><span class="s3">is None</span><span class="s1">:</span>
+        <span class="s1">utils.load_ldconfig_cache()</span>
+        <span class="s1">lib = utils.LDCONFIG_CACHE.get(name)</span>
+        <span class="s3">if </span><span class="s1">lib:</span>
+            <span class="s3">assert </span><span class="s1">os.path.isfile(lib)</span>
+
+    <span class="s0"># Look in the known safe paths.</span>
+    <span class="s3">if </span><span class="s1">lib </span><span class="s3">is None</span><span class="s1">:</span>
+        <span class="s0"># Architecture independent locations.</span>
+        <span class="s1">paths = [</span><span class="s4">'/lib'</span><span class="s3">, </span><span class="s4">'/usr/lib'</span><span class="s1">]</span>
+        <span class="s0"># Architecture dependent locations.</span>
+        <span class="s3">if </span><span class="s1">compat.architecture == </span><span class="s4">'32bit'</span><span class="s1">:</span>
+            <span class="s1">paths.extend([</span><span class="s4">'/lib32'</span><span class="s3">, </span><span class="s4">'/usr/lib32'</span><span class="s1">])</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s1">paths.extend([</span><span class="s4">'/lib64'</span><span class="s3">, </span><span class="s4">'/usr/lib64'</span><span class="s1">])</span>
+        <span class="s0"># Machine dependent locations.</span>
+        <span class="s3">if </span><span class="s1">compat.machine == </span><span class="s4">'intel'</span><span class="s1">:</span>
+            <span class="s3">if </span><span class="s1">compat.architecture == </span><span class="s4">'32bit'</span><span class="s1">:</span>
+                <span class="s1">paths.extend([</span><span class="s4">'/usr/lib/i386-linux-gnu'</span><span class="s1">])</span>
+            <span class="s3">else</span><span class="s1">:</span>
+                <span class="s1">paths.extend([</span><span class="s4">'/usr/lib/x86_64-linux-gnu'</span><span class="s1">])</span>
+
+        <span class="s0"># On Debian/Ubuntu /usr/bin/python is linked statically with libpython. Newer Debian/Ubuntu with multiarch</span>
+        <span class="s0"># support puts the libpythonX.Y.so in paths like /usr/lib/i386-linux-gnu/.</span>
+        <span class="s3">try</span><span class="s1">:</span>
+            <span class="s0"># Module available only in Python 2.7+</span>
+            <span class="s3">import </span><span class="s1">sysconfig</span>
+
+            <span class="s0"># 'multiarchsubdir' works on Debian/Ubuntu only in Python 2.7 and 3.3+.</span>
+            <span class="s1">arch_subdir = sysconfig.get_config_var(</span><span class="s4">'multiarchsubdir'</span><span class="s1">)</span>
+            <span class="s0"># Ignore if None is returned.</span>
+            <span class="s3">if </span><span class="s1">arch_subdir:</span>
+                <span class="s1">arch_subdir = os.path.basename(arch_subdir)</span>
+                <span class="s1">paths.append(os.path.join(</span><span class="s4">'/usr/lib'</span><span class="s3">, </span><span class="s1">arch_subdir))</span>
+            <span class="s3">else</span><span class="s1">:</span>
+                <span class="s1">logger.debug(</span><span class="s4">'Multiarch directory not detected.'</span><span class="s1">)</span>
+        <span class="s3">except </span><span class="s1">ImportError:</span>
+            <span class="s1">logger.debug(</span><span class="s4">'Multiarch directory not detected.'</span><span class="s1">)</span>
+
+        <span class="s0"># Termux (a Ubuntu like subsystem for Android) has an additional libraries directory.</span>
+        <span class="s3">if </span><span class="s1">os.path.isdir(</span><span class="s4">'/data/data/com.termux/files/usr/lib'</span><span class="s1">):</span>
+            <span class="s1">paths.append(</span><span class="s4">'/data/data/com.termux/files/usr/lib'</span><span class="s1">)</span>
+
+        <span class="s3">if </span><span class="s1">compat.is_aix:</span>
+            <span class="s1">paths.append(</span><span class="s4">'/opt/freeware/lib'</span><span class="s1">)</span>
+        <span class="s3">elif </span><span class="s1">compat.is_hpux:</span>
+            <span class="s3">if </span><span class="s1">compat.architecture == </span><span class="s4">'32bit'</span><span class="s1">:</span>
+                <span class="s1">paths.append(</span><span class="s4">'/usr/local/lib/hpux32'</span><span class="s1">)</span>
+            <span class="s3">else</span><span class="s1">:</span>
+                <span class="s1">paths.append(</span><span class="s4">'/usr/local/lib/hpux64'</span><span class="s1">)</span>
+        <span class="s3">elif </span><span class="s1">compat.is_freebsd </span><span class="s3">or </span><span class="s1">compat.is_openbsd:</span>
+            <span class="s1">paths.append(</span><span class="s4">'/usr/local/lib'</span><span class="s1">)</span>
+        <span class="s1">lib = _which_library(name</span><span class="s3">, </span><span class="s1">paths)</span>
+
+    <span class="s0"># Give up :(</span>
+    <span class="s3">if </span><span class="s1">lib </span><span class="s3">is None</span><span class="s1">:</span>
+        <span class="s3">return None</span>
+
+    <span class="s0"># Resolve the file name into the soname</span>
+    <span class="s3">if </span><span class="s1">compat.is_freebsd </span><span class="s3">or </span><span class="s1">compat.is_aix </span><span class="s3">or </span><span class="s1">compat.is_openbsd:</span>
+        <span class="s0"># On FreeBSD objdump does not show SONAME, and on AIX objdump does not exist, so we just return the lib we</span>
+        <span class="s0"># have found.</span>
+        <span class="s3">return </span><span class="s1">lib</span>
+    <span class="s3">else</span><span class="s1">:</span>
+        <span class="s1">dir = os.path.dirname(lib)</span>
+        <span class="s3">return </span><span class="s1">os.path.join(dir</span><span class="s3">, </span><span class="s1">_get_so_name(lib))</span>
+
+
+<span class="s3">def </span><span class="s1">_which_library(name</span><span class="s3">, </span><span class="s1">dirs):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Search for a shared library in a list of directories. 
+ 
+    Args: 
+        name: 
+            The library name including the `lib` prefix but excluding any `.so` suffix. 
+        dirs: 
+            An iterable of folders to search in. 
+    Returns: 
+        The path to the library if found or None otherwise. 
+ 
+    &quot;&quot;&quot;</span>
+    <span class="s1">matcher = _library_matcher(name)</span>
+    <span class="s3">for </span><span class="s1">path </span><span class="s3">in </span><span class="s1">filter(os.path.exists</span><span class="s3">, </span><span class="s1">dirs):</span>
+        <span class="s3">for </span><span class="s1">_path </span><span class="s3">in </span><span class="s1">os.listdir(path):</span>
+            <span class="s3">if </span><span class="s1">matcher(_path):</span>
+                <span class="s3">return </span><span class="s1">os.path.join(path</span><span class="s3">, </span><span class="s1">_path)</span>
+
+
+<span class="s3">def </span><span class="s1">_library_matcher(name):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Create a callable that matches libraries if **name** is a valid library prefix for input library full names. 
+    &quot;&quot;&quot;</span>
+    <span class="s3">return </span><span class="s1">re.compile(name + </span><span class="s4">r&quot;[0-9]*\.&quot;</span><span class="s1">).match</span>
+
+
+<span class="s3">def </span><span class="s1">_get_so_name(filename):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Return the soname of a library. 
+ 
+    Soname is useful when there are multiple symplinks to one library. 
+    &quot;&quot;&quot;</span>
+    <span class="s0"># TODO verify that objdump works on other unixes and not Linux only.</span>
+    <span class="s1">cmd = [</span><span class="s4">&quot;objdump&quot;</span><span class="s3">, </span><span class="s4">&quot;-p&quot;</span><span class="s3">, </span><span class="s1">filename]</span>
+    <span class="s1">pattern = </span><span class="s4">r'\s+SONAME\s+([^\s]+)'</span>
+    <span class="s3">if </span><span class="s1">compat.is_solar:</span>
+        <span class="s1">cmd = [</span><span class="s4">&quot;elfdump&quot;</span><span class="s3">, </span><span class="s4">&quot;-d&quot;</span><span class="s3">, </span><span class="s1">filename]</span>
+        <span class="s1">pattern = </span><span class="s4">r'\s+SONAME\s+[^\s]+\s+([^\s]+)'</span>
+    <span class="s1">m = re.search(pattern</span><span class="s3">, </span><span class="s1">compat.exec_command(*cmd))</span>
+    <span class="s3">return </span><span class="s1">m.group(</span><span class="s5">1</span><span class="s1">)</span>
+
+
+<span class="s3">def </span><span class="s1">get_python_library_path():</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Find dynamic Python library that will be bundled with frozen executable. 
+ 
+    NOTE: This is a fallback option when the Python executable is likely statically linked with the Python library and 
+          we need to search more for it. For example, this is the case on Debian/Ubuntu. 
+ 
+    Return  full path to Python dynamic library or None when not found. 
+ 
+    We need to know name of the Python dynamic library for the bootloader. Bootloader has to know what library to 
+    load and not try to guess. 
+ 
+    Some linux distributions (e.g. debian-based) statically link the Python executable to the libpython, 
+    so bindepend does not include it in its output. In this situation let's try to find it. 
+ 
+    Custom Mac OS builds could possibly also have non-framework style libraries, so this method also checks for that 
+    variant as well. 
+    &quot;&quot;&quot;</span>
+    <span class="s3">def </span><span class="s1">_find_lib_in_libdirs(*libdirs):</span>
+        <span class="s3">for </span><span class="s1">libdir </span><span class="s3">in </span><span class="s1">libdirs:</span>
+            <span class="s3">for </span><span class="s1">name </span><span class="s3">in </span><span class="s1">compat.PYDYLIB_NAMES:</span>
+                <span class="s1">full_path = os.path.join(libdir</span><span class="s3">, </span><span class="s1">name)</span>
+                <span class="s3">if </span><span class="s1">os.path.exists(full_path):</span>
+                    <span class="s3">return </span><span class="s1">full_path</span>
+        <span class="s3">return None</span>
+
+    <span class="s0"># If this is Microsoft App Store Python, check the compat.base_path first. While compat.python_executable resolves</span>
+    <span class="s0"># to actual python.exe file, the latter contains relative library reference that does not get properly resolved by</span>
+    <span class="s0"># getfullnameof().</span>
+    <span class="s3">if </span><span class="s1">compat.is_ms_app_store:</span>
+        <span class="s1">python_libname = _find_lib_in_libdirs(compat.base_prefix)</span>
+        <span class="s3">if </span><span class="s1">python_libname:</span>
+            <span class="s3">return </span><span class="s1">python_libname</span>
+
+    <span class="s0"># Try to get Python library name from the Python executable. It assumes that Python library is not statically</span>
+    <span class="s0"># linked.</span>
+    <span class="s1">dlls = getImports(compat.python_executable)</span>
+    <span class="s3">for </span><span class="s1">filename </span><span class="s3">in </span><span class="s1">dlls:</span>
+        <span class="s3">for </span><span class="s1">name </span><span class="s3">in </span><span class="s1">compat.PYDYLIB_NAMES:</span>
+            <span class="s3">if </span><span class="s1">os.path.basename(filename) == name:</span>
+                <span class="s0"># On Windows filename is just like 'python27.dll'. Convert it to absolute path.</span>
+                <span class="s3">if </span><span class="s1">compat.is_win </span><span class="s3">and not </span><span class="s1">os.path.isabs(filename):</span>
+                    <span class="s1">filename = getfullnameof(filename)</span>
+                <span class="s0"># Python library found. Return absolute path to it.</span>
+                <span class="s3">return </span><span class="s1">filename</span>
+
+    <span class="s0"># Python library NOT found. Resume searching using alternative methods.</span>
+
+    <span class="s0"># Work around for python venv having VERSION.dll rather than pythonXY.dll</span>
+    <span class="s3">if </span><span class="s1">compat.is_win </span><span class="s3">and </span><span class="s4">'VERSION.dll' </span><span class="s3">in </span><span class="s1">dlls:</span>
+        <span class="s1">pydll = </span><span class="s4">'python%d%d.dll' </span><span class="s1">% sys.version_info[:</span><span class="s5">2</span><span class="s1">]</span>
+        <span class="s3">return </span><span class="s1">getfullnameof(pydll)</span>
+
+    <span class="s0"># Applies only to non Windows platforms and conda.</span>
+
+    <span class="s3">if </span><span class="s1">compat.is_conda:</span>
+        <span class="s0"># Conda needs to be the first here since it overrules the operating system specific paths.</span>
+        <span class="s1">python_libname = _find_lib_in_libdirs(os.path.join(compat.base_prefix</span><span class="s3">, </span><span class="s4">'lib'</span><span class="s1">))</span>
+        <span class="s3">if </span><span class="s1">python_libname:</span>
+            <span class="s3">return </span><span class="s1">python_libname</span>
+
+    <span class="s3">elif </span><span class="s1">compat.is_unix:</span>
+        <span class="s3">for </span><span class="s1">name </span><span class="s3">in </span><span class="s1">compat.PYDYLIB_NAMES:</span>
+            <span class="s1">python_libname = findLibrary(name)</span>
+            <span class="s3">if </span><span class="s1">python_libname:</span>
+                <span class="s3">return </span><span class="s1">python_libname</span>
+
+    <span class="s3">if </span><span class="s1">compat.is_darwin </span><span class="s3">or </span><span class="s1">compat.is_linux:</span>
+        <span class="s0"># On MacPython, Analysis.assemble is able to find the libpython with no additional help, asking for</span>
+        <span class="s0"># sys.executable dependencies. However, this fails on system python, because the shared library is not listed as</span>
+        <span class="s0"># a dependency of the binary (most probably it is opened at runtime using some dlopen trickery). This happens on</span>
+        <span class="s0"># Mac OS when Python is compiled as Framework.</span>
+        <span class="s0"># Linux using pyenv is similarly linked so that sys.executable dependencies does not yield libpython.so.</span>
+
+        <span class="s0"># Python compiled as Framework contains same values in sys.prefix and exec_prefix. That is why we can use just</span>
+        <span class="s0"># sys.prefix. In virtualenv, PyInstaller is not able to find Python library. We need special care for this case.</span>
+        <span class="s1">python_libname = _find_lib_in_libdirs(</span>
+            <span class="s1">compat.base_prefix</span><span class="s3">,</span>
+            <span class="s1">os.path.join(compat.base_prefix</span><span class="s3">, </span><span class="s4">'lib'</span><span class="s1">)</span><span class="s3">,</span>
+        <span class="s1">)</span>
+        <span class="s3">if </span><span class="s1">python_libname:</span>
+            <span class="s3">return </span><span class="s1">python_libname</span>
+
+    <span class="s0"># Python library NOT found. Provide helpful feedback.</span>
+    <span class="s1">msg = </span><span class="s4">&quot;&quot;&quot;Python library not found: %s 
+    This means your Python installation does not come with proper shared library files. 
+    This usually happens due to missing development package, or unsuitable build parameters of the Python installation. 
+ 
+    * On Debian/Ubuntu, you need to install Python development packages: 
+      * apt-get install python3-dev 
+      * apt-get install python-dev 
+    * If you are building Python by yourself, rebuild with `--enable-shared` (or, `--enable-framework` on macOS). 
+    &quot;&quot;&quot; </span><span class="s1">% (</span><span class="s4">&quot;, &quot;</span><span class="s1">.join(compat.PYDYLIB_NAMES)</span><span class="s3">,</span><span class="s1">)</span>
+    <span class="s3">raise </span><span class="s1">IOError(msg)</span>
+
+
+<span class="s3">def </span><span class="s1">findSystemLibrary(name):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Given a library name, try to resolve the path to that library. 
+ 
+    If the path is already an absolute path, return it without searching. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s3">if </span><span class="s1">os.path.isabs(name):</span>
+        <span class="s3">return </span><span class="s1">name</span>
+
+    <span class="s3">if </span><span class="s1">compat.is_unix:</span>
+        <span class="s3">return </span><span class="s1">findLibrary(name)</span>
+    <span class="s3">elif </span><span class="s1">compat.is_win:</span>
+        <span class="s3">return </span><span class="s1">getfullnameof(name)</span>
+    <span class="s3">else</span><span class="s1">:</span>
+        <span class="s0"># This seems to work, and is similar to what we have above..</span>
+        <span class="s3">return </span><span class="s1">ctypes.util.find_library(name)</span>
+</pre>
+</body>
+</html>

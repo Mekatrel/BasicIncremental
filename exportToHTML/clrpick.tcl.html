@@ -1,0 +1,712 @@
+<html>
+<head>
+<title>clrpick.tcl</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #a9b7c6;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+clrpick.tcl</font>
+</center></td></tr></table>
+<pre><span class="s0"># clrpick.tcl --</span>
+<span class="s0">#</span>
+<span class="s0">#	Color selection dialog for platforms that do not support a</span>
+<span class="s0">#	standard color selection dialog.</span>
+<span class="s0">#</span>
+<span class="s0"># Copyright (c) 1996 Sun Microsystems, Inc.</span>
+<span class="s0">#</span>
+<span class="s0"># See the file &quot;license.terms&quot; for information on usage and redistribution</span>
+<span class="s0"># of this file, and for a DISCLAIMER OF ALL WARRANTIES.</span>
+<span class="s0">#</span>
+<span class="s0"># ToDo:</span>
+<span class="s0">#</span>
+<span class="s0">#	(1): Find out how many free colors are left in the colormap and</span>
+<span class="s0">#	     don't allocate too many colors.</span>
+<span class="s0">#	(2): Implement HSV color selection.</span>
+<span class="s0">#</span>
+
+<span class="s0"># Make sure namespaces exist</span>
+<span class="s0">namespace eval ::tk {}</span>
+<span class="s0">namespace eval ::tk::dialog {}</span>
+<span class="s0">namespace eval ::tk::dialog::color {</span>
+    <span class="s0">namespace import ::tk::msgcat::*</span>
+<span class="s0">}</span>
+
+<span class="s0"># ::tk::dialog::color:: --</span>
+<span class="s0">#</span>
+<span class="s0">#	Create a color dialog and let the user choose a color. This function</span>
+<span class="s0">#	should not be called directly. It is called by the tk_chooseColor</span>
+<span class="s0">#	function when a native color selector widget does not exist</span>
+<span class="s0">#</span>
+<span class="s0">proc ::tk::dialog::color:: {args} {</span>
+    <span class="s0">variable ::tk::Priv</span>
+    <span class="s0">set dataName __tk__color</span>
+    <span class="s0">upvar ::tk::dialog::color::$dataName data</span>
+    <span class="s0">set w .$dataName</span>
+
+    <span class="s0"># The lines variables track the start and end indices of the line</span>
+    <span class="s0"># elements in the colorbar canvases.</span>
+    <span class="s0">set data(lines,red,start)   0</span>
+    <span class="s0">set data(lines,red,last)   -1</span>
+    <span class="s0">set data(lines,green,start) 0</span>
+    <span class="s0">set data(lines,green,last) -1</span>
+    <span class="s0">set data(lines,blue,start)  0</span>
+    <span class="s0">set data(lines,blue,last)  -1</span>
+
+    <span class="s0"># This is the actual number of lines that are drawn in each color strip.</span>
+    <span class="s0"># Note that the bars may be of any width.</span>
+    <span class="s0"># However, NUM_COLORBARS must be a number that evenly divides 256.</span>
+    <span class="s0"># Such as 256, 128, 64, etc.</span>
+    <span class="s0">set data(NUM_COLORBARS) 16</span>
+
+    <span class="s0"># BARS_WIDTH is the number of pixels wide the color bar portion of the</span>
+    <span class="s0"># canvas is. This number must be a multiple of NUM_COLORBARS</span>
+    <span class="s0">set data(BARS_WIDTH) 160</span>
+
+    <span class="s0"># PLGN_WIDTH is the number of pixels wide of the triangular selection</span>
+    <span class="s0"># polygon. This also results in the definition of the padding on the</span>
+    <span class="s0"># left and right sides which is half of PLGN_WIDTH. Make this number even.</span>
+    <span class="s0">set data(PLGN_HEIGHT) 10</span>
+
+    <span class="s0"># PLGN_HEIGHT is the height of the selection polygon and the height of the</span>
+    <span class="s0"># selection rectangle at the bottom of the color bar. No restrictions.</span>
+    <span class="s0">set data(PLGN_WIDTH) 10</span>
+
+    <span class="s0">Config $dataName $args</span>
+    <span class="s0">InitValues $dataName</span>
+
+    <span class="s0">set sc [winfo screen $data(-parent)]</span>
+    <span class="s0">set winExists [winfo exists $w]</span>
+    <span class="s0">if {!$winExists || $sc ne [winfo screen $w]} {</span>
+	<span class="s0">if {$winExists} {</span>
+	    <span class="s0">destroy $w</span>
+	<span class="s0">}</span>
+	<span class="s0">toplevel $w -class TkColorDialog -screen $sc</span>
+	<span class="s0">if {[tk windowingsystem] eq &quot;x11&quot;} {wm attributes $w -type dialog}</span>
+	<span class="s0">BuildDialog $w</span>
+    <span class="s0">}</span>
+
+    <span class="s0"># Dialog boxes should be transient with respect to their parent,</span>
+    <span class="s0"># so that they will always stay on top of their parent window.  However,</span>
+    <span class="s0"># some window managers will create the window as withdrawn if the parent</span>
+    <span class="s0"># window is withdrawn or iconified.  Combined with the grab we put on the</span>
+    <span class="s0"># window, this can hang the entire application.  Therefore we only make</span>
+    <span class="s0"># the dialog transient if the parent is viewable.</span>
+
+    <span class="s0">if {[winfo viewable [winfo toplevel $data(-parent)]] } {</span>
+	<span class="s0">wm transient $w $data(-parent)</span>
+    <span class="s0">}</span>
+
+    <span class="s0"># 5. Withdraw the window, then update all the geometry information</span>
+    <span class="s0"># so we know how big it wants to be, then center the window in the</span>
+    <span class="s0"># display (Motif style) and de-iconify it.</span>
+
+    <span class="s0">::tk::PlaceWindow $w widget $data(-parent)</span>
+    <span class="s0">wm title $w $data(-title)</span>
+
+    <span class="s0"># 6. Set a grab and claim the focus too.</span>
+
+    <span class="s0">::tk::SetFocusGrab $w $data(okBtn)</span>
+
+    <span class="s0"># 7. Wait for the user to respond, then restore the focus and</span>
+    <span class="s0"># return the index of the selected button.  Restore the focus</span>
+    <span class="s0"># before deleting the window, since otherwise the window manager</span>
+    <span class="s0"># may take the focus away so we can't redirect it.  Finally,</span>
+    <span class="s0"># restore any grab that was in effect.</span>
+
+    <span class="s0">vwait ::tk::Priv(selectColor)</span>
+    <span class="s0">set result $Priv(selectColor)</span>
+    <span class="s0">::tk::RestoreFocusGrab $w $data(okBtn)</span>
+    <span class="s0">unset data</span>
+
+    <span class="s0">return $result</span>
+<span class="s0">}</span>
+
+<span class="s0"># ::tk::dialog::color::InitValues --</span>
+<span class="s0">#</span>
+<span class="s0">#	Get called during initialization or when user resets NUM_COLORBARS</span>
+<span class="s0">#</span>
+<span class="s0">proc ::tk::dialog::color::InitValues {dataName} {</span>
+    <span class="s0">upvar ::tk::dialog::color::$dataName data</span>
+
+    <span class="s0"># IntensityIncr is the difference in color intensity between a colorbar</span>
+    <span class="s0"># and its neighbors.</span>
+    <span class="s0">set data(intensityIncr) [expr {256 / $data(NUM_COLORBARS)}]</span>
+
+    <span class="s0"># ColorbarWidth is the width of each colorbar</span>
+    <span class="s0">set data(colorbarWidth) [expr {$data(BARS_WIDTH) / $data(NUM_COLORBARS)}]</span>
+
+    <span class="s0"># Indent is the width of the space at the left and right side of the</span>
+    <span class="s0"># colorbar. It is always half the selector polygon width, because the</span>
+    <span class="s0"># polygon extends into the space.</span>
+    <span class="s0">set data(indent) [expr {$data(PLGN_WIDTH) / 2}]</span>
+
+    <span class="s0">set data(colorPad) 2</span>
+    <span class="s0">set data(selPad)   [expr {$data(PLGN_WIDTH) / 2}]</span>
+
+    <span class="s0">#</span>
+    <span class="s0"># minX is the x coordinate of the first colorbar</span>
+    <span class="s0">#</span>
+    <span class="s0">set data(minX) $data(indent)</span>
+
+    <span class="s0">#</span>
+    <span class="s0"># maxX is the x coordinate of the last colorbar</span>
+    <span class="s0">#</span>
+    <span class="s0">set data(maxX) [expr {$data(BARS_WIDTH) + $data(indent)-1}]</span>
+
+    <span class="s0">#</span>
+    <span class="s0"># canvasWidth is the width of the entire canvas, including the indents</span>
+    <span class="s0">#</span>
+    <span class="s0">set data(canvasWidth) [expr {$data(BARS_WIDTH) + $data(PLGN_WIDTH)}]</span>
+
+    <span class="s0"># Set the initial color, specified by -initialcolor, or the</span>
+    <span class="s0"># color chosen by the user the last time.</span>
+    <span class="s0">set data(selection) $data(-initialcolor)</span>
+    <span class="s0">set data(finalColor)  $data(-initialcolor)</span>
+    <span class="s0">set rgb [winfo rgb . $data(selection)]</span>
+
+    <span class="s0">set data(red,intensity)   [expr {[lindex $rgb 0]/0x100}]</span>
+    <span class="s0">set data(green,intensity) [expr {[lindex $rgb 1]/0x100}]</span>
+    <span class="s0">set data(blue,intensity)  [expr {[lindex $rgb 2]/0x100}]</span>
+<span class="s0">}</span>
+
+<span class="s0"># ::tk::dialog::color::Config  --</span>
+<span class="s0">#</span>
+<span class="s0">#	Parses the command line arguments to tk_chooseColor</span>
+<span class="s0">#</span>
+<span class="s0">proc ::tk::dialog::color::Config {dataName argList} {</span>
+    <span class="s0">variable ::tk::Priv</span>
+    <span class="s0">upvar ::tk::dialog::color::$dataName data</span>
+
+    <span class="s0"># 1: the configuration specs</span>
+    <span class="s0">#</span>
+    <span class="s0">if {[info exists Priv(selectColor)] &amp;&amp; $Priv(selectColor) ne &quot;&quot;} {</span>
+	<span class="s0">set defaultColor $Priv(selectColor)</span>
+    <span class="s0">} else {</span>
+	<span class="s0">set defaultColor [. cget -background]</span>
+    <span class="s0">}</span>
+
+    <span class="s0">set specs [list \</span>
+	    <span class="s0">[list -initialcolor &quot;&quot; &quot;&quot; $defaultColor] \</span>
+	    <span class="s0">[list -parent &quot;&quot; &quot;&quot; &quot;.&quot;] \</span>
+	    <span class="s0">[list -title &quot;&quot; &quot;&quot; [mc &quot;Color&quot;]] \</span>
+	    <span class="s0">]</span>
+
+    <span class="s0"># 2: parse the arguments</span>
+    <span class="s0">#</span>
+    <span class="s0">tclParseConfigSpec ::tk::dialog::color::$dataName $specs &quot;&quot; $argList</span>
+
+    <span class="s0">if {$data(-title) eq &quot;&quot;} {</span>
+	<span class="s0">set data(-title) &quot; &quot;</span>
+    <span class="s0">}</span>
+    <span class="s0">if {[catch {winfo rgb . $data(-initialcolor)} err]} {</span>
+	<span class="s0">return -code error -errorcode [list TK LOOKUP COLOR $data(-initialcolor)] \</span>
+	    <span class="s0">$err</span>
+    <span class="s0">}</span>
+
+    <span class="s0">if {![winfo exists $data(-parent)]} {</span>
+	<span class="s0">return -code error -errorcode [list TK LOOKUP WINDOW $data(-parent)] \</span>
+	    <span class="s0">&quot;bad window path name \&quot;$data(-parent)\&quot;&quot;</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+
+<span class="s0"># ::tk::dialog::color::BuildDialog --</span>
+<span class="s0">#</span>
+<span class="s0">#	Build the dialog.</span>
+<span class="s0">#</span>
+<span class="s0">proc ::tk::dialog::color::BuildDialog {w} {</span>
+    <span class="s0">upvar ::tk::dialog::color::[winfo name $w] data</span>
+
+    <span class="s0"># TopFrame contains the color strips and the color selection</span>
+    <span class="s0">#</span>
+    <span class="s0">set topFrame [frame $w.top -relief raised -bd 1]</span>
+
+    <span class="s0"># StripsFrame contains the colorstrips and the individual RGB entries</span>
+    <span class="s0">set stripsFrame [frame $topFrame.colorStrip]</span>
+
+    <span class="s0">set maxWidth [::tk::mcmaxamp &amp;Red &amp;Green &amp;Blue]</span>
+    <span class="s0">set maxWidth [expr {$maxWidth&lt;6 ? 6 : $maxWidth}]</span>
+    <span class="s0">set colorList {</span>
+	<span class="s0">red   &quot;&amp;Red&quot;</span>
+	<span class="s0">green &quot;&amp;Green&quot;</span>
+	<span class="s0">blue  &quot;&amp;Blue&quot;</span>
+    <span class="s0">}</span>
+    <span class="s0">foreach {color l} $colorList {</span>
+	<span class="s0"># each f frame contains an [R|G|B] entry and the equiv. color strip.</span>
+	<span class="s0">set f [frame $stripsFrame.$color]</span>
+
+	<span class="s0"># The box frame contains the label and entry widget for an [R|G|B]</span>
+	<span class="s0">set box [frame $f.box]</span>
+
+	<span class="s0">::tk::AmpWidget label $box.label -text &quot;[mc $l]:&quot; \</span>
+		<span class="s0">-width $maxWidth -anchor ne</span>
+	<span class="s0">bind $box.label &lt;&lt;AltUnderlined&gt;&gt; [list focus $box.entry]</span>
+
+	<span class="s0">entry $box.entry -textvariable \</span>
+		<span class="s0">::tk::dialog::color::[winfo name $w]($color,intensity) \</span>
+		<span class="s0">-width 4</span>
+	<span class="s0">pack $box.label -side left -fill y -padx 2 -pady 3</span>
+	<span class="s0">pack $box.entry -side left -anchor n -pady 0</span>
+	<span class="s0">pack $box -side left -fill both</span>
+
+	<span class="s0">set height [expr {</span>
+	    <span class="s0">[winfo reqheight $box.entry] -</span>
+	    <span class="s0">2*([$box.entry cget -highlightthickness] + [$box.entry cget -bd])</span>
+	<span class="s0">}]</span>
+
+	<span class="s0">canvas $f.color -height $height \</span>
+		<span class="s0">-width $data(BARS_WIDTH) -relief sunken -bd 2</span>
+	<span class="s0">canvas $f.sel -height $data(PLGN_HEIGHT) \</span>
+		<span class="s0">-width $data(canvasWidth) -highlightthickness 0</span>
+	<span class="s0">pack $f.color -expand yes -fill both</span>
+	<span class="s0">pack $f.sel -expand yes -fill both</span>
+
+	<span class="s0">pack $f -side top -fill x -padx 0 -pady 2</span>
+
+	<span class="s0">set data($color,entry) $box.entry</span>
+	<span class="s0">set data($color,col) $f.color</span>
+	<span class="s0">set data($color,sel) $f.sel</span>
+
+	<span class="s0">bind $data($color,col) &lt;Configure&gt; \</span>
+		<span class="s0">[list tk::dialog::color::DrawColorScale $w $color 1]</span>
+	<span class="s0">bind $data($color,col) &lt;Enter&gt; \</span>
+		<span class="s0">[list tk::dialog::color::EnterColorBar $w $color]</span>
+	<span class="s0">bind $data($color,col) &lt;Leave&gt; \</span>
+		<span class="s0">[list tk::dialog::color::LeaveColorBar $w $color]</span>
+
+	<span class="s0">bind $data($color,sel) &lt;Enter&gt; \</span>
+		<span class="s0">[list tk::dialog::color::EnterColorBar $w $color]</span>
+	<span class="s0">bind $data($color,sel) &lt;Leave&gt; \</span>
+		<span class="s0">[list tk::dialog::color::LeaveColorBar $w $color]</span>
+
+	<span class="s0">bind $box.entry &lt;Return&gt; [list tk::dialog::color::HandleRGBEntry $w]</span>
+    <span class="s0">}</span>
+
+    <span class="s0">pack $stripsFrame -side left -fill both -padx 4 -pady 10</span>
+
+    <span class="s0"># The selFrame contains a frame that demonstrates the currently</span>
+    <span class="s0"># selected color</span>
+    <span class="s0">#</span>
+    <span class="s0">set selFrame [frame $topFrame.sel]</span>
+    <span class="s0">set lab [::tk::AmpWidget label $selFrame.lab \</span>
+	    <span class="s0">-text [mc &quot;&amp;Selection:&quot;] -anchor sw]</span>
+    <span class="s0">set ent [entry $selFrame.ent \</span>
+	    <span class="s0">-textvariable ::tk::dialog::color::[winfo name $w](selection) \</span>
+	    <span class="s0">-width 16]</span>
+    <span class="s0">set f1  [frame $selFrame.f1 -relief sunken -bd 2]</span>
+    <span class="s0">set data(finalCanvas) [frame $f1.demo -bd 0 -width 100 -height 70]</span>
+
+    <span class="s0">pack $lab $ent -side top -fill x -padx 4 -pady 2</span>
+    <span class="s0">pack $f1 -expand yes -anchor nw -fill both -padx 6 -pady 10</span>
+    <span class="s0">pack $data(finalCanvas) -expand yes -fill both</span>
+
+    <span class="s0">bind $ent &lt;Return&gt; [list tk::dialog::color::HandleSelEntry $w]</span>
+
+    <span class="s0">pack $selFrame -side left -fill none -anchor nw</span>
+    <span class="s0">pack $topFrame -side top -expand yes -fill both -anchor nw</span>
+
+    <span class="s0"># the botFrame frame contains the buttons</span>
+    <span class="s0">#</span>
+    <span class="s0">set botFrame [frame $w.bot -relief raised -bd 1]</span>
+
+    <span class="s0">::tk::AmpWidget button $botFrame.ok     -text [mc &quot;&amp;OK&quot;]		\</span>
+	    <span class="s0">-command [list tk::dialog::color::OkCmd $w]</span>
+    <span class="s0">::tk::AmpWidget button $botFrame.cancel -text [mc &quot;&amp;Cancel&quot;]	\</span>
+	    <span class="s0">-command [list tk::dialog::color::CancelCmd $w]</span>
+
+    <span class="s0">set data(okBtn)      $botFrame.ok</span>
+    <span class="s0">set data(cancelBtn)  $botFrame.cancel</span>
+
+    <span class="s0">grid x $botFrame.ok x $botFrame.cancel x -sticky ew</span>
+    <span class="s0">grid configure $botFrame.ok $botFrame.cancel -padx 10 -pady 10</span>
+    <span class="s0">grid columnconfigure $botFrame {0 4} -weight 1 -uniform space</span>
+    <span class="s0">grid columnconfigure $botFrame {1 3} -weight 1 -uniform button</span>
+    <span class="s0">grid columnconfigure $botFrame 2 -weight 2 -uniform space</span>
+    <span class="s0">pack $botFrame -side bottom -fill x</span>
+
+    <span class="s0"># Accelerator bindings</span>
+    <span class="s0">bind $lab &lt;&lt;AltUnderlined&gt;&gt; [list focus $ent]</span>
+    <span class="s0">bind $w &lt;KeyPress-Escape&gt; [list tk::ButtonInvoke $data(cancelBtn)]</span>
+    <span class="s0">bind $w &lt;Alt-Key&gt; [list tk::AltKeyInDialog $w %A]</span>
+
+    <span class="s0">wm protocol $w WM_DELETE_WINDOW [list tk::dialog::color::CancelCmd $w]</span>
+    <span class="s0">bind $lab &lt;Destroy&gt; [list tk::dialog::color::CancelCmd $w]</span>
+<span class="s0">}</span>
+
+<span class="s0"># ::tk::dialog::color::SetRGBValue --</span>
+<span class="s0">#</span>
+<span class="s0">#	Sets the current selection of the dialog box</span>
+<span class="s0">#</span>
+<span class="s0">proc ::tk::dialog::color::SetRGBValue {w color} {</span>
+    <span class="s0">upvar ::tk::dialog::color::[winfo name $w] data</span>
+
+    <span class="s0">set data(red,intensity)   [lindex $color 0]</span>
+    <span class="s0">set data(green,intensity) [lindex $color 1]</span>
+    <span class="s0">set data(blue,intensity)  [lindex $color 2]</span>
+
+    <span class="s0">RedrawColorBars $w all</span>
+
+    <span class="s0"># Now compute the new x value of each colorbars pointer polygon</span>
+    <span class="s0">foreach color {red green blue} {</span>
+	<span class="s0">set x [RgbToX $w $data($color,intensity)]</span>
+	<span class="s0">MoveSelector $w $data($color,sel) $color $x 0</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+
+<span class="s0"># ::tk::dialog::color::XToRgb --</span>
+<span class="s0">#</span>
+<span class="s0">#	Converts a screen coordinate to intensity</span>
+<span class="s0">#</span>
+<span class="s0">proc ::tk::dialog::color::XToRgb {w x} {</span>
+    <span class="s0">upvar ::tk::dialog::color::[winfo name $w] data</span>
+
+    <span class="s0">set x [expr {($x * $data(intensityIncr))/ $data(colorbarWidth)}]</span>
+    <span class="s0">if {$x &gt; 255} {</span>
+	<span class="s0">set x 255</span>
+    <span class="s0">}</span>
+    <span class="s0">return $x</span>
+<span class="s0">}</span>
+
+<span class="s0"># ::tk::dialog::color::RgbToX</span>
+<span class="s0">#</span>
+<span class="s0">#	Converts an intensity to screen coordinate.</span>
+<span class="s0">#</span>
+<span class="s0">proc ::tk::dialog::color::RgbToX {w color} {</span>
+    <span class="s0">upvar ::tk::dialog::color::[winfo name $w] data</span>
+
+    <span class="s0">return [expr {($color * $data(colorbarWidth)/ $data(intensityIncr))}]</span>
+<span class="s0">}</span>
+
+<span class="s0"># ::tk::dialog::color::DrawColorScale --</span>
+<span class="s0">#</span>
+<span class="s0">#	Draw color scale is called whenever the size of one of the color</span>
+<span class="s0">#	scale canvases is changed.</span>
+<span class="s0">#</span>
+<span class="s0">proc ::tk::dialog::color::DrawColorScale {w c {create 0}} {</span>
+    <span class="s0">upvar ::tk::dialog::color::[winfo name $w] data</span>
+
+    <span class="s0"># col: color bar canvas</span>
+    <span class="s0"># sel: selector canvas</span>
+    <span class="s0">set col $data($c,col)</span>
+    <span class="s0">set sel $data($c,sel)</span>
+
+    <span class="s0"># First handle the case that we are creating everything for the first time.</span>
+    <span class="s0">if {$create} {</span>
+	<span class="s0"># First remove all the lines that already exist.</span>
+	<span class="s0">if { $data(lines,$c,last) &gt; $data(lines,$c,start)} {</span>
+	    <span class="s0">for {set i $data(lines,$c,start)} \</span>
+		    <span class="s0">{$i &lt;= $data(lines,$c,last)} {incr i} {</span>
+		<span class="s0">$sel delete $i</span>
+	    <span class="s0">}</span>
+	<span class="s0">}</span>
+	<span class="s0"># Delete the selector if it exists</span>
+	<span class="s0">if {[info exists data($c,index)]} {</span>
+	    <span class="s0">$sel delete $data($c,index)</span>
+	<span class="s0">}</span>
+
+	<span class="s0"># Draw the selection polygons</span>
+	<span class="s0">CreateSelector $w $sel $c</span>
+	<span class="s0">$sel bind $data($c,index) &lt;ButtonPress-1&gt; \</span>
+		<span class="s0">[list tk::dialog::color::StartMove $w $sel $c %x $data(selPad) 1]</span>
+	<span class="s0">$sel bind $data($c,index) &lt;B1-Motion&gt; \</span>
+		<span class="s0">[list tk::dialog::color::MoveSelector $w $sel $c %x $data(selPad)]</span>
+	<span class="s0">$sel bind $data($c,index) &lt;ButtonRelease-1&gt; \</span>
+		<span class="s0">[list tk::dialog::color::ReleaseMouse $w $sel $c %x $data(selPad)]</span>
+
+	<span class="s0">set height [winfo height $col]</span>
+	<span class="s0"># Create an invisible region under the colorstrip to catch mouse clicks</span>
+	<span class="s0"># that aren't on the selector.</span>
+	<span class="s0">set data($c,clickRegion) [$sel create rectangle 0 0 \</span>
+		<span class="s0">$data(canvasWidth) $height -fill {} -outline {}]</span>
+
+	<span class="s0">bind $col &lt;ButtonPress-1&gt; \</span>
+		<span class="s0">[list tk::dialog::color::StartMove $w $sel $c %x $data(colorPad)]</span>
+	<span class="s0">bind $col &lt;B1-Motion&gt; \</span>
+		<span class="s0">[list tk::dialog::color::MoveSelector $w $sel $c %x $data(colorPad)]</span>
+	<span class="s0">bind $col &lt;ButtonRelease-1&gt; \</span>
+		<span class="s0">[list tk::dialog::color::ReleaseMouse $w $sel $c %x $data(colorPad)]</span>
+
+	<span class="s0">$sel bind $data($c,clickRegion) &lt;ButtonPress-1&gt; \</span>
+		<span class="s0">[list tk::dialog::color::StartMove $w $sel $c %x $data(selPad)]</span>
+	<span class="s0">$sel bind $data($c,clickRegion) &lt;B1-Motion&gt; \</span>
+		<span class="s0">[list tk::dialog::color::MoveSelector $w $sel $c %x $data(selPad)]</span>
+	<span class="s0">$sel bind $data($c,clickRegion) &lt;ButtonRelease-1&gt; \</span>
+		<span class="s0">[list tk::dialog::color::ReleaseMouse $w $sel $c %x $data(selPad)]</span>
+    <span class="s0">} else {</span>
+	<span class="s0"># l is the canvas index of the first colorbar.</span>
+	<span class="s0">set l $data(lines,$c,start)</span>
+    <span class="s0">}</span>
+
+    <span class="s0"># Draw the color bars.</span>
+    <span class="s0">set highlightW [expr {[$col cget -highlightthickness] + [$col cget -bd]}]</span>
+    <span class="s0">for {set i 0} { $i &lt; $data(NUM_COLORBARS)} { incr i} {</span>
+	<span class="s0">set intensity [expr {$i * $data(intensityIncr)}]</span>
+	<span class="s0">set startx [expr {$i * $data(colorbarWidth) + $highlightW}]</span>
+	<span class="s0">if {$c eq &quot;red&quot;} {</span>
+	    <span class="s0">set color [format &quot;#%02x%02x%02x&quot; \</span>
+		    <span class="s0">$intensity $data(green,intensity) $data(blue,intensity)]</span>
+	<span class="s0">} elseif {$c eq &quot;green&quot;} {</span>
+	    <span class="s0">set color [format &quot;#%02x%02x%02x&quot; \</span>
+		    <span class="s0">$data(red,intensity) $intensity $data(blue,intensity)]</span>
+	<span class="s0">} else {</span>
+	    <span class="s0">set color [format &quot;#%02x%02x%02x&quot; \</span>
+		    <span class="s0">$data(red,intensity) $data(green,intensity) $intensity]</span>
+	<span class="s0">}</span>
+
+	<span class="s0">if {$create} {</span>
+	    <span class="s0">set index [$col create rect $startx $highlightW \</span>
+		    <span class="s0">[expr {$startx +$data(colorbarWidth)}] \</span>
+		    <span class="s0">[expr {[winfo height $col] + $highlightW}] \</span>
+		    <span class="s0">-fill $color -outline $color]</span>
+	<span class="s0">} else {</span>
+	    <span class="s0">$col itemconfigure $l -fill $color -outline $color</span>
+	    <span class="s0">incr l</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+    <span class="s0">$sel raise $data($c,index)</span>
+
+    <span class="s0">if {$create} {</span>
+	<span class="s0">set data(lines,$c,last) $index</span>
+	<span class="s0">set data(lines,$c,start) [expr {$index - $data(NUM_COLORBARS) + 1}]</span>
+    <span class="s0">}</span>
+
+    <span class="s0">RedrawFinalColor $w</span>
+<span class="s0">}</span>
+
+<span class="s0"># ::tk::dialog::color::CreateSelector --</span>
+<span class="s0">#</span>
+<span class="s0">#	Creates and draws the selector polygon at the position</span>
+<span class="s0">#	$data($c,intensity).</span>
+<span class="s0">#</span>
+<span class="s0">proc ::tk::dialog::color::CreateSelector {w sel c } {</span>
+    <span class="s0">upvar ::tk::dialog::color::[winfo name $w] data</span>
+    <span class="s0">set data($c,index) [$sel create polygon \</span>
+	    <span class="s0">0 $data(PLGN_HEIGHT) \</span>
+	    <span class="s0">$data(PLGN_WIDTH) $data(PLGN_HEIGHT) \</span>
+	    <span class="s0">$data(indent) 0]</span>
+    <span class="s0">set data($c,x) [RgbToX $w $data($c,intensity)]</span>
+    <span class="s0">$sel move $data($c,index) $data($c,x) 0</span>
+<span class="s0">}</span>
+
+<span class="s0"># ::tk::dialog::color::RedrawFinalColor</span>
+<span class="s0">#</span>
+<span class="s0">#	Combines the intensities of the three colors into the final color</span>
+<span class="s0">#</span>
+<span class="s0">proc ::tk::dialog::color::RedrawFinalColor {w} {</span>
+    <span class="s0">upvar ::tk::dialog::color::[winfo name $w] data</span>
+
+    <span class="s0">set color [format &quot;#%02x%02x%02x&quot; $data(red,intensity) \</span>
+	    <span class="s0">$data(green,intensity) $data(blue,intensity)]</span>
+
+    <span class="s0">$data(finalCanvas) configure -bg $color</span>
+    <span class="s0">set data(finalColor) $color</span>
+    <span class="s0">set data(selection) $color</span>
+    <span class="s0">set data(finalRGB) [list \</span>
+	    <span class="s0">$data(red,intensity) \</span>
+	    <span class="s0">$data(green,intensity) \</span>
+	    <span class="s0">$data(blue,intensity)]</span>
+<span class="s0">}</span>
+
+<span class="s0"># ::tk::dialog::color::RedrawColorBars --</span>
+<span class="s0">#</span>
+<span class="s0"># Only redraws the colors on the color strips that were not manipulated.</span>
+<span class="s0"># Params: color of colorstrip that changed. If color is not [red|green|blue]</span>
+<span class="s0">#         Then all colorstrips will be updated</span>
+<span class="s0">#</span>
+<span class="s0">proc ::tk::dialog::color::RedrawColorBars {w colorChanged} {</span>
+    <span class="s0">upvar ::tk::dialog::color::[winfo name $w] data</span>
+
+    <span class="s0">switch $colorChanged {</span>
+	<span class="s0">red {</span>
+	    <span class="s0">DrawColorScale $w green</span>
+	    <span class="s0">DrawColorScale $w blue</span>
+	<span class="s0">}</span>
+	<span class="s0">green {</span>
+	    <span class="s0">DrawColorScale $w red</span>
+	    <span class="s0">DrawColorScale $w blue</span>
+	<span class="s0">}</span>
+	<span class="s0">blue {</span>
+	    <span class="s0">DrawColorScale $w red</span>
+	    <span class="s0">DrawColorScale $w green</span>
+	<span class="s0">}</span>
+	<span class="s0">default {</span>
+	    <span class="s0">DrawColorScale $w red</span>
+	    <span class="s0">DrawColorScale $w green</span>
+	    <span class="s0">DrawColorScale $w blue</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+    <span class="s0">RedrawFinalColor $w</span>
+<span class="s0">}</span>
+
+<span class="s0">#----------------------------------------------------------------------</span>
+<span class="s0">#			Event handlers</span>
+<span class="s0">#----------------------------------------------------------------------</span>
+
+<span class="s0"># ::tk::dialog::color::StartMove --</span>
+<span class="s0">#</span>
+<span class="s0">#	Handles a mousedown button event over the selector polygon.</span>
+<span class="s0">#	Adds the bindings for moving the mouse while the button is</span>
+<span class="s0">#	pressed.  Sets the binding for the button-release event.</span>
+<span class="s0">#</span>
+<span class="s0"># Params: sel is the selector canvas window, color is the color of the strip.</span>
+<span class="s0">#</span>
+<span class="s0">proc ::tk::dialog::color::StartMove {w sel color x delta {dontMove 0}} {</span>
+    <span class="s0">upvar ::tk::dialog::color::[winfo name $w] data</span>
+
+    <span class="s0">if {!$dontMove} {</span>
+	<span class="s0">MoveSelector $w $sel $color $x $delta</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+
+<span class="s0"># ::tk::dialog::color::MoveSelector --</span>
+<span class="s0">#</span>
+<span class="s0"># Moves the polygon selector so that its middle point has the same</span>
+<span class="s0"># x value as the specified x. If x is outside the bounds [0,255],</span>
+<span class="s0"># the selector is set to the closest endpoint.</span>
+<span class="s0">#</span>
+<span class="s0"># Params: sel is the selector canvas, c is [red|green|blue]</span>
+<span class="s0">#         x is a x-coordinate.</span>
+<span class="s0">#</span>
+<span class="s0">proc ::tk::dialog::color::MoveSelector {w sel color x delta} {</span>
+    <span class="s0">upvar ::tk::dialog::color::[winfo name $w] data</span>
+
+    <span class="s0">incr x -$delta</span>
+
+    <span class="s0">if { $x &lt; 0 } {</span>
+	<span class="s0">set x 0</span>
+    <span class="s0">} elseif { $x &gt; $data(BARS_WIDTH)} {</span>
+	<span class="s0">set x $data(BARS_WIDTH)</span>
+    <span class="s0">}</span>
+    <span class="s0">set diff [expr {$x - $data($color,x)}]</span>
+    <span class="s0">$sel move $data($color,index) $diff 0</span>
+    <span class="s0">set data($color,x) [expr {$data($color,x) + $diff}]</span>
+
+    <span class="s0"># Return the x value that it was actually set at</span>
+    <span class="s0">return $x</span>
+<span class="s0">}</span>
+
+<span class="s0"># ::tk::dialog::color::ReleaseMouse</span>
+<span class="s0">#</span>
+<span class="s0"># Removes mouse tracking bindings, updates the colorbars.</span>
+<span class="s0">#</span>
+<span class="s0"># Params: sel is the selector canvas, color is the color of the strip,</span>
+<span class="s0">#         x is the x-coord of the mouse.</span>
+<span class="s0">#</span>
+<span class="s0">proc ::tk::dialog::color::ReleaseMouse {w sel color x delta} {</span>
+    <span class="s0">upvar ::tk::dialog::color::[winfo name $w] data</span>
+
+    <span class="s0">set x [MoveSelector $w $sel $color $x $delta]</span>
+
+    <span class="s0"># Determine exactly what color we are looking at.</span>
+    <span class="s0">set data($color,intensity) [XToRgb $w $x]</span>
+
+    <span class="s0">RedrawColorBars $w $color</span>
+<span class="s0">}</span>
+
+<span class="s0"># ::tk::dialog::color::ResizeColorbars --</span>
+<span class="s0">#</span>
+<span class="s0">#	Completely redraws the colorbars, including resizing the</span>
+<span class="s0">#	colorstrips</span>
+<span class="s0">#</span>
+<span class="s0">proc ::tk::dialog::color::ResizeColorBars {w} {</span>
+    <span class="s0">upvar ::tk::dialog::color::[winfo name $w] data</span>
+
+    <span class="s0">if {</span>
+	<span class="s0">($data(BARS_WIDTH) &lt; $data(NUM_COLORBARS)) ||</span>
+	<span class="s0">(($data(BARS_WIDTH) % $data(NUM_COLORBARS)) != 0)</span>
+    <span class="s0">} then {</span>
+	<span class="s0">set data(BARS_WIDTH) $data(NUM_COLORBARS)</span>
+    <span class="s0">}</span>
+    <span class="s0">InitValues [winfo name $w]</span>
+    <span class="s0">foreach color {red green blue} {</span>
+	<span class="s0">$data($color,col) configure -width $data(canvasWidth)</span>
+	<span class="s0">DrawColorScale $w $color 1</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+
+<span class="s0"># ::tk::dialog::color::HandleSelEntry --</span>
+<span class="s0">#</span>
+<span class="s0">#	Handles the return keypress event in the &quot;Selection:&quot; entry</span>
+<span class="s0">#</span>
+<span class="s0">proc ::tk::dialog::color::HandleSelEntry {w} {</span>
+    <span class="s0">upvar ::tk::dialog::color::[winfo name $w] data</span>
+
+    <span class="s0">set text [string trim $data(selection)]</span>
+    <span class="s0"># Check to make sure that the color is valid</span>
+    <span class="s0">if {[catch {set color [winfo rgb . $text]} ]} {</span>
+	<span class="s0">set data(selection) $data(finalColor)</span>
+	<span class="s0">return</span>
+    <span class="s0">}</span>
+
+    <span class="s0">set R [expr {[lindex $color 0]/0x100}]</span>
+    <span class="s0">set G [expr {[lindex $color 1]/0x100}]</span>
+    <span class="s0">set B [expr {[lindex $color 2]/0x100}]</span>
+
+    <span class="s0">SetRGBValue $w &quot;$R $G $B&quot;</span>
+    <span class="s0">set data(selection) $text</span>
+<span class="s0">}</span>
+
+<span class="s0"># ::tk::dialog::color::HandleRGBEntry --</span>
+<span class="s0">#</span>
+<span class="s0">#	Handles the return keypress event in the R, G or B entry</span>
+<span class="s0">#</span>
+<span class="s0">proc ::tk::dialog::color::HandleRGBEntry {w} {</span>
+    <span class="s0">upvar ::tk::dialog::color::[winfo name $w] data</span>
+
+    <span class="s0">foreach c {red green blue} {</span>
+	<span class="s0">if {[catch {</span>
+	    <span class="s0">set data($c,intensity) [expr {int($data($c,intensity))}]</span>
+	<span class="s0">}]} {</span>
+	    <span class="s0">set data($c,intensity) 0</span>
+	<span class="s0">}</span>
+
+	<span class="s0">if {$data($c,intensity) &lt; 0} {</span>
+	    <span class="s0">set data($c,intensity) 0</span>
+	<span class="s0">}</span>
+	<span class="s0">if {$data($c,intensity) &gt; 255} {</span>
+	    <span class="s0">set data($c,intensity) 255</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+
+    <span class="s0">SetRGBValue $w &quot;$data(red,intensity) \</span>
+	<span class="s0">$data(green,intensity) $data(blue,intensity)&quot;</span>
+<span class="s0">}</span>
+
+<span class="s0"># mouse cursor enters a color bar</span>
+<span class="s0">#</span>
+<span class="s0">proc ::tk::dialog::color::EnterColorBar {w color} {</span>
+    <span class="s0">upvar ::tk::dialog::color::[winfo name $w] data</span>
+
+    <span class="s0">$data($color,sel) itemconfigure $data($color,index) -fill red</span>
+<span class="s0">}</span>
+
+<span class="s0"># mouse leaves enters a color bar</span>
+<span class="s0">#</span>
+<span class="s0">proc ::tk::dialog::color::LeaveColorBar {w color} {</span>
+    <span class="s0">upvar ::tk::dialog::color::[winfo name $w] data</span>
+
+    <span class="s0">$data($color,sel) itemconfigure $data($color,index) -fill black</span>
+<span class="s0">}</span>
+
+<span class="s0"># user hits OK button</span>
+<span class="s0">#</span>
+<span class="s0">proc ::tk::dialog::color::OkCmd {w} {</span>
+    <span class="s0">variable ::tk::Priv</span>
+    <span class="s0">upvar ::tk::dialog::color::[winfo name $w] data</span>
+
+    <span class="s0">set Priv(selectColor) $data(finalColor)</span>
+<span class="s0">}</span>
+
+<span class="s0"># user hits Cancel button or destroys window</span>
+<span class="s0">#</span>
+<span class="s0">proc ::tk::dialog::color::CancelCmd {w} {</span>
+    <span class="s0">variable ::tk::Priv</span>
+    <span class="s0">set Priv(selectColor) &quot;&quot;</span>
+<span class="s0">}</span>
+</pre>
+</body>
+</html>

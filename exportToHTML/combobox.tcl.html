@@ -1,0 +1,473 @@
+<html>
+<head>
+<title>combobox.tcl</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #a9b7c6;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+combobox.tcl</font>
+</center></td></tr></table>
+<pre><span class="s0">#</span>
+<span class="s0"># Combobox bindings.</span>
+<span class="s0">#</span>
+<span class="s0"># &lt;&lt;NOTE-WM-TRANSIENT&gt;&gt;:</span>
+<span class="s0">#</span>
+<span class="s0">#	Need to set [wm transient] just before mapping the popdown</span>
+<span class="s0">#	instead of when it's created, in case a containing frame</span>
+<span class="s0">#	has been reparented [#1818441].</span>
+<span class="s0">#</span>
+<span class="s0">#	On Windows: setting [wm transient] prevents the parent</span>
+<span class="s0">#	toplevel from becoming inactive when the popdown is posted</span>
+<span class="s0">#	(Tk 8.4.8+)</span>
+<span class="s0">#</span>
+<span class="s0">#	On X11: WM_TRANSIENT_FOR on override-redirect windows</span>
+<span class="s0">#	may be used by compositing managers and by EWMH-aware</span>
+<span class="s0">#	window managers (even though the older ICCCM spec says</span>
+<span class="s0">#	it's meaningless).</span>
+<span class="s0">#</span>
+<span class="s0">#	On OSX: [wm transient] does utterly the wrong thing.</span>
+<span class="s0">#	Instead, we use [MacWindowStyle &quot;help&quot; &quot;noActivates hideOnSuspend&quot;].</span>
+<span class="s0">#	The &quot;noActivates&quot; attribute prevents the parent toplevel</span>
+<span class="s0">#	from deactivating when the popdown is posted, and is also</span>
+<span class="s0">#	necessary for &quot;help&quot; windows to receive mouse events.</span>
+<span class="s0">#	&quot;hideOnSuspend&quot; makes the popdown disappear (resp. reappear)</span>
+<span class="s0">#	when the parent toplevel is deactivated (resp. reactivated).</span>
+<span class="s0">#	(see [#1814778]).  Also set [wm resizable 0 0], to prevent</span>
+<span class="s0">#	TkAqua from shrinking the scrollbar to make room for a grow box</span>
+<span class="s0">#	that isn't there.</span>
+<span class="s0">#</span>
+<span class="s0">#	In order to work around other platform quirks in TkAqua,</span>
+<span class="s0">#	[grab] and [focus] are set in &lt;Map&gt; bindings instead of</span>
+<span class="s0">#	immediately after deiconifying the window.</span>
+<span class="s0">#</span>
+
+<span class="s0">namespace eval ttk::combobox {</span>
+    <span class="s0">variable Values	;# Values($cb) is -listvariable of listbox widget</span>
+    <span class="s0">variable State</span>
+    <span class="s0">set State(entryPress) 0</span>
+<span class="s0">}</span>
+
+<span class="s0">### Combobox bindings.</span>
+<span class="s0">#</span>
+<span class="s0"># Duplicate the Entry bindings, override if needed:</span>
+<span class="s0">#</span>
+
+<span class="s0">ttk::copyBindings TEntry TCombobox</span>
+
+<span class="s0">bind TCombobox &lt;KeyPress-Down&gt; 		{ ttk::combobox::Post %W }</span>
+<span class="s0">bind TCombobox &lt;KeyPress-Escape&gt; 	{ ttk::combobox::Unpost %W }</span>
+
+<span class="s0">bind TCombobox &lt;ButtonPress-1&gt; 		{ ttk::combobox::Press &quot;&quot; %W %x %y }</span>
+<span class="s0">bind TCombobox &lt;Shift-ButtonPress-1&gt;	{ ttk::combobox::Press &quot;s&quot; %W %x %y }</span>
+<span class="s0">bind TCombobox &lt;Double-ButtonPress-1&gt; 	{ ttk::combobox::Press &quot;2&quot; %W %x %y }</span>
+<span class="s0">bind TCombobox &lt;Triple-ButtonPress-1&gt; 	{ ttk::combobox::Press &quot;3&quot; %W %x %y }</span>
+<span class="s0">bind TCombobox &lt;B1-Motion&gt;		{ ttk::combobox::Drag %W %x }</span>
+<span class="s0">bind TCombobox &lt;Motion&gt;			{ ttk::combobox::Motion %W %x %y }</span>
+
+<span class="s0">ttk::bindMouseWheel TCombobox [list ttk::combobox::Scroll %W]</span>
+
+<span class="s0">bind TCombobox &lt;&lt;TraverseIn&gt;&gt; 		{ ttk::combobox::TraverseIn %W }</span>
+
+<span class="s0">### Combobox listbox bindings.</span>
+<span class="s0">#</span>
+<span class="s0">bind ComboboxListbox &lt;ButtonRelease-1&gt;	{ ttk::combobox::LBSelected %W }</span>
+<span class="s0">bind ComboboxListbox &lt;KeyPress-Return&gt;	{ ttk::combobox::LBSelected %W }</span>
+<span class="s0">bind ComboboxListbox &lt;KeyPress-Escape&gt;  { ttk::combobox::LBCancel %W }</span>
+<span class="s0">bind ComboboxListbox &lt;KeyPress-Tab&gt;	{ ttk::combobox::LBTab %W next }</span>
+<span class="s0">bind ComboboxListbox &lt;&lt;PrevWindow&gt;&gt;	{ ttk::combobox::LBTab %W prev }</span>
+<span class="s0">bind ComboboxListbox &lt;Destroy&gt;		{ ttk::combobox::LBCleanup %W }</span>
+<span class="s0">bind ComboboxListbox &lt;Motion&gt;		{ ttk::combobox::LBHover %W %x %y }</span>
+<span class="s0">bind ComboboxListbox &lt;Map&gt;		{ focus -force %W }</span>
+
+<span class="s0">switch -- [tk windowingsystem] {</span>
+    <span class="s0">win32 {</span>
+	<span class="s0"># Dismiss listbox when user switches to a different application.</span>
+	<span class="s0"># NB: *only* do this on Windows (see #1814778)</span>
+	<span class="s0">bind ComboboxListbox &lt;FocusOut&gt;		{ ttk::combobox::LBCancel %W }</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+
+<span class="s0">### Combobox popdown window bindings.</span>
+<span class="s0">#</span>
+<span class="s0">bind ComboboxPopdown	&lt;Map&gt;		{ ttk::combobox::MapPopdown %W }</span>
+<span class="s0">bind ComboboxPopdown	&lt;Unmap&gt;		{ ttk::combobox::UnmapPopdown %W }</span>
+<span class="s0">bind ComboboxPopdown	&lt;ButtonPress&gt; \</span>
+			<span class="s0">{ ttk::combobox::Unpost [winfo parent %W] }</span>
+
+<span class="s0">### Option database settings.</span>
+<span class="s0">#</span>
+
+<span class="s0">option add *TCombobox*Listbox.font TkTextFont</span>
+<span class="s0">option add *TCombobox*Listbox.relief flat</span>
+<span class="s0">option add *TCombobox*Listbox.highlightThickness 0</span>
+
+<span class="s0">## Platform-specific settings.</span>
+<span class="s0">#</span>
+<span class="s0">switch -- [tk windowingsystem] {</span>
+    <span class="s0">x11 {</span>
+	<span class="s0">option add *TCombobox*Listbox.background white</span>
+    <span class="s0">}</span>
+    <span class="s0">aqua {</span>
+	<span class="s0">option add *TCombobox*Listbox.borderWidth 0</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+
+<span class="s0">### Binding procedures.</span>
+<span class="s0">#</span>
+
+<span class="s0">## Press $mode $x $y -- ButtonPress binding for comboboxes.</span>
+<span class="s0">#	Either post/unpost the listbox, or perform Entry widget binding,</span>
+<span class="s0">#	depending on widget state and location of button press.</span>
+<span class="s0">#</span>
+<span class="s0">proc ttk::combobox::Press {mode w x y} {</span>
+    <span class="s0">variable State</span>
+
+    <span class="s0">$w instate disabled { return }</span>
+
+    <span class="s0">set State(entryPress) [expr {</span>
+	   <span class="s0">[$w instate !readonly]</span>
+	<span class="s0">&amp;&amp; [string match *textarea [$w identify element $x $y]]</span>
+    <span class="s0">}]</span>
+
+    <span class="s0">focus $w</span>
+    <span class="s0">if {$State(entryPress)} {</span>
+	<span class="s0">switch -- $mode {</span>
+	    <span class="s0">s 	{ ttk::entry::Shift-Press $w $x 	; # Shift }</span>
+	    <span class="s0">2	{ ttk::entry::Select $w $x word 	; # Double click}</span>
+	    <span class="s0">3	{ ttk::entry::Select $w $x line 	; # Triple click }</span>
+	    <span class="s0">&quot;&quot;	-</span>
+	    <span class="s0">default { ttk::entry::Press $w $x }</span>
+	<span class="s0">}</span>
+    <span class="s0">} else {</span>
+	<span class="s0">Post $w</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+
+<span class="s0">## Drag -- B1-Motion binding for comboboxes.</span>
+<span class="s0">#	If the initial ButtonPress event was handled by Entry binding,</span>
+<span class="s0">#	perform Entry widget drag binding; otherwise nothing.</span>
+<span class="s0">#</span>
+<span class="s0">proc ttk::combobox::Drag {w x}  {</span>
+    <span class="s0">variable State</span>
+    <span class="s0">if {$State(entryPress)} {</span>
+	<span class="s0">ttk::entry::Drag $w $x</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+
+<span class="s0">## Motion --</span>
+<span class="s0">#	Set cursor.</span>
+<span class="s0">#</span>
+<span class="s0">proc ttk::combobox::Motion {w x y} {</span>
+    <span class="s0">if {   [$w identify $x $y] eq &quot;textarea&quot;</span>
+        <span class="s0">&amp;&amp; [$w instate {!readonly !disabled}]</span>
+    <span class="s0">} {</span>
+	<span class="s0">ttk::setCursor $w text</span>
+    <span class="s0">} else {</span>
+	<span class="s0">ttk::setCursor $w &quot;&quot;</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+
+<span class="s0">## TraverseIn -- receive focus due to keyboard navigation</span>
+<span class="s0">#	For editable comboboxes, set the selection and insert cursor.</span>
+<span class="s0">#</span>
+<span class="s0">proc ttk::combobox::TraverseIn {w} {</span>
+    <span class="s0">$w instate {!readonly !disabled} {</span>
+	<span class="s0">$w selection range 0 end</span>
+	<span class="s0">$w icursor end</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+
+<span class="s0">## SelectEntry $cb $index --</span>
+<span class="s0">#	Set the combobox selection in response to a user action.</span>
+<span class="s0">#</span>
+<span class="s0">proc ttk::combobox::SelectEntry {cb index} {</span>
+    <span class="s0">$cb current $index</span>
+    <span class="s0">$cb selection range 0 end</span>
+    <span class="s0">$cb icursor end</span>
+    <span class="s0">event generate $cb &lt;&lt;ComboboxSelected&gt;&gt; -when mark</span>
+<span class="s0">}</span>
+
+<span class="s0">## Scroll -- Mousewheel binding</span>
+<span class="s0">#</span>
+<span class="s0">proc ttk::combobox::Scroll {cb dir} {</span>
+    <span class="s0">$cb instate disabled { return }</span>
+    <span class="s0">set max [llength [$cb cget -values]]</span>
+    <span class="s0">set current [$cb current]</span>
+    <span class="s0">incr current $dir</span>
+    <span class="s0">if {$max != 0 &amp;&amp; $current == $current % $max} {</span>
+	<span class="s0">SelectEntry $cb $current</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+
+<span class="s0">## LBSelected $lb -- Activation binding for listbox</span>
+<span class="s0">#	Set the combobox value to the currently-selected listbox value</span>
+<span class="s0">#	and unpost the listbox.</span>
+<span class="s0">#</span>
+<span class="s0">proc ttk::combobox::LBSelected {lb} {</span>
+    <span class="s0">set cb [LBMaster $lb]</span>
+    <span class="s0">LBSelect $lb</span>
+    <span class="s0">Unpost $cb</span>
+    <span class="s0">focus $cb</span>
+<span class="s0">}</span>
+
+<span class="s0">## LBCancel --</span>
+<span class="s0">#	Unpost the listbox.</span>
+<span class="s0">#</span>
+<span class="s0">proc ttk::combobox::LBCancel {lb} {</span>
+    <span class="s0">Unpost [LBMaster $lb]</span>
+<span class="s0">}</span>
+
+<span class="s0">## LBTab -- Tab key binding for combobox listbox.</span>
+<span class="s0">#	Set the selection, and navigate to next/prev widget.</span>
+<span class="s0">#</span>
+<span class="s0">proc ttk::combobox::LBTab {lb dir} {</span>
+    <span class="s0">set cb [LBMaster $lb]</span>
+    <span class="s0">switch -- $dir {</span>
+	<span class="s0">next	{ set newFocus [tk_focusNext $cb] }</span>
+	<span class="s0">prev	{ set newFocus [tk_focusPrev $cb] }</span>
+    <span class="s0">}</span>
+
+    <span class="s0">if {$newFocus ne &quot;&quot;} {</span>
+	<span class="s0">LBSelect $lb</span>
+	<span class="s0">Unpost $cb</span>
+	<span class="s0"># The [grab release] call in [Unpost] queues events that later</span>
+	<span class="s0"># re-set the focus (@@@ NOTE: this might not be true anymore).</span>
+	<span class="s0"># Set new focus later:</span>
+	<span class="s0">after 0 [list ttk::traverseTo $newFocus]</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+
+<span class="s0">## LBHover -- &lt;Motion&gt; binding for combobox listbox.</span>
+<span class="s0">#	Follow selection on mouseover.</span>
+<span class="s0">#</span>
+<span class="s0">proc ttk::combobox::LBHover {w x y} {</span>
+    <span class="s0">$w selection clear 0 end</span>
+    <span class="s0">$w activate @$x,$y</span>
+    <span class="s0">$w selection set @$x,$y</span>
+<span class="s0">}</span>
+
+<span class="s0">## MapPopdown -- &lt;Map&gt; binding for ComboboxPopdown</span>
+<span class="s0">#</span>
+<span class="s0">proc ttk::combobox::MapPopdown {w} {</span>
+    <span class="s0">[winfo parent $w] state pressed</span>
+    <span class="s0">ttk::globalGrab $w</span>
+<span class="s0">}</span>
+
+<span class="s0">## UnmapPopdown -- &lt;Unmap&gt; binding for ComboboxPopdown</span>
+<span class="s0">#</span>
+<span class="s0">proc ttk::combobox::UnmapPopdown {w} {</span>
+    <span class="s0">[winfo parent $w] state !pressed</span>
+    <span class="s0">ttk::releaseGrab $w</span>
+<span class="s0">}</span>
+
+<span class="s0">###</span>
+<span class="s0">#</span>
+
+<span class="s0">namespace eval ::ttk::combobox {</span>
+    <span class="s0"># @@@ Until we have a proper native scrollbar on Aqua, use</span>
+    <span class="s0"># @@@ the regular Tk one.  Use ttk::scrollbar on other platforms.</span>
+    <span class="s0">variable scrollbar ttk::scrollbar</span>
+    <span class="s0">if {[tk windowingsystem] eq &quot;aqua&quot;} {</span>
+	<span class="s0">set scrollbar ::scrollbar</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+
+<span class="s0">## PopdownWindow --</span>
+<span class="s0">#	Returns the popdown widget associated with a combobox,</span>
+<span class="s0">#	creating it if necessary.</span>
+<span class="s0">#</span>
+<span class="s0">proc ttk::combobox::PopdownWindow {cb} {</span>
+    <span class="s0">variable scrollbar</span>
+
+    <span class="s0">if {![winfo exists $cb.popdown]} {</span>
+	<span class="s0">set poplevel [PopdownToplevel $cb.popdown]</span>
+	<span class="s0">set popdown [ttk::frame $poplevel.f -style ComboboxPopdownFrame]</span>
+
+	<span class="s0">$scrollbar $popdown.sb \</span>
+	    <span class="s0">-orient vertical -command [list $popdown.l yview]</span>
+	<span class="s0">listbox $popdown.l \</span>
+	    <span class="s0">-listvariable ttk::combobox::Values($cb) \</span>
+	    <span class="s0">-yscrollcommand [list $popdown.sb set] \</span>
+	    <span class="s0">-exportselection false \</span>
+	    <span class="s0">-selectmode browse \</span>
+	    <span class="s0">-activestyle none \</span>
+	    <span class="s0">;</span>
+
+	<span class="s0">bindtags $popdown.l \</span>
+	    <span class="s0">[list $popdown.l ComboboxListbox Listbox $popdown all]</span>
+
+	<span class="s0">grid $popdown.l -row 0 -column 0 -padx {1 0} -pady 1 -sticky nsew</span>
+        <span class="s0">grid $popdown.sb -row 0 -column 1 -padx {0 1} -pady 1 -sticky ns</span>
+	<span class="s0">grid columnconfigure $popdown 0 -weight 1</span>
+	<span class="s0">grid rowconfigure $popdown 0 -weight 1</span>
+
+        <span class="s0">grid $popdown -sticky news -padx 0 -pady 0</span>
+        <span class="s0">grid rowconfigure $poplevel 0 -weight 1</span>
+        <span class="s0">grid columnconfigure $poplevel 0 -weight 1</span>
+    <span class="s0">}</span>
+    <span class="s0">return $cb.popdown</span>
+<span class="s0">}</span>
+
+<span class="s0">## PopdownToplevel -- Create toplevel window for the combobox popdown</span>
+<span class="s0">#</span>
+<span class="s0">#	See also &lt;&lt;NOTE-WM-TRANSIENT&gt;&gt;</span>
+<span class="s0">#</span>
+<span class="s0">proc ttk::combobox::PopdownToplevel {w} {</span>
+    <span class="s0">toplevel $w -class ComboboxPopdown</span>
+    <span class="s0">wm withdraw $w</span>
+    <span class="s0">switch -- [tk windowingsystem] {</span>
+	<span class="s0">default -</span>
+	<span class="s0">x11 {</span>
+	    <span class="s0">$w configure -relief flat -borderwidth 0</span>
+	    <span class="s0">wm attributes $w -type combo</span>
+	    <span class="s0">wm overrideredirect $w true</span>
+	<span class="s0">}</span>
+	<span class="s0">win32 {</span>
+	    <span class="s0">$w configure -relief flat -borderwidth 0</span>
+	    <span class="s0">wm overrideredirect $w true</span>
+	    <span class="s0">wm attributes $w -topmost 1</span>
+	<span class="s0">}</span>
+	<span class="s0">aqua {</span>
+	    <span class="s0">$w configure -relief solid -borderwidth 0</span>
+	    <span class="s0">tk::unsupported::MacWindowStyle style $w \</span>
+	    	<span class="s0">help {noActivates hideOnSuspend}</span>
+	    <span class="s0">wm resizable $w 0 0</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+    <span class="s0">return $w</span>
+<span class="s0">}</span>
+
+<span class="s0">## ConfigureListbox --</span>
+<span class="s0">#	Set listbox values, selection, height, and scrollbar visibility</span>
+<span class="s0">#	from current combobox values.</span>
+<span class="s0">#</span>
+<span class="s0">proc ttk::combobox::ConfigureListbox {cb} {</span>
+    <span class="s0">variable Values</span>
+
+    <span class="s0">set popdown [PopdownWindow $cb].f</span>
+    <span class="s0">set values [$cb cget -values]</span>
+    <span class="s0">set current [$cb current]</span>
+    <span class="s0">if {$current &lt; 0} {</span>
+	<span class="s0">set current 0 		;# no current entry, highlight first one</span>
+    <span class="s0">}</span>
+    <span class="s0">set Values($cb) $values</span>
+    <span class="s0">$popdown.l selection clear 0 end</span>
+    <span class="s0">$popdown.l selection set $current</span>
+    <span class="s0">$popdown.l activate $current</span>
+    <span class="s0">$popdown.l see $current</span>
+    <span class="s0">set height [llength $values]</span>
+    <span class="s0">if {$height &gt; [$cb cget -height]} {</span>
+	<span class="s0">set height [$cb cget -height]</span>
+    	<span class="s0">grid $popdown.sb</span>
+        <span class="s0">grid configure $popdown.l -padx {1 0}</span>
+    <span class="s0">} else {</span>
+	<span class="s0">grid remove $popdown.sb</span>
+        <span class="s0">grid configure $popdown.l -padx 1</span>
+    <span class="s0">}</span>
+    <span class="s0">$popdown.l configure -height $height</span>
+<span class="s0">}</span>
+
+<span class="s0">## PlacePopdown --</span>
+<span class="s0">#	Set popdown window geometry.</span>
+<span class="s0">#</span>
+<span class="s0"># @@@TODO: factor with menubutton::PostPosition</span>
+<span class="s0">#</span>
+<span class="s0">proc ttk::combobox::PlacePopdown {cb popdown} {</span>
+    <span class="s0">set x [winfo rootx $cb]</span>
+    <span class="s0">set y [winfo rooty $cb]</span>
+    <span class="s0">set w [winfo width $cb]</span>
+    <span class="s0">set h [winfo height $cb]</span>
+    <span class="s0">set postoffset [ttk::style lookup TCombobox -postoffset {} {0 0 0 0}]</span>
+    <span class="s0">foreach var {x y w h} delta $postoffset {</span>
+    	<span class="s0">incr $var $delta</span>
+    <span class="s0">}</span>
+
+    <span class="s0">set H [winfo reqheight $popdown]</span>
+    <span class="s0">if {$y + $h + $H &gt; [winfo screenheight $popdown]} {</span>
+	<span class="s0">set Y [expr {$y - $H}]</span>
+    <span class="s0">} else {</span>
+	<span class="s0">set Y [expr {$y + $h}]</span>
+    <span class="s0">}</span>
+    <span class="s0">wm geometry $popdown ${w}x${H}+${x}+${Y}</span>
+<span class="s0">}</span>
+
+<span class="s0">## Post $cb --</span>
+<span class="s0">#	Pop down the associated listbox.</span>
+<span class="s0">#</span>
+<span class="s0">proc ttk::combobox::Post {cb} {</span>
+    <span class="s0"># Don't do anything if disabled:</span>
+    <span class="s0">#</span>
+    <span class="s0">$cb instate disabled { return }</span>
+
+    <span class="s0"># ASSERT: ![$cb instate pressed]</span>
+
+    <span class="s0"># Run -postcommand callback:</span>
+    <span class="s0">#</span>
+    <span class="s0">uplevel #0 [$cb cget -postcommand]</span>
+
+    <span class="s0">set popdown [PopdownWindow $cb]</span>
+    <span class="s0">ConfigureListbox $cb</span>
+    <span class="s0">update idletasks	;# needed for geometry propagation.</span>
+    <span class="s0">PlacePopdown $cb $popdown</span>
+    <span class="s0"># See &lt;&lt;NOTE-WM-TRANSIENT&gt;&gt;</span>
+    <span class="s0">switch -- [tk windowingsystem] {</span>
+	<span class="s0">x11 - win32 { wm transient $popdown [winfo toplevel $cb] }</span>
+    <span class="s0">}</span>
+
+    <span class="s0"># Post the listbox:</span>
+    <span class="s0">#</span>
+    <span class="s0">wm attribute $popdown -topmost 1</span>
+    <span class="s0">wm deiconify $popdown</span>
+    <span class="s0">raise $popdown</span>
+<span class="s0">}</span>
+
+<span class="s0">## Unpost $cb --</span>
+<span class="s0">#	Unpost the listbox.</span>
+<span class="s0">#</span>
+<span class="s0">proc ttk::combobox::Unpost {cb} {</span>
+    <span class="s0">if {[winfo exists $cb.popdown]} {</span>
+	<span class="s0">wm withdraw $cb.popdown</span>
+    <span class="s0">}</span>
+    <span class="s0">grab release $cb.popdown ;# in case of stuck or unexpected grab [#1239190]</span>
+<span class="s0">}</span>
+
+<span class="s0">## LBMaster $lb --</span>
+<span class="s0">#	Return the combobox main widget that owns the listbox.</span>
+<span class="s0">#</span>
+<span class="s0">proc ttk::combobox::LBMaster {lb} {</span>
+    <span class="s0">winfo parent [winfo parent [winfo parent $lb]]</span>
+<span class="s0">}</span>
+
+<span class="s0">## LBSelect $lb --</span>
+<span class="s0">#	Transfer listbox selection to combobox value.</span>
+<span class="s0">#</span>
+<span class="s0">proc ttk::combobox::LBSelect {lb} {</span>
+    <span class="s0">set cb [LBMaster $lb]</span>
+    <span class="s0">set selection [$lb curselection]</span>
+    <span class="s0">if {[llength $selection] == 1} {</span>
+	<span class="s0">SelectEntry $cb [lindex $selection 0]</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+
+<span class="s0">## LBCleanup $lb --</span>
+<span class="s0">#	&lt;Destroy&gt; binding for combobox listboxes.</span>
+<span class="s0">#	Cleans up by unsetting the linked textvariable.</span>
+<span class="s0">#</span>
+<span class="s0">#	Note: we can't just use { unset [%W cget -listvariable] }</span>
+<span class="s0">#	because the widget command is already gone when this binding fires).</span>
+<span class="s0">#	[winfo parent] still works, fortunately.</span>
+<span class="s0">#</span>
+<span class="s0">proc ttk::combobox::LBCleanup {lb} {</span>
+    <span class="s0">variable Values</span>
+    <span class="s0">unset Values([LBMaster $lb])</span>
+<span class="s0">}</span>
+
+<span class="s0">#*EOF*</span>
+</pre>
+</body>
+</html>
