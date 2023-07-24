@@ -1,0 +1,558 @@
+<html>
+<head>
+<title>known_failures.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #cc7832;}
+.s3 { color: #6a8759;}
+.s4 { color: #6897bb;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+known_failures.py</font>
+</center></td></tr></table>
+<pre><span class="s0"># This is a list of known failures (=bugs).</span>
+<span class="s0"># The tests listed there must fail (or testrunner.py will report error) unless they are prefixed with FLAKY</span>
+<span class="s0"># in which cases the result of them is simply ignored</span>
+<span class="s2">from </span><span class="s1">__future__ </span><span class="s2">import </span><span class="s1">print_function</span>
+
+<span class="s2">import </span><span class="s1">sys</span>
+<span class="s2">import </span><span class="s1">struct</span>
+
+<span class="s2">from </span><span class="s1">gevent.testing </span><span class="s2">import </span><span class="s1">sysinfo</span>
+
+<span class="s2">class </span><span class="s1">Condition(object):</span>
+    <span class="s1">__slots__ = ()</span>
+
+    <span class="s2">def </span><span class="s1">__and__(self</span><span class="s2">, </span><span class="s1">other):</span>
+        <span class="s2">return </span><span class="s1">AndCondition(self</span><span class="s2">, </span><span class="s1">other)</span>
+
+    <span class="s2">def </span><span class="s1">__or__(self</span><span class="s2">, </span><span class="s1">other):</span>
+        <span class="s2">return </span><span class="s1">OrCondition(self</span><span class="s2">, </span><span class="s1">other)</span>
+
+    <span class="s2">def </span><span class="s1">__nonzero__(self):</span>
+        <span class="s2">return </span><span class="s1">self.__bool__()</span>
+
+    <span class="s2">def </span><span class="s1">__bool__(self):</span>
+        <span class="s2">raise </span><span class="s1">NotImplementedError</span>
+
+
+<span class="s2">class </span><span class="s1">AbstractBinaryCondition(Condition): </span><span class="s0"># pylint:disable=abstract-method</span>
+    <span class="s1">__slots__ = (</span>
+        <span class="s3">'lhs'</span><span class="s2">,</span>
+        <span class="s3">'rhs'</span><span class="s2">,</span>
+    <span class="s1">)</span>
+    <span class="s1">OP = </span><span class="s2">None</span>
+    <span class="s2">def </span><span class="s1">__init__(self</span><span class="s2">, </span><span class="s1">lhs</span><span class="s2">, </span><span class="s1">rhs):</span>
+        <span class="s1">self.lhs = lhs</span>
+        <span class="s1">self.rhs = rhs</span>
+
+    <span class="s2">def </span><span class="s1">__repr__(self):</span>
+        <span class="s2">return </span><span class="s3">&quot;(%r %s %r)&quot; </span><span class="s1">% (</span>
+            <span class="s1">self.lhs</span><span class="s2">,</span>
+            <span class="s1">self.OP</span><span class="s2">,</span>
+            <span class="s1">self.rhs</span>
+        <span class="s1">)</span>
+
+<span class="s2">class </span><span class="s1">OrCondition(AbstractBinaryCondition):</span>
+    <span class="s1">__slots__ = ()</span>
+    <span class="s1">OP = </span><span class="s3">'|'</span>
+    <span class="s2">def </span><span class="s1">__bool__(self):</span>
+        <span class="s2">return </span><span class="s1">bool(self.lhs) </span><span class="s2">or </span><span class="s1">bool(self.rhs)</span>
+
+<span class="s2">class </span><span class="s1">AndCondition(AbstractBinaryCondition):</span>
+    <span class="s1">__slots__ = ()</span>
+    <span class="s1">OP = </span><span class="s3">'&amp;'</span>
+    <span class="s2">def </span><span class="s1">__bool__(self):</span>
+        <span class="s2">return </span><span class="s1">bool(self.lhs) </span><span class="s2">and </span><span class="s1">bool(self.rhs)</span>
+
+<span class="s2">class </span><span class="s1">ConstantCondition(Condition):</span>
+    <span class="s1">__slots__ = (</span>
+        <span class="s3">'value'</span><span class="s2">,</span>
+        <span class="s3">'__name__'</span><span class="s2">,</span>
+    <span class="s1">)</span>
+
+    <span class="s2">def </span><span class="s1">__init__(self</span><span class="s2">, </span><span class="s1">value</span><span class="s2">, </span><span class="s1">name=</span><span class="s2">None</span><span class="s1">):</span>
+        <span class="s1">self.value = bool(value)</span>
+        <span class="s1">self.__name__ = name </span><span class="s2">or </span><span class="s1">str(value)</span>
+
+    <span class="s2">def </span><span class="s1">__bool__(self):</span>
+        <span class="s2">return </span><span class="s1">self.value</span>
+
+    <span class="s2">def </span><span class="s1">__repr__(self):</span>
+        <span class="s2">return </span><span class="s1">self.__name__</span>
+
+<span class="s1">ALWAYS = ConstantCondition(</span><span class="s2">True</span><span class="s1">)</span>
+<span class="s1">NEVER = ConstantCondition(</span><span class="s2">False</span><span class="s1">)</span>
+
+<span class="s2">class </span><span class="s1">_AttrCondition(ConstantCondition):</span>
+    <span class="s1">__slots__ = (</span>
+    <span class="s1">)</span>
+
+    <span class="s2">def </span><span class="s1">__init__(self</span><span class="s2">, </span><span class="s1">name):</span>
+        <span class="s1">ConstantCondition.__init__(self</span><span class="s2">, </span><span class="s1">getattr(sysinfo</span><span class="s2">, </span><span class="s1">name)</span><span class="s2">, </span><span class="s1">name)</span>
+
+<span class="s1">PYPY = _AttrCondition(</span><span class="s3">'PYPY'</span><span class="s1">)</span>
+<span class="s1">PYPY3 = _AttrCondition(</span><span class="s3">'PYPY3'</span><span class="s1">)</span>
+<span class="s1">PY3 = _AttrCondition(</span><span class="s3">'PY3'</span><span class="s1">)</span>
+<span class="s1">PY2 = _AttrCondition(</span><span class="s3">'PY2'</span><span class="s1">)</span>
+<span class="s1">OSX = _AttrCondition(</span><span class="s3">'OSX'</span><span class="s1">)</span>
+<span class="s1">LIBUV = _AttrCondition(</span><span class="s3">'LIBUV'</span><span class="s1">)</span>
+<span class="s1">WIN = _AttrCondition(</span><span class="s3">'WIN'</span><span class="s1">)</span>
+<span class="s1">APPVEYOR = _AttrCondition(</span><span class="s3">'RUNNING_ON_APPVEYOR'</span><span class="s1">)</span>
+<span class="s1">TRAVIS = _AttrCondition(</span><span class="s3">'RUNNING_ON_TRAVIS'</span><span class="s1">)</span>
+<span class="s1">CI = _AttrCondition(</span><span class="s3">'RUNNING_ON_CI'</span><span class="s1">)</span>
+<span class="s1">LEAKTEST = _AttrCondition(</span><span class="s3">'RUN_LEAKCHECKS'</span><span class="s1">)</span>
+<span class="s1">COVERAGE = _AttrCondition(</span><span class="s3">'RUN_COVERAGE'</span><span class="s1">)</span>
+<span class="s1">RESOLVER_NOT_SYSTEM = _AttrCondition(</span><span class="s3">'RESOLVER_NOT_SYSTEM'</span><span class="s1">)</span>
+<span class="s1">BIT_64 = ConstantCondition(struct.calcsize(</span><span class="s3">'P'</span><span class="s1">) * </span><span class="s4">8 </span><span class="s1">== </span><span class="s4">64</span><span class="s2">, </span><span class="s3">'BIT_64'</span><span class="s1">)</span>
+<span class="s1">PY380_EXACTLY = ConstantCondition(sys.version_info[:</span><span class="s4">3</span><span class="s1">] == (</span><span class="s4">3</span><span class="s2">, </span><span class="s4">8</span><span class="s2">, </span><span class="s4">0</span><span class="s1">)</span><span class="s2">, </span><span class="s3">'PY380_EXACTLY'</span><span class="s1">)</span>
+
+<span class="s2">class </span><span class="s1">_Definition(object):</span>
+    <span class="s1">__slots__ = (</span>
+        <span class="s3">'__name__'</span><span class="s2">,</span>
+        <span class="s0"># When does the class of this condition apply?</span>
+        <span class="s3">'when'</span><span class="s2">,</span>
+        <span class="s0"># When should this test be run alone, if it's run?</span>
+        <span class="s3">'run_alone'</span><span class="s2">,</span>
+        <span class="s0"># Should this test be ignored during coverage measurement?</span>
+        <span class="s3">'ignore_coverage'</span><span class="s2">,</span>
+        <span class="s0"># {name: (Condition, value)}</span>
+        <span class="s3">'options'</span><span class="s2">,</span>
+    <span class="s1">)</span>
+
+    <span class="s2">def </span><span class="s1">__init__(self</span><span class="s2">, </span><span class="s1">when</span><span class="s2">, </span><span class="s1">run_alone</span><span class="s2">, </span><span class="s1">ignore_coverage</span><span class="s2">, </span><span class="s1">options):</span>
+        <span class="s2">assert </span><span class="s1">isinstance(when</span><span class="s2">, </span><span class="s1">Condition)</span>
+        <span class="s2">assert </span><span class="s1">isinstance(run_alone</span><span class="s2">, </span><span class="s1">Condition)</span>
+        <span class="s2">assert </span><span class="s1">isinstance(ignore_coverage</span><span class="s2">, </span><span class="s1">Condition)</span>
+        <span class="s1">self.when = when</span>
+        <span class="s1">self.__name__ = </span><span class="s2">None </span><span class="s0"># pylint:disable=non-str-assignment-to-dunder-name</span>
+        <span class="s1">self.run_alone = run_alone</span>
+        <span class="s1">self.ignore_coverage = ignore_coverage</span>
+        <span class="s2">if </span><span class="s1">options:</span>
+            <span class="s2">for </span><span class="s1">v </span><span class="s2">in </span><span class="s1">options.values():</span>
+                <span class="s2">assert </span><span class="s1">isinstance(v</span><span class="s2">, </span><span class="s1">tuple) </span><span class="s2">and </span><span class="s1">len(v) == </span><span class="s4">2</span>
+                <span class="s2">assert </span><span class="s1">isinstance(v[</span><span class="s4">0</span><span class="s1">]</span><span class="s2">, </span><span class="s1">Condition)</span>
+        <span class="s1">self.options = options</span>
+
+    <span class="s2">def </span><span class="s1">__set_name__(self</span><span class="s2">, </span><span class="s1">owner</span><span class="s2">, </span><span class="s1">name):</span>
+        <span class="s1">self.__name__ = name</span>
+
+    <span class="s2">def </span><span class="s1">__repr__(self):</span>
+        <span class="s2">return </span><span class="s3">'&lt;%s for %s when=%r=%s run_alone=%r=%s&gt;' </span><span class="s1">% (</span>
+            <span class="s1">type(self).__name__</span><span class="s2">,</span>
+            <span class="s1">self.__name__</span><span class="s2">,</span>
+            <span class="s1">self.when</span><span class="s2">, </span><span class="s1">bool(self.when)</span><span class="s2">,</span>
+            <span class="s1">self.run_alone</span><span class="s2">, </span><span class="s1">bool(self.run_alone)</span>
+        <span class="s1">)</span>
+
+<span class="s2">class </span><span class="s1">_Action(_Definition):</span>
+    <span class="s1">__slots__ = (</span>
+        <span class="s3">'reason'</span><span class="s2">,</span>
+    <span class="s1">)</span>
+    <span class="s2">def </span><span class="s1">__init__(self</span><span class="s2">, </span><span class="s1">reason=</span><span class="s3">''</span><span class="s2">, </span><span class="s1">when=ALWAYS</span><span class="s2">, </span><span class="s1">run_alone=NEVER</span><span class="s2">, </span><span class="s1">ignore_coverage=NEVER</span><span class="s2">,</span>
+                 <span class="s1">options=</span><span class="s2">None</span><span class="s1">):</span>
+        <span class="s1">_Definition.__init__(self</span><span class="s2">, </span><span class="s1">when</span><span class="s2">, </span><span class="s1">run_alone</span><span class="s2">, </span><span class="s1">ignore_coverage</span><span class="s2">, </span><span class="s1">options)</span>
+        <span class="s1">self.reason = reason</span>
+
+<span class="s2">class </span><span class="s1">RunAlone(_Action):</span>
+    <span class="s1">__slots__ = ()</span>
+
+    <span class="s2">def </span><span class="s1">__init__(self</span><span class="s2">, </span><span class="s1">reason=</span><span class="s3">''</span><span class="s2">, </span><span class="s1">when=ALWAYS</span><span class="s2">, </span><span class="s1">ignore_coverage=NEVER):</span>
+        <span class="s1">_Action.__init__(self</span><span class="s2">, </span><span class="s1">reason</span><span class="s2">, </span><span class="s1">run_alone=when</span><span class="s2">, </span><span class="s1">ignore_coverage=ignore_coverage)</span>
+
+<span class="s2">class </span><span class="s1">Failing(_Action):</span>
+    <span class="s1">__slots__ = ()</span>
+
+<span class="s2">class </span><span class="s1">Flaky(Failing):</span>
+    <span class="s1">__slots__ = ()</span>
+
+<span class="s2">class </span><span class="s1">Ignored(_Action):</span>
+    <span class="s1">__slots__ = ()</span>
+
+<span class="s2">class </span><span class="s1">Multi(object):</span>
+    <span class="s2">def </span><span class="s1">__init__(self):</span>
+        <span class="s1">self._conds = []</span>
+
+    <span class="s2">def </span><span class="s1">flaky(self</span><span class="s2">, </span><span class="s1">reason=</span><span class="s3">''</span><span class="s2">, </span><span class="s1">when=</span><span class="s2">True, </span><span class="s1">ignore_coverage=NEVER</span><span class="s2">, </span><span class="s1">run_alone=NEVER):</span>
+        <span class="s1">self._conds.append(</span>
+            <span class="s1">Flaky(</span>
+                <span class="s1">reason</span><span class="s2">, </span><span class="s1">when=when</span><span class="s2">,</span>
+                <span class="s1">ignore_coverage=ignore_coverage</span><span class="s2">,</span>
+                <span class="s1">run_alone=run_alone</span><span class="s2">,</span>
+            <span class="s1">)</span>
+        <span class="s1">)</span>
+        <span class="s2">return </span><span class="s1">self</span>
+
+    <span class="s2">def </span><span class="s1">ignored(self</span><span class="s2">, </span><span class="s1">reason=</span><span class="s3">''</span><span class="s2">, </span><span class="s1">when=</span><span class="s2">True</span><span class="s1">):</span>
+        <span class="s1">self._conds.append(Ignored(reason</span><span class="s2">, </span><span class="s1">when=when))</span>
+        <span class="s2">return </span><span class="s1">self</span>
+
+    <span class="s2">def </span><span class="s1">__set_name__(self</span><span class="s2">, </span><span class="s1">owner</span><span class="s2">, </span><span class="s1">name):</span>
+        <span class="s2">for </span><span class="s1">c </span><span class="s2">in </span><span class="s1">self._conds:</span>
+            <span class="s1">c.__set_name__(owner</span><span class="s2">, </span><span class="s1">name)</span>
+
+
+<span class="s2">class </span><span class="s1">DefinitionsMeta(type):</span>
+    <span class="s0"># a metaclass on Python 3 that makes sure we only set attributes once. pylint doesn't</span>
+    <span class="s0"># warn about that.</span>
+    <span class="s1">@classmethod</span>
+    <span class="s2">def </span><span class="s1">__prepare__(cls</span><span class="s2">, </span><span class="s1">name</span><span class="s2">, </span><span class="s1">bases): </span><span class="s0"># pylint:disable=unused-argument</span>
+        <span class="s2">return </span><span class="s1">SetOnceMapping()</span>
+
+
+<span class="s2">class </span><span class="s1">SetOnceMapping(dict):</span>
+
+    <span class="s2">def </span><span class="s1">__setitem__(self</span><span class="s2">, </span><span class="s1">name</span><span class="s2">, </span><span class="s1">value):</span>
+        <span class="s2">if </span><span class="s1">name </span><span class="s2">in </span><span class="s1">self:</span>
+            <span class="s2">raise </span><span class="s1">AttributeError(name)</span>
+        <span class="s1">dict.__setitem__(self</span><span class="s2">, </span><span class="s1">name</span><span class="s2">, </span><span class="s1">value)</span>
+
+<span class="s1">som = SetOnceMapping()</span>
+<span class="s1">som[</span><span class="s4">1</span><span class="s1">] = </span><span class="s4">1</span>
+<span class="s2">try</span><span class="s1">:</span>
+    <span class="s1">som[</span><span class="s4">1</span><span class="s1">] = </span><span class="s4">2</span>
+<span class="s2">except </span><span class="s1">AttributeError:</span>
+    <span class="s2">del </span><span class="s1">som</span>
+<span class="s2">else</span><span class="s1">:</span>
+    <span class="s2">raise </span><span class="s1">AssertionError(</span><span class="s3">&quot;SetOnceMapping is broken&quot;</span><span class="s1">)</span>
+
+<span class="s1">DefinitionsBase = DefinitionsMeta(</span><span class="s3">'DefinitionsBase'</span><span class="s2">, </span><span class="s1">(object</span><span class="s2">,</span><span class="s1">)</span><span class="s2">, </span><span class="s1">{})</span>
+
+<span class="s2">class </span><span class="s1">Definitions(DefinitionsBase):</span>
+
+    <span class="s1">test__issue6 = Flaky(</span>
+        <span class="s3">&quot;&quot;&quot;test__issue6 (see comments in test file) is really flaky on both Travis and Appveyor; 
+        on Travis we could just run the test again (but that gets old fast), but on appveyor 
+        we don't have that option without a new commit---and sometimes we really need a build 
+        to succeed in order to get a release wheel&quot;&quot;&quot;</span>
+    <span class="s1">)</span>
+
+    <span class="s1">test__core_fork = Ignored(</span>
+        <span class="s3">&quot;&quot;&quot;fork watchers don't get called on windows 
+        because fork is not a concept windows has. 
+        See this file for a detailed explanation.&quot;&quot;&quot;</span><span class="s2">,</span>
+        <span class="s1">when=WIN</span>
+    <span class="s1">)</span>
+
+    <span class="s1">test__greenletset = Flaky(</span>
+        <span class="s1">when=WIN</span><span class="s2">,</span>
+        <span class="s1">ignore_coverage=PYPY</span>
+    <span class="s1">)</span>
+
+    <span class="s1">test__example_udp_client = test__example_udp_server = Flaky(</span>
+        <span class="s3">&quot;&quot;&quot; 
+        These both run on port 9000 and can step on each other...seems 
+        like the appveyor containers aren't fully port safe? Or it 
+        takes longer for the processes to shut down? Or we run them in 
+        a different order in the process pool than we do other places? 
+ 
+        On PyPy on Travis, this fails to get the correct results, 
+        sometimes. I can't reproduce locally 
+        &quot;&quot;&quot;</span><span class="s2">,</span>
+        <span class="s1">when=APPVEYOR | (PYPY &amp; TRAVIS)</span>
+    <span class="s1">)</span>
+
+    <span class="s0"># This one sometimes randomly closes connections, but no indication</span>
+    <span class="s0"># of a server crash, only a client side close.</span>
+    <span class="s1">test__server_pywsgi = Flaky(when=APPVEYOR)</span>
+
+    <span class="s1">test_threading = Multi().ignored(</span>
+        <span class="s3">&quot;&quot;&quot; 
+        This one seems to just stop right after patching is done. It 
+        passes on a local win 10 vm, and the main test_threading_2.py 
+        does as well. Based on the printouts we added, it appears to 
+        not even finish importing: 
+        https://ci.appveyor.com/project/denik/gevent/build/1.0.1277/job/tpvhesij5gldjxqw#L1190 
+        Ignored because it takes two minutes to time out. 
+        &quot;&quot;&quot;</span><span class="s2">,</span>
+        <span class="s1">when=APPVEYOR &amp; LIBUV &amp; PYPY</span>
+    <span class="s1">).flaky(</span>
+        <span class="s3">&quot;&quot;&quot; 
+        test_set_and_clear in Py3 relies on 5 threads all starting and 
+        coming to an Event wait point while a sixth thread sleeps for a half 
+        second. The sixth thread then does something and checks that 
+        the 5 threads were all at the wait point. But the timing is sometimes 
+        too tight for appveyor. This happens even if Event isn't 
+        monkey-patched 
+        &quot;&quot;&quot;</span><span class="s2">,</span>
+        <span class="s1">when=APPVEYOR &amp; PY3</span>
+    <span class="s1">)</span>
+
+    <span class="s1">test_ftplib = Flaky(</span>
+        <span class="s3">r&quot;&quot;&quot; 
+        could be a problem of appveyor - not sure 
+         ====================================================================== 
+          ERROR: test_af (__main__.TestIPv6Environment) 
+         ---------------------------------------------------------------------- 
+          File &quot;C:\Python27-x64\lib\ftplib.py&quot;, line 135, in connect 
+            self.sock = socket.create_connection((self.host, self.port), self.timeout) 
+          File &quot;c:\projects\gevent\gevent\socket.py&quot;, line 73, in create_connection 
+            raise err 
+          error: [Errno 10049] [Error 10049] The requested address is not valid in its context. 
+        XXX: On Jan 3 2016 this suddenly started passing on Py27/64; no idea why, the python version 
+        was 2.7.11 before and after. 
+        &quot;&quot;&quot;</span><span class="s2">,</span>
+        <span class="s1">when=APPVEYOR &amp; BIT_64</span>
+    <span class="s1">)</span>
+
+
+    <span class="s1">test__backdoor = Flaky(when=LEAKTEST | PYPY)</span>
+    <span class="s1">test__socket_errors = Flaky(when=LEAKTEST)</span>
+    <span class="s1">test_signal = Multi().flaky(</span>
+        <span class="s3">&quot;On Travis, this very frequently fails due to timing&quot;</span><span class="s2">,</span>
+        <span class="s1">when=TRAVIS &amp; LEAKTEST</span><span class="s2">,</span>
+        <span class="s0"># Partial workaround for the _testcapi issue on PyPy,</span>
+        <span class="s0"># but also because signal delivery can sometimes be slow, and this</span>
+        <span class="s0"># spawn processes of its own</span>
+        <span class="s1">run_alone=APPVEYOR</span><span class="s2">,</span>
+    <span class="s1">).ignored(</span>
+        <span class="s3">&quot;&quot;&quot; 
+        This fails to run a single test. It looks like just importing the module 
+        can hang. All I see is the output from patch_all() 
+        &quot;&quot;&quot;</span><span class="s2">,</span>
+        <span class="s1">when=APPVEYOR &amp; PYPY3</span>
+    <span class="s1">)</span>
+
+    <span class="s1">test__monkey_sigchld_2 = Ignored(</span>
+        <span class="s3">&quot;&quot;&quot; 
+        This hangs for no apparent reason when run by the testrunner, 
+        even wher maked standalone when run standalone from the 
+        command line, it's fine. Issue in pypy2 6.0? 
+        &quot;&quot;&quot;</span><span class="s2">,</span>
+        <span class="s1">when=PYPY &amp; LIBUV</span>
+    <span class="s1">)</span>
+
+    <span class="s1">test_ssl = Ignored(</span>
+        <span class="s3">&quot;&quot;&quot; 
+        PyPy 7.0 and 7.1 on Travis with Ubunto Xenial 16.04 can't 
+        allocate SSL Context objects, either in Python 2.7 or 3.6. 
+        There must be some library incompatibility. No point even 
+        running them. XXX: Remember to turn this back on. 
+ 
+        On Windows, with PyPy3.7 7.3.7, there seem to be all kind of certificate 
+        errors. 
+        &quot;&quot;&quot;</span><span class="s2">,</span>
+        <span class="s1">when=(PYPY &amp; TRAVIS) | (PYPY3 &amp; WIN)</span>
+    <span class="s1">)</span>
+
+    <span class="s1">test_httpservers = Ignored(</span>
+        <span class="s3">&quot;&quot;&quot; 
+        All the CGI tests hang. There appear to be subprocess problems. 
+        &quot;&quot;&quot;</span><span class="s2">,</span>
+        <span class="s1">when=PYPY3 &amp; WIN</span>
+    <span class="s1">)</span>
+
+
+
+    <span class="s1">test__pywsgi = Ignored(</span>
+        <span class="s3">&quot;&quot;&quot; 
+        XXX: Re-enable this when we can investigate more. This has 
+        started crashing with a SystemError. I cannot reproduce with 
+        the same version on macOS and I cannot reproduce with the same 
+        version in a Linux vm. Commenting out individual tests just 
+        moves the crash around. 
+        https://bitbucket.org/pypy/pypy/issues/2769/systemerror-unexpected-internal-exception 
+ 
+        On Appveyor 3.8.0, for some reason this takes *way* too long, about 100s, which 
+        often goes just over the default timeout of 100s. This makes no sense. 
+        But it also takes nearly that long in 3.7. 3.6 and earlier are much faster. 
+ 
+        It also takes just over 100s on PyPy 3.7. 
+        &quot;&quot;&quot;</span><span class="s2">,</span>
+        <span class="s1">when=(PYPY &amp; TRAVIS &amp; LIBUV) | PY380_EXACTLY</span><span class="s2">,</span>
+        <span class="s0"># https://bitbucket.org/pypy/pypy/issues/2769/systemerror-unexpected-internal-exception</span>
+        <span class="s1">run_alone=(CI &amp; LEAKTEST &amp; PY3) | (PYPY &amp; LIBUV)</span><span class="s2">,</span>
+        <span class="s0"># This often takes much longer on PyPy on CI.</span>
+        <span class="s1">options={</span><span class="s3">'timeout'</span><span class="s1">: (CI &amp; PYPY</span><span class="s2">, </span><span class="s4">180</span><span class="s1">)}</span><span class="s2">,</span>
+    <span class="s1">)</span>
+
+    <span class="s1">test_subprocess = Multi().flaky(</span>
+        <span class="s3">&quot;Unknown, can't reproduce locally; times out one test&quot;</span><span class="s2">,</span>
+        <span class="s1">when=PYPY &amp; PY3 &amp; TRAVIS</span><span class="s2">,</span>
+        <span class="s1">ignore_coverage=ALWAYS</span><span class="s2">,</span>
+    <span class="s1">).ignored(</span>
+        <span class="s3">&quot;Tests don't even start before the process times out.&quot;</span><span class="s2">,</span>
+        <span class="s1">when=PYPY3 &amp; WIN</span>
+    <span class="s1">)</span>
+
+    <span class="s1">test__threadpool = Ignored(</span>
+        <span class="s3">&quot;&quot;&quot; 
+        XXX: Re-enable these when we have more time to investigate. 
+ 
+        This test, which normally takes ~60s, sometimes 
+        hangs forever after running several tests. I cannot reproduce, 
+        it seems highly load dependent. Observed with both libev and libuv. 
+        &quot;&quot;&quot;</span><span class="s2">,</span>
+        <span class="s1">when=TRAVIS &amp; (PYPY | OSX)</span><span class="s2">,</span>
+        <span class="s0"># This often takes much longer on PyPy on CI.</span>
+        <span class="s1">options={</span><span class="s3">'timeout'</span><span class="s1">: (CI &amp; PYPY</span><span class="s2">, </span><span class="s4">180</span><span class="s1">)}</span><span class="s2">,</span>
+    <span class="s1">)</span>
+
+    <span class="s1">test__threading_2 = Ignored(</span>
+        <span class="s3">&quot;&quot;&quot; 
+        This test, which normally takes 4-5s, sometimes 
+        hangs forever after running two tests. I cannot reproduce, 
+        it seems highly load dependent. Observed with both libev and libuv. 
+        &quot;&quot;&quot;</span><span class="s2">,</span>
+        <span class="s1">when=TRAVIS &amp; (PYPY | OSX)</span><span class="s2">,</span>
+        <span class="s0"># This often takes much longer on PyPy on CI.</span>
+        <span class="s1">options={</span><span class="s3">'timeout'</span><span class="s1">: (CI &amp; PYPY</span><span class="s2">, </span><span class="s4">180</span><span class="s1">)}</span><span class="s2">,</span>
+    <span class="s1">)</span>
+
+    <span class="s1">test__issue230 = Ignored(</span>
+        <span class="s3">&quot;&quot;&quot; 
+        This rarely hangs for unknown reasons. I cannot reproduce 
+        locally. 
+        &quot;&quot;&quot;</span><span class="s2">,</span>
+        <span class="s1">when=TRAVIS &amp; OSX</span>
+    <span class="s1">)</span>
+
+    <span class="s1">test_selectors = Flaky(</span>
+        <span class="s3">&quot;&quot;&quot; 
+        Timing issues on appveyor. 
+        &quot;&quot;&quot;</span><span class="s2">,</span>
+        <span class="s1">when=PY3 &amp; APPVEYOR</span><span class="s2">,</span>
+        <span class="s1">ignore_coverage=ALWAYS</span><span class="s2">,</span>
+    <span class="s1">)</span>
+
+    <span class="s1">test__example_portforwarder = Flaky(</span>
+        <span class="s3">&quot;&quot;&quot; 
+        This one sometimes times out, often after output &quot;The process 
+        with PID XXX could not be terminated. Reason: There is no 
+        running instance of the task.&quot;, 
+        &quot;&quot;&quot;</span><span class="s2">,</span>
+        <span class="s1">when=APPVEYOR | COVERAGE</span>
+    <span class="s1">)</span>
+
+    <span class="s1">test__issue302monkey = test__threading_vs_settrace = Flaky(</span>
+        <span class="s3">&quot;&quot;&quot; 
+        The gevent concurrency plugin tends to slow things 
+        down and get us past our default timeout value. These 
+        tests in particular are sensitive to it. So in fact we just turn them 
+        off. 
+        &quot;&quot;&quot;</span><span class="s2">,</span>
+        <span class="s1">when=COVERAGE</span><span class="s2">,</span>
+        <span class="s1">ignore_coverage=ALWAYS</span><span class="s2">,</span>
+    <span class="s1">)</span>
+
+    <span class="s1">test__hub_join_timeout = Ignored(</span>
+        <span class="s3">r&quot;&quot;&quot; 
+        This sometimes times out. It appears to happen when the 
+        times take too long and a test raises a FlakyTestTimeout error, 
+        aka a unittest.SkipTest error. This probably indicates that we're 
+        not cleaning something up correctly: 
+ 
+        .....ss 
+        GEVENTTEST_USE_RESOURCES=-network C:\Python38-x64\python.exe -u \ 
+           -mgevent.tests.test__hub_join_timeout [code TIMEOUT] [took 100.4s] 
+        &quot;&quot;&quot;</span><span class="s2">,</span>
+        <span class="s1">when=APPVEYOR</span>
+    <span class="s1">)</span>
+
+    <span class="s1">test__example_wsgiserver = test__example_webproxy = RunAlone(</span>
+        <span class="s3">&quot;&quot;&quot; 
+        These share the same port, which means they can conflict 
+        between concurrent test runs too 
+        XXX: Fix this by dynamically picking a port. 
+        &quot;&quot;&quot;</span><span class="s2">,</span>
+    <span class="s1">)</span>
+
+    <span class="s1">test__pool = RunAlone(</span>
+        <span class="s3">&quot;&quot;&quot; 
+        On a heavily loaded box, these can all take upwards of 200s. 
+        &quot;&quot;&quot;</span><span class="s2">,</span>
+        <span class="s1">when=(CI &amp; LEAKTEST) | (PYPY3 &amp; APPVEYOR)</span>
+    <span class="s1">)</span>
+
+    <span class="s1">test_socket = RunAlone(</span>
+        <span class="s3">&quot;Sometimes has unexpected timeouts&quot;</span><span class="s2">,</span>
+        <span class="s1">when=CI &amp; PYPY &amp; PY3</span><span class="s2">,</span>
+        <span class="s1">ignore_coverage=ALWAYS</span><span class="s2">, </span><span class="s0"># times out</span>
+    <span class="s1">)</span>
+
+    <span class="s1">test__refcount = Ignored(</span>
+        <span class="s3">&quot;Sometimes fails to connect for no reason&quot;</span><span class="s2">,</span>
+        <span class="s1">when=(CI &amp; OSX) | (CI &amp; PYPY) | APPVEYOR</span><span class="s2">,</span>
+        <span class="s1">ignore_coverage=PYPY</span>
+    <span class="s1">)</span>
+
+    <span class="s1">test__doctests = Ignored(</span>
+        <span class="s3">&quot;Sometimes times out during/after gevent._config.Config&quot;</span><span class="s2">,</span>
+        <span class="s1">when=CI &amp; OSX</span>
+    <span class="s1">)</span>
+
+
+
+<span class="s0"># tests that can't be run when coverage is enabled</span>
+<span class="s0"># TODO: Now that we have this declarative, we could eliminate this list,</span>
+<span class="s0"># just add them to the main IGNORED_TESTS list.</span>
+<span class="s1">IGNORE_COVERAGE = [</span>
+<span class="s1">]</span>
+
+<span class="s0"># A mapping from test file basename to a dictionary of</span>
+<span class="s0"># options that will be applied on top of the DEFAULT_RUN_OPTIONS.</span>
+<span class="s1">TEST_FILE_OPTIONS = {</span>
+
+<span class="s1">}</span>
+
+<span class="s1">FAILING_TESTS = []</span>
+<span class="s1">IGNORED_TESTS = []</span>
+<span class="s0"># tests that don't do well when run on busy box</span>
+<span class="s0"># or that are mutually exclusive</span>
+<span class="s1">RUN_ALONE = [</span>
+
+<span class="s1">]</span>
+
+<span class="s2">def </span><span class="s1">populate(): </span><span class="s0"># pylint:disable=too-many-branches</span>
+    <span class="s0"># TODO: Maybe move to the metaclass.</span>
+    <span class="s0"># TODO: This could be better.</span>
+    <span class="s2">for </span><span class="s1">k</span><span class="s2">, </span><span class="s1">v </span><span class="s2">in </span><span class="s1">Definitions.__dict__.items():</span>
+        <span class="s2">if </span><span class="s1">isinstance(v</span><span class="s2">, </span><span class="s1">Multi):</span>
+            <span class="s1">actions = v._conds</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">actions = (v</span><span class="s2">,</span><span class="s1">)</span>
+        <span class="s1">test_name = k + </span><span class="s3">'.py'</span>
+        <span class="s2">del </span><span class="s1">k</span><span class="s2">, </span><span class="s1">v</span>
+
+        <span class="s2">for </span><span class="s1">action </span><span class="s2">in </span><span class="s1">actions:</span>
+            <span class="s2">if not </span><span class="s1">isinstance(action</span><span class="s2">, </span><span class="s1">_Action):</span>
+                <span class="s2">continue</span>
+
+            <span class="s2">if </span><span class="s1">action.run_alone:</span>
+                <span class="s1">RUN_ALONE.append(test_name)</span>
+            <span class="s2">if </span><span class="s1">action.ignore_coverage:</span>
+                <span class="s1">IGNORE_COVERAGE.append(test_name)</span>
+            <span class="s2">if </span><span class="s1">action.options:</span>
+                <span class="s2">for </span><span class="s1">opt_name</span><span class="s2">, </span><span class="s1">(condition</span><span class="s2">, </span><span class="s1">value) </span><span class="s2">in </span><span class="s1">action.options.items():</span>
+                    <span class="s0"># TODO: Verify that this doesn't match more than once.</span>
+                    <span class="s2">if </span><span class="s1">condition:</span>
+                        <span class="s1">TEST_FILE_OPTIONS.setdefault(test_name</span><span class="s2">, </span><span class="s1">{})[opt_name] = value</span>
+            <span class="s2">if </span><span class="s1">action.when:</span>
+                <span class="s2">if </span><span class="s1">isinstance(action</span><span class="s2">, </span><span class="s1">Ignored):</span>
+                    <span class="s1">IGNORED_TESTS.append(test_name)</span>
+                <span class="s2">elif </span><span class="s1">isinstance(action</span><span class="s2">, </span><span class="s1">Flaky):</span>
+                    <span class="s1">FAILING_TESTS.append(</span><span class="s3">'FLAKY ' </span><span class="s1">+ test_name)</span>
+                <span class="s2">elif </span><span class="s1">isinstance(action</span><span class="s2">, </span><span class="s1">Failing):</span>
+                    <span class="s1">FAILING_TESTS.append(test_name)</span>
+
+    <span class="s1">FAILING_TESTS.sort()</span>
+    <span class="s1">IGNORED_TESTS.sort()</span>
+    <span class="s1">RUN_ALONE.sort()</span>
+
+<span class="s1">populate()</span>
+
+<span class="s2">if </span><span class="s1">__name__ == </span><span class="s3">'__main__'</span><span class="s1">:</span>
+    <span class="s1">print(</span><span class="s3">'known_failures:</span><span class="s2">\n</span><span class="s3">'</span><span class="s2">, </span><span class="s1">FAILING_TESTS)</span>
+    <span class="s1">print(</span><span class="s3">'ignored tests:</span><span class="s2">\n</span><span class="s3">'</span><span class="s2">, </span><span class="s1">IGNORED_TESTS)</span>
+    <span class="s1">print(</span><span class="s3">'run alone:</span><span class="s2">\n</span><span class="s3">'</span><span class="s2">, </span><span class="s1">RUN_ALONE)</span>
+    <span class="s1">print(</span><span class="s3">'options:</span><span class="s2">\n</span><span class="s3">'</span><span class="s2">, </span><span class="s1">TEST_FILE_OPTIONS)</span>
+    <span class="s1">print(</span><span class="s3">&quot;ignore during coverage:</span><span class="s2">\n</span><span class="s3">&quot;</span><span class="s2">, </span><span class="s1">IGNORE_COVERAGE)</span>
+</pre>
+</body>
+</html>

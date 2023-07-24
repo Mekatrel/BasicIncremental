@@ -1,0 +1,115 @@
+<html>
+<head>
+<title>test__example_wsgiserver.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #cc7832;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #6a8759;}
+.s3 { color: #6897bb;}
+.s4 { color: #a5c261;}
+.s5 { color: #808080;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+test__example_wsgiserver.py</font>
+</center></td></tr></table>
+<pre><span class="s0">import </span><span class="s1">sys</span>
+
+<span class="s0">try</span><span class="s1">:</span>
+    <span class="s0">from </span><span class="s1">urllib </span><span class="s0">import </span><span class="s1">request </span><span class="s0">as </span><span class="s1">urllib2</span>
+<span class="s0">except </span><span class="s1">ImportError:</span>
+    <span class="s0">import </span><span class="s1">urllib2</span>
+
+
+<span class="s0">import </span><span class="s1">socket</span>
+<span class="s0">import </span><span class="s1">ssl</span>
+
+<span class="s0">import </span><span class="s1">gevent.testing </span><span class="s0">as </span><span class="s1">greentest</span>
+<span class="s0">from </span><span class="s1">gevent.testing </span><span class="s0">import </span><span class="s1">DEFAULT_XPC_SOCKET_TIMEOUT</span>
+<span class="s0">from </span><span class="s1">gevent.testing </span><span class="s0">import </span><span class="s1">util</span>
+<span class="s0">from </span><span class="s1">gevent.testing </span><span class="s0">import </span><span class="s1">params</span>
+
+<span class="s1">@greentest.skipOnCI(</span><span class="s2">&quot;Timing issues sometimes lead to a connection refused&quot;</span><span class="s1">)</span>
+<span class="s0">class </span><span class="s1">Test_wsgiserver(util.TestServer):</span>
+    <span class="s1">example = </span><span class="s2">'wsgiserver.py'</span>
+    <span class="s1">URL = </span><span class="s2">'http://%s:8088' </span><span class="s1">% (params.DEFAULT_LOCAL_HOST_ADDR</span><span class="s0">,</span><span class="s1">)</span>
+    <span class="s1">PORT = </span><span class="s3">8088</span>
+    <span class="s1">not_found_message = </span><span class="s4">b'&lt;h1&gt;Not Found&lt;/h1&gt;'</span>
+    <span class="s1">ssl_ctx = </span><span class="s0">None</span>
+    <span class="s1">_use_ssl = </span><span class="s0">False</span>
+
+    <span class="s0">def </span><span class="s1">read(self</span><span class="s0">, </span><span class="s1">path=</span><span class="s2">'/'</span><span class="s1">):</span>
+        <span class="s1">url = self.URL + path</span>
+        <span class="s0">try</span><span class="s1">:</span>
+            <span class="s1">kwargs = {}</span>
+            <span class="s0">if </span><span class="s1">self.ssl_ctx </span><span class="s0">is not None</span><span class="s1">:</span>
+                <span class="s1">kwargs = {</span><span class="s2">'context'</span><span class="s1">: self.ssl_ctx}</span>
+
+            <span class="s1">response = urllib2.urlopen(url</span><span class="s0">, None,</span>
+                                       <span class="s1">DEFAULT_XPC_SOCKET_TIMEOUT</span><span class="s0">,</span>
+                                       <span class="s1">**kwargs)</span>
+        <span class="s0">except </span><span class="s1">urllib2.HTTPError:</span>
+            <span class="s1">response = sys.exc_info()[</span><span class="s3">1</span><span class="s1">]</span>
+        <span class="s1">result = </span><span class="s2">'%s %s' </span><span class="s1">% (response.code</span><span class="s0">, </span><span class="s1">response.msg)</span><span class="s0">, </span><span class="s1">response.read()</span>
+        <span class="s5"># XXX: It looks like under PyPy this isn't directly closing the socket</span>
+        <span class="s5"># when SSL is in use. It takes a GC cycle to make that true.</span>
+        <span class="s1">response.close()</span>
+        <span class="s0">return </span><span class="s1">result</span>
+
+    <span class="s0">def </span><span class="s1">_test_hello(self):</span>
+        <span class="s1">status</span><span class="s0">, </span><span class="s1">data = self.read(</span><span class="s2">'/'</span><span class="s1">)</span>
+        <span class="s1">self.assertEqual(status</span><span class="s0">, </span><span class="s2">'200 OK'</span><span class="s1">)</span>
+        <span class="s1">self.assertEqual(data</span><span class="s0">, </span><span class="s4">b&quot;&lt;b&gt;hello world&lt;/b&gt;&quot;</span><span class="s1">)</span>
+
+    <span class="s0">def </span><span class="s1">_test_not_found(self):</span>
+        <span class="s1">status</span><span class="s0">, </span><span class="s1">data = self.read(</span><span class="s2">'/xxx'</span><span class="s1">)</span>
+        <span class="s1">self.assertEqual(status</span><span class="s0">, </span><span class="s2">'404 Not Found'</span><span class="s1">)</span>
+        <span class="s1">self.assertEqual(data</span><span class="s0">, </span><span class="s1">self.not_found_message)</span>
+
+    <span class="s0">def </span><span class="s1">_do_test_a_blocking_client(self):</span>
+        <span class="s5"># We spawn this in a separate server because if it's broken</span>
+        <span class="s5"># the whole server hangs</span>
+        <span class="s0">with </span><span class="s1">self.running_server():</span>
+            <span class="s5"># First, make sure we can talk to it.</span>
+            <span class="s1">self._test_hello()</span>
+            <span class="s5"># Now create a connection and only partway finish</span>
+            <span class="s5"># the transaction</span>
+            <span class="s1">sock = socket.create_connection((params.DEFAULT_LOCAL_HOST_ADDR</span><span class="s0">, </span><span class="s1">self.PORT))</span>
+            <span class="s1">ssl_sock = </span><span class="s0">None</span>
+            <span class="s0">if </span><span class="s1">self._use_ssl:</span>
+                <span class="s1">ssl_sock = ssl.wrap_socket(sock) </span><span class="s5"># pylint:disable=deprecated-method</span>
+                <span class="s1">sock_file = ssl_sock.makefile(mode=</span><span class="s2">'rwb'</span><span class="s1">)</span>
+            <span class="s0">else</span><span class="s1">:</span>
+                <span class="s1">sock_file = sock.makefile(mode=</span><span class="s2">'rwb'</span><span class="s1">)</span>
+            <span class="s5"># write an incomplete request</span>
+            <span class="s1">sock_file.write(</span><span class="s4">b'GET /xxx HTTP/1.0</span><span class="s0">\r\n</span><span class="s4">'</span><span class="s1">)</span>
+            <span class="s1">sock_file.flush()</span>
+            <span class="s5"># Leave it open and not doing anything</span>
+            <span class="s5"># while the other request runs to completion.</span>
+            <span class="s5"># This demonstrates that a blocking client</span>
+            <span class="s5"># doesn't hang the whole server</span>
+            <span class="s1">self._test_hello()</span>
+
+            <span class="s5"># now finish the original request</span>
+            <span class="s1">sock_file.write(</span><span class="s4">b'</span><span class="s0">\r\n</span><span class="s4">'</span><span class="s1">)</span>
+            <span class="s1">sock_file.flush()</span>
+            <span class="s1">line = sock_file.readline()</span>
+            <span class="s1">self.assertEqual(line</span><span class="s0">, </span><span class="s4">b'HTTP/1.1 404 Not Found</span><span class="s0">\r\n</span><span class="s4">'</span><span class="s1">)</span>
+
+            <span class="s1">sock_file.close()</span>
+            <span class="s0">if </span><span class="s1">ssl_sock </span><span class="s0">is not None</span><span class="s1">:</span>
+                <span class="s1">ssl_sock.close()</span>
+            <span class="s1">sock.close()</span>
+
+    <span class="s0">def </span><span class="s1">test_a_blocking_client(self):</span>
+        <span class="s1">self._do_test_a_blocking_client()</span>
+
+<span class="s0">if </span><span class="s1">__name__ == </span><span class="s2">'__main__'</span><span class="s1">:</span>
+    <span class="s1">greentest.main()</span>
+</pre>
+</body>
+</html>

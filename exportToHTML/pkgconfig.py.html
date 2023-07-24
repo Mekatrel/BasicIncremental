@@ -1,0 +1,143 @@
+<html>
+<head>
+<title>pkgconfig.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #cc7832;}
+.s3 { color: #629755; font-style: italic;}
+.s4 { color: #6a8759;}
+.s5 { color: #6897bb;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+pkgconfig.py</font>
+</center></td></tr></table>
+<pre><span class="s0"># pkg-config, https://www.freedesktop.org/wiki/Software/pkg-config/ integration for cffi</span>
+<span class="s2">import </span><span class="s1">sys</span><span class="s2">, </span><span class="s1">os</span><span class="s2">, </span><span class="s1">subprocess</span>
+
+<span class="s2">from </span><span class="s1">.error </span><span class="s2">import </span><span class="s1">PkgConfigError</span>
+
+
+<span class="s2">def </span><span class="s1">merge_flags(cfg1</span><span class="s2">, </span><span class="s1">cfg2):</span>
+    <span class="s3">&quot;&quot;&quot;Merge values from cffi config flags cfg2 to cf1 
+ 
+    Example: 
+        merge_flags({&quot;libraries&quot;: [&quot;one&quot;]}, {&quot;libraries&quot;: [&quot;two&quot;]}) 
+        {&quot;libraries&quot;: [&quot;one&quot;, &quot;two&quot;]} 
+    &quot;&quot;&quot;</span>
+    <span class="s2">for </span><span class="s1">key</span><span class="s2">, </span><span class="s1">value </span><span class="s2">in </span><span class="s1">cfg2.items():</span>
+        <span class="s2">if </span><span class="s1">key </span><span class="s2">not in </span><span class="s1">cfg1:</span>
+            <span class="s1">cfg1[key] = value</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s2">if not </span><span class="s1">isinstance(cfg1[key]</span><span class="s2">, </span><span class="s1">list):</span>
+                <span class="s2">raise </span><span class="s1">TypeError(</span><span class="s4">&quot;cfg1[%r] should be a list of strings&quot; </span><span class="s1">% (key</span><span class="s2">,</span><span class="s1">))</span>
+            <span class="s2">if not </span><span class="s1">isinstance(value</span><span class="s2">, </span><span class="s1">list):</span>
+                <span class="s2">raise </span><span class="s1">TypeError(</span><span class="s4">&quot;cfg2[%r] should be a list of strings&quot; </span><span class="s1">% (key</span><span class="s2">,</span><span class="s1">))</span>
+            <span class="s1">cfg1[key].extend(value)</span>
+    <span class="s2">return </span><span class="s1">cfg1</span>
+
+
+<span class="s2">def </span><span class="s1">call(libname</span><span class="s2">, </span><span class="s1">flag</span><span class="s2">, </span><span class="s1">encoding=sys.getfilesystemencoding()):</span>
+    <span class="s3">&quot;&quot;&quot;Calls pkg-config and returns the output if found 
+    &quot;&quot;&quot;</span>
+    <span class="s1">a = [</span><span class="s4">&quot;pkg-config&quot;</span><span class="s2">, </span><span class="s4">&quot;--print-errors&quot;</span><span class="s1">]</span>
+    <span class="s1">a.append(flag)</span>
+    <span class="s1">a.append(libname)</span>
+    <span class="s2">try</span><span class="s1">:</span>
+        <span class="s1">pc = subprocess.Popen(a</span><span class="s2">, </span><span class="s1">stdout=subprocess.PIPE</span><span class="s2">, </span><span class="s1">stderr=subprocess.PIPE)</span>
+    <span class="s2">except </span><span class="s1">EnvironmentError </span><span class="s2">as </span><span class="s1">e:</span>
+        <span class="s2">raise </span><span class="s1">PkgConfigError(</span><span class="s4">&quot;cannot run pkg-config: %s&quot; </span><span class="s1">% (str(e).strip()</span><span class="s2">,</span><span class="s1">))</span>
+
+    <span class="s1">bout</span><span class="s2">, </span><span class="s1">berr = pc.communicate()</span>
+    <span class="s2">if </span><span class="s1">pc.returncode != </span><span class="s5">0</span><span class="s1">:</span>
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s1">berr = berr.decode(encoding)</span>
+        <span class="s2">except </span><span class="s1">Exception:</span>
+            <span class="s2">pass</span>
+        <span class="s2">raise </span><span class="s1">PkgConfigError(berr.strip())</span>
+
+    <span class="s2">if </span><span class="s1">sys.version_info &gt;= (</span><span class="s5">3</span><span class="s2">,</span><span class="s1">) </span><span class="s2">and not </span><span class="s1">isinstance(bout</span><span class="s2">, </span><span class="s1">str):   </span><span class="s0"># Python 3.x</span>
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s1">bout = bout.decode(encoding)</span>
+        <span class="s2">except </span><span class="s1">UnicodeDecodeError:</span>
+            <span class="s2">raise </span><span class="s1">PkgConfigError(</span><span class="s4">&quot;pkg-config %s %s returned bytes that cannot &quot;</span>
+                                 <span class="s4">&quot;be decoded with encoding %r:</span><span class="s2">\n</span><span class="s4">%r&quot; </span><span class="s1">%</span>
+                                 <span class="s1">(flag</span><span class="s2">, </span><span class="s1">libname</span><span class="s2">, </span><span class="s1">encoding</span><span class="s2">, </span><span class="s1">bout))</span>
+
+    <span class="s2">if </span><span class="s1">os.altsep != </span><span class="s4">'</span><span class="s2">\\</span><span class="s4">' </span><span class="s2">and </span><span class="s4">'</span><span class="s2">\\</span><span class="s4">' </span><span class="s2">in </span><span class="s1">bout:</span>
+        <span class="s2">raise </span><span class="s1">PkgConfigError(</span><span class="s4">&quot;pkg-config %s %s returned an unsupported &quot;</span>
+                             <span class="s4">&quot;backslash-escaped output:</span><span class="s2">\n</span><span class="s4">%r&quot; </span><span class="s1">%</span>
+                             <span class="s1">(flag</span><span class="s2">, </span><span class="s1">libname</span><span class="s2">, </span><span class="s1">bout))</span>
+    <span class="s2">return </span><span class="s1">bout</span>
+
+
+<span class="s2">def </span><span class="s1">flags_from_pkgconfig(libs):</span>
+    <span class="s3">r&quot;&quot;&quot;Return compiler line flags for FFI.set_source based on pkg-config output 
+ 
+    Usage 
+        ... 
+        ffibuilder.set_source(&quot;_foo&quot;, pkgconfig = [&quot;libfoo&quot;, &quot;libbar &gt;= 1.8.3&quot;]) 
+ 
+    If pkg-config is installed on build machine, then arguments include_dirs, 
+    library_dirs, libraries, define_macros, extra_compile_args and 
+    extra_link_args are extended with an output of pkg-config for libfoo and 
+    libbar. 
+ 
+    Raises PkgConfigError in case the pkg-config call fails. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s2">def </span><span class="s1">get_include_dirs(string):</span>
+        <span class="s2">return </span><span class="s1">[x[</span><span class="s5">2</span><span class="s1">:] </span><span class="s2">for </span><span class="s1">x </span><span class="s2">in </span><span class="s1">string.split() </span><span class="s2">if </span><span class="s1">x.startswith(</span><span class="s4">&quot;-I&quot;</span><span class="s1">)]</span>
+
+    <span class="s2">def </span><span class="s1">get_library_dirs(string):</span>
+        <span class="s2">return </span><span class="s1">[x[</span><span class="s5">2</span><span class="s1">:] </span><span class="s2">for </span><span class="s1">x </span><span class="s2">in </span><span class="s1">string.split() </span><span class="s2">if </span><span class="s1">x.startswith(</span><span class="s4">&quot;-L&quot;</span><span class="s1">)]</span>
+
+    <span class="s2">def </span><span class="s1">get_libraries(string):</span>
+        <span class="s2">return </span><span class="s1">[x[</span><span class="s5">2</span><span class="s1">:] </span><span class="s2">for </span><span class="s1">x </span><span class="s2">in </span><span class="s1">string.split() </span><span class="s2">if </span><span class="s1">x.startswith(</span><span class="s4">&quot;-l&quot;</span><span class="s1">)]</span>
+
+    <span class="s0"># convert -Dfoo=bar to list of tuples [(&quot;foo&quot;, &quot;bar&quot;)] expected by distutils</span>
+    <span class="s2">def </span><span class="s1">get_macros(string):</span>
+        <span class="s2">def </span><span class="s1">_macro(x):</span>
+            <span class="s1">x = x[</span><span class="s5">2</span><span class="s1">:]    </span><span class="s0"># drop &quot;-D&quot;</span>
+            <span class="s2">if </span><span class="s4">'=' </span><span class="s2">in </span><span class="s1">x:</span>
+                <span class="s2">return </span><span class="s1">tuple(x.split(</span><span class="s4">&quot;=&quot;</span><span class="s2">, </span><span class="s5">1</span><span class="s1">))  </span><span class="s0"># &quot;-Dfoo=bar&quot; =&gt; (&quot;foo&quot;, &quot;bar&quot;)</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s2">return </span><span class="s1">(x</span><span class="s2">, None</span><span class="s1">)               </span><span class="s0"># &quot;-Dfoo&quot; =&gt; (&quot;foo&quot;, None)</span>
+        <span class="s2">return </span><span class="s1">[_macro(x) </span><span class="s2">for </span><span class="s1">x </span><span class="s2">in </span><span class="s1">string.split() </span><span class="s2">if </span><span class="s1">x.startswith(</span><span class="s4">&quot;-D&quot;</span><span class="s1">)]</span>
+
+    <span class="s2">def </span><span class="s1">get_other_cflags(string):</span>
+        <span class="s2">return </span><span class="s1">[x </span><span class="s2">for </span><span class="s1">x </span><span class="s2">in </span><span class="s1">string.split() </span><span class="s2">if not </span><span class="s1">x.startswith(</span><span class="s4">&quot;-I&quot;</span><span class="s1">) </span><span class="s2">and</span>
+                                             <span class="s2">not </span><span class="s1">x.startswith(</span><span class="s4">&quot;-D&quot;</span><span class="s1">)]</span>
+
+    <span class="s2">def </span><span class="s1">get_other_libs(string):</span>
+        <span class="s2">return </span><span class="s1">[x </span><span class="s2">for </span><span class="s1">x </span><span class="s2">in </span><span class="s1">string.split() </span><span class="s2">if not </span><span class="s1">x.startswith(</span><span class="s4">&quot;-L&quot;</span><span class="s1">) </span><span class="s2">and</span>
+                                             <span class="s2">not </span><span class="s1">x.startswith(</span><span class="s4">&quot;-l&quot;</span><span class="s1">)]</span>
+
+    <span class="s0"># return kwargs for given libname</span>
+    <span class="s2">def </span><span class="s1">kwargs(libname):</span>
+        <span class="s1">fse = sys.getfilesystemencoding()</span>
+        <span class="s1">all_cflags = call(libname</span><span class="s2">, </span><span class="s4">&quot;--cflags&quot;</span><span class="s1">)</span>
+        <span class="s1">all_libs = call(libname</span><span class="s2">, </span><span class="s4">&quot;--libs&quot;</span><span class="s1">)</span>
+        <span class="s2">return </span><span class="s1">{</span>
+            <span class="s4">&quot;include_dirs&quot;</span><span class="s1">: get_include_dirs(all_cflags)</span><span class="s2">,</span>
+            <span class="s4">&quot;library_dirs&quot;</span><span class="s1">: get_library_dirs(all_libs)</span><span class="s2">,</span>
+            <span class="s4">&quot;libraries&quot;</span><span class="s1">: get_libraries(all_libs)</span><span class="s2">,</span>
+            <span class="s4">&quot;define_macros&quot;</span><span class="s1">: get_macros(all_cflags)</span><span class="s2">,</span>
+            <span class="s4">&quot;extra_compile_args&quot;</span><span class="s1">: get_other_cflags(all_cflags)</span><span class="s2">,</span>
+            <span class="s4">&quot;extra_link_args&quot;</span><span class="s1">: get_other_libs(all_libs)</span><span class="s2">,</span>
+            <span class="s1">}</span>
+
+    <span class="s0"># merge all arguments together</span>
+    <span class="s1">ret = {}</span>
+    <span class="s2">for </span><span class="s1">libname </span><span class="s2">in </span><span class="s1">libs:</span>
+        <span class="s1">lib_flags = kwargs(libname)</span>
+        <span class="s1">merge_flags(ret</span><span class="s2">, </span><span class="s1">lib_flags)</span>
+    <span class="s2">return </span><span class="s1">ret</span>
+</pre>
+</body>
+</html>

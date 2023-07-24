@@ -1,0 +1,469 @@
+<html>
+<head>
+<title>test__event.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #cc7832;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #808080;}
+.s3 { color: #6897bb;}
+.s4 { color: #6a8759;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+test__event.py</font>
+</center></td></tr></table>
+<pre><span class="s0">from </span><span class="s1">__future__ </span><span class="s0">import </span><span class="s1">absolute_import</span>
+<span class="s0">from </span><span class="s1">__future__ </span><span class="s0">import </span><span class="s1">print_function</span>
+<span class="s0">from </span><span class="s1">__future__ </span><span class="s0">import </span><span class="s1">division</span>
+
+<span class="s0">import </span><span class="s1">weakref</span>
+
+<span class="s0">import </span><span class="s1">gevent</span>
+<span class="s0">from </span><span class="s1">gevent.event </span><span class="s0">import </span><span class="s1">Event</span><span class="s0">, </span><span class="s1">AsyncResult</span>
+
+<span class="s0">import </span><span class="s1">gevent.testing </span><span class="s0">as </span><span class="s1">greentest</span>
+
+<span class="s0">from </span><span class="s1">gevent.testing.six </span><span class="s0">import </span><span class="s1">xrange</span>
+<span class="s0">from </span><span class="s1">gevent.testing.timing </span><span class="s0">import </span><span class="s1">AbstractGenericGetTestCase</span>
+<span class="s0">from </span><span class="s1">gevent.testing.timing </span><span class="s0">import </span><span class="s1">AbstractGenericWaitTestCase</span>
+<span class="s0">from </span><span class="s1">gevent.testing.timing </span><span class="s0">import </span><span class="s1">SMALL_TICK</span>
+<span class="s0">from </span><span class="s1">gevent.testing.timing </span><span class="s0">import </span><span class="s1">SMALL_TICK_MAX_ADJ</span>
+
+<span class="s1">DELAY = SMALL_TICK + SMALL_TICK_MAX_ADJ</span>
+
+
+<span class="s0">class </span><span class="s1">TestEventWait(AbstractGenericWaitTestCase):</span>
+
+    <span class="s0">def </span><span class="s1">wait(self</span><span class="s0">, </span><span class="s1">timeout):</span>
+        <span class="s1">Event().wait(timeout=timeout)</span>
+
+    <span class="s0">def </span><span class="s1">test_cover(self):</span>
+        <span class="s1">str(Event())</span>
+
+
+<span class="s0">class </span><span class="s1">TestGeventWaitOnEvent(AbstractGenericWaitTestCase):</span>
+
+    <span class="s0">def </span><span class="s1">wait(self</span><span class="s0">, </span><span class="s1">timeout):</span>
+        <span class="s1">gevent.wait([Event()]</span><span class="s0">, </span><span class="s1">timeout=timeout)</span>
+
+    <span class="s0">def </span><span class="s1">test_set_during_wait(self):</span>
+        <span class="s2"># https://github.com/gevent/gevent/issues/771</span>
+        <span class="s2"># broke in the refactoring. we must not add new links</span>
+        <span class="s2"># while we're running the callback</span>
+
+        <span class="s1">event = Event()</span>
+
+        <span class="s0">def </span><span class="s1">setter():</span>
+            <span class="s1">event.set()</span>
+
+        <span class="s0">def </span><span class="s1">waiter():</span>
+            <span class="s1">s = gevent.spawn(setter)</span>
+            <span class="s2"># let the setter set() the event;</span>
+            <span class="s2"># when this method returns we'll be running in the Event._notify_links callback</span>
+            <span class="s2"># (that is, it switched to us)</span>
+            <span class="s1">res = event.wait()</span>
+            <span class="s1">self.assertTrue(res)</span>
+            <span class="s1">self.assertTrue(event.ready())</span>
+            <span class="s1">s.join() </span><span class="s2"># make sure it's dead</span>
+            <span class="s2"># Clear the event. Now we can't wait for the event without</span>
+            <span class="s2"># another set to happen.</span>
+            <span class="s1">event.clear()</span>
+            <span class="s1">self.assertFalse(event.ready())</span>
+
+            <span class="s2"># Before the bug fix, this would return &quot;immediately&quot; with</span>
+            <span class="s2"># event in the result list, because the _notify_links loop would</span>
+            <span class="s2"># immediately add the waiter and call it</span>
+            <span class="s1">o = gevent.wait((event</span><span class="s0">,</span><span class="s1">)</span><span class="s0">, </span><span class="s1">timeout=</span><span class="s3">0.01</span><span class="s1">)</span>
+            <span class="s1">self.assertFalse(event.ready())</span>
+            <span class="s1">self.assertNotIn(event</span><span class="s0">, </span><span class="s1">o)</span>
+
+        <span class="s1">gevent.spawn(waiter).join()</span>
+
+
+<span class="s0">class </span><span class="s1">TestAsyncResultWait(AbstractGenericWaitTestCase):</span>
+
+    <span class="s0">def </span><span class="s1">wait(self</span><span class="s0">, </span><span class="s1">timeout):</span>
+        <span class="s1">AsyncResult().wait(timeout=timeout)</span>
+
+
+<span class="s0">class </span><span class="s1">TestWaitAsyncResult(AbstractGenericWaitTestCase):</span>
+
+    <span class="s0">def </span><span class="s1">wait(self</span><span class="s0">, </span><span class="s1">timeout):</span>
+        <span class="s1">gevent.wait([AsyncResult()]</span><span class="s0">, </span><span class="s1">timeout=timeout)</span>
+
+
+<span class="s0">class </span><span class="s1">TestAsyncResultGet(AbstractGenericGetTestCase):</span>
+
+    <span class="s0">def </span><span class="s1">wait(self</span><span class="s0">, </span><span class="s1">timeout):</span>
+        <span class="s1">AsyncResult().get(timeout=timeout)</span>
+
+<span class="s0">class </span><span class="s1">MyException(Exception):</span>
+    <span class="s0">pass</span>
+
+<span class="s0">class </span><span class="s1">TestAsyncResult(greentest.TestCase):</span>
+
+    <span class="s0">def </span><span class="s1">test_link(self):</span>
+        <span class="s1">ar = AsyncResult()</span>
+        <span class="s1">self.assertRaises(TypeError</span><span class="s0">, </span><span class="s1">ar.rawlink</span><span class="s0">, None</span><span class="s1">)</span>
+        <span class="s1">ar.unlink(</span><span class="s0">None</span><span class="s1">) </span><span class="s2"># doesn't raise</span>
+        <span class="s1">ar.unlink(</span><span class="s0">None</span><span class="s1">) </span><span class="s2"># doesn't raise</span>
+        <span class="s1">str(ar) </span><span class="s2"># cover</span>
+
+    <span class="s0">def </span><span class="s1">test_set_exc(self):</span>
+        <span class="s1">log = []</span>
+        <span class="s1">e = AsyncResult()</span>
+        <span class="s1">self.assertEqual(e.exc_info</span><span class="s0">, </span><span class="s1">())</span>
+        <span class="s1">self.assertEqual(e.exception</span><span class="s0">, None</span><span class="s1">)</span>
+
+        <span class="s0">def </span><span class="s1">waiter():</span>
+            <span class="s0">with </span><span class="s1">self.assertRaises(MyException) </span><span class="s0">as </span><span class="s1">exc:</span>
+                <span class="s1">e.get()</span>
+            <span class="s1">log.append((</span><span class="s4">'caught'</span><span class="s0">, </span><span class="s1">exc.exception))</span>
+        <span class="s1">gevent.spawn(waiter)</span>
+        <span class="s1">obj = MyException()</span>
+        <span class="s1">e.set_exception(obj)</span>
+        <span class="s1">gevent.sleep(</span><span class="s3">0</span><span class="s1">)</span>
+        <span class="s1">self.assertEqual(log</span><span class="s0">, </span><span class="s1">[(</span><span class="s4">'caught'</span><span class="s0">, </span><span class="s1">obj)])</span>
+
+    <span class="s0">def </span><span class="s1">test_set(self):</span>
+        <span class="s1">event1 = AsyncResult()</span>
+        <span class="s1">timer_exc = MyException(</span><span class="s4">'interrupted'</span><span class="s1">)</span>
+
+        <span class="s2"># Notice that this test is racy:</span>
+        <span class="s2"># After DELAY, we set the event. We also try to immediately</span>
+        <span class="s2"># raise the exception with a timer of 0 --- but that depends</span>
+        <span class="s2"># on cycling the loop. Hence the fairly large value for DELAY.</span>
+        <span class="s1">g = gevent.spawn_later(DELAY</span><span class="s0">, </span><span class="s1">event1.set</span><span class="s0">, </span><span class="s4">'hello event1'</span><span class="s1">)</span>
+        <span class="s1">self._close_on_teardown(g.kill)</span>
+        <span class="s0">with </span><span class="s1">gevent.Timeout.start_new(</span><span class="s3">0</span><span class="s0">, </span><span class="s1">timer_exc):</span>
+            <span class="s0">with </span><span class="s1">self.assertRaises(MyException) </span><span class="s0">as </span><span class="s1">exc:</span>
+                <span class="s1">event1.get()</span>
+            <span class="s1">self.assertIs(timer_exc</span><span class="s0">, </span><span class="s1">exc.exception)</span>
+
+    <span class="s0">def </span><span class="s1">test_set_with_timeout(self):</span>
+        <span class="s1">event2 = AsyncResult()</span>
+
+        <span class="s1">X = object()</span>
+        <span class="s1">result = gevent.with_timeout(DELAY</span><span class="s0">, </span><span class="s1">event2.get</span><span class="s0">, </span><span class="s1">timeout_value=X)</span>
+        <span class="s1">self.assertIs(</span>
+            <span class="s1">result</span><span class="s0">, </span><span class="s1">X</span><span class="s0">,</span>
+            <span class="s4">'Nobody sent anything to event2 yet it received %r' </span><span class="s1">% (result</span><span class="s0">, </span><span class="s1">))</span>
+
+    <span class="s0">def </span><span class="s1">test_nonblocking_get(self):</span>
+        <span class="s1">ar = AsyncResult()</span>
+        <span class="s1">self.assertRaises(gevent.Timeout</span><span class="s0">, </span><span class="s1">ar.get</span><span class="s0">, </span><span class="s1">block=</span><span class="s0">False</span><span class="s1">)</span>
+        <span class="s1">self.assertRaises(gevent.Timeout</span><span class="s0">, </span><span class="s1">ar.get_nowait)</span>
+
+<span class="s0">class </span><span class="s1">TestAsyncResultCrossThread(greentest.TestCase):</span>
+
+    <span class="s0">def </span><span class="s1">_makeOne(self):</span>
+        <span class="s0">return </span><span class="s1">AsyncResult()</span>
+
+    <span class="s0">def </span><span class="s1">_setOne(self</span><span class="s0">, </span><span class="s1">one):</span>
+        <span class="s1">one.set(</span><span class="s4">'from main'</span><span class="s1">)</span>
+
+    <span class="s1">BG_WAIT_DELAY = </span><span class="s3">60</span>
+
+    <span class="s0">def </span><span class="s1">_check_pypy_switch(self):</span>
+        <span class="s2"># On PyPy 7.3.3, switching to the main greenlet of a thread from a</span>
+        <span class="s2"># different thread silently does nothing. We can't detect the cross-thread</span>
+        <span class="s2"># switch, and so this test breaks</span>
+        <span class="s2"># https://foss.heptapod.net/pypy/pypy/-/issues/3381</span>
+        <span class="s0">if </span><span class="s1">greentest.PYPY:</span>
+            <span class="s0">import </span><span class="s1">sys</span>
+            <span class="s0">if </span><span class="s1">sys.pypy_version_info[:</span><span class="s3">3</span><span class="s1">] &lt;= (</span><span class="s3">7</span><span class="s0">, </span><span class="s3">3</span><span class="s0">, </span><span class="s3">3</span><span class="s1">): </span><span class="s2"># pylint:disable=no-member</span>
+                <span class="s1">self.skipTest(</span><span class="s4">&quot;PyPy bug: https://foss.heptapod.net/pypy/pypy/-/issues/3381&quot;</span><span class="s1">)</span>
+
+    <span class="s1">@greentest.ignores_leakcheck</span>
+    <span class="s0">def </span><span class="s1">test_cross_thread_use(self</span><span class="s0">, </span><span class="s1">timed_wait=</span><span class="s0">False, </span><span class="s1">wait_in_bg=</span><span class="s0">False</span><span class="s1">):</span>
+        <span class="s2"># Issue 1739.</span>
+        <span class="s2"># AsyncResult has *never* been thread safe, and using it from one</span>
+        <span class="s2"># thread to another is not safe. However, in some very careful use cases</span>
+        <span class="s2"># that can actually work.</span>
+        <span class="s2">#</span>
+        <span class="s2"># This test makes sure it doesn't hang in one careful use</span>
+        <span class="s2"># scenario.</span>
+        <span class="s1">self.assertNotMonkeyPatched() </span><span class="s2"># Need real threads, event objects</span>
+        <span class="s0">from </span><span class="s1">threading </span><span class="s0">import </span><span class="s1">Thread </span><span class="s0">as </span><span class="s1">NativeThread</span>
+        <span class="s0">from </span><span class="s1">threading </span><span class="s0">import </span><span class="s1">Event </span><span class="s0">as </span><span class="s1">NativeEvent</span>
+
+        <span class="s0">if not </span><span class="s1">wait_in_bg:</span>
+            <span class="s1">self._check_pypy_switch()</span>
+
+        <span class="s1">test = self</span>
+        <span class="s0">class </span><span class="s1">Thread(NativeThread):</span>
+            <span class="s0">def </span><span class="s1">__init__(self):</span>
+                <span class="s1">NativeThread.__init__(self)</span>
+                <span class="s1">self.daemon = </span><span class="s0">True</span>
+                <span class="s1">self.running_event = NativeEvent()</span>
+                <span class="s1">self.finished_event = NativeEvent()</span>
+
+                <span class="s1">self.async_result = test._makeOne()</span>
+                <span class="s1">self.result = </span><span class="s4">'&lt;never set&gt;'</span>
+
+            <span class="s0">def </span><span class="s1">run(self):</span>
+                <span class="s2"># Give the loop in this thread something to do</span>
+                <span class="s1">g_event = Event()</span>
+                <span class="s0">def </span><span class="s1">spin():</span>
+                    <span class="s0">while not </span><span class="s1">g_event.is_set():</span>
+                        <span class="s1">g_event.wait(DELAY * </span><span class="s3">2</span><span class="s1">)</span>
+                <span class="s1">glet = gevent.spawn(spin)</span>
+
+                <span class="s0">def </span><span class="s1">work():</span>
+                    <span class="s1">self.running_event.set()</span>
+                    <span class="s2"># If we use a timed wait(), the bug doesn't manifest.</span>
+                    <span class="s2"># This is probably because the loop wakes up to handle the timer,</span>
+                    <span class="s2"># and notices the callback.</span>
+                    <span class="s2"># See https://github.com/gevent/gevent/issues/1735</span>
+                    <span class="s0">if </span><span class="s1">timed_wait:</span>
+                        <span class="s1">self.result = self.async_result.wait(test.BG_WAIT_DELAY)</span>
+                    <span class="s0">else</span><span class="s1">:</span>
+                        <span class="s1">self.result = self.async_result.wait()</span>
+
+                <span class="s0">if </span><span class="s1">wait_in_bg:</span>
+                    <span class="s2"># This results in a separate code path</span>
+                    <span class="s1">worker = gevent.spawn(work)</span>
+                    <span class="s1">worker.join()</span>
+                    <span class="s0">del </span><span class="s1">worker</span>
+                <span class="s0">else</span><span class="s1">:</span>
+                    <span class="s1">work()</span>
+
+                <span class="s1">g_event.set()</span>
+                <span class="s1">glet.join()</span>
+                <span class="s0">del </span><span class="s1">glet</span>
+                <span class="s1">self.finished_event.set()</span>
+                <span class="s1">gevent.get_hub().destroy(destroy_loop=</span><span class="s0">True</span><span class="s1">)</span>
+
+        <span class="s1">thread = Thread()</span>
+        <span class="s1">thread.start()</span>
+        <span class="s0">try</span><span class="s1">:</span>
+            <span class="s1">thread.running_event.wait()</span>
+            <span class="s1">self._setOne(thread.async_result)</span>
+            <span class="s1">thread.finished_event.wait(DELAY * </span><span class="s3">5</span><span class="s1">)</span>
+        <span class="s0">finally</span><span class="s1">:</span>
+            <span class="s1">thread.join(DELAY * </span><span class="s3">15</span><span class="s1">)</span>
+
+        <span class="s1">self._check_result(thread.result)</span>
+
+    <span class="s0">def </span><span class="s1">_check_result(self</span><span class="s0">, </span><span class="s1">result):</span>
+        <span class="s1">self.assertEqual(result</span><span class="s0">, </span><span class="s4">'from main'</span><span class="s1">)</span>
+
+    <span class="s0">def </span><span class="s1">test_cross_thread_use_bg(self):</span>
+        <span class="s1">self.test_cross_thread_use(timed_wait=</span><span class="s0">False, </span><span class="s1">wait_in_bg=</span><span class="s0">True</span><span class="s1">)</span>
+
+    <span class="s0">def </span><span class="s1">test_cross_thread_use_timed(self):</span>
+        <span class="s1">self.test_cross_thread_use(timed_wait=</span><span class="s0">True, </span><span class="s1">wait_in_bg=</span><span class="s0">False</span><span class="s1">)</span>
+
+    <span class="s0">def </span><span class="s1">test_cross_thread_use_timed_bg(self):</span>
+        <span class="s1">self.test_cross_thread_use(timed_wait=</span><span class="s0">True, </span><span class="s1">wait_in_bg=</span><span class="s0">True</span><span class="s1">)</span>
+
+    <span class="s1">@greentest.ignores_leakcheck</span>
+    <span class="s0">def </span><span class="s1">test_cross_thread_use_set_in_bg(self):</span>
+        <span class="s1">self.assertNotMonkeyPatched() </span><span class="s2"># Need real threads, event objects</span>
+        <span class="s0">from </span><span class="s1">threading </span><span class="s0">import </span><span class="s1">Thread </span><span class="s0">as </span><span class="s1">NativeThread</span>
+        <span class="s0">from </span><span class="s1">threading </span><span class="s0">import </span><span class="s1">Event </span><span class="s0">as </span><span class="s1">NativeEvent</span>
+
+        <span class="s1">self._check_pypy_switch()</span>
+        <span class="s1">test = self</span>
+        <span class="s0">class </span><span class="s1">Thread(NativeThread):</span>
+            <span class="s0">def </span><span class="s1">__init__(self):</span>
+                <span class="s1">NativeThread.__init__(self)</span>
+                <span class="s1">self.daemon = </span><span class="s0">True</span>
+                <span class="s1">self.running_event = NativeEvent()</span>
+                <span class="s1">self.finished_event = NativeEvent()</span>
+
+                <span class="s1">self.async_result = test._makeOne()</span>
+                <span class="s1">self.result = </span><span class="s4">'&lt;never set&gt;'</span>
+
+            <span class="s0">def </span><span class="s1">run(self):</span>
+                <span class="s1">self.running_event.set()</span>
+                <span class="s1">test._setOne(self.async_result)</span>
+
+                <span class="s1">self.finished_event.set()</span>
+                <span class="s1">gevent.get_hub().destroy(destroy_loop=</span><span class="s0">True</span><span class="s1">)</span>
+
+        <span class="s1">thread = Thread()</span>
+        <span class="s1">glet = </span><span class="s0">None</span>
+        <span class="s0">try</span><span class="s1">:</span>
+            <span class="s1">glet = gevent.spawn(thread.start)</span>
+            <span class="s1">result = thread.async_result.wait(self.BG_WAIT_DELAY)</span>
+        <span class="s0">finally</span><span class="s1">:</span>
+            <span class="s1">thread.join(DELAY * </span><span class="s3">15</span><span class="s1">)</span>
+            <span class="s0">if </span><span class="s1">glet </span><span class="s0">is not None</span><span class="s1">:</span>
+                <span class="s1">glet.join(DELAY)</span>
+        <span class="s1">self._check_result(result)</span>
+
+    <span class="s1">@greentest.ignores_leakcheck</span>
+    <span class="s0">def </span><span class="s1">test_cross_thread_use_set_in_bg2(self):</span>
+        <span class="s2"># Do it again to make sure it works multiple times.</span>
+        <span class="s1">self.test_cross_thread_use_set_in_bg()</span>
+
+<span class="s0">class </span><span class="s1">TestEventCrossThread(TestAsyncResultCrossThread):</span>
+
+    <span class="s0">def </span><span class="s1">_makeOne(self):</span>
+        <span class="s0">return </span><span class="s1">Event()</span>
+
+    <span class="s0">def </span><span class="s1">_setOne(self</span><span class="s0">, </span><span class="s1">one):</span>
+        <span class="s1">one.set()</span>
+
+    <span class="s0">def </span><span class="s1">_check_result(self</span><span class="s0">, </span><span class="s1">result):</span>
+        <span class="s1">self.assertTrue(result)</span>
+
+
+<span class="s0">class </span><span class="s1">TestAsyncResultAsLinkTarget(greentest.TestCase):</span>
+    <span class="s1">error_fatal = </span><span class="s0">False</span>
+
+    <span class="s0">def </span><span class="s1">test_set(self):</span>
+        <span class="s1">g = gevent.spawn(</span><span class="s0">lambda</span><span class="s1">: </span><span class="s3">1</span><span class="s1">)</span>
+        <span class="s1">s1</span><span class="s0">, </span><span class="s1">s2</span><span class="s0">, </span><span class="s1">s3 = AsyncResult()</span><span class="s0">, </span><span class="s1">AsyncResult()</span><span class="s0">, </span><span class="s1">AsyncResult()</span>
+        <span class="s1">g.link(s1)</span>
+        <span class="s1">g.link_value(s2)</span>
+        <span class="s1">g.link_exception(s3)</span>
+        <span class="s1">self.assertEqual(s1.get()</span><span class="s0">, </span><span class="s3">1</span><span class="s1">)</span>
+        <span class="s1">self.assertEqual(s2.get()</span><span class="s0">, </span><span class="s3">1</span><span class="s1">)</span>
+        <span class="s1">X = object()</span>
+        <span class="s1">result = gevent.with_timeout(DELAY</span><span class="s0">, </span><span class="s1">s3.get</span><span class="s0">, </span><span class="s1">timeout_value=X)</span>
+        <span class="s1">self.assertIs(result</span><span class="s0">, </span><span class="s1">X)</span>
+
+    <span class="s0">def </span><span class="s1">test_set_exception(self):</span>
+        <span class="s0">def </span><span class="s1">func():</span>
+            <span class="s0">raise </span><span class="s1">greentest.ExpectedException(</span><span class="s4">'TestAsyncResultAsLinkTarget.test_set_exception'</span><span class="s1">)</span>
+        <span class="s1">g = gevent.spawn(func)</span>
+        <span class="s1">s1</span><span class="s0">, </span><span class="s1">s2</span><span class="s0">, </span><span class="s1">s3 = AsyncResult()</span><span class="s0">, </span><span class="s1">AsyncResult()</span><span class="s0">, </span><span class="s1">AsyncResult()</span>
+        <span class="s1">g.link(s1)</span>
+        <span class="s1">g.link_value(s2)</span>
+        <span class="s1">g.link_exception(s3)</span>
+        <span class="s1">self.assertRaises(greentest.ExpectedException</span><span class="s0">, </span><span class="s1">s1.get)</span>
+        <span class="s1">X = object()</span>
+        <span class="s1">result = gevent.with_timeout(DELAY</span><span class="s0">, </span><span class="s1">s2.get</span><span class="s0">, </span><span class="s1">timeout_value=X)</span>
+        <span class="s1">self.assertIs(result</span><span class="s0">, </span><span class="s1">X)</span>
+        <span class="s1">self.assertRaises(greentest.ExpectedException</span><span class="s0">, </span><span class="s1">s3.get)</span>
+
+
+<span class="s0">class </span><span class="s1">TestEvent_SetThenClear(greentest.TestCase):</span>
+    <span class="s1">N = </span><span class="s3">1</span>
+
+    <span class="s0">def </span><span class="s1">test(self):</span>
+        <span class="s1">e = Event()</span>
+        <span class="s1">waiters = [gevent.spawn(e.wait) </span><span class="s0">for </span><span class="s1">i </span><span class="s0">in </span><span class="s1">range(self.N)]</span>
+        <span class="s1">gevent.sleep(</span><span class="s3">0.001</span><span class="s1">)</span>
+        <span class="s1">e.set()</span>
+        <span class="s1">e.clear()</span>
+        <span class="s0">for </span><span class="s1">greenlet </span><span class="s0">in </span><span class="s1">waiters:</span>
+            <span class="s1">greenlet.join()</span>
+
+
+<span class="s0">class </span><span class="s1">TestEvent_SetThenClear100(TestEvent_SetThenClear):</span>
+    <span class="s1">N = </span><span class="s3">100</span>
+
+
+<span class="s0">class </span><span class="s1">TestEvent_SetThenClear1000(TestEvent_SetThenClear):</span>
+    <span class="s1">N = </span><span class="s3">1000</span>
+
+
+<span class="s0">class </span><span class="s1">TestWait(greentest.TestCase):</span>
+    <span class="s1">N = </span><span class="s3">5</span>
+    <span class="s1">count = </span><span class="s0">None</span>
+    <span class="s1">timeout = </span><span class="s3">1</span>
+    <span class="s1">period = timeout / </span><span class="s3">100.0</span>
+
+    <span class="s0">def </span><span class="s1">_sender(self</span><span class="s0">, </span><span class="s1">events</span><span class="s0">, </span><span class="s1">asyncs):</span>
+        <span class="s0">while </span><span class="s1">events </span><span class="s0">or </span><span class="s1">asyncs:</span>
+            <span class="s1">gevent.sleep(self.period)</span>
+            <span class="s0">if </span><span class="s1">events:</span>
+                <span class="s1">events.pop().set()</span>
+            <span class="s1">gevent.sleep(self.period)</span>
+            <span class="s0">if </span><span class="s1">asyncs:</span>
+                <span class="s1">asyncs.pop().set()</span>
+
+    <span class="s1">@greentest.skipOnAppVeyor(</span><span class="s4">&quot;Not all results have arrived sometimes due to timer issues&quot;</span><span class="s1">)</span>
+    <span class="s0">def </span><span class="s1">test(self):</span>
+        <span class="s1">events = [Event() </span><span class="s0">for </span><span class="s1">_ </span><span class="s0">in </span><span class="s1">xrange(self.N)]</span>
+        <span class="s1">asyncs = [AsyncResult() </span><span class="s0">for </span><span class="s1">_ </span><span class="s0">in </span><span class="s1">xrange(self.N)]</span>
+        <span class="s1">max_len = len(events) + len(asyncs)</span>
+        <span class="s1">sender = gevent.spawn(self._sender</span><span class="s0">, </span><span class="s1">events</span><span class="s0">, </span><span class="s1">asyncs)</span>
+        <span class="s1">results = gevent.wait(events + asyncs</span><span class="s0">, </span><span class="s1">count=self.count</span><span class="s0">, </span><span class="s1">timeout=self.timeout)</span>
+        <span class="s0">if </span><span class="s1">self.timeout </span><span class="s0">is None</span><span class="s1">:</span>
+            <span class="s1">expected_len = max_len</span>
+        <span class="s0">else</span><span class="s1">:</span>
+            <span class="s1">expected_len = min(max_len</span><span class="s0">, </span><span class="s1">self.timeout / self.period)</span>
+        <span class="s0">if </span><span class="s1">self.count </span><span class="s0">is None</span><span class="s1">:</span>
+            <span class="s1">self.assertTrue(sender.ready()</span><span class="s0">, </span><span class="s1">sender)</span>
+        <span class="s0">else</span><span class="s1">:</span>
+            <span class="s1">expected_len = min(self.count</span><span class="s0">, </span><span class="s1">expected_len)</span>
+            <span class="s1">self.assertFalse(sender.ready()</span><span class="s0">, </span><span class="s1">sender)</span>
+            <span class="s1">sender.kill()</span>
+        <span class="s1">self.assertEqual(expected_len</span><span class="s0">, </span><span class="s1">len(results)</span><span class="s0">, </span><span class="s1">(expected_len</span><span class="s0">, </span><span class="s1">len(results)</span><span class="s0">, </span><span class="s1">results))</span>
+
+
+<span class="s0">class </span><span class="s1">TestWait_notimeout(TestWait):</span>
+    <span class="s1">timeout = </span><span class="s0">None</span>
+
+
+<span class="s0">class </span><span class="s1">TestWait_count1(TestWait):</span>
+    <span class="s1">count = </span><span class="s3">1</span>
+
+
+<span class="s0">class </span><span class="s1">TestWait_count2(TestWait):</span>
+    <span class="s1">count = </span><span class="s3">2</span>
+
+<span class="s0">class </span><span class="s1">TestEventBasics(greentest.TestCase):</span>
+
+    <span class="s0">def </span><span class="s1">test_weakref(self):</span>
+        <span class="s2"># Event objects should allow weakrefs</span>
+        <span class="s1">e = Event()</span>
+        <span class="s1">r = weakref.ref(e)</span>
+        <span class="s1">self.assertIs(e</span><span class="s0">, </span><span class="s1">r())</span>
+        <span class="s0">del </span><span class="s1">e</span>
+        <span class="s0">del </span><span class="s1">r</span>
+
+    <span class="s0">def </span><span class="s1">test_wait_while_notifying(self):</span>
+        <span class="s2"># If someone calls wait() on an Event that is</span>
+        <span class="s2"># ready, and notifying other waiters, that new</span>
+        <span class="s2"># waiter still runs at the end, but this does not</span>
+        <span class="s2"># require a trip around the event loop.</span>
+        <span class="s2"># See https://github.com/gevent/gevent/issues/1520</span>
+        <span class="s1">event = Event()</span>
+        <span class="s1">results = []</span>
+
+        <span class="s0">def </span><span class="s1">wait_then_append(arg):</span>
+            <span class="s1">event.wait()</span>
+            <span class="s1">results.append(arg)</span>
+
+        <span class="s1">gevent.spawn(wait_then_append</span><span class="s0">, </span><span class="s3">1</span><span class="s1">)</span>
+        <span class="s1">gevent.spawn(wait_then_append</span><span class="s0">, </span><span class="s3">2</span><span class="s1">)</span>
+        <span class="s1">gevent.idle()</span>
+        <span class="s1">self.assertEqual(</span><span class="s3">2</span><span class="s0">, </span><span class="s1">event.linkcount())</span>
+        <span class="s1">check = gevent.get_hub().loop.check()</span>
+        <span class="s1">check.start(results.append</span><span class="s0">, </span><span class="s3">4</span><span class="s1">)</span>
+        <span class="s1">event.set()</span>
+        <span class="s1">wait_then_append(</span><span class="s3">3</span><span class="s1">)</span>
+        <span class="s1">self.assertEqual(results</span><span class="s0">, </span><span class="s1">[</span><span class="s3">1</span><span class="s0">, </span><span class="s3">2</span><span class="s0">, </span><span class="s3">3</span><span class="s1">])</span>
+        <span class="s2"># Note that the check event DID NOT run.</span>
+        <span class="s1">check.stop()</span>
+        <span class="s1">check.close()</span>
+
+    <span class="s0">def </span><span class="s1">test_gevent_wait_twice_when_already_set(self):</span>
+        <span class="s1">event = Event()</span>
+        <span class="s1">event.set()</span>
+        <span class="s2"># First one works fine.</span>
+        <span class="s1">result = gevent.wait([event])</span>
+        <span class="s1">self.assertEqual(result</span><span class="s0">, </span><span class="s1">[event])</span>
+        <span class="s2"># Second one used to fail with an AssertionError,</span>
+        <span class="s2"># now it passes</span>
+        <span class="s1">result = gevent.wait([event])</span>
+        <span class="s1">self.assertEqual(result</span><span class="s0">, </span><span class="s1">[event])</span>
+
+
+<span class="s0">del </span><span class="s1">AbstractGenericGetTestCase</span>
+<span class="s0">del </span><span class="s1">AbstractGenericWaitTestCase</span>
+
+<span class="s0">if </span><span class="s1">__name__ == </span><span class="s4">'__main__'</span><span class="s1">:</span>
+    <span class="s1">greentest.main()</span>
+</pre>
+</body>
+</html>

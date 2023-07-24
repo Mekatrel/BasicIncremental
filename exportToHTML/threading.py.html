@@ -1,0 +1,262 @@
+<html>
+<head>
+<title>threading.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #629755; font-style: italic;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #cc7832;}
+.s3 { color: #6a8759;}
+.s4 { color: #808080;}
+.s5 { color: #6897bb;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+threading.py</font>
+</center></td></tr></table>
+<pre><span class="s0">&quot;&quot;&quot; 
+Implementation of the standard :mod:`threading` using greenlets. 
+ 
+.. note:: 
+ 
+    This module is a helper for :mod:`gevent.monkey` and is not 
+    intended to be used directly. For spawning greenlets in your 
+    applications, prefer higher level constructs like 
+    :class:`gevent.Greenlet` class or :func:`gevent.spawn`. Attributes 
+    in this module like ``__threading__`` are implementation artifacts subject 
+    to change at any time. 
+ 
+.. versionchanged:: 1.2.3 
+ 
+   Defer adjusting the stdlib's list of active threads until we are 
+   monkey patched. Previously this was done at import time. We are 
+   documented to only be used as a helper for monkey patching, so this should 
+   functionally be the same, but some applications ignore the documentation and 
+   directly import this module anyway. 
+ 
+   A positive consequence is that ``import gevent.threading, 
+   threading; threading.current_thread()`` will no longer return a DummyThread 
+   before monkey-patching. 
+&quot;&quot;&quot;</span>
+<span class="s2">from </span><span class="s1">__future__ </span><span class="s2">import </span><span class="s1">absolute_import</span>
+
+
+<span class="s1">__implements__ = [</span>
+    <span class="s3">'local'</span><span class="s2">,</span>
+    <span class="s3">'_start_new_thread'</span><span class="s2">,</span>
+    <span class="s3">'_allocate_lock'</span><span class="s2">,</span>
+    <span class="s3">'Lock'</span><span class="s2">,</span>
+    <span class="s3">'_get_ident'</span><span class="s2">,</span>
+    <span class="s3">'_sleep'</span><span class="s2">,</span>
+    <span class="s3">'_DummyThread'</span><span class="s2">,</span>
+    <span class="s4"># RLock cannot go here, even though we need to import it.</span>
+    <span class="s4"># If it goes here, it replaces the RLock from the native</span>
+    <span class="s4"># threading module, but we really just need it here when some</span>
+    <span class="s4"># things import this module.</span>
+    <span class="s4">#'RLock',</span>
+<span class="s1">]</span>
+
+
+<span class="s2">import </span><span class="s1">threading </span><span class="s2">as </span><span class="s1">__threading__</span>
+<span class="s1">_DummyThread_ = __threading__._DummyThread</span>
+<span class="s2">from </span><span class="s1">gevent.local </span><span class="s2">import </span><span class="s1">local</span>
+<span class="s2">from </span><span class="s1">gevent.thread </span><span class="s2">import </span><span class="s1">start_new_thread </span><span class="s2">as </span><span class="s1">_start_new_thread</span>
+<span class="s2">from </span><span class="s1">gevent.thread </span><span class="s2">import </span><span class="s1">allocate_lock </span><span class="s2">as </span><span class="s1">_allocate_lock</span>
+<span class="s2">from </span><span class="s1">gevent.thread </span><span class="s2">import </span><span class="s1">get_ident </span><span class="s2">as </span><span class="s1">_get_ident</span>
+<span class="s2">from </span><span class="s1">gevent.hub </span><span class="s2">import </span><span class="s1">sleep </span><span class="s2">as </span><span class="s1">_sleep</span><span class="s2">, </span><span class="s1">getcurrent</span>
+<span class="s2">from </span><span class="s1">gevent.lock </span><span class="s2">import </span><span class="s1">RLock</span>
+
+<span class="s2">from </span><span class="s1">gevent._compat </span><span class="s2">import </span><span class="s1">PY3</span>
+<span class="s2">from </span><span class="s1">gevent._compat </span><span class="s2">import </span><span class="s1">PYPY</span>
+<span class="s2">from </span><span class="s1">gevent._util </span><span class="s2">import </span><span class="s1">LazyOnClass</span>
+
+<span class="s4"># Exports, prevent unused import warnings.</span>
+<span class="s4"># XXX: Why don't we use __all__?</span>
+<span class="s1">local = local</span>
+<span class="s1">start_new_thread = _start_new_thread</span>
+<span class="s1">allocate_lock = _allocate_lock</span>
+<span class="s1">_get_ident = _get_ident</span>
+<span class="s1">_sleep = _sleep</span>
+<span class="s1">getcurrent = getcurrent</span>
+
+<span class="s1">Lock = _allocate_lock</span>
+<span class="s1">RLock = RLock</span>
+
+
+<span class="s2">def </span><span class="s1">_cleanup(g):</span>
+    <span class="s1">__threading__._active.pop(_get_ident(g)</span><span class="s2">, None</span><span class="s1">)</span>
+
+<span class="s2">def </span><span class="s1">_make_cleanup_id(gid):</span>
+    <span class="s2">def </span><span class="s1">_(_r):</span>
+        <span class="s1">__threading__._active.pop(gid</span><span class="s2">, None</span><span class="s1">)</span>
+    <span class="s2">return </span><span class="s1">_</span>
+
+<span class="s1">_weakref = </span><span class="s2">None</span>
+
+<span class="s2">class </span><span class="s1">_DummyThread(_DummyThread_):</span>
+    <span class="s4"># We avoid calling the superclass constructor. This makes us about</span>
+    <span class="s4"># twice as fast (1.16 vs 0.68usec on PyPy, 29.3 vs 17.7usec on</span>
+    <span class="s4"># CPython 2.7), and has the important effect of avoiding</span>
+    <span class="s4"># allocation and then immediate deletion of _Thread__block, a</span>
+    <span class="s4"># lock. This is especially important on PyPy where locks go</span>
+    <span class="s4"># through the cpyext API and Cython, which is known to be slow and</span>
+    <span class="s4"># potentially buggy (e.g.,</span>
+    <span class="s4"># https://bitbucket.org/pypy/pypy/issues/2149/memory-leak-for-python-subclass-of-cpyext#comment-22347393)</span>
+
+    <span class="s4"># These objects are constructed quite frequently in some cases, so</span>
+    <span class="s4"># the optimization matters: for example, in gunicorn, which uses</span>
+    <span class="s4"># pywsgi.WSGIServer, most every request is handled in a new greenlet,</span>
+    <span class="s4"># and every request uses a logging.Logger to write the access log,</span>
+    <span class="s4"># and every call to a log method captures the current thread (by</span>
+    <span class="s4"># default).</span>
+    <span class="s4">#</span>
+    <span class="s4"># (Obviously we have to duplicate the effects of the constructor,</span>
+    <span class="s4"># at least for external state purposes, which is potentially</span>
+    <span class="s4"># slightly fragile.)</span>
+
+    <span class="s4"># For the same reason, instances of this class will cleanup their own entry</span>
+    <span class="s4"># in ``threading._active``</span>
+
+    <span class="s4"># This class also solves a problem forking process with subprocess: after forking,</span>
+    <span class="s4"># Thread.__stop is called, which throws an exception when __block doesn't</span>
+    <span class="s4"># exist.</span>
+
+    <span class="s4"># Capture the static things as class vars to save on memory/</span>
+    <span class="s4"># construction time.</span>
+    <span class="s4"># In Py2, they're all private; in Py3, they become protected</span>
+    <span class="s1">_Thread__stopped = _is_stopped = _stopped = </span><span class="s2">False</span>
+    <span class="s1">_Thread__initialized = _initialized = </span><span class="s2">True</span>
+    <span class="s1">_Thread__daemonic = _daemonic = </span><span class="s2">True</span>
+    <span class="s1">_Thread__args = _args = ()</span>
+    <span class="s1">_Thread__kwargs = _kwargs = </span><span class="s2">None</span>
+    <span class="s1">_Thread__target = _target = </span><span class="s2">None</span>
+    <span class="s1">_Thread_ident = _ident = </span><span class="s2">None</span>
+    <span class="s1">_Thread__started = _started = __threading__.Event()</span>
+    <span class="s1">_Thread__started.set()</span>
+    <span class="s1">_tstate_lock = </span><span class="s2">None</span>
+
+    <span class="s2">def </span><span class="s1">__init__(self): </span><span class="s4"># pylint:disable=super-init-not-called</span>
+        <span class="s4">#_DummyThread_.__init__(self)</span>
+
+        <span class="s4"># It'd be nice to use a pattern like &quot;greenlet-%d&quot;, but there are definitely</span>
+        <span class="s4"># third-party libraries checking thread names to detect DummyThread objects.</span>
+        <span class="s1">self._name = self._Thread__name = __threading__._newname(</span><span class="s3">&quot;Dummy-%d&quot;</span><span class="s1">)</span>
+        <span class="s4"># All dummy threads in the same native thread share the same ident</span>
+        <span class="s4"># (that of the native thread), unless we're monkey-patched.</span>
+        <span class="s1">self._set_ident()</span>
+
+        <span class="s1">g = getcurrent()</span>
+        <span class="s1">gid = _get_ident(g)</span>
+        <span class="s1">__threading__._active[gid] = self</span>
+        <span class="s1">rawlink = getattr(g</span><span class="s2">, </span><span class="s3">'rawlink'</span><span class="s2">, None</span><span class="s1">)</span>
+        <span class="s2">if </span><span class="s1">rawlink </span><span class="s2">is not None</span><span class="s1">:</span>
+            <span class="s4"># raw greenlet.greenlet greenlets don't</span>
+            <span class="s4"># have rawlink...</span>
+            <span class="s1">rawlink(_cleanup)</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s4"># ... so for them we use weakrefs.</span>
+            <span class="s4"># See https://github.com/gevent/gevent/issues/918</span>
+            <span class="s1">ref = self.__weakref_ref</span>
+            <span class="s1">ref = ref(g</span><span class="s2">, </span><span class="s1">_make_cleanup_id(gid)) </span><span class="s4"># pylint:disable=too-many-function-args</span>
+            <span class="s1">self.__raw_ref = ref</span>
+            <span class="s2">assert </span><span class="s1">self.__raw_ref </span><span class="s2">is </span><span class="s1">ref </span><span class="s4"># prevent pylint thinking its unused</span>
+
+    <span class="s2">def </span><span class="s1">_Thread__stop(self):</span>
+        <span class="s2">pass</span>
+
+    <span class="s1">_stop = _Thread__stop </span><span class="s4"># py3</span>
+
+    <span class="s2">def </span><span class="s1">_wait_for_tstate_lock(self</span><span class="s2">, </span><span class="s1">*args</span><span class="s2">, </span><span class="s1">**kwargs): </span><span class="s4"># pylint:disable=signature-differs</span>
+        <span class="s2">pass</span>
+
+    <span class="s1">@LazyOnClass</span>
+    <span class="s2">def </span><span class="s1">__weakref_ref(self):</span>
+        <span class="s2">return </span><span class="s1">__import__(</span><span class="s3">'weakref'</span><span class="s1">).ref</span>
+
+<span class="s2">if </span><span class="s1">hasattr(__threading__</span><span class="s2">, </span><span class="s3">'main_thread'</span><span class="s1">): </span><span class="s4"># py 3.4+</span>
+    <span class="s2">def </span><span class="s1">main_native_thread():</span>
+        <span class="s2">return </span><span class="s1">__threading__.main_thread() </span><span class="s4"># pylint:disable=no-member</span>
+<span class="s2">else</span><span class="s1">:</span>
+    <span class="s2">def </span><span class="s1">main_native_thread():</span>
+        <span class="s1">main_threads = [v </span><span class="s2">for </span><span class="s1">v </span><span class="s2">in </span><span class="s1">__threading__._active.values()</span>
+                        <span class="s2">if </span><span class="s1">isinstance(v</span><span class="s2">, </span><span class="s1">__threading__._MainThread)]</span>
+        <span class="s2">assert </span><span class="s1">len(main_threads) == </span><span class="s5">1</span><span class="s2">, </span><span class="s3">&quot;Too many main threads&quot;</span>
+
+        <span class="s2">return </span><span class="s1">main_threads[</span><span class="s5">0</span><span class="s1">]</span>
+
+<span class="s2">if </span><span class="s1">PY3:</span>
+    <span class="s4"># XXX: Issue 18808 breaks us on Python 3.4+.</span>
+    <span class="s4"># Thread objects now expect a callback from the interpreter itself</span>
+    <span class="s4"># (threadmodule.c:release_sentinel) when the C-level PyThreadState</span>
+    <span class="s4"># object is being deallocated. Because this never happens</span>
+    <span class="s4"># when a greenlet exits, join() and friends will block forever.</span>
+    <span class="s4"># Fortunately this is easy to fix: just ensure that the allocation of the</span>
+    <span class="s4"># lock, _set_sentinel, creates a *gevent* lock, and release it when</span>
+    <span class="s4"># we're done. The main _shutdown code is in Python and deals with</span>
+    <span class="s4"># this gracefully.</span>
+
+    <span class="s2">class </span><span class="s1">Thread(__threading__.Thread):</span>
+
+        <span class="s2">def </span><span class="s1">_set_tstate_lock(self):</span>
+            <span class="s1">super(Thread</span><span class="s2">, </span><span class="s1">self)._set_tstate_lock()</span>
+            <span class="s1">greenlet = getcurrent()</span>
+            <span class="s1">greenlet.rawlink(self.__greenlet_finished)</span>
+
+        <span class="s2">def </span><span class="s1">__greenlet_finished(self</span><span class="s2">, </span><span class="s1">_):</span>
+            <span class="s2">if </span><span class="s1">self._tstate_lock:</span>
+                <span class="s1">self._tstate_lock.release()</span>
+                <span class="s1">self._stop()</span>
+
+    <span class="s1">__implements__.append(</span><span class="s3">'Thread'</span><span class="s1">)</span>
+
+    <span class="s2">class </span><span class="s1">Timer(Thread</span><span class="s2">, </span><span class="s1">__threading__.Timer): </span><span class="s4"># pylint:disable=abstract-method,inherit-non-class</span>
+        <span class="s2">pass</span>
+
+    <span class="s1">__implements__.append(</span><span class="s3">'Timer'</span><span class="s1">)</span>
+
+    <span class="s1">_set_sentinel = allocate_lock</span>
+    <span class="s1">__implements__.append(</span><span class="s3">'_set_sentinel'</span><span class="s1">)</span>
+    <span class="s4"># The main thread is patched up with more care</span>
+    <span class="s4"># in _gevent_will_monkey_patch</span>
+
+<span class="s2">if </span><span class="s1">PY3:</span>
+    <span class="s1">__implements__.remove(</span><span class="s3">'_get_ident'</span><span class="s1">)</span>
+    <span class="s1">__implements__.append(</span><span class="s3">'get_ident'</span><span class="s1">)</span>
+    <span class="s1">get_ident = _get_ident</span>
+    <span class="s1">__implements__.remove(</span><span class="s3">'_sleep'</span><span class="s1">)</span>
+
+<span class="s2">if </span><span class="s1">hasattr(__threading__</span><span class="s2">, </span><span class="s3">'_CRLock'</span><span class="s1">):</span>
+    <span class="s4"># Python 3 changed the implementation of threading.RLock</span>
+    <span class="s4"># Previously it was a factory function around threading._RLock</span>
+    <span class="s4"># which in turn used _allocate_lock. Now, it wants to use</span>
+    <span class="s4"># threading._CRLock, which is imported from _thread.RLock and as such</span>
+    <span class="s4"># is implemented in C. So it bypasses our _allocate_lock function.</span>
+    <span class="s4"># Fortunately they left the Python fallback in place and use it</span>
+    <span class="s4"># if the imported _CRLock is None; this arranges for that to be the case.</span>
+
+    <span class="s4"># This was also backported to PyPy 2.7-7.0</span>
+    <span class="s2">assert </span><span class="s1">PY3 </span><span class="s2">or </span><span class="s1">PYPY</span><span class="s2">, </span><span class="s3">&quot;Unsupported Python version&quot;</span>
+    <span class="s1">_CRLock = </span><span class="s2">None</span>
+    <span class="s1">__implements__.append(</span><span class="s3">'_CRLock'</span><span class="s1">)</span>
+
+<span class="s2">def </span><span class="s1">_gevent_will_monkey_patch(native_module</span><span class="s2">, </span><span class="s1">items</span><span class="s2">, </span><span class="s1">warn): </span><span class="s4"># pylint:disable=unused-argument</span>
+    <span class="s4"># Make sure the MainThread can be found by our current greenlet ID,</span>
+    <span class="s4"># otherwise we get a new DummyThread, which cannot be joined.</span>
+    <span class="s4"># Fixes tests in test_threading_2 under PyPy.</span>
+    <span class="s1">main_thread = main_native_thread()</span>
+    <span class="s2">if </span><span class="s1">__threading__.current_thread() != main_thread:</span>
+        <span class="s1">warn(</span><span class="s3">&quot;Monkey-patching outside the main native thread. Some APIs &quot;</span>
+             <span class="s3">&quot;will not be available. Expect a KeyError to be printed at shutdown.&quot;</span><span class="s1">)</span>
+        <span class="s2">return</span>
+
+    <span class="s2">if </span><span class="s1">_get_ident() </span><span class="s2">not in </span><span class="s1">__threading__._active:</span>
+        <span class="s1">main_id = main_thread.ident</span>
+        <span class="s2">del </span><span class="s1">__threading__._active[main_id]</span>
+        <span class="s1">main_thread._ident = main_thread._Thread__ident = _get_ident()</span>
+        <span class="s1">__threading__._active[_get_ident()] = main_thread</span>
+</pre>
+</body>
+</html>

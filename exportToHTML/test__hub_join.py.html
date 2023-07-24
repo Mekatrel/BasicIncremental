@@ -1,0 +1,138 @@
+<html>
+<head>
+<title>test__hub_join.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #cc7832;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #808080;}
+.s3 { color: #6897bb;}
+.s4 { color: #6a8759;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+test__hub_join.py</font>
+</center></td></tr></table>
+<pre><span class="s0">from </span><span class="s1">contextlib </span><span class="s0">import </span><span class="s1">contextmanager</span>
+<span class="s0">import </span><span class="s1">unittest</span>
+
+
+<span class="s0">import </span><span class="s1">gevent</span>
+<span class="s0">from </span><span class="s1">gevent.testing </span><span class="s0">import </span><span class="s1">ignores_leakcheck</span>
+
+<span class="s0">class </span><span class="s1">TestJoin(unittest.TestCase):</span>
+
+    <span class="s0">def </span><span class="s1">test_join_many_times(self):</span>
+        <span class="s2"># hub.join() guarantees that loop has exited cleanly</span>
+        <span class="s1">res = gevent.get_hub().join()</span>
+        <span class="s1">self.assertTrue(res)</span>
+        <span class="s1">self.assertFalse(gevent.get_hub().dead)</span>
+
+        <span class="s1">res = gevent.get_hub().join()</span>
+        <span class="s1">self.assertTrue(res)</span>
+
+        <span class="s2"># but it is still possible to use gevent afterwards</span>
+        <span class="s1">gevent.sleep(</span><span class="s3">0.01</span><span class="s1">)</span>
+
+        <span class="s1">res = gevent.get_hub().join()</span>
+        <span class="s1">self.assertTrue(res)</span>
+
+    <span class="s1">@staticmethod</span>
+    <span class="s0">def </span><span class="s1">__clean():</span>
+        <span class="s0">import </span><span class="s1">gc</span>
+        <span class="s0">for </span><span class="s1">_ </span><span class="s0">in </span><span class="s1">range(</span><span class="s3">2</span><span class="s1">):</span>
+            <span class="s0">while </span><span class="s1">gc.collect():</span>
+                <span class="s0">pass</span>
+
+    <span class="s1">@contextmanager</span>
+    <span class="s0">def </span><span class="s1">assert_no_greenlet_growth(self):</span>
+        <span class="s0">from </span><span class="s1">gevent._greenlet_primitives </span><span class="s0">import </span><span class="s1">get_reachable_greenlets</span>
+        <span class="s1">clean = self.__clean</span>
+        <span class="s1">clean()</span>
+        <span class="s1">count_before = len(get_reachable_greenlets())</span>
+
+        <span class="s0">yield</span>
+
+        <span class="s1">count_after = len(get_reachable_greenlets())</span>
+        <span class="s0">if </span><span class="s1">count_after &gt; count_before:</span>
+            <span class="s2"># We could be off by exactly 1. Not entirely clear where.</span>
+            <span class="s2"># But it only happens the first time.</span>
+            <span class="s1">count_after -= </span><span class="s3">1</span>
+        <span class="s2"># If we were run in multiple process, our count could actually have</span>
+        <span class="s2"># gone down due to the GC's we did.</span>
+        <span class="s1">self.assertEqual(count_after</span><span class="s0">, </span><span class="s1">count_before)</span>
+
+    <span class="s1">@ignores_leakcheck</span>
+    <span class="s0">def </span><span class="s1">test_join_in_new_thread_doesnt_leak_hub_or_greenlet(self):</span>
+        <span class="s2"># https://github.com/gevent/gevent/issues/1601</span>
+        <span class="s0">import </span><span class="s1">threading</span>
+        <span class="s1">clean = self.__clean</span>
+
+        <span class="s0">def </span><span class="s1">thread_main():</span>
+            <span class="s1">g = gevent.Greenlet(run=</span><span class="s0">lambda</span><span class="s1">: </span><span class="s3">0</span><span class="s1">)</span>
+            <span class="s1">g.start()</span>
+            <span class="s1">g.join()</span>
+            <span class="s1">hub = gevent.get_hub()</span>
+            <span class="s1">hub.join()</span>
+            <span class="s1">hub.destroy(destroy_loop=</span><span class="s0">True</span><span class="s1">)</span>
+            <span class="s0">del </span><span class="s1">hub</span>
+
+        <span class="s0">def </span><span class="s1">tester(main):</span>
+            <span class="s1">t = threading.Thread(target=main)</span>
+            <span class="s1">t.start()</span>
+            <span class="s1">t.join()</span>
+
+            <span class="s1">clean()</span>
+
+        <span class="s0">with </span><span class="s1">self.assert_no_greenlet_growth():</span>
+            <span class="s0">for </span><span class="s1">_ </span><span class="s0">in </span><span class="s1">range(</span><span class="s3">10</span><span class="s1">):</span>
+                <span class="s1">tester(thread_main)</span>
+
+            <span class="s0">del </span><span class="s1">tester</span>
+            <span class="s0">del </span><span class="s1">thread_main</span>
+
+    <span class="s1">@ignores_leakcheck</span>
+    <span class="s0">def </span><span class="s1">test_destroy_in_main_thread_from_new_thread(self):</span>
+        <span class="s2"># https://github.com/gevent/gevent/issues/1631</span>
+        <span class="s0">import </span><span class="s1">threading</span>
+
+        <span class="s1">clean = self.__clean</span>
+        <span class="s0">class </span><span class="s1">Thread(threading.Thread):</span>
+            <span class="s1">hub = </span><span class="s0">None</span>
+            <span class="s0">def </span><span class="s1">run(self):</span>
+                <span class="s1">g = gevent.Greenlet(run=</span><span class="s0">lambda</span><span class="s1">: </span><span class="s3">0</span><span class="s1">)</span>
+                <span class="s1">g.start()</span>
+                <span class="s1">g.join()</span>
+                <span class="s0">del </span><span class="s1">g</span>
+                <span class="s1">hub = gevent.get_hub()</span>
+                <span class="s1">hub.join()</span>
+                <span class="s1">self.hub = hub</span>
+
+        <span class="s0">def </span><span class="s1">tester(Thread</span><span class="s0">, </span><span class="s1">clean):</span>
+            <span class="s1">t = Thread()</span>
+            <span class="s1">t.start()</span>
+            <span class="s1">t.join()</span>
+            <span class="s1">t.hub.destroy(destroy_loop=</span><span class="s0">True</span><span class="s1">)</span>
+            <span class="s1">t.hub = </span><span class="s0">None</span>
+            <span class="s0">del </span><span class="s1">t</span>
+            <span class="s1">clean()</span>
+
+        <span class="s2"># Unfortunately, this WILL leak greenlets,</span>
+        <span class="s2"># at least on CPython. The frames of the dead threads</span>
+        <span class="s2"># are referenced by the hub in some sort of cycle, and</span>
+        <span class="s2"># greenlets don't particpate in GC.</span>
+        <span class="s0">for </span><span class="s1">_ </span><span class="s0">in </span><span class="s1">range(</span><span class="s3">10</span><span class="s1">):</span>
+            <span class="s1">tester(Thread</span><span class="s0">, </span><span class="s1">clean)</span>
+
+        <span class="s0">del </span><span class="s1">tester</span>
+        <span class="s0">del </span><span class="s1">Thread</span>
+
+
+<span class="s0">if </span><span class="s1">__name__ == </span><span class="s4">'__main__'</span><span class="s1">:</span>
+    <span class="s1">unittest.main()</span>
+</pre>
+</body>
+</html>

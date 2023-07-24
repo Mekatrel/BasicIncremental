@@ -1,0 +1,265 @@
+<html>
+<head>
+<title>readers.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #629755; font-style: italic;}
+.s3 { color: #cc7832;}
+.s4 { color: #6a8759;}
+.s5 { color: #6897bb;}
+.s6 { color: #a5c261;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+readers.py</font>
+</center></td></tr></table>
+<pre><span class="s0">#-----------------------------------------------------------------------------</span>
+<span class="s0"># Copyright (c) 2013-2021, PyInstaller Development Team.</span>
+<span class="s0">#</span>
+<span class="s0"># Distributed under the terms of the GNU General Public License (version 2</span>
+<span class="s0"># or later) with exception for distributing the bootloader.</span>
+<span class="s0">#</span>
+<span class="s0"># The full license is in the file COPYING.txt, distributed with this software.</span>
+<span class="s0">#</span>
+<span class="s0"># SPDX-License-Identifier: (GPL-2.0-or-later WITH Bootloader-exception)</span>
+<span class="s0">#-----------------------------------------------------------------------------</span>
+<span class="s2">&quot;&quot;&quot; 
+This CArchiveReader is used only by the archieve_viewer utility. 
+&quot;&quot;&quot;</span>
+
+<span class="s0"># TODO clean up this module</span>
+
+<span class="s3">import </span><span class="s1">os</span>
+<span class="s3">import </span><span class="s1">struct</span>
+
+<span class="s3">from </span><span class="s1">PyInstaller.loader.pyimod02_archive </span><span class="s3">import </span><span class="s1">ArchiveReader</span>
+
+
+<span class="s3">class </span><span class="s1">NotAnArchiveError(Exception):</span>
+    <span class="s3">pass</span>
+
+
+<span class="s3">class </span><span class="s1">CTOCReader(object):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    A class encapsulating the table of contents of a CArchive. 
+ 
+    When written to disk, it is easily read from C. 
+    &quot;&quot;&quot;</span>
+    <span class="s0"># (structlen, dpos, dlen, ulen, flag, typcd) followed by name</span>
+    <span class="s1">ENTRYSTRUCT = </span><span class="s4">'!iIIIBB'</span>
+    <span class="s1">ENTRYLEN = struct.calcsize(ENTRYSTRUCT)</span>
+
+    <span class="s3">def </span><span class="s1">__init__(self):</span>
+        <span class="s1">self.data = []</span>
+
+    <span class="s3">def </span><span class="s1">frombinary(self</span><span class="s3">, </span><span class="s1">s):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Decode the binary string into an in memory list. 
+ 
+        S is a binary string. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">p = </span><span class="s5">0</span>
+
+        <span class="s3">while </span><span class="s1">p &lt; len(s):</span>
+            <span class="s1">slen</span><span class="s3">, </span><span class="s1">dpos</span><span class="s3">, </span><span class="s1">dlen</span><span class="s3">, </span><span class="s1">ulen</span><span class="s3">, </span><span class="s1">flag</span><span class="s3">, </span><span class="s1">typcd = struct.unpack(self.ENTRYSTRUCT</span><span class="s3">, </span><span class="s1">s[p:p + self.ENTRYLEN])</span>
+            <span class="s1">nmlen = slen - self.ENTRYLEN</span>
+            <span class="s1">p = p + self.ENTRYLEN</span>
+            <span class="s1">nm</span><span class="s3">, </span><span class="s1">= struct.unpack(</span><span class="s4">'%is' </span><span class="s1">% nmlen</span><span class="s3">, </span><span class="s1">s[p:p + nmlen])</span>
+            <span class="s1">p = p + nmlen</span>
+            <span class="s0"># nm may have up to 15 bytes of padding</span>
+            <span class="s1">nm = nm.rstrip(</span><span class="s6">b'</span><span class="s3">\0</span><span class="s6">'</span><span class="s1">)</span>
+            <span class="s1">nm = nm.decode(</span><span class="s4">'utf-8'</span><span class="s1">)</span>
+            <span class="s1">typcd = chr(typcd)</span>
+            <span class="s1">self.data.append((dpos</span><span class="s3">, </span><span class="s1">dlen</span><span class="s3">, </span><span class="s1">ulen</span><span class="s3">, </span><span class="s1">flag</span><span class="s3">, </span><span class="s1">typcd</span><span class="s3">, </span><span class="s1">nm))</span>
+
+    <span class="s3">def </span><span class="s1">get(self</span><span class="s3">, </span><span class="s1">ndx):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Return the table of contents entry (tuple) at index NDX. 
+        &quot;&quot;&quot;</span>
+        <span class="s3">return </span><span class="s1">self.data[ndx]</span>
+
+    <span class="s3">def </span><span class="s1">__getitem__(self</span><span class="s3">, </span><span class="s1">ndx):</span>
+        <span class="s3">return </span><span class="s1">self.data[ndx]</span>
+
+    <span class="s3">def </span><span class="s1">find(self</span><span class="s3">, </span><span class="s1">name):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Return the index of the toc entry with name NAME. 
+ 
+        Return -1 for failure. 
+        &quot;&quot;&quot;</span>
+        <span class="s3">for </span><span class="s1">i</span><span class="s3">, </span><span class="s1">nm </span><span class="s3">in </span><span class="s1">enumerate(self.data):</span>
+            <span class="s3">if </span><span class="s1">nm[-</span><span class="s5">1</span><span class="s1">] == name:</span>
+                <span class="s3">return </span><span class="s1">i</span>
+        <span class="s3">return </span><span class="s1">-</span><span class="s5">1</span>
+
+
+<span class="s3">class </span><span class="s1">CArchiveReader(ArchiveReader):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    An Archive subclass that can hold arbitrary data. 
+ 
+    This class encapsulates all files that are bundled within an executable. It can contain ZlibArchive (Python .pyc 
+    files), dlls, Python C extensions and all other data files that are bundled in --onefile mode. 
+ 
+    Easily handled from C or from Python. 
+    &quot;&quot;&quot;</span>
+    <span class="s0"># MAGIC is useful to verify that conversion of Python data types to C structure and back works properly.</span>
+    <span class="s1">MAGIC = </span><span class="s6">b'MEI</span><span class="s3">\014\013\012\013\016</span><span class="s6">'</span>
+    <span class="s1">HDRLEN = </span><span class="s5">0</span>
+    <span class="s1">LEVEL = </span><span class="s5">9</span>
+
+    <span class="s0"># Cookie - holds some information for the bootloader. C struct format definition. '!' at the beginning means network</span>
+    <span class="s0"># byte order. C struct looks like:</span>
+    <span class="s0">#</span>
+    <span class="s0">#   typedef struct _cookie {</span>
+    <span class="s0">#       char magic[8]; /* 'MEI\014\013\012\013\016' */</span>
+    <span class="s0">#       uint32_t len;  /* len of entire package */</span>
+    <span class="s0">#       uint32_t TOC;  /* pos (rel to start) of TableOfContents */</span>
+    <span class="s0">#       int  TOClen;   /* length of TableOfContents */</span>
+    <span class="s0">#       int  pyvers;   /* new in v4 */</span>
+    <span class="s0">#       char pylibname[64];    /* Filename of Python dynamic library. */</span>
+    <span class="s0">#   } COOKIE;</span>
+    <span class="s0">#</span>
+    <span class="s1">_cookie_format = </span><span class="s4">'!8sIIii64s'</span>
+    <span class="s1">_cookie_size = struct.calcsize(_cookie_format)</span>
+
+    <span class="s3">def </span><span class="s1">__init__(self</span><span class="s3">, </span><span class="s1">archive_path=</span><span class="s3">None, </span><span class="s1">start=</span><span class="s5">0</span><span class="s3">, </span><span class="s1">length=</span><span class="s5">0</span><span class="s3">, </span><span class="s1">pylib_name=</span><span class="s4">''</span><span class="s1">):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Constructor. 
+ 
+        archive_path path name of file (create empty CArchive if path is None). 
+        start        is the seekposition within PATH. 
+        len          is the length of the CArchive (if 0, then read till EOF). 
+        pylib_name   name of Python DLL which bootloader will use. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">self.length = length</span>
+        <span class="s1">self._pylib_name = pylib_name</span>
+
+        <span class="s0"># A CArchive created from scratch starts at 0, no leading bootloader.</span>
+        <span class="s1">self.pkg_start = </span><span class="s5">0</span>
+        <span class="s1">super().__init__(archive_path</span><span class="s3">, </span><span class="s1">start)</span>
+
+    <span class="s3">def </span><span class="s1">checkmagic(self):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Verify that self is a valid CArchive. 
+ 
+        Magic signature is at end of the archive. 
+ 
+        This fuction is used by ArchiveViewer.py utility. 
+        &quot;&quot;&quot;</span>
+        <span class="s0"># Magic is at EOF; if we're embedded, we need to figure where that is.</span>
+        <span class="s3">if </span><span class="s1">self.length:</span>
+            <span class="s1">self.lib.seek(self.start + self.length</span><span class="s3">, </span><span class="s5">0</span><span class="s1">)</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s1">self.lib.seek(</span><span class="s5">0</span><span class="s3">, </span><span class="s1">os.SEEK_END)</span>
+        <span class="s1">end_pos = self.lib.tell()</span>
+
+        <span class="s1">SEARCH_CHUNK_SIZE = </span><span class="s5">8192</span>
+        <span class="s1">magic_offset = -</span><span class="s5">1</span>
+        <span class="s3">while </span><span class="s1">end_pos &gt;= len(self.MAGIC):</span>
+            <span class="s1">start_pos = max(end_pos - SEARCH_CHUNK_SIZE</span><span class="s3">, </span><span class="s5">0</span><span class="s1">)</span>
+            <span class="s1">chunk_size = end_pos - start_pos</span>
+            <span class="s0"># Is the remaining chunk large enough to hold the pattern?</span>
+            <span class="s3">if </span><span class="s1">chunk_size &lt; len(self.MAGIC):</span>
+                <span class="s3">break</span>
+            <span class="s0"># Read and scan the chunk</span>
+            <span class="s1">self.lib.seek(start_pos</span><span class="s3">, </span><span class="s1">os.SEEK_SET)</span>
+            <span class="s1">buf = self.lib.read(chunk_size)</span>
+            <span class="s1">pos = buf.rfind(self.MAGIC)</span>
+            <span class="s3">if </span><span class="s1">pos != -</span><span class="s5">1</span><span class="s1">:</span>
+                <span class="s1">magic_offset = start_pos + pos</span>
+                <span class="s3">break</span>
+            <span class="s0"># Adjust search location for next chunk; ensure proper overlap</span>
+            <span class="s1">end_pos = start_pos + len(self.MAGIC) - </span><span class="s5">1</span>
+        <span class="s3">if </span><span class="s1">magic_offset == -</span><span class="s5">1</span><span class="s1">:</span>
+            <span class="s3">raise </span><span class="s1">RuntimeError(</span><span class="s4">&quot;%s is not a valid %s archive file&quot; </span><span class="s1">% (self.path</span><span class="s3">, </span><span class="s1">self.__class__.__name__))</span>
+        <span class="s1">filelen = magic_offset + self._cookie_size</span>
+        <span class="s0"># Read the whole cookie</span>
+        <span class="s1">self.lib.seek(magic_offset</span><span class="s3">, </span><span class="s1">os.SEEK_SET)</span>
+        <span class="s1">buf = self.lib.read(self._cookie_size)</span>
+        <span class="s1">magic</span><span class="s3">, </span><span class="s1">totallen</span><span class="s3">, </span><span class="s1">tocpos</span><span class="s3">, </span><span class="s1">toclen</span><span class="s3">, </span><span class="s1">pyvers</span><span class="s3">, </span><span class="s1">pylib_name = struct.unpack(self._cookie_format</span><span class="s3">, </span><span class="s1">buf)</span>
+        <span class="s3">if </span><span class="s1">magic != self.MAGIC:</span>
+            <span class="s3">raise </span><span class="s1">RuntimeError(</span><span class="s4">&quot;%s is not a valid %s archive file&quot; </span><span class="s1">% (self.path</span><span class="s3">, </span><span class="s1">self.__class__.__name__))</span>
+
+        <span class="s1">self.pkg_start = filelen - totallen</span>
+        <span class="s3">if </span><span class="s1">self.length:</span>
+            <span class="s3">if </span><span class="s1">totallen != self.length </span><span class="s3">or </span><span class="s1">self.pkg_start != self.start:</span>
+                <span class="s3">raise </span><span class="s1">RuntimeError(</span><span class="s4">'Problem with embedded archive in %s' </span><span class="s1">% self.path)</span>
+        <span class="s0"># Verify presence of Python library name.</span>
+        <span class="s3">if not </span><span class="s1">pylib_name:</span>
+            <span class="s3">raise </span><span class="s1">RuntimeError(</span><span class="s4">'Python library filename not defined in archive.'</span><span class="s1">)</span>
+        <span class="s1">self.tocpos</span><span class="s3">, </span><span class="s1">self.toclen = tocpos</span><span class="s3">, </span><span class="s1">toclen</span>
+
+    <span class="s3">def </span><span class="s1">loadtoc(self):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Load the table of contents into memory. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">self.toc = CTOCReader()</span>
+        <span class="s1">self.lib.seek(self.pkg_start + self.tocpos)</span>
+        <span class="s1">tocstr = self.lib.read(self.toclen)</span>
+        <span class="s1">self.toc.frombinary(tocstr)</span>
+
+    <span class="s3">def </span><span class="s1">extract(self</span><span class="s3">, </span><span class="s1">name):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Get the contents of an entry. 
+ 
+        NAME is an entry name OR the index to the TOC. 
+ 
+        Return the tuple (ispkg, contents). 
+        For non-Python resoures, ispkg is meaningless (and 0). 
+        Used by the import mechanism. 
+        &quot;&quot;&quot;</span>
+        <span class="s3">if </span><span class="s1">isinstance(name</span><span class="s3">, </span><span class="s1">str):</span>
+            <span class="s1">ndx = self.toc.find(name)</span>
+            <span class="s3">if </span><span class="s1">ndx == -</span><span class="s5">1</span><span class="s1">:</span>
+                <span class="s3">return None</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s1">ndx = name</span>
+        <span class="s1">dpos</span><span class="s3">, </span><span class="s1">dlen</span><span class="s3">, </span><span class="s1">ulen</span><span class="s3">, </span><span class="s1">flag</span><span class="s3">, </span><span class="s1">typcd</span><span class="s3">, </span><span class="s1">nm = self.toc.get(ndx)</span>
+
+        <span class="s3">with </span><span class="s1">self.lib:</span>
+            <span class="s1">self.lib.seek(self.pkg_start + dpos)</span>
+            <span class="s1">rslt = self.lib.read(dlen)</span>
+
+        <span class="s3">if </span><span class="s1">flag == </span><span class="s5">1</span><span class="s1">:</span>
+            <span class="s3">import </span><span class="s1">zlib</span>
+            <span class="s1">rslt = zlib.decompress(rslt)</span>
+        <span class="s3">if </span><span class="s1">typcd == </span><span class="s4">'M'</span><span class="s1">:</span>
+            <span class="s3">return </span><span class="s5">1</span><span class="s3">, </span><span class="s1">rslt</span>
+
+        <span class="s3">return </span><span class="s1">typcd == </span><span class="s4">'M'</span><span class="s3">, </span><span class="s1">rslt</span>
+
+    <span class="s3">def </span><span class="s1">contents(self):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Return the names of the entries. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">rslt = []</span>
+        <span class="s3">for </span><span class="s1">dpos</span><span class="s3">, </span><span class="s1">dlen</span><span class="s3">, </span><span class="s1">ulen</span><span class="s3">, </span><span class="s1">flag</span><span class="s3">, </span><span class="s1">typcd</span><span class="s3">, </span><span class="s1">nm </span><span class="s3">in </span><span class="s1">self.toc:</span>
+            <span class="s1">rslt.append(nm)</span>
+        <span class="s3">return </span><span class="s1">rslt</span>
+
+    <span class="s3">def </span><span class="s1">openEmbedded(self</span><span class="s3">, </span><span class="s1">name):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Open a CArchive of name NAME embedded within this CArchive. 
+ 
+        This fuction is used by ArchiveViewer.py utility. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">ndx = self.toc.find(name)</span>
+
+        <span class="s3">if </span><span class="s1">ndx == -</span><span class="s5">1</span><span class="s1">:</span>
+            <span class="s3">raise </span><span class="s1">KeyError(</span><span class="s4">&quot;Member '%s' not found in %s&quot; </span><span class="s1">% (name</span><span class="s3">, </span><span class="s1">self.path))</span>
+        <span class="s1">dpos</span><span class="s3">, </span><span class="s1">dlen</span><span class="s3">, </span><span class="s1">ulen</span><span class="s3">, </span><span class="s1">flag</span><span class="s3">, </span><span class="s1">typcd</span><span class="s3">, </span><span class="s1">nm = self.toc.get(ndx)</span>
+
+        <span class="s3">if </span><span class="s1">typcd </span><span class="s3">not in </span><span class="s4">&quot;zZ&quot;</span><span class="s1">:</span>
+            <span class="s3">raise </span><span class="s1">NotAnArchiveError(</span><span class="s4">'%s is not an archive' </span><span class="s1">% name)</span>
+
+        <span class="s3">if </span><span class="s1">flag:</span>
+            <span class="s3">raise </span><span class="s1">ValueError(</span><span class="s4">'Cannot open compressed archive %s in place' </span><span class="s1">% name)</span>
+        <span class="s3">return </span><span class="s1">CArchiveReader(self.path</span><span class="s3">, </span><span class="s1">self.pkg_start + dpos</span><span class="s3">, </span><span class="s1">dlen)</span>
+</pre>
+</body>
+</html>

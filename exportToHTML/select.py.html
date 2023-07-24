@@ -1,0 +1,369 @@
+<html>
+<head>
+<title>select.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #629755; font-style: italic;}
+.s3 { color: #cc7832;}
+.s4 { color: #6a8759;}
+.s5 { color: #6897bb;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+select.py</font>
+</center></td></tr></table>
+<pre><span class="s0"># Copyright (c) 2009-2011 Denis Bilenko. See LICENSE for details.</span>
+<span class="s2">&quot;&quot;&quot; 
+Waiting for I/O completion. 
+&quot;&quot;&quot;</span>
+<span class="s3">from </span><span class="s1">__future__ </span><span class="s3">import </span><span class="s1">absolute_import</span><span class="s3">, </span><span class="s1">division</span><span class="s3">, </span><span class="s1">print_function</span>
+
+<span class="s3">import </span><span class="s1">sys</span>
+<span class="s3">import </span><span class="s1">select </span><span class="s3">as </span><span class="s1">__select__</span>
+
+<span class="s3">from </span><span class="s1">gevent.event </span><span class="s3">import </span><span class="s1">Event</span>
+<span class="s3">from </span><span class="s1">gevent.hub </span><span class="s3">import </span><span class="s1">_get_hub_noargs </span><span class="s3">as </span><span class="s1">get_hub</span>
+<span class="s3">from </span><span class="s1">gevent.hub </span><span class="s3">import </span><span class="s1">sleep </span><span class="s3">as </span><span class="s1">_g_sleep</span>
+<span class="s3">from </span><span class="s1">gevent._compat </span><span class="s3">import </span><span class="s1">integer_types</span>
+<span class="s3">from </span><span class="s1">gevent._compat </span><span class="s3">import </span><span class="s1">iteritems</span>
+<span class="s3">from </span><span class="s1">gevent._util </span><span class="s3">import </span><span class="s1">copy_globals</span>
+<span class="s3">from </span><span class="s1">gevent._util </span><span class="s3">import </span><span class="s1">_NONE</span>
+
+<span class="s3">from </span><span class="s1">errno </span><span class="s3">import </span><span class="s1">EINTR</span>
+<span class="s1">_real_original_select = __select__.select</span>
+<span class="s3">if </span><span class="s1">sys.platform.startswith(</span><span class="s4">'win32'</span><span class="s1">):</span>
+    <span class="s3">def </span><span class="s1">_original_select(r</span><span class="s3">, </span><span class="s1">w</span><span class="s3">, </span><span class="s1">x</span><span class="s3">, </span><span class="s1">t):</span>
+        <span class="s0"># windows can't handle three empty lists, but we've always</span>
+        <span class="s0"># accepted that</span>
+        <span class="s3">if not </span><span class="s1">r </span><span class="s3">and not </span><span class="s1">w </span><span class="s3">and not </span><span class="s1">x:</span>
+            <span class="s3">return </span><span class="s1">(()</span><span class="s3">, </span><span class="s1">()</span><span class="s3">, </span><span class="s1">())</span>
+        <span class="s3">return </span><span class="s1">_real_original_select(r</span><span class="s3">, </span><span class="s1">w</span><span class="s3">, </span><span class="s1">x</span><span class="s3">, </span><span class="s1">t)</span>
+<span class="s3">else</span><span class="s1">:</span>
+    <span class="s1">_original_select = _real_original_select</span>
+
+<span class="s0"># These will be replaced by copy_globals if they are defined by the</span>
+<span class="s0"># platform. They're not defined on Windows, but we still provide</span>
+<span class="s0"># poll() there. We only pay attention to POLLIN and POLLOUT.</span>
+<span class="s1">POLLIN = </span><span class="s5">1</span>
+<span class="s1">POLLPRI = </span><span class="s5">2</span>
+<span class="s1">POLLOUT = </span><span class="s5">4</span>
+<span class="s1">POLLERR = </span><span class="s5">8</span>
+<span class="s1">POLLHUP = </span><span class="s5">16</span>
+<span class="s1">POLLNVAL = </span><span class="s5">32</span>
+
+<span class="s1">POLLRDNORM = </span><span class="s5">64</span>
+<span class="s1">POLLRDBAND = </span><span class="s5">128</span>
+<span class="s1">POLLWRNORM = </span><span class="s5">4</span>
+<span class="s1">POLLWRBAND = </span><span class="s5">256</span>
+
+<span class="s1">__implements__ = [</span>
+    <span class="s4">'select'</span><span class="s3">,</span>
+<span class="s1">]</span>
+<span class="s3">if </span><span class="s1">hasattr(__select__</span><span class="s3">, </span><span class="s4">'poll'</span><span class="s1">):</span>
+    <span class="s1">__implements__.append(</span><span class="s4">'poll'</span><span class="s1">)</span>
+<span class="s3">else</span><span class="s1">:</span>
+    <span class="s1">__extra__ = [</span>
+        <span class="s4">'poll'</span><span class="s3">,</span>
+    <span class="s1">]</span>
+
+<span class="s1">__all__ = [</span><span class="s4">'error'</span><span class="s1">] + __implements__</span>
+
+<span class="s1">error = __select__.error</span>
+
+<span class="s1">__imports__ = copy_globals(__select__</span><span class="s3">, </span><span class="s1">globals()</span><span class="s3">,</span>
+                           <span class="s1">names_to_ignore=__all__</span><span class="s3">,</span>
+                           <span class="s1">dunder_names_to_keep=())</span>
+
+<span class="s1">_EV_READ = </span><span class="s5">1</span>
+<span class="s1">_EV_WRITE = </span><span class="s5">2</span>
+
+<span class="s3">def </span><span class="s1">get_fileno(obj):</span>
+    <span class="s3">try</span><span class="s1">:</span>
+        <span class="s1">fileno_f = obj.fileno</span>
+    <span class="s3">except </span><span class="s1">AttributeError:</span>
+        <span class="s3">if not </span><span class="s1">isinstance(obj</span><span class="s3">, </span><span class="s1">integer_types):</span>
+            <span class="s3">raise </span><span class="s1">TypeError(</span><span class="s4">'argument must be an int, or have a fileno() method: %r' </span><span class="s1">% (obj</span><span class="s3">,</span><span class="s1">))</span>
+        <span class="s3">return </span><span class="s1">obj</span>
+    <span class="s3">else</span><span class="s1">:</span>
+        <span class="s3">return </span><span class="s1">fileno_f()</span>
+
+
+<span class="s3">class </span><span class="s1">SelectResult(object):</span>
+    <span class="s1">__slots__ = ()</span>
+
+    <span class="s1">@staticmethod</span>
+    <span class="s3">def </span><span class="s1">_make_callback(ready_collection</span><span class="s3">, </span><span class="s1">event</span><span class="s3">, </span><span class="s1">mask):</span>
+        <span class="s3">def </span><span class="s1">cb(fd</span><span class="s3">, </span><span class="s1">watcher):</span>
+            <span class="s1">ready_collection.append(fd)</span>
+            <span class="s1">watcher.close()</span>
+            <span class="s1">event.set()</span>
+        <span class="s1">cb.mask = mask</span>
+        <span class="s3">return </span><span class="s1">cb</span>
+
+    <span class="s1">@classmethod</span>
+    <span class="s3">def </span><span class="s1">_make_watchers(cls</span><span class="s3">, </span><span class="s1">watchers</span><span class="s3">, </span><span class="s1">*fd_cb):</span>
+        <span class="s1">loop = get_hub().loop</span>
+        <span class="s1">io = loop.io</span>
+        <span class="s1">MAXPRI = loop.MAXPRI</span>
+
+        <span class="s3">for </span><span class="s1">fdlist</span><span class="s3">, </span><span class="s1">callback </span><span class="s3">in </span><span class="s1">fd_cb:</span>
+            <span class="s3">try</span><span class="s1">:</span>
+                <span class="s3">for </span><span class="s1">fd </span><span class="s3">in </span><span class="s1">fdlist:</span>
+                    <span class="s1">watcher = io(get_fileno(fd)</span><span class="s3">, </span><span class="s1">callback.mask)</span>
+                    <span class="s1">watcher.priority = MAXPRI</span>
+                    <span class="s1">watchers.append(watcher)</span>
+                    <span class="s1">watcher.start(callback</span><span class="s3">, </span><span class="s1">fd</span><span class="s3">, </span><span class="s1">watcher)</span>
+            <span class="s3">except </span><span class="s1">IOError </span><span class="s3">as </span><span class="s1">ex:</span>
+                <span class="s3">raise </span><span class="s1">error(*ex.args)</span>
+
+    <span class="s1">@staticmethod</span>
+    <span class="s3">def </span><span class="s1">_closeall(watchers):</span>
+        <span class="s3">for </span><span class="s1">watcher </span><span class="s3">in </span><span class="s1">watchers:</span>
+            <span class="s1">watcher.stop()</span>
+            <span class="s1">watcher.close()</span>
+        <span class="s3">del </span><span class="s1">watchers[:]</span>
+
+    <span class="s3">def </span><span class="s1">select(self</span><span class="s3">, </span><span class="s1">rlist</span><span class="s3">, </span><span class="s1">wlist</span><span class="s3">, </span><span class="s1">timeout):</span>
+        <span class="s1">watchers = []</span>
+        <span class="s0"># read and write are the collected ready objects, accumulated</span>
+        <span class="s0"># by the callback. Note that we could get spurious callbacks</span>
+        <span class="s0"># if the socket is closed while we're blocked. We can't easily</span>
+        <span class="s0"># detect that (libev filters the events passed so we can't</span>
+        <span class="s0"># pass arbitrary events). After an iteration of polling for</span>
+        <span class="s0"># IO, libev will invoke all the pending IO watchers, and then</span>
+        <span class="s0"># any newly added (fed) events, and then we will invoke added</span>
+        <span class="s0"># callbacks. With libev 4.27+ and EV_VERIFY, it's critical to</span>
+        <span class="s0"># close our watcher immediately once we get an event. That</span>
+        <span class="s0"># could be the close event (coming just before the actual</span>
+        <span class="s0"># close happens), and once the FD is closed, libev will abort</span>
+        <span class="s0"># the process if we stop the watcher.</span>
+        <span class="s1">read = []</span>
+        <span class="s1">write = []</span>
+        <span class="s1">event = Event()</span>
+        <span class="s1">add_read = self._make_callback(read</span><span class="s3">, </span><span class="s1">event</span><span class="s3">, </span><span class="s1">_EV_READ)</span>
+        <span class="s1">add_write = self._make_callback(write</span><span class="s3">, </span><span class="s1">event</span><span class="s3">, </span><span class="s1">_EV_WRITE)</span>
+
+        <span class="s3">try</span><span class="s1">:</span>
+            <span class="s1">self._make_watchers(watchers</span><span class="s3">,</span>
+                                <span class="s1">(rlist</span><span class="s3">, </span><span class="s1">add_read)</span><span class="s3">,</span>
+                                <span class="s1">(wlist</span><span class="s3">, </span><span class="s1">add_write))</span>
+            <span class="s1">event.wait(timeout=timeout)</span>
+            <span class="s3">return </span><span class="s1">read</span><span class="s3">, </span><span class="s1">write</span><span class="s3">, </span><span class="s1">[]</span>
+        <span class="s3">finally</span><span class="s1">:</span>
+            <span class="s1">self._closeall(watchers)</span>
+
+
+<span class="s3">def </span><span class="s1">select(rlist</span><span class="s3">, </span><span class="s1">wlist</span><span class="s3">, </span><span class="s1">xlist</span><span class="s3">, </span><span class="s1">timeout=</span><span class="s3">None</span><span class="s1">): </span><span class="s0"># pylint:disable=unused-argument</span>
+    <span class="s2">&quot;&quot;&quot;An implementation of :meth:`select.select` that blocks only the current greenlet. 
+ 
+    .. caution:: *xlist* is ignored. 
+ 
+    .. versionchanged:: 1.2a1 
+       Raise a :exc:`ValueError` if timeout is negative. This matches Python 3's 
+       behaviour (Python 2 would raise a ``select.error``). Previously gevent had 
+       undefined behaviour. 
+    .. versionchanged:: 1.2a1 
+       Raise an exception if any of the file descriptors are invalid. 
+    &quot;&quot;&quot;</span>
+    <span class="s3">if </span><span class="s1">timeout </span><span class="s3">is not None and </span><span class="s1">timeout &lt; </span><span class="s5">0</span><span class="s1">:</span>
+        <span class="s0"># Raise an error like the real implementation; which error</span>
+        <span class="s0"># depends on the version. Python 3, where select.error is OSError,</span>
+        <span class="s0"># raises a ValueError (which makes sense). Older pythons raise</span>
+        <span class="s0"># the error from the select syscall...but we don't actually get there.</span>
+        <span class="s0"># We choose to just raise the ValueError as it makes more sense and is</span>
+        <span class="s0"># forward compatible</span>
+        <span class="s3">raise </span><span class="s1">ValueError(</span><span class="s4">&quot;timeout must be non-negative&quot;</span><span class="s1">)</span>
+
+    <span class="s0"># First, do a poll with the original select system call. This is</span>
+    <span class="s0"># the most efficient way to check to see if any of the file</span>
+    <span class="s0"># descriptors have previously been closed and raise the correct</span>
+    <span class="s0"># corresponding exception. (Because libev tends to just return</span>
+    <span class="s0"># them as ready, or, if built with EV_VERIFY &gt;= 2 and libev &gt;=</span>
+    <span class="s0"># 4.27, crash the process. And libuv also tends to crash the</span>
+    <span class="s0"># process.)</span>
+    <span class="s0">#</span>
+    <span class="s0"># We accept the *xlist* here even though we can't</span>
+    <span class="s0"># below because this is all about error handling.</span>
+    <span class="s1">sel_results = (()</span><span class="s3">, </span><span class="s1">()</span><span class="s3">, </span><span class="s1">())</span>
+    <span class="s3">try</span><span class="s1">:</span>
+        <span class="s1">sel_results = _original_select(rlist</span><span class="s3">, </span><span class="s1">wlist</span><span class="s3">, </span><span class="s1">xlist</span><span class="s3">, </span><span class="s5">0</span><span class="s1">)</span>
+    <span class="s3">except </span><span class="s1">error </span><span class="s3">as </span><span class="s1">e:</span>
+        <span class="s1">enumber = getattr(e</span><span class="s3">, </span><span class="s4">'errno'</span><span class="s3">, None</span><span class="s1">) </span><span class="s3">or </span><span class="s1">e.args[</span><span class="s5">0</span><span class="s1">]</span>
+        <span class="s3">if </span><span class="s1">enumber != EINTR:</span>
+            <span class="s0"># Ignore interrupted syscalls</span>
+            <span class="s3">raise</span>
+
+    <span class="s3">if </span><span class="s1">sel_results[</span><span class="s5">0</span><span class="s1">] </span><span class="s3">or </span><span class="s1">sel_results[</span><span class="s5">1</span><span class="s1">] </span><span class="s3">or </span><span class="s1">sel_results[</span><span class="s5">2</span><span class="s1">] </span><span class="s3">or </span><span class="s1">(timeout </span><span class="s3">is not None and </span><span class="s1">timeout == </span><span class="s5">0</span><span class="s1">):</span>
+        <span class="s0"># If we actually had stuff ready, go ahead and return it. No need</span>
+        <span class="s0"># to go through the trouble of doing our own stuff.</span>
+
+        <span class="s0"># Likewise, if the timeout is 0, we already did a 0 timeout</span>
+        <span class="s0"># select and we don't need to do it again. Note that in libuv,</span>
+        <span class="s0"># zero duration timers may be called immediately, without</span>
+        <span class="s0"># cycling the event loop at all. 2.7/test_telnetlib.py &quot;hangs&quot;</span>
+        <span class="s0"># calling zero-duration timers if we go to the loop here.</span>
+
+        <span class="s0"># However, because this is typically a place where scheduling switches</span>
+        <span class="s0"># can occur, we need to make sure that's still the case; otherwise a single</span>
+        <span class="s0"># consumer could monopolize the thread. (shows up in test_ftplib.)</span>
+        <span class="s1">_g_sleep()</span>
+        <span class="s3">return </span><span class="s1">sel_results</span>
+
+    <span class="s1">result = SelectResult()</span>
+    <span class="s3">return </span><span class="s1">result.select(rlist</span><span class="s3">, </span><span class="s1">wlist</span><span class="s3">, </span><span class="s1">timeout)</span>
+
+
+
+<span class="s3">class </span><span class="s1">PollResult(object):</span>
+    <span class="s1">__slots__ = (</span><span class="s4">'events'</span><span class="s3">, </span><span class="s4">'event'</span><span class="s1">)</span>
+
+    <span class="s3">def </span><span class="s1">__init__(self):</span>
+        <span class="s1">self.events = set()</span>
+        <span class="s1">self.event = Event()</span>
+
+    <span class="s3">def </span><span class="s1">add_event(self</span><span class="s3">, </span><span class="s1">events</span><span class="s3">, </span><span class="s1">fd):</span>
+        <span class="s3">if </span><span class="s1">events &lt; </span><span class="s5">0</span><span class="s1">:</span>
+            <span class="s1">result_flags = POLLNVAL</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s1">result_flags = </span><span class="s5">0</span>
+            <span class="s3">if </span><span class="s1">events &amp; _EV_READ:</span>
+                <span class="s1">result_flags = POLLIN</span>
+            <span class="s3">if </span><span class="s1">events &amp; _EV_WRITE:</span>
+                <span class="s1">result_flags |= POLLOUT</span>
+
+        <span class="s1">self.events.add((fd</span><span class="s3">, </span><span class="s1">result_flags))</span>
+        <span class="s1">self.event.set()</span>
+
+<span class="s3">class </span><span class="s1">poll(object):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    An implementation of :class:`select.poll` that blocks only the current greenlet. 
+ 
+    .. caution:: ``POLLPRI`` data is not supported. 
+ 
+    .. versionadded:: 1.1b1 
+    .. versionchanged:: 1.5 
+       This is now always defined, regardless of whether the standard library 
+       defines :func:`select.poll` or not. Note that it may have different performance 
+       characteristics. 
+    &quot;&quot;&quot;</span>
+    <span class="s3">def </span><span class="s1">__init__(self):</span>
+        <span class="s0"># {int -&gt; flags}</span>
+        <span class="s0"># We can't keep watcher objects in here because people commonly</span>
+        <span class="s0"># just drop the poll object when they're done, without calling</span>
+        <span class="s0"># unregister(). dnspython does this.</span>
+        <span class="s1">self.fds = {}</span>
+        <span class="s1">self.loop = get_hub().loop</span>
+
+    <span class="s3">def </span><span class="s1">register(self</span><span class="s3">, </span><span class="s1">fd</span><span class="s3">, </span><span class="s1">eventmask=_NONE):</span>
+        <span class="s3">if </span><span class="s1">eventmask </span><span class="s3">is </span><span class="s1">_NONE:</span>
+            <span class="s1">flags = _EV_READ | _EV_WRITE</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s1">flags = </span><span class="s5">0</span>
+            <span class="s3">if </span><span class="s1">eventmask &amp; POLLIN:</span>
+                <span class="s1">flags = _EV_READ</span>
+            <span class="s3">if </span><span class="s1">eventmask &amp; POLLOUT:</span>
+                <span class="s1">flags |= _EV_WRITE</span>
+            <span class="s0"># If they ask for POLLPRI, we can't support</span>
+            <span class="s0"># that. Should we raise an error?</span>
+
+        <span class="s1">fileno = get_fileno(fd)</span>
+        <span class="s1">self.fds[fileno] = flags</span>
+
+    <span class="s3">def </span><span class="s1">modify(self</span><span class="s3">, </span><span class="s1">fd</span><span class="s3">, </span><span class="s1">eventmask):</span>
+        <span class="s1">self.register(fd</span><span class="s3">, </span><span class="s1">eventmask)</span>
+
+    <span class="s3">def </span><span class="s1">_get_started_watchers(self</span><span class="s3">, </span><span class="s1">watcher_cb):</span>
+        <span class="s1">watchers = []</span>
+        <span class="s1">io = self.loop.io</span>
+        <span class="s1">MAXPRI = self.loop.MAXPRI</span>
+
+        <span class="s3">try</span><span class="s1">:</span>
+            <span class="s3">for </span><span class="s1">fd</span><span class="s3">, </span><span class="s1">flags </span><span class="s3">in </span><span class="s1">iteritems(self.fds):</span>
+                <span class="s1">watcher = io(fd</span><span class="s3">, </span><span class="s1">flags)</span>
+                <span class="s1">watchers.append(watcher)</span>
+                <span class="s1">watcher.priority = MAXPRI</span>
+                <span class="s1">watcher.start(watcher_cb</span><span class="s3">, </span><span class="s1">fd</span><span class="s3">, </span><span class="s1">pass_events=</span><span class="s3">True</span><span class="s1">)</span>
+        <span class="s3">except</span><span class="s1">:</span>
+            <span class="s3">for </span><span class="s1">awatcher </span><span class="s3">in </span><span class="s1">watchers:</span>
+                <span class="s1">awatcher.stop()</span>
+                <span class="s1">awatcher.close()</span>
+            <span class="s3">raise</span>
+        <span class="s3">return </span><span class="s1">watchers</span>
+
+
+    <span class="s3">def </span><span class="s1">poll(self</span><span class="s3">, </span><span class="s1">timeout=</span><span class="s3">None</span><span class="s1">):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        poll the registered fds. 
+ 
+        .. versionchanged:: 1.2a1 
+           File descriptors that are closed are reported with POLLNVAL. 
+ 
+        .. versionchanged:: 1.3a2 
+           Under libuv, interpret *timeout* values less than 0 the same as *None*, 
+           i.e., block. This was always the case with libev. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">result = PollResult()</span>
+        <span class="s1">watchers = self._get_started_watchers(result.add_event)</span>
+        <span class="s3">try</span><span class="s1">:</span>
+            <span class="s3">if </span><span class="s1">timeout </span><span class="s3">is not None</span><span class="s1">:</span>
+                <span class="s3">if </span><span class="s1">timeout &lt; </span><span class="s5">0</span><span class="s1">:</span>
+                    <span class="s0"># The docs for python say that an omitted timeout,</span>
+                    <span class="s0"># a negative timeout and a timeout of None are all</span>
+                    <span class="s0"># supposed to block forever. Many, but not all</span>
+                    <span class="s0"># OS's accept any negative number to mean that. Some</span>
+                    <span class="s0"># OS's raise errors for anything negative but not -1.</span>
+                    <span class="s0"># Python 3.7 changes to always pass exactly -1 in that</span>
+                    <span class="s0"># case from selectors.</span>
+
+                    <span class="s0"># Our Timeout class currently does not have a defined behaviour</span>
+                    <span class="s0"># for negative values. On libuv, it uses a check watcher and effectively</span>
+                    <span class="s0"># doesn't block. On libev, it seems to block. In either case, we</span>
+                    <span class="s0"># *want* to block, so turn this into the sure fire block request.</span>
+                    <span class="s1">timeout = </span><span class="s3">None</span>
+                <span class="s3">elif </span><span class="s1">timeout:</span>
+                    <span class="s0"># The docs for poll.poll say timeout is in</span>
+                    <span class="s0"># milliseconds. Our result objects work in</span>
+                    <span class="s0"># seconds, so this should be *=, shouldn't it?</span>
+                    <span class="s1">timeout /= </span><span class="s5">1000.0</span>
+            <span class="s1">result.event.wait(timeout=timeout)</span>
+            <span class="s3">return </span><span class="s1">list(result.events)</span>
+        <span class="s3">finally</span><span class="s1">:</span>
+            <span class="s3">for </span><span class="s1">awatcher </span><span class="s3">in </span><span class="s1">watchers:</span>
+                <span class="s1">awatcher.stop()</span>
+                <span class="s1">awatcher.close()</span>
+
+    <span class="s3">def </span><span class="s1">unregister(self</span><span class="s3">, </span><span class="s1">fd):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Unregister the *fd*. 
+ 
+        .. versionchanged:: 1.2a1 
+           Raise a `KeyError` if *fd* was not registered, like the standard 
+           library. Previously gevent did nothing. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">fileno = get_fileno(fd)</span>
+        <span class="s3">del </span><span class="s1">self.fds[fileno]</span>
+
+
+<span class="s3">def </span><span class="s1">_gevent_do_monkey_patch(patch_request):</span>
+    <span class="s1">aggressive = patch_request.patch_kwargs[</span><span class="s4">'aggressive'</span><span class="s1">]</span>
+
+    <span class="s1">patch_request.default_patch_items()</span>
+
+    <span class="s3">if </span><span class="s1">aggressive:</span>
+        <span class="s0"># since these are blocking we're removing them here. This makes some other</span>
+        <span class="s0"># modules (e.g. asyncore)  non-blocking, as they use select that we provide</span>
+        <span class="s0"># when none of these are available.</span>
+        <span class="s1">patch_request.remove_item(</span>
+            <span class="s4">'epoll'</span><span class="s3">,</span>
+            <span class="s4">'kqueue'</span><span class="s3">,</span>
+            <span class="s4">'kevent'</span><span class="s3">,</span>
+            <span class="s4">'devpoll'</span><span class="s3">,</span>
+        <span class="s1">)</span>
+</pre>
+</body>
+</html>

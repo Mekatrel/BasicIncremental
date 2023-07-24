@@ -1,0 +1,482 @@
+<html>
+<head>
+<title>splash.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #cc7832;}
+.s3 { color: #6a8759;}
+.s4 { color: #629755; font-style: italic;}
+.s5 { color: #6897bb;}
+.s6 { color: #a5c261;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+splash.py</font>
+</center></td></tr></table>
+<pre><span class="s0"># -----------------------------------------------------------------------------</span>
+<span class="s0"># Copyright (c) 2005-2021, PyInstaller Development Team.</span>
+<span class="s0">#</span>
+<span class="s0"># Distributed under the terms of the GNU General Public License (version 2</span>
+<span class="s0"># or later) with exception for distributing the bootloader.</span>
+<span class="s0">#</span>
+<span class="s0"># The full license is in the file COPYING.txt, distributed with this software.</span>
+<span class="s0">#</span>
+<span class="s0"># SPDX-License-Identifier: (GPL-2.0-or-later WITH Bootloader-exception)</span>
+<span class="s0"># -----------------------------------------------------------------------------</span>
+<span class="s2">import </span><span class="s1">io</span>
+<span class="s2">import </span><span class="s1">os</span>
+<span class="s2">import </span><span class="s1">re</span>
+<span class="s2">import </span><span class="s1">struct</span>
+
+<span class="s2">from </span><span class="s1">PyInstaller </span><span class="s2">import </span><span class="s1">log </span><span class="s2">as </span><span class="s1">logging</span>
+<span class="s2">from </span><span class="s1">PyInstaller.archive.writers </span><span class="s2">import </span><span class="s1">SplashWriter</span>
+<span class="s2">from </span><span class="s1">PyInstaller.building </span><span class="s2">import </span><span class="s1">splash_templates</span>
+<span class="s2">from </span><span class="s1">PyInstaller.building.datastruct </span><span class="s2">import </span><span class="s1">TOC</span><span class="s2">, </span><span class="s1">Target</span>
+<span class="s2">from </span><span class="s1">PyInstaller.building.utils </span><span class="s2">import </span><span class="s1">_check_guts_eq</span><span class="s2">, </span><span class="s1">_check_guts_toc</span><span class="s2">, </span><span class="s1">misc</span>
+<span class="s2">from </span><span class="s1">PyInstaller.compat </span><span class="s2">import </span><span class="s1">is_darwin</span>
+<span class="s2">from </span><span class="s1">PyInstaller.utils.hooks </span><span class="s2">import </span><span class="s1">exec_statement</span>
+<span class="s2">from </span><span class="s1">PyInstaller.utils.hooks.tcl_tk </span><span class="s2">import </span><span class="s1">(TK_ROOTNAME</span><span class="s2">, </span><span class="s1">collect_tcl_tk_files</span><span class="s2">, </span><span class="s1">find_tcl_tk_shared_libs)</span>
+
+<span class="s2">try</span><span class="s1">:</span>
+    <span class="s2">from </span><span class="s1">PIL </span><span class="s2">import </span><span class="s1">Image </span><span class="s2">as </span><span class="s1">PILImage</span>
+<span class="s2">except </span><span class="s1">ImportError:</span>
+    <span class="s1">PILImage = </span><span class="s2">None</span>
+
+<span class="s1">logger = logging.getLogger(__name__)</span>
+
+<span class="s0"># These requirement files are checked against the current splash screen script. If you wish to modify the splash screen</span>
+<span class="s0"># and run into tcl errors/bad behavior, this is a good place to start and add components your implementation of the</span>
+<span class="s0"># splash screen might use.</span>
+<span class="s1">splash_requirements = [</span>
+    <span class="s0"># prepended tcl/tk binaries</span>
+    <span class="s1">os.path.join(TK_ROOTNAME</span><span class="s2">, </span><span class="s3">&quot;license.terms&quot;</span><span class="s1">)</span><span class="s2">,</span>
+    <span class="s1">os.path.join(TK_ROOTNAME</span><span class="s2">, </span><span class="s3">&quot;text.tcl&quot;</span><span class="s1">)</span><span class="s2">,</span>
+    <span class="s1">os.path.join(TK_ROOTNAME</span><span class="s2">, </span><span class="s3">&quot;tk.tcl&quot;</span><span class="s1">)</span><span class="s2">,</span>
+    <span class="s0"># Used for customizable font</span>
+    <span class="s1">os.path.join(TK_ROOTNAME</span><span class="s2">, </span><span class="s3">&quot;ttk&quot;</span><span class="s2">, </span><span class="s3">&quot;ttk.tcl&quot;</span><span class="s1">)</span><span class="s2">,</span>
+    <span class="s1">os.path.join(TK_ROOTNAME</span><span class="s2">, </span><span class="s3">&quot;ttk&quot;</span><span class="s2">, </span><span class="s3">&quot;fonts.tcl&quot;</span><span class="s1">)</span><span class="s2">,</span>
+    <span class="s1">os.path.join(TK_ROOTNAME</span><span class="s2">, </span><span class="s3">&quot;ttk&quot;</span><span class="s2">, </span><span class="s3">&quot;cursors.tcl&quot;</span><span class="s1">)</span><span class="s2">,</span>
+    <span class="s1">os.path.join(TK_ROOTNAME</span><span class="s2">, </span><span class="s3">&quot;ttk&quot;</span><span class="s2">, </span><span class="s3">&quot;utils.tcl&quot;</span><span class="s1">)</span><span class="s2">,</span>
+<span class="s1">]</span>
+
+
+<span class="s2">class </span><span class="s1">Splash(Target):</span>
+    <span class="s4">&quot;&quot;&quot; 
+    Bundles the required resources for the splash screen into a file, which will be included in the CArchive. 
+ 
+    A Splash has two outputs, one is itself and one is sored in splash.binaries. Both need to be passed to other 
+    build targets in order to enable the splash screen. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">typ = </span><span class="s3">'SPLASH'</span>
+
+    <span class="s2">def </span><span class="s1">__init__(self</span><span class="s2">, </span><span class="s1">image_file</span><span class="s2">, </span><span class="s1">binaries</span><span class="s2">, </span><span class="s1">datas</span><span class="s2">, </span><span class="s1">**kwargs):</span>
+        <span class="s4">&quot;&quot;&quot; 
+        :param str image_file: 
+            A path-like object to the image to be used. Only the PNG file format is supported. 
+ 
+            .. note:: If a different file format is supplied and PIL (Pillow) is installed, the file will be converted 
+                automatically. 
+ 
+            .. note:: *Windows*: Due to the implementation, the color Magenta/ RGB(255, 0, 255) must not be used in the 
+                image or text. 
+ 
+            .. note:: If PIL (Pillow) is installed and the image is bigger than max_img_size, the image will be resized 
+                to fit into the specified area. 
+        :param TOC binaries: 
+            The TOC of binaries the Analysis build target found. This TOC includes all extensionmodules and their 
+            dependencies. This is required to figure out, if the users program uses tkinter. 
+        :param TOC datas: 
+            The TOC of data the Analysis build target found. This TOC includes all data-file dependencies of the 
+            modules. This is required to check if all splash screen requirements can be bundled. 
+ 
+        :keyword text_pos: 
+            An optional 2x integer tuple that represents the origin of the text on the splash screen image. The 
+            origin of the text is its lower left corner. A unit in the respective coordinate system is a pixel of the 
+            image, its origin lies in the top left corner of the image. This parameter also acts like a switch for 
+            the text feature. If omitted, no text will be displayed on the splash screen. This text will be used to 
+            show textual progress in onefile mode. 
+        :type text_pos: Tuple[int, int] 
+        :keyword text_size: 
+            The desired size of the font. If the size argument is a positive number, it is interpreted as a size in 
+            points. If size is a negative number, its absolute value is interpreted as a size in pixels. Default: ``12`` 
+        :type text_size: int 
+        :keyword text_font: 
+            An optional name of a font for the text. This font must be installed on the user system, otherwise the 
+            system default font is used. If this parameter is omitted, the default font is also used. 
+        :keyword text_color: 
+            An optional color for the text. Either RGB HTML notation or color names are supported. Default: black 
+            (Windows: Due to a implementation issue the color magenta/ rgb(255, 0, 255) is forbidden) 
+        :type text_color: str 
+        :keyword text_default: 
+            The default text which will be displayed before the extraction starts. Default: &quot;Initializing&quot; 
+        :type text_default: str 
+        :keyword full_tk: 
+            By default Splash bundles only the necessary files for the splash screen (some tk components). This 
+            options enables adding full tk and making it a requirement, meaning all tk files will be unpacked before 
+            the splash screen can be started. This is useful during development of the splash screen script. 
+            Default: ``False`` 
+        :type full_tk: bool 
+        :keyword minify_script: 
+            The splash screen is created by executing an Tcl/Tk script. This option enables minimizing the script, 
+            meaning removing all non essential parts from the script. Default: True 
+        :keyword rundir: 
+            The folder name in which tcl/tk will be extracted at runtime. There should be no matching folder in your 
+            application to avoid conflicts. Default:  ``__splash`` 
+        :type rundir: str 
+        :keyword name: 
+            An optional alternative filename for the .res file. If not specified, a name is generated. 
+        :type name: str 
+        :keyword script_name: 
+            An optional alternative filename for the Tcl script, that will be generated. If not specified, a name is 
+            generated. 
+        :type script_name: str 
+        :keyword max_img_size: 
+            Maximum size of the splash screen image as a tuple. If the supplied image exceeds this limit, it will be 
+            resized to fit the maximum width (to keep the original aspect ratio). This option can be disabled by 
+            setting it to None. Default: (760, 480) 
+        :type max_img_size: Tuple[int, int] 
+        &quot;&quot;&quot;</span>
+        <span class="s2">from </span><span class="s1">..config </span><span class="s2">import </span><span class="s1">CONF</span>
+        <span class="s1">Target.__init__(self)</span>
+
+        <span class="s0"># Splash screen is not supported on macOS. It operates in a secondary thread and macOS disallows UI operations</span>
+        <span class="s0"># in any thread other than main.</span>
+        <span class="s2">if </span><span class="s1">is_darwin:</span>
+            <span class="s2">raise </span><span class="s1">SystemExit(</span><span class="s3">&quot;Splash screen is not supported on macOS.&quot;</span><span class="s1">)</span>
+
+        <span class="s0"># Make image path relative to .spec file</span>
+        <span class="s2">if not </span><span class="s1">os.path.isabs(image_file):</span>
+            <span class="s1">image_file = os.path.join(CONF[</span><span class="s3">'specpath'</span><span class="s1">]</span><span class="s2">, </span><span class="s1">image_file)</span>
+        <span class="s1">image_file = os.path.normpath(image_file)</span>
+        <span class="s2">if not </span><span class="s1">os.path.exists(image_file):</span>
+            <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s3">&quot;Image file '%s' not found&quot; </span><span class="s1">% image_file)</span>
+
+        <span class="s0"># Copy all arguments</span>
+        <span class="s1">self.image_file = image_file</span>
+        <span class="s1">self.full_tk = kwargs.get(</span><span class="s3">&quot;full_tk&quot;</span><span class="s2">, False</span><span class="s1">)</span>
+        <span class="s1">self.name = kwargs.get(</span><span class="s3">&quot;name&quot;</span><span class="s2">, None</span><span class="s1">)</span>
+        <span class="s1">self.script_name = kwargs.get(</span><span class="s3">&quot;script_name&quot;</span><span class="s2">, None</span><span class="s1">)</span>
+        <span class="s1">self.minify_script = kwargs.get(</span><span class="s3">&quot;minify_script&quot;</span><span class="s2">, True</span><span class="s1">)</span>
+        <span class="s1">self.rundir = kwargs.get(</span><span class="s3">&quot;rundir&quot;</span><span class="s2">, None</span><span class="s1">)</span>
+        <span class="s1">self.max_img_size = kwargs.get(</span><span class="s3">&quot;max_img_size&quot;</span><span class="s2">, </span><span class="s1">(</span><span class="s5">760</span><span class="s2">, </span><span class="s5">480</span><span class="s1">))</span>
+
+        <span class="s0"># text options</span>
+        <span class="s1">self.text_pos = kwargs.get(</span><span class="s3">&quot;text_pos&quot;</span><span class="s2">, None</span><span class="s1">)</span>
+        <span class="s1">self.text_size = kwargs.get(</span><span class="s3">&quot;text_size&quot;</span><span class="s2">, </span><span class="s5">12</span><span class="s1">)</span>
+        <span class="s1">self.text_font = kwargs.get(</span><span class="s3">&quot;text_font&quot;</span><span class="s2">, </span><span class="s3">&quot;TkDefaultFont&quot;</span><span class="s1">)</span>
+        <span class="s1">self.text_color = kwargs.get(</span><span class="s3">&quot;text_color&quot;</span><span class="s2">, </span><span class="s3">&quot;black&quot;</span><span class="s1">)</span>
+        <span class="s1">self.text_default = kwargs.get(</span><span class="s3">&quot;text_default&quot;</span><span class="s2">, </span><span class="s3">&quot;Initializing&quot;</span><span class="s1">)</span>
+
+        <span class="s0"># Save the generated file separately so that it is not necessary to generate the data again and again</span>
+        <span class="s1">root = os.path.splitext(self.tocfilename)[</span><span class="s5">0</span><span class="s1">]</span>
+        <span class="s2">if </span><span class="s1">self.name </span><span class="s2">is None</span><span class="s1">:</span>
+            <span class="s1">self.name = root + </span><span class="s3">'.res'</span>
+        <span class="s2">if </span><span class="s1">self.script_name </span><span class="s2">is None</span><span class="s1">:</span>
+            <span class="s1">self.script_name = root + </span><span class="s3">'_script.tcl'</span>
+
+        <span class="s2">if </span><span class="s1">self.rundir </span><span class="s2">is None</span><span class="s1">:</span>
+            <span class="s1">self.rundir = self._find_rundir(binaries + datas)</span>
+
+        <span class="s0"># Internal variables</span>
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s0"># Do not import _tkinter at the toplevel, because on some systems _tkinter will fail to load, since it is</span>
+            <span class="s0"># not installed. This would cause a runtime error in PyInstaller, since this module is imported from</span>
+            <span class="s0"># build_main.py, instead we just want to inform the user that the splash screen feature is not supported on</span>
+            <span class="s0"># his platform</span>
+            <span class="s2">import </span><span class="s1">_tkinter</span>
+            <span class="s1">self._tkinter_module = _tkinter</span>
+            <span class="s1">self._tkinter_file = self._tkinter_module.__file__</span>
+        <span class="s2">except </span><span class="s1">ModuleNotFoundError:</span>
+            <span class="s2">raise </span><span class="s1">SystemExit(</span>
+                <span class="s3">&quot;You platform does not support the splash screen feature, since tkinter is not installed. Please &quot;</span>
+                <span class="s3">&quot;install tkinter and try again.&quot;</span>
+            <span class="s1">)</span>
+
+        <span class="s0"># Calculated / analysed values</span>
+        <span class="s1">self.uses_tkinter = self._uses_tkinter(binaries)</span>
+        <span class="s1">self.script = self.generate_script()</span>
+        <span class="s1">self.tcl_lib</span><span class="s2">, </span><span class="s1">self.tk_lib = find_tcl_tk_shared_libs(self._tkinter_file)</span>
+        <span class="s2">if </span><span class="s1">is_darwin:</span>
+            <span class="s0"># Outdated Tcl/Tk 8.5 system framework is not supported. Depending on macOS version, the library path will</span>
+            <span class="s0"># come up empty (hidden system libraries on Big Sur), or will be</span>
+            <span class="s0"># [/System]/Library/Frameworks/Tcl.framework/Tcl</span>
+            <span class="s2">if </span><span class="s1">self.tcl_lib[</span><span class="s5">1</span><span class="s1">] </span><span class="s2">is None or </span><span class="s3">'Library/Frameworks/Tcl.framework' </span><span class="s2">in </span><span class="s1">self.tcl_lib[</span><span class="s5">1</span><span class="s1">]:</span>
+                <span class="s2">raise </span><span class="s1">SystemExit(</span><span class="s3">&quot;The splash screen feature does not support macOS system framework version of Tcl/Tk.&quot;</span><span class="s1">)</span>
+        <span class="s0"># Check if tcl/tk was found</span>
+        <span class="s2">assert </span><span class="s1">all(self.tcl_lib)</span>
+        <span class="s2">assert </span><span class="s1">all(self.tk_lib)</span>
+        <span class="s1">logger.debug(</span><span class="s3">&quot;Use Tcl Library from %s and Tk From %s&quot; </span><span class="s1">% (self.tcl_lib</span><span class="s2">, </span><span class="s1">self.tk_lib))</span>
+        <span class="s1">self.splash_requirements = set([self.tcl_lib[</span><span class="s5">0</span><span class="s1">]</span><span class="s2">, </span><span class="s1">self.tk_lib[</span><span class="s5">0</span><span class="s1">]] + splash_requirements)</span>
+
+        <span class="s1">logger.info(</span><span class="s3">&quot;Collect tcl/tk binaries for the splash screen&quot;</span><span class="s1">)</span>
+        <span class="s1">tcltk_tree = collect_tcl_tk_files(self._tkinter_file)</span>
+        <span class="s2">if </span><span class="s1">self.full_tk:</span>
+            <span class="s0"># The user wants a full copy of tk, so make all tk files a requirement.</span>
+            <span class="s1">self.splash_requirements.update(toc[</span><span class="s5">0</span><span class="s1">] </span><span class="s2">for </span><span class="s1">toc </span><span class="s2">in </span><span class="s1">tcltk_tree)</span>
+
+        <span class="s1">self.binaries = TOC()</span>
+        <span class="s2">if not </span><span class="s1">self.uses_tkinter:</span>
+            <span class="s0"># The user's script does not use tkinter, so we need to provide a TOC of all necessary files add the shared</span>
+            <span class="s0"># libraries to the binaries.</span>
+            <span class="s1">self.binaries.append((self.tcl_lib[</span><span class="s5">0</span><span class="s1">]</span><span class="s2">, </span><span class="s1">self.tcl_lib[</span><span class="s5">1</span><span class="s1">]</span><span class="s2">, </span><span class="s3">'BINARY'</span><span class="s1">))</span>
+            <span class="s1">self.binaries.append((self.tk_lib[</span><span class="s5">0</span><span class="s1">]</span><span class="s2">, </span><span class="s1">self.tk_lib[</span><span class="s5">1</span><span class="s1">]</span><span class="s2">, </span><span class="s3">'BINARY'</span><span class="s1">))</span>
+
+            <span class="s0"># Only add the intersection of the required and the collected resources, or add all entries if full_tk is</span>
+            <span class="s0"># true.</span>
+            <span class="s1">self.binaries.extend(toc </span><span class="s2">for </span><span class="s1">toc </span><span class="s2">in </span><span class="s1">tcltk_tree </span><span class="s2">if </span><span class="s1">toc[</span><span class="s5">0</span><span class="s1">] </span><span class="s2">in </span><span class="s1">self.splash_requirements)</span>
+
+        <span class="s0"># Check if all requirements were found.</span>
+        <span class="s1">fnames = [toc[</span><span class="s5">0</span><span class="s1">] </span><span class="s2">for </span><span class="s1">toc </span><span class="s2">in </span><span class="s1">(binaries + datas + self.binaries)]</span>
+
+        <span class="s2">def </span><span class="s1">_filter(_item):</span>
+            <span class="s2">if </span><span class="s1">_item </span><span class="s2">not in </span><span class="s1">fnames:</span>
+                <span class="s0"># Item is not bundled, so warn the user about it. This actually may happen on some tkinter installations</span>
+                <span class="s0"># that are missing the license.terms file.</span>
+                <span class="s1">logger.warning(</span>
+                    <span class="s3">&quot;The local Tcl/Tk installation is missing the file %s. The behavior of the splash screen is &quot;</span>
+                    <span class="s3">&quot;therefore undefined and may be unsupported.&quot; </span><span class="s1">% _item</span>
+                <span class="s1">)</span>
+                <span class="s2">return False</span>
+            <span class="s2">return True</span>
+
+        <span class="s0"># Remove all files which were not found.</span>
+        <span class="s1">self.splash_requirements = set(filter(_filter</span><span class="s2">, </span><span class="s1">self.splash_requirements))</span>
+
+        <span class="s0"># Test if the tcl/tk version is supported by the bootloader.</span>
+        <span class="s1">self.test_tk_version()</span>
+
+        <span class="s1">logger.debug(</span><span class="s3">&quot;Splash Requirements: %s&quot; </span><span class="s1">% self.splash_requirements)</span>
+
+        <span class="s1">self.__postinit__()</span>
+
+    <span class="s1">_GUTS = (</span>
+        <span class="s0"># input parameters</span>
+        <span class="s1">(</span><span class="s3">'image_file'</span><span class="s2">, </span><span class="s1">_check_guts_eq)</span><span class="s2">,</span>
+        <span class="s1">(</span><span class="s3">'name'</span><span class="s2">, </span><span class="s1">_check_guts_eq)</span><span class="s2">,</span>
+        <span class="s1">(</span><span class="s3">'script_name'</span><span class="s2">, </span><span class="s1">_check_guts_eq)</span><span class="s2">,</span>
+        <span class="s1">(</span><span class="s3">'text_pos'</span><span class="s2">, </span><span class="s1">_check_guts_eq)</span><span class="s2">,</span>
+        <span class="s1">(</span><span class="s3">'text_size'</span><span class="s2">, </span><span class="s1">_check_guts_eq)</span><span class="s2">,</span>
+        <span class="s1">(</span><span class="s3">'text_font'</span><span class="s2">, </span><span class="s1">_check_guts_eq)</span><span class="s2">,</span>
+        <span class="s1">(</span><span class="s3">'text_color'</span><span class="s2">, </span><span class="s1">_check_guts_eq)</span><span class="s2">,</span>
+        <span class="s1">(</span><span class="s3">'text_default'</span><span class="s2">, </span><span class="s1">_check_guts_eq)</span><span class="s2">,</span>
+        <span class="s1">(</span><span class="s3">'full_tk'</span><span class="s2">, </span><span class="s1">_check_guts_eq)</span><span class="s2">,</span>
+        <span class="s1">(</span><span class="s3">'minify_script'</span><span class="s2">, </span><span class="s1">_check_guts_eq)</span><span class="s2">,</span>
+        <span class="s1">(</span><span class="s3">'rundir'</span><span class="s2">, </span><span class="s1">_check_guts_eq)</span><span class="s2">,</span>
+        <span class="s1">(</span><span class="s3">'max_img_size'</span><span class="s2">, </span><span class="s1">_check_guts_eq)</span><span class="s2">,</span>
+        <span class="s0"># calculated/analysed values</span>
+        <span class="s1">(</span><span class="s3">'uses_tkinter'</span><span class="s2">, </span><span class="s1">_check_guts_eq)</span><span class="s2">,</span>
+        <span class="s1">(</span><span class="s3">'script'</span><span class="s2">, </span><span class="s1">_check_guts_eq)</span><span class="s2">,</span>
+        <span class="s1">(</span><span class="s3">'tcl_lib'</span><span class="s2">, </span><span class="s1">_check_guts_eq)</span><span class="s2">,</span>
+        <span class="s1">(</span><span class="s3">'tk_lib'</span><span class="s2">, </span><span class="s1">_check_guts_eq)</span><span class="s2">,</span>
+        <span class="s1">(</span><span class="s3">'splash_requirements'</span><span class="s2">, </span><span class="s1">_check_guts_eq)</span><span class="s2">,</span>
+        <span class="s1">(</span><span class="s3">'binaries'</span><span class="s2">, </span><span class="s1">_check_guts_toc)</span><span class="s2">,</span>
+        <span class="s0"># internal value</span>
+        <span class="s0"># Check if the tkinter installation changed. This is theoretically possible if someone uses two different python</span>
+        <span class="s0"># installations of the same version.</span>
+        <span class="s1">(</span><span class="s3">'_tkinter_file'</span><span class="s2">, </span><span class="s1">_check_guts_eq)</span><span class="s2">,</span>
+    <span class="s1">)</span>
+
+    <span class="s2">def </span><span class="s1">_check_guts(self</span><span class="s2">, </span><span class="s1">data</span><span class="s2">, </span><span class="s1">last_build):</span>
+        <span class="s2">if </span><span class="s1">Target._check_guts(self</span><span class="s2">, </span><span class="s1">data</span><span class="s2">, </span><span class="s1">last_build):</span>
+            <span class="s2">return True</span>
+
+        <span class="s0"># Check if the image has been modified.</span>
+        <span class="s2">if </span><span class="s1">misc.mtime(self.image_file) &gt; last_build:</span>
+            <span class="s1">logger.info(</span><span class="s3">&quot;Building %s because file %s changed&quot;</span><span class="s2">, </span><span class="s1">self.tocbasename</span><span class="s2">, </span><span class="s1">self.image_file)</span>
+            <span class="s2">return True</span>
+
+        <span class="s2">return False</span>
+
+    <span class="s2">def </span><span class="s1">assemble(self):</span>
+        <span class="s1">logger.info(</span><span class="s3">&quot;Building Splash %s&quot; </span><span class="s1">% self.name)</span>
+
+        <span class="s0"># Function to resize a given image to fit into the area defined by max_img_size.</span>
+        <span class="s2">def </span><span class="s1">_resize_image(_image</span><span class="s2">, </span><span class="s1">_orig_size):</span>
+            <span class="s2">if </span><span class="s1">PILImage:</span>
+                <span class="s1">_w</span><span class="s2">, </span><span class="s1">_h = _orig_size</span>
+                <span class="s1">_ratio_w = self.max_img_size[</span><span class="s5">0</span><span class="s1">] / _w</span>
+                <span class="s2">if </span><span class="s1">_ratio_w &lt; </span><span class="s5">1</span><span class="s1">:</span>
+                    <span class="s0"># Image width exceeds limit</span>
+                    <span class="s1">_h = int(_h * _ratio_w)</span>
+                    <span class="s1">_w = self.max_img_size[</span><span class="s5">0</span><span class="s1">]</span>
+
+                <span class="s1">_ratio_h = self.max_img_size[</span><span class="s5">1</span><span class="s1">] / _h</span>
+                <span class="s2">if </span><span class="s1">_ratio_h &lt; </span><span class="s5">1</span><span class="s1">:</span>
+                    <span class="s0"># Image height exceeds limit</span>
+                    <span class="s1">_w = int(_w * _ratio_h)</span>
+                    <span class="s1">_h = self.max_img_size[</span><span class="s5">1</span><span class="s1">]</span>
+
+                <span class="s0"># If a file is given it will be open</span>
+                <span class="s2">if </span><span class="s1">isinstance(_image</span><span class="s2">, </span><span class="s1">PILImage.Image):</span>
+                    <span class="s1">_img = _image</span>
+                <span class="s2">else</span><span class="s1">:</span>
+                    <span class="s1">_img = PILImage.open(_image)</span>
+                <span class="s1">_img_resized = _img.resize((_w</span><span class="s2">, </span><span class="s1">_h))</span>
+
+                <span class="s0"># Save image into a stream</span>
+                <span class="s1">_image_stream = io.BytesIO()</span>
+                <span class="s1">_img_resized.save(_image_stream</span><span class="s2">, </span><span class="s1">format=</span><span class="s3">'PNG'</span><span class="s1">)</span>
+                <span class="s1">_img.close()</span>
+                <span class="s1">_img_resized.close()</span>
+                <span class="s1">_image_data = _image_stream.getvalue()</span>
+                <span class="s1">logger.info(</span>
+                    <span class="s3">&quot;Resized image %s from dimensions %s to (%d, %d)&quot; </span><span class="s1">% (self.image_file</span><span class="s2">, </span><span class="s1">str(_orig_size)</span><span class="s2">, </span><span class="s1">_w</span><span class="s2">, </span><span class="s1">_h)</span>
+                <span class="s1">)</span>
+                <span class="s2">return </span><span class="s1">_image_data</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s2">raise </span><span class="s1">ValueError(</span>
+                    <span class="s3">&quot;The splash image dimensions (w: %d, h: %d) exceed max_img_size (w: %d, h:%d), but the image &quot;</span>
+                    <span class="s3">&quot;cannot be resized due to missing PIL.Image! Either install the Pillow package, adjust the &quot;</span>
+                    <span class="s3">&quot;max_img_size, or use an image of compatible dimensions.&quot; </span><span class="s1">%</span>
+                    <span class="s1">(_orig_size[</span><span class="s5">0</span><span class="s1">]</span><span class="s2">, </span><span class="s1">_orig_size[</span><span class="s5">1</span><span class="s1">]</span><span class="s2">, </span><span class="s1">self.max_img_size[</span><span class="s5">0</span><span class="s1">]</span><span class="s2">, </span><span class="s1">self.max_img_size[</span><span class="s5">1</span><span class="s1">])</span>
+                <span class="s1">)</span>
+
+        <span class="s0"># Open image file</span>
+        <span class="s1">image_file = open(self.image_file</span><span class="s2">, </span><span class="s3">'rb'</span><span class="s1">)</span>
+
+        <span class="s0"># Check header of the file to identify it</span>
+        <span class="s2">if </span><span class="s1">image_file.read(</span><span class="s5">8</span><span class="s1">) == </span><span class="s6">b'</span><span class="s2">\x89</span><span class="s6">PNG</span><span class="s2">\r\n\x1a\n</span><span class="s6">'</span><span class="s1">:</span>
+            <span class="s0"># self.image_file is a PNG file</span>
+            <span class="s1">image_file.seek(</span><span class="s5">16</span><span class="s1">)</span>
+            <span class="s1">img_size = (struct.unpack(</span><span class="s3">&quot;!I&quot;</span><span class="s2">, </span><span class="s1">image_file.read(</span><span class="s5">4</span><span class="s1">))[</span><span class="s5">0</span><span class="s1">]</span><span class="s2">, </span><span class="s1">struct.unpack(</span><span class="s3">&quot;!I&quot;</span><span class="s2">, </span><span class="s1">image_file.read(</span><span class="s5">4</span><span class="s1">))[</span><span class="s5">0</span><span class="s1">])</span>
+
+            <span class="s2">if </span><span class="s1">img_size &gt; self.max_img_size:</span>
+                <span class="s0"># The image exceeds the maximum image size, so resize it</span>
+                <span class="s1">image = _resize_image(self.image_file</span><span class="s2">, </span><span class="s1">img_size)</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s1">image = os.path.abspath(self.image_file)</span>
+        <span class="s2">elif </span><span class="s1">PILImage:</span>
+            <span class="s0"># Pillow is installed, meaning the image can be converted automatically</span>
+            <span class="s1">img = PILImage.open(self.image_file</span><span class="s2">, </span><span class="s1">mode=</span><span class="s3">'r'</span><span class="s1">)</span>
+
+            <span class="s2">if </span><span class="s1">img.size &gt; self.max_img_size:</span>
+                <span class="s1">image = _resize_image(img</span><span class="s2">, </span><span class="s1">img.size)</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s1">image_data = io.BytesIO()</span>
+                <span class="s1">img.save(image_data</span><span class="s2">, </span><span class="s1">format=</span><span class="s3">'PNG'</span><span class="s1">)</span>
+                <span class="s1">img.close()</span>
+                <span class="s1">image = image_data.getvalue()</span>
+            <span class="s1">logger.info(</span><span class="s3">&quot;Converted image %s to PNG format&quot; </span><span class="s1">% self.image_file)</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s2">raise </span><span class="s1">ValueError(</span>
+                <span class="s3">&quot;The image %s needs to be converted to a PNG file, but PIL.Image is not available! Either install the &quot;</span>
+                <span class="s3">&quot;Pillow package, or use a PNG image for you splash screen.&quot; </span><span class="s1">% self.image_file</span>
+            <span class="s1">)</span>
+
+        <span class="s1">image_file.close()</span>
+
+        <span class="s1">SplashWriter(</span>
+            <span class="s1">self.name</span><span class="s2">,</span>
+            <span class="s1">self.splash_requirements</span><span class="s2">,</span>
+            <span class="s1">self.tcl_lib[</span><span class="s5">0</span><span class="s1">]</span><span class="s2">,  </span><span class="s0"># tcl86t.dll</span>
+            <span class="s1">self.tk_lib[</span><span class="s5">0</span><span class="s1">]</span><span class="s2">,  </span><span class="s0"># tk86t.dll</span>
+            <span class="s1">TK_ROOTNAME</span><span class="s2">,</span>
+            <span class="s1">self.rundir</span><span class="s2">,</span>
+            <span class="s1">image</span><span class="s2">,</span>
+            <span class="s1">self.script</span>
+        <span class="s1">)</span>
+
+    <span class="s2">def </span><span class="s1">test_tk_version(self):</span>
+        <span class="s1">tcl_version = float(self._tkinter_module.TCL_VERSION)</span>
+        <span class="s1">tk_version = float(self._tkinter_module.TK_VERSION)</span>
+
+        <span class="s0"># Test if tcl/tk version is supported</span>
+        <span class="s2">if </span><span class="s1">tcl_version &lt; </span><span class="s5">8.6 </span><span class="s2">or </span><span class="s1">tk_version &lt; </span><span class="s5">8.6</span><span class="s1">:</span>
+            <span class="s1">logger.warning(</span>
+                <span class="s3">&quot;The installed Tcl/Tk (%s/%s) version might not work with the splash screen feature of the bootloader. &quot;</span>
+                <span class="s3">&quot;The bootloader is tested against Tcl/Tk 8.6&quot; </span><span class="s1">%</span>
+                <span class="s1">(self._tkinter_module.TCL_VERSION</span><span class="s2">, </span><span class="s1">self._tkinter_module.TK_VERSION)</span>
+            <span class="s1">)</span>
+
+        <span class="s0"># This should be impossible, since tcl/tk is released together with the same version number, but just in case</span>
+        <span class="s2">if </span><span class="s1">tcl_version != tk_version:</span>
+            <span class="s1">logger.warning(</span>
+                <span class="s3">&quot;The installed version of Tcl (%s) and Tk (%s) do not match. PyInstaller is tested against matching &quot;</span>
+                <span class="s3">&quot;versions&quot; </span><span class="s1">% (self._tkinter_module.TCL_VERSION</span><span class="s2">, </span><span class="s1">self._tkinter_module.TK_VERSION)</span>
+            <span class="s1">)</span>
+
+        <span class="s0"># Test if tcl is threaded.</span>
+        <span class="s0"># If the variable tcl_platform(threaded) exist, the tcl interpreter was compiled with thread support.</span>
+        <span class="s1">threaded = bool(exec_statement(</span>
+            <span class="s3">&quot;&quot;&quot; 
+            from tkinter import Tcl, TclError 
+            try: 
+                print(Tcl().getvar('tcl_platform(threaded)')) 
+            except TclError: 
+                pass 
+            &quot;&quot;&quot;</span>
+        <span class="s1">))  </span><span class="s0"># yapf: disable</span>
+
+        <span class="s2">if not </span><span class="s1">threaded:</span>
+            <span class="s0"># This is a feature breaking problem, so exit.</span>
+            <span class="s2">raise </span><span class="s1">SystemExit(</span>
+                <span class="s3">&quot;The installed tcl version is not threaded. PyInstaller only supports the splash screen &quot;</span>
+                <span class="s3">&quot;using threaded tcl.&quot;</span>
+            <span class="s1">)</span>
+
+    <span class="s2">def </span><span class="s1">generate_script(self):</span>
+        <span class="s4">&quot;&quot;&quot; 
+        Generate the script for the splash screen. 
+ 
+        If minify_script is True, all unnecessary parts will be removed. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">d = {}</span>
+        <span class="s2">if </span><span class="s1">self.text_pos </span><span class="s2">is not None</span><span class="s1">:</span>
+            <span class="s1">logger.debug(</span><span class="s3">&quot;Add text support to splash screen&quot;</span><span class="s1">)</span>
+            <span class="s1">d.update({</span>
+                <span class="s3">'pad_x'</span><span class="s1">: self.text_pos[</span><span class="s5">0</span><span class="s1">]</span><span class="s2">,</span>
+                <span class="s3">'pad_y'</span><span class="s1">: self.text_pos[</span><span class="s5">1</span><span class="s1">]</span><span class="s2">,</span>
+                <span class="s3">'color'</span><span class="s1">: self.text_color</span><span class="s2">,</span>
+                <span class="s3">'font'</span><span class="s1">: self.text_font</span><span class="s2">,</span>
+                <span class="s3">'font_size'</span><span class="s1">: self.text_size</span><span class="s2">,</span>
+                <span class="s3">'default_text'</span><span class="s1">: self.text_default</span><span class="s2">,</span>
+            <span class="s1">})</span>
+        <span class="s1">script = splash_templates.build_script(text_options=d)</span>
+
+        <span class="s2">if </span><span class="s1">self.minify_script:</span>
+            <span class="s0"># Remove any documentation, empty lines and unnecessary spaces</span>
+            <span class="s1">script = </span><span class="s3">'</span><span class="s2">\n</span><span class="s3">'</span><span class="s1">.join(</span>
+                <span class="s1">line </span><span class="s2">for </span><span class="s1">line </span><span class="s2">in </span><span class="s1">map(</span><span class="s2">lambda </span><span class="s1">l: l.strip()</span><span class="s2">, </span><span class="s1">script.splitlines())</span>
+                <span class="s2">if not </span><span class="s1">line.startswith(</span><span class="s3">'#'</span><span class="s1">)  </span><span class="s0"># documentation</span>
+                <span class="s2">and </span><span class="s1">line  </span><span class="s0"># empty lines</span>
+            <span class="s1">)</span>
+            <span class="s0"># Remove unnecessary spaces</span>
+            <span class="s1">script = re.sub(</span><span class="s3">' +'</span><span class="s2">, </span><span class="s3">' '</span><span class="s2">, </span><span class="s1">script)</span>
+
+        <span class="s0"># Write script to disk, so that it is transparent to the user what script is executed.</span>
+        <span class="s2">with </span><span class="s1">open(self.script_name</span><span class="s2">, </span><span class="s3">&quot;w&quot;</span><span class="s1">) </span><span class="s2">as </span><span class="s1">script_file:</span>
+            <span class="s1">script_file.write(script)</span>
+        <span class="s2">return </span><span class="s1">script</span>
+
+    <span class="s1">@staticmethod</span>
+    <span class="s2">def </span><span class="s1">_uses_tkinter(binaries):</span>
+        <span class="s0"># Test for _tkinter instead of tkinter, because a user might use a different wrapping library for tk.</span>
+        <span class="s2">return </span><span class="s3">'_tkinter' </span><span class="s2">in </span><span class="s1">binaries.filenames</span>
+
+    <span class="s1">@staticmethod</span>
+    <span class="s2">def </span><span class="s1">_find_rundir(structure):</span>
+        <span class="s0"># First try a name the user could understand, if one would find the directory.</span>
+        <span class="s1">rundir = </span><span class="s3">'__splash%s'</span>
+        <span class="s1">candidate = rundir % </span><span class="s3">&quot;&quot;</span>
+        <span class="s1">counter = </span><span class="s5">0</span>
+
+        <span class="s0"># Run this loop as long as a folder exist named like rundir. In most cases __splash will be sufficient and this</span>
+        <span class="s0"># loop wont enter.</span>
+        <span class="s2">while </span><span class="s1">any(e[</span><span class="s5">0</span><span class="s1">].startswith(candidate + os.sep) </span><span class="s2">for </span><span class="s1">e </span><span class="s2">in </span><span class="s1">structure):</span>
+            <span class="s0"># just append to rundir a counter</span>
+            <span class="s1">candidate = rundir % str(counter)</span>
+            <span class="s1">counter += </span><span class="s5">1</span>
+
+            <span class="s0"># The SPLASH_DATA_HEADER structure limits the name to be 16 bytes at maximum. So if we exceed the limit</span>
+            <span class="s0"># raise an error. This will never happen, since there are 10^8 different possibilities, but just in case.</span>
+            <span class="s2">assert </span><span class="s1">len(candidate) &lt;= </span><span class="s5">16</span>
+
+        <span class="s2">return </span><span class="s1">candidate</span>
+</pre>
+</body>
+</html>

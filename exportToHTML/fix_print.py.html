@@ -1,0 +1,126 @@
+<html>
+<head>
+<title>fix_print.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #629755; font-style: italic;}
+.s3 { color: #cc7832;}
+.s4 { color: #6a8759;}
+.s5 { color: #6897bb;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+fix_print.py</font>
+</center></td></tr></table>
+<pre><span class="s0"># Copyright 2006 Google, Inc. All Rights Reserved.</span>
+<span class="s0"># Licensed to PSF under a Contributor Agreement.</span>
+
+<span class="s2">&quot;&quot;&quot;Fixer for print. 
+ 
+Change: 
+    &quot;print&quot;          into &quot;print()&quot; 
+    &quot;print ...&quot;      into &quot;print(...)&quot; 
+    &quot;print(...)&quot;     not changed 
+    &quot;print ... ,&quot;    into &quot;print(..., end=' ')&quot; 
+    &quot;print &gt;&gt;x, ...&quot; into &quot;print(..., file=x)&quot; 
+ 
+No changes are applied if print_function is imported from __future__ 
+ 
+&quot;&quot;&quot;</span>
+
+<span class="s0"># Local imports</span>
+<span class="s3">from </span><span class="s1">lib2to3 </span><span class="s3">import </span><span class="s1">patcomp</span><span class="s3">, </span><span class="s1">pytree</span><span class="s3">, </span><span class="s1">fixer_base</span>
+<span class="s3">from </span><span class="s1">lib2to3.pgen2 </span><span class="s3">import </span><span class="s1">token</span>
+<span class="s3">from </span><span class="s1">lib2to3.fixer_util </span><span class="s3">import </span><span class="s1">Name</span><span class="s3">, </span><span class="s1">Call</span><span class="s3">, </span><span class="s1">Comma</span><span class="s3">, </span><span class="s1">String</span>
+<span class="s0"># from libmodernize import add_future</span>
+
+<span class="s1">parend_expr = patcomp.compile_pattern(</span>
+              <span class="s4">&quot;&quot;&quot;atom&lt; '(' [arith_expr|atom|power|term|STRING|NAME] ')' &gt;&quot;&quot;&quot;</span>
+              <span class="s1">)</span>
+
+
+<span class="s3">class </span><span class="s1">FixPrint(fixer_base.BaseFix):</span>
+
+    <span class="s1">BM_compatible = </span><span class="s3">True</span>
+
+    <span class="s1">PATTERN = </span><span class="s4">&quot;&quot;&quot; 
+              simple_stmt&lt; any* bare='print' any* &gt; | print_stmt 
+              &quot;&quot;&quot;</span>
+
+    <span class="s3">def </span><span class="s1">transform(self</span><span class="s3">, </span><span class="s1">node</span><span class="s3">, </span><span class="s1">results):</span>
+        <span class="s3">assert </span><span class="s1">results</span>
+
+        <span class="s1">bare_print = results.get(</span><span class="s4">&quot;bare&quot;</span><span class="s1">)</span>
+
+        <span class="s3">if </span><span class="s1">bare_print:</span>
+            <span class="s0"># Special-case print all by itself.</span>
+            <span class="s1">bare_print.replace(Call(Name(</span><span class="s4">u&quot;print&quot;</span><span class="s1">)</span><span class="s3">, </span><span class="s1">[]</span><span class="s3">,</span>
+                               <span class="s1">prefix=bare_print.prefix))</span>
+            <span class="s0"># The &quot;from __future__ import print_function&quot;&quot; declaration is added</span>
+            <span class="s0"># by the fix_print_with_import fixer, so we skip it here.</span>
+            <span class="s0"># add_future(node, u'print_function')</span>
+            <span class="s3">return</span>
+        <span class="s3">assert </span><span class="s1">node.children[</span><span class="s5">0</span><span class="s1">] == Name(</span><span class="s4">u&quot;print&quot;</span><span class="s1">)</span>
+        <span class="s1">args = node.children[</span><span class="s5">1</span><span class="s1">:]</span>
+        <span class="s3">if </span><span class="s1">len(args) == </span><span class="s5">1 </span><span class="s3">and </span><span class="s1">parend_expr.match(args[</span><span class="s5">0</span><span class="s1">]):</span>
+            <span class="s0"># We don't want to keep sticking parens around an</span>
+            <span class="s0"># already-parenthesised expression.</span>
+            <span class="s3">return</span>
+
+        <span class="s1">sep = end = file = </span><span class="s3">None</span>
+        <span class="s3">if </span><span class="s1">args </span><span class="s3">and </span><span class="s1">args[-</span><span class="s5">1</span><span class="s1">] == Comma():</span>
+            <span class="s1">args = args[:-</span><span class="s5">1</span><span class="s1">]</span>
+            <span class="s1">end = </span><span class="s4">&quot; &quot;</span>
+
+            <span class="s0"># try to determine if the string ends in a non-space whitespace character, in which</span>
+            <span class="s0"># case there should be no space at the end of the conversion</span>
+            <span class="s1">string_leaves = [leaf </span><span class="s3">for </span><span class="s1">leaf </span><span class="s3">in </span><span class="s1">args[-</span><span class="s5">1</span><span class="s1">].leaves() </span><span class="s3">if </span><span class="s1">leaf.type == token.STRING]</span>
+            <span class="s3">if </span><span class="s1">(</span>
+                <span class="s1">string_leaves</span>
+                <span class="s3">and </span><span class="s1">string_leaves[-</span><span class="s5">1</span><span class="s1">].value[</span><span class="s5">0</span><span class="s1">] != </span><span class="s4">&quot;r&quot;  </span><span class="s0"># &quot;raw&quot; string</span>
+                <span class="s3">and </span><span class="s1">string_leaves[-</span><span class="s5">1</span><span class="s1">].value[-</span><span class="s5">3</span><span class="s1">:-</span><span class="s5">1</span><span class="s1">] </span><span class="s3">in </span><span class="s1">(</span><span class="s4">r&quot;\t&quot;</span><span class="s3">, </span><span class="s4">r&quot;\n&quot;</span><span class="s3">, </span><span class="s4">r&quot;\r&quot;</span><span class="s1">)</span>
+            <span class="s1">):</span>
+                <span class="s1">end = </span><span class="s4">&quot;&quot;</span>
+        <span class="s3">if </span><span class="s1">args </span><span class="s3">and </span><span class="s1">args[</span><span class="s5">0</span><span class="s1">] == pytree.Leaf(token.RIGHTSHIFT</span><span class="s3">, </span><span class="s4">u&quot;&gt;&gt;&quot;</span><span class="s1">):</span>
+            <span class="s3">assert </span><span class="s1">len(args) &gt;= </span><span class="s5">2</span>
+            <span class="s1">file = args[</span><span class="s5">1</span><span class="s1">].clone()</span>
+            <span class="s1">args = args[</span><span class="s5">3</span><span class="s1">:] </span><span class="s0"># Strip a possible comma after the file expression</span>
+        <span class="s0"># Now synthesize a print(args, sep=..., end=..., file=...) node.</span>
+        <span class="s1">l_args = [arg.clone() </span><span class="s3">for </span><span class="s1">arg </span><span class="s3">in </span><span class="s1">args]</span>
+        <span class="s3">if </span><span class="s1">l_args:</span>
+            <span class="s1">l_args[</span><span class="s5">0</span><span class="s1">].prefix = </span><span class="s4">u&quot;&quot;</span>
+        <span class="s3">if </span><span class="s1">sep </span><span class="s3">is not None or </span><span class="s1">end </span><span class="s3">is not None or </span><span class="s1">file </span><span class="s3">is not None</span><span class="s1">:</span>
+            <span class="s3">if </span><span class="s1">sep </span><span class="s3">is not None</span><span class="s1">:</span>
+                <span class="s1">self.add_kwarg(l_args</span><span class="s3">, </span><span class="s4">u&quot;sep&quot;</span><span class="s3">, </span><span class="s1">String(repr(sep)))</span>
+            <span class="s3">if </span><span class="s1">end </span><span class="s3">is not None</span><span class="s1">:</span>
+                <span class="s1">self.add_kwarg(l_args</span><span class="s3">, </span><span class="s4">u&quot;end&quot;</span><span class="s3">, </span><span class="s1">String(repr(end)))</span>
+            <span class="s3">if </span><span class="s1">file </span><span class="s3">is not None</span><span class="s1">:</span>
+                <span class="s1">self.add_kwarg(l_args</span><span class="s3">, </span><span class="s4">u&quot;file&quot;</span><span class="s3">, </span><span class="s1">file)</span>
+        <span class="s1">n_stmt = Call(Name(</span><span class="s4">u&quot;print&quot;</span><span class="s1">)</span><span class="s3">, </span><span class="s1">l_args)</span>
+        <span class="s1">n_stmt.prefix = node.prefix</span>
+
+        <span class="s0"># Note that there are corner cases where adding this future-import is</span>
+        <span class="s0"># incorrect, for example when the file also has a 'print ()' statement</span>
+        <span class="s0"># that was intended to print &quot;()&quot;.</span>
+        <span class="s0"># add_future(node, u'print_function')</span>
+        <span class="s3">return </span><span class="s1">n_stmt</span>
+
+    <span class="s3">def </span><span class="s1">add_kwarg(self</span><span class="s3">, </span><span class="s1">l_nodes</span><span class="s3">, </span><span class="s1">s_kwd</span><span class="s3">, </span><span class="s1">n_expr):</span>
+        <span class="s0"># XXX All this prefix-setting may lose comments (though rarely)</span>
+        <span class="s1">n_expr.prefix = </span><span class="s4">u&quot;&quot;</span>
+        <span class="s1">n_argument = pytree.Node(self.syms.argument</span><span class="s3">,</span>
+                                 <span class="s1">(Name(s_kwd)</span><span class="s3">,</span>
+                                  <span class="s1">pytree.Leaf(token.EQUAL</span><span class="s3">, </span><span class="s4">u&quot;=&quot;</span><span class="s1">)</span><span class="s3">,</span>
+                                  <span class="s1">n_expr))</span>
+        <span class="s3">if </span><span class="s1">l_nodes:</span>
+            <span class="s1">l_nodes.append(Comma())</span>
+            <span class="s1">n_argument.prefix = </span><span class="s4">u&quot; &quot;</span>
+        <span class="s1">l_nodes.append(n_argument)</span>
+</pre>
+</body>
+</html>

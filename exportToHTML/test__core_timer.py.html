@@ -1,0 +1,178 @@
+<html>
+<head>
+<title>test__core_timer.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #cc7832;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #6897bb;}
+.s3 { color: #808080;}
+.s4 { color: #6a8759;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+test__core_timer.py</font>
+</center></td></tr></table>
+<pre><span class="s0">from </span><span class="s1">__future__ </span><span class="s0">import </span><span class="s1">print_function</span>
+<span class="s0">from </span><span class="s1">gevent </span><span class="s0">import </span><span class="s1">config</span>
+
+<span class="s0">import </span><span class="s1">gevent.testing </span><span class="s0">as </span><span class="s1">greentest</span>
+<span class="s0">from </span><span class="s1">gevent.testing </span><span class="s0">import </span><span class="s1">TestCase</span>
+<span class="s0">from </span><span class="s1">gevent.testing </span><span class="s0">import </span><span class="s1">LARGE_TIMEOUT</span>
+<span class="s0">from </span><span class="s1">gevent.testing.sysinfo </span><span class="s0">import </span><span class="s1">CFFI_BACKEND</span>
+<span class="s0">from </span><span class="s1">gevent.testing.flaky </span><span class="s0">import </span><span class="s1">reraises_flaky_timeout</span>
+
+
+<span class="s0">class </span><span class="s1">Test(TestCase):</span>
+    <span class="s1">__timeout__ = LARGE_TIMEOUT</span>
+
+    <span class="s1">repeat = </span><span class="s2">0</span>
+    <span class="s1">timer_duration = </span><span class="s2">0.001</span>
+
+    <span class="s0">def </span><span class="s1">setUp(self):</span>
+        <span class="s1">super(Test</span><span class="s0">, </span><span class="s1">self).setUp()</span>
+        <span class="s1">self.called = []</span>
+        <span class="s1">self.loop = config.loop(default=</span><span class="s0">False</span><span class="s1">)</span>
+        <span class="s1">self.timer = self.loop.timer(self.timer_duration</span><span class="s0">, </span><span class="s1">repeat=self.repeat)</span>
+        <span class="s0">assert not </span><span class="s1">self.loop.default</span>
+
+    <span class="s0">def </span><span class="s1">cleanup(self):</span>
+        <span class="s3"># cleanup instead of tearDown to cooperate well with</span>
+        <span class="s3"># leakcheck.py</span>
+        <span class="s1">self.timer.close()</span>
+        <span class="s3"># cycle the loop so libuv close callbacks fire</span>
+        <span class="s1">self.loop.run()</span>
+        <span class="s1">self.loop.destroy()</span>
+        <span class="s1">self.loop = </span><span class="s0">None</span>
+        <span class="s1">self.timer = </span><span class="s0">None</span>
+
+    <span class="s0">def </span><span class="s1">f(self</span><span class="s0">, </span><span class="s1">x=</span><span class="s0">None</span><span class="s1">):</span>
+        <span class="s1">self.called.append(</span><span class="s2">1</span><span class="s1">)</span>
+        <span class="s0">if </span><span class="s1">x </span><span class="s0">is not None</span><span class="s1">:</span>
+            <span class="s1">x.stop()</span>
+
+    <span class="s0">def </span><span class="s1">assertTimerInKeepalive(self):</span>
+        <span class="s0">if </span><span class="s1">CFFI_BACKEND:</span>
+            <span class="s1">self.assertIn(self.timer</span><span class="s0">, </span><span class="s1">self.loop._keepaliveset)</span>
+
+    <span class="s0">def </span><span class="s1">assertTimerNotInKeepalive(self):</span>
+        <span class="s0">if </span><span class="s1">CFFI_BACKEND:</span>
+            <span class="s1">self.assertNotIn(self.timer</span><span class="s0">, </span><span class="s1">self.loop._keepaliveset)</span>
+
+    <span class="s0">def </span><span class="s1">test_main(self):</span>
+        <span class="s1">loop = self.loop</span>
+        <span class="s1">x = self.timer</span>
+        <span class="s1">x.start(self.f)</span>
+        <span class="s1">self.assertTimerInKeepalive()</span>
+        <span class="s1">self.assertTrue(x.active</span><span class="s0">, </span><span class="s1">x)</span>
+
+        <span class="s0">with </span><span class="s1">self.assertRaises((AttributeError</span><span class="s0">, </span><span class="s1">ValueError)):</span>
+            <span class="s1">x.priority = </span><span class="s2">1</span>
+
+        <span class="s1">loop.run()</span>
+        <span class="s1">self.assertEqual(x.pending</span><span class="s0">, </span><span class="s2">0</span><span class="s1">)</span>
+        <span class="s1">self.assertEqual(self.called</span><span class="s0">, </span><span class="s1">[</span><span class="s2">1</span><span class="s1">])</span>
+        <span class="s1">self.assertIsNone(x.callback)</span>
+        <span class="s1">self.assertIsNone(x.args)</span>
+
+        <span class="s0">if </span><span class="s1">x.priority </span><span class="s0">is not None</span><span class="s1">:</span>
+            <span class="s1">self.assertEqual(x.priority</span><span class="s0">, </span><span class="s2">0</span><span class="s1">)</span>
+            <span class="s1">x.priority = </span><span class="s2">1</span>
+            <span class="s1">self.assertEqual(x.priority</span><span class="s0">, </span><span class="s2">1</span><span class="s1">)</span>
+
+        <span class="s1">x.stop()</span>
+        <span class="s1">self.assertTimerNotInKeepalive()</span>
+
+<span class="s0">class </span><span class="s1">TestAgain(Test):</span>
+    <span class="s1">repeat = </span><span class="s2">1</span>
+
+    <span class="s0">def </span><span class="s1">test_main(self):</span>
+        <span class="s3"># Again works for a new timer</span>
+        <span class="s1">x = self.timer</span>
+        <span class="s1">x.again(self.f</span><span class="s0">, </span><span class="s1">x)</span>
+        <span class="s1">self.assertTimerInKeepalive()</span>
+
+        <span class="s1">self.assertEqual(x.args</span><span class="s0">, </span><span class="s1">(x</span><span class="s0">,</span><span class="s1">))</span>
+
+        <span class="s3"># XXX: On libev, this takes 1 second. On libuv,</span>
+        <span class="s3"># it takes the expected time.</span>
+        <span class="s1">self.loop.run()</span>
+
+        <span class="s1">self.assertEqual(self.called</span><span class="s0">, </span><span class="s1">[</span><span class="s2">1</span><span class="s1">])</span>
+
+        <span class="s1">x.stop()</span>
+        <span class="s1">self.assertTimerNotInKeepalive()</span>
+
+
+<span class="s0">class </span><span class="s1">TestTimerResolution(Test):</span>
+
+    <span class="s3"># On CI, with *all* backends, sometimes we get timer values of</span>
+    <span class="s3"># 0.02 or higher.</span>
+    <span class="s1">@reraises_flaky_timeout(AssertionError)</span>
+    <span class="s0">def </span><span class="s1">test_resolution(self): </span><span class="s3"># pylint:disable=too-many-locals</span>
+        <span class="s3"># Make sure that having an active IO watcher</span>
+        <span class="s3"># doesn't badly throw off our timer resolution.</span>
+        <span class="s3"># (This was a specific problem with libuv)</span>
+
+        <span class="s3"># https://github.com/gevent/gevent/pull/1194</span>
+        <span class="s0">from </span><span class="s1">gevent._compat </span><span class="s0">import </span><span class="s1">perf_counter</span>
+
+        <span class="s0">import </span><span class="s1">socket</span>
+        <span class="s1">s = socket.socket()</span>
+        <span class="s1">self._close_on_teardown(s)</span>
+        <span class="s1">fd = s.fileno()</span>
+
+        <span class="s1">ran_at_least_once = </span><span class="s0">False</span>
+        <span class="s1">fired_at = []</span>
+
+        <span class="s0">def </span><span class="s1">timer_counter():</span>
+            <span class="s1">fired_at.append(perf_counter())</span>
+
+        <span class="s1">loop = self.loop</span>
+
+        <span class="s1">timer_multiplier = </span><span class="s2">11</span>
+        <span class="s1">max_time = self.timer_duration * timer_multiplier</span>
+        <span class="s0">assert </span><span class="s1">max_time &lt; </span><span class="s2">0.3</span>
+
+        <span class="s0">for </span><span class="s1">_ </span><span class="s0">in </span><span class="s1">range(</span><span class="s2">150</span><span class="s1">):</span>
+            <span class="s3"># in libuv, our signal timer fires every 300ms; depending on</span>
+            <span class="s3"># when this runs, we could artificially get a better</span>
+            <span class="s3"># resolution than we expect. Run it multiple times to be more sure.</span>
+            <span class="s1">io = loop.io(fd</span><span class="s0">, </span><span class="s2">1</span><span class="s1">)</span>
+            <span class="s1">io.start(</span><span class="s0">lambda </span><span class="s1">events=</span><span class="s0">None</span><span class="s1">: </span><span class="s0">None</span><span class="s1">)</span>
+
+
+            <span class="s1">now = perf_counter()</span>
+            <span class="s0">del </span><span class="s1">fired_at[:]</span>
+            <span class="s1">timer = self.timer</span>
+            <span class="s1">timer.start(timer_counter)</span>
+
+            <span class="s1">loop.run(once=</span><span class="s0">True</span><span class="s1">)</span>
+
+            <span class="s1">io.stop()</span>
+            <span class="s1">io.close()</span>
+
+            <span class="s1">timer.stop()</span>
+
+            <span class="s0">if </span><span class="s1">fired_at:</span>
+                <span class="s1">ran_at_least_once = </span><span class="s0">True</span>
+                <span class="s1">self.assertEqual(</span><span class="s2">1</span><span class="s0">, </span><span class="s1">len(fired_at))</span>
+                <span class="s1">self.assertTimeWithinRange(fired_at[</span><span class="s2">0</span><span class="s1">] - now</span><span class="s0">,</span>
+                                           <span class="s2">0</span><span class="s0">,</span>
+                                           <span class="s1">max_time)</span>
+
+
+        <span class="s0">if not </span><span class="s1">greentest.RUNNING_ON_CI:</span>
+            <span class="s3"># Hmm, this always fires locally on mocOS but</span>
+            <span class="s3"># not an Travis?</span>
+            <span class="s1">self.assertTrue(ran_at_least_once)</span>
+
+
+<span class="s0">if </span><span class="s1">__name__ == </span><span class="s4">'__main__'</span><span class="s1">:</span>
+    <span class="s1">greentest.main()</span>
+</pre>
+</body>
+</html>

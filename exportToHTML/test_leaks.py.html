@@ -1,0 +1,470 @@
+<html>
+<head>
+<title>test_leaks.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #629755; font-style: italic;}
+.s3 { color: #cc7832;}
+.s4 { color: #6a8759;}
+.s5 { color: #6897bb;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+test_leaks.py</font>
+</center></td></tr></table>
+<pre><span class="s0"># -*- coding: utf-8 -*-</span>
+<span class="s2">&quot;&quot;&quot; 
+Testing scenarios that may have leaked. 
+&quot;&quot;&quot;</span>
+<span class="s3">from </span><span class="s1">__future__ </span><span class="s3">import </span><span class="s1">print_function</span><span class="s3">, </span><span class="s1">absolute_import</span><span class="s3">, </span><span class="s1">division</span>
+
+<span class="s3">import </span><span class="s1">sys</span>
+<span class="s3">import </span><span class="s1">gc</span>
+
+<span class="s3">import </span><span class="s1">time</span>
+<span class="s3">import </span><span class="s1">weakref</span>
+<span class="s3">import </span><span class="s1">threading</span>
+
+<span class="s3">import </span><span class="s1">psutil</span>
+
+<span class="s3">import </span><span class="s1">greenlet</span>
+<span class="s3">from </span><span class="s1">. </span><span class="s3">import </span><span class="s1">TestCase</span>
+<span class="s3">from </span><span class="s1">.leakcheck </span><span class="s3">import </span><span class="s1">fails_leakcheck</span>
+<span class="s3">from </span><span class="s1">.leakcheck </span><span class="s3">import </span><span class="s1">ignores_leakcheck</span>
+<span class="s3">from </span><span class="s1">.leakcheck </span><span class="s3">import </span><span class="s1">RUNNING_ON_GITHUB_ACTIONS</span>
+<span class="s3">from </span><span class="s1">.leakcheck </span><span class="s3">import </span><span class="s1">RUNNING_ON_MANYLINUX</span>
+
+<span class="s3">try</span><span class="s1">:</span>
+    <span class="s3">from </span><span class="s1">sys </span><span class="s3">import </span><span class="s1">intern</span>
+<span class="s3">except </span><span class="s1">ImportError:</span>
+    <span class="s0"># Python 2</span>
+    <span class="s3">pass</span>
+
+<span class="s3">assert </span><span class="s1">greenlet.GREENLET_USE_GC </span><span class="s0"># Option to disable this was removed in 1.0</span>
+
+<span class="s3">class </span><span class="s1">HasFinalizerTracksInstances(object):</span>
+    <span class="s1">EXTANT_INSTANCES = set()</span>
+    <span class="s3">def </span><span class="s1">__init__(self</span><span class="s3">, </span><span class="s1">msg):</span>
+        <span class="s1">self.msg = intern(msg)</span>
+        <span class="s1">self.EXTANT_INSTANCES.add(id(self))</span>
+    <span class="s3">def </span><span class="s1">__del__(self):</span>
+        <span class="s1">self.EXTANT_INSTANCES.remove(id(self))</span>
+    <span class="s3">def </span><span class="s1">__repr__(self):</span>
+        <span class="s3">return </span><span class="s4">&quot;&lt;HasFinalizerTracksInstances at 0x%x %r&gt;&quot; </span><span class="s1">% (</span>
+            <span class="s1">id(self)</span><span class="s3">, </span><span class="s1">self.msg</span>
+        <span class="s1">)</span>
+    <span class="s1">@classmethod</span>
+    <span class="s3">def </span><span class="s1">reset(cls):</span>
+        <span class="s1">cls.EXTANT_INSTANCES.clear()</span>
+
+
+<span class="s3">class </span><span class="s1">TestLeaks(TestCase):</span>
+
+    <span class="s3">def </span><span class="s1">test_arg_refs(self):</span>
+        <span class="s1">args = (</span><span class="s4">'a'</span><span class="s3">, </span><span class="s4">'b'</span><span class="s3">, </span><span class="s4">'c'</span><span class="s1">)</span>
+        <span class="s1">refcount_before = sys.getrefcount(args)</span>
+        <span class="s0"># pylint:disable=unnecessary-lambda</span>
+        <span class="s1">g = greenlet.greenlet(</span>
+            <span class="s3">lambda </span><span class="s1">*args: greenlet.getcurrent().parent.switch(*args))</span>
+        <span class="s3">for </span><span class="s1">_ </span><span class="s3">in </span><span class="s1">range(</span><span class="s5">100</span><span class="s1">):</span>
+            <span class="s1">g.switch(*args)</span>
+        <span class="s1">self.assertEqual(sys.getrefcount(args)</span><span class="s3">, </span><span class="s1">refcount_before)</span>
+
+    <span class="s3">def </span><span class="s1">test_kwarg_refs(self):</span>
+        <span class="s1">kwargs = {}</span>
+        <span class="s0"># pylint:disable=unnecessary-lambda</span>
+        <span class="s1">g = greenlet.greenlet(</span>
+            <span class="s3">lambda </span><span class="s1">**kwargs: greenlet.getcurrent().parent.switch(**kwargs))</span>
+        <span class="s3">for </span><span class="s1">_ </span><span class="s3">in </span><span class="s1">range(</span><span class="s5">100</span><span class="s1">):</span>
+            <span class="s1">g.switch(**kwargs)</span>
+        <span class="s1">self.assertEqual(sys.getrefcount(kwargs)</span><span class="s3">, </span><span class="s5">2</span><span class="s1">)</span>
+
+
+    <span class="s1">@staticmethod</span>
+    <span class="s3">def </span><span class="s1">__recycle_threads():</span>
+        <span class="s0"># By introducing a thread that does sleep we allow other threads,</span>
+        <span class="s0"># that have triggered their __block condition, but did not have a</span>
+        <span class="s0"># chance to deallocate their thread state yet, to finally do so.</span>
+        <span class="s0"># The way it works is by requiring a GIL switch (different thread),</span>
+        <span class="s0"># which does a GIL release (sleep), which might do a GIL switch</span>
+        <span class="s0"># to finished threads and allow them to clean up.</span>
+        <span class="s3">def </span><span class="s1">worker():</span>
+            <span class="s1">time.sleep(</span><span class="s5">0.001</span><span class="s1">)</span>
+        <span class="s1">t = threading.Thread(target=worker)</span>
+        <span class="s1">t.start()</span>
+        <span class="s1">time.sleep(</span><span class="s5">0.001</span><span class="s1">)</span>
+        <span class="s1">t.join(</span><span class="s5">10</span><span class="s1">)</span>
+
+    <span class="s3">def </span><span class="s1">test_threaded_leak(self):</span>
+        <span class="s1">gg = []</span>
+        <span class="s3">def </span><span class="s1">worker():</span>
+            <span class="s0"># only main greenlet present</span>
+            <span class="s1">gg.append(weakref.ref(greenlet.getcurrent()))</span>
+        <span class="s3">for </span><span class="s1">_ </span><span class="s3">in </span><span class="s1">range(</span><span class="s5">2</span><span class="s1">):</span>
+            <span class="s1">t = threading.Thread(target=worker)</span>
+            <span class="s1">t.start()</span>
+            <span class="s1">t.join(</span><span class="s5">10</span><span class="s1">)</span>
+            <span class="s3">del </span><span class="s1">t</span>
+        <span class="s1">greenlet.getcurrent() </span><span class="s0"># update ts_current</span>
+        <span class="s1">self.__recycle_threads()</span>
+        <span class="s1">greenlet.getcurrent() </span><span class="s0"># update ts_current</span>
+        <span class="s1">gc.collect()</span>
+        <span class="s1">greenlet.getcurrent() </span><span class="s0"># update ts_current</span>
+        <span class="s3">for </span><span class="s1">g </span><span class="s3">in </span><span class="s1">gg:</span>
+            <span class="s1">self.assertIsNone(g())</span>
+
+    <span class="s3">def </span><span class="s1">test_threaded_adv_leak(self):</span>
+        <span class="s1">gg = []</span>
+        <span class="s3">def </span><span class="s1">worker():</span>
+            <span class="s0"># main and additional *finished* greenlets</span>
+            <span class="s1">ll = greenlet.getcurrent().ll = []</span>
+            <span class="s3">def </span><span class="s1">additional():</span>
+                <span class="s1">ll.append(greenlet.getcurrent())</span>
+            <span class="s3">for </span><span class="s1">_ </span><span class="s3">in </span><span class="s1">range(</span><span class="s5">2</span><span class="s1">):</span>
+                <span class="s1">greenlet.greenlet(additional).switch()</span>
+            <span class="s1">gg.append(weakref.ref(greenlet.getcurrent()))</span>
+        <span class="s3">for </span><span class="s1">_ </span><span class="s3">in </span><span class="s1">range(</span><span class="s5">2</span><span class="s1">):</span>
+            <span class="s1">t = threading.Thread(target=worker)</span>
+            <span class="s1">t.start()</span>
+            <span class="s1">t.join(</span><span class="s5">10</span><span class="s1">)</span>
+            <span class="s3">del </span><span class="s1">t</span>
+        <span class="s1">greenlet.getcurrent() </span><span class="s0"># update ts_current</span>
+        <span class="s1">self.__recycle_threads()</span>
+        <span class="s1">greenlet.getcurrent() </span><span class="s0"># update ts_current</span>
+        <span class="s1">gc.collect()</span>
+        <span class="s1">greenlet.getcurrent() </span><span class="s0"># update ts_current</span>
+        <span class="s3">for </span><span class="s1">g </span><span class="s3">in </span><span class="s1">gg:</span>
+            <span class="s1">self.assertIsNone(g())</span>
+
+    <span class="s3">def </span><span class="s1">assertClocksUsed(self):</span>
+        <span class="s1">used = greenlet._greenlet.get_clocks_used_doing_optional_cleanup()</span>
+        <span class="s1">self.assertGreaterEqual(used</span><span class="s3">, </span><span class="s5">0</span><span class="s1">)</span>
+        <span class="s0"># we don't lose the value</span>
+        <span class="s1">greenlet._greenlet.enable_optional_cleanup(</span><span class="s3">True</span><span class="s1">)</span>
+        <span class="s1">used2 = greenlet._greenlet.get_clocks_used_doing_optional_cleanup()</span>
+        <span class="s1">self.assertEqual(used</span><span class="s3">, </span><span class="s1">used2)</span>
+        <span class="s1">self.assertGreater(greenlet._greenlet.CLOCKS_PER_SEC</span><span class="s3">, </span><span class="s5">1</span><span class="s1">)</span>
+
+    <span class="s3">def </span><span class="s1">_check_issue251(self</span><span class="s3">,</span>
+                        <span class="s1">manually_collect_background=</span><span class="s3">True,</span>
+                        <span class="s1">explicit_reference_to_switch=</span><span class="s3">False</span><span class="s1">):</span>
+        <span class="s0"># See https://github.com/python-greenlet/greenlet/issues/251</span>
+        <span class="s0"># Killing a greenlet (probably not the main one)</span>
+        <span class="s0"># in one thread from another thread would</span>
+        <span class="s0"># result in leaking a list (the ts_delkey list).</span>
+        <span class="s0"># We no longer use lists to hold that stuff, though.</span>
+
+        <span class="s0"># For the test to be valid, even empty lists have to be tracked by the</span>
+        <span class="s0"># GC</span>
+
+        <span class="s3">assert </span><span class="s1">gc.is_tracked([])</span>
+        <span class="s1">HasFinalizerTracksInstances.reset()</span>
+        <span class="s1">greenlet.getcurrent()</span>
+        <span class="s1">greenlets_before = self.count_objects(greenlet.greenlet</span><span class="s3">, </span><span class="s1">exact_kind=</span><span class="s3">False</span><span class="s1">)</span>
+
+        <span class="s1">background_glet_running = threading.Event()</span>
+        <span class="s1">background_glet_killed = threading.Event()</span>
+        <span class="s1">background_greenlets = []</span>
+
+        <span class="s0"># XXX: Switching this to a greenlet subclass that overrides</span>
+        <span class="s0"># run results in all callers failing the leaktest; that</span>
+        <span class="s0"># greenlet instance is leaked. There's a bound method for</span>
+        <span class="s0"># run() living on the stack of the greenlet in g_initialstub,</span>
+        <span class="s0"># and since we don't manually switch back to the background</span>
+        <span class="s0"># greenlet to let it &quot;fall off the end&quot; and exit the</span>
+        <span class="s0"># g_initialstub function, it never gets cleaned up. Making the</span>
+        <span class="s0"># garbage collector aware of this bound method (making it an</span>
+        <span class="s0"># attribute of the greenlet structure and traversing into it)</span>
+        <span class="s0"># doesn't help, for some reason.</span>
+        <span class="s3">def </span><span class="s1">background_greenlet():</span>
+            <span class="s0"># Throw control back to the main greenlet.</span>
+            <span class="s1">jd = HasFinalizerTracksInstances(</span><span class="s4">&quot;DELETING STACK OBJECT&quot;</span><span class="s1">)</span>
+            <span class="s1">greenlet._greenlet.set_thread_local(</span>
+                <span class="s4">'test_leaks_key'</span><span class="s3">,</span>
+                <span class="s1">HasFinalizerTracksInstances(</span><span class="s4">&quot;DELETING THREAD STATE&quot;</span><span class="s1">))</span>
+            <span class="s0"># Explicitly keeping 'switch' in a local variable</span>
+            <span class="s0"># breaks this test in all versions</span>
+            <span class="s3">if </span><span class="s1">explicit_reference_to_switch:</span>
+                <span class="s1">s = greenlet.getcurrent().parent.switch</span>
+                <span class="s1">s([jd])</span>
+            <span class="s3">else</span><span class="s1">:</span>
+                <span class="s1">greenlet.getcurrent().parent.switch([jd])</span>
+
+        <span class="s1">bg_main_wrefs = []</span>
+
+        <span class="s3">def </span><span class="s1">background_thread():</span>
+            <span class="s1">glet = greenlet.greenlet(background_greenlet)</span>
+            <span class="s1">bg_main_wrefs.append(weakref.ref(glet.parent))</span>
+
+            <span class="s1">background_greenlets.append(glet)</span>
+            <span class="s1">glet.switch() </span><span class="s0"># Be sure it's active.</span>
+            <span class="s0"># Control is ours again.</span>
+            <span class="s3">del </span><span class="s1">glet </span><span class="s0"># Delete one reference from the thread it runs in.</span>
+            <span class="s1">background_glet_running.set()</span>
+            <span class="s1">background_glet_killed.wait(</span><span class="s5">10</span><span class="s1">)</span>
+
+            <span class="s0"># To trigger the background collection of the dead</span>
+            <span class="s0"># greenlet, thus clearing out the contents of the list, we</span>
+            <span class="s0"># need to run some APIs. See issue 252.</span>
+            <span class="s3">if </span><span class="s1">manually_collect_background:</span>
+                <span class="s1">greenlet.getcurrent()</span>
+
+
+        <span class="s1">t = threading.Thread(target=background_thread)</span>
+        <span class="s1">t.start()</span>
+        <span class="s1">background_glet_running.wait(</span><span class="s5">10</span><span class="s1">)</span>
+        <span class="s1">greenlet.getcurrent()</span>
+        <span class="s1">lists_before = self.count_objects(list</span><span class="s3">, </span><span class="s1">exact_kind=</span><span class="s3">True</span><span class="s1">)</span>
+
+        <span class="s3">assert </span><span class="s1">len(background_greenlets) == </span><span class="s5">1</span>
+        <span class="s1">self.assertFalse(background_greenlets[</span><span class="s5">0</span><span class="s1">].dead)</span>
+        <span class="s0"># Delete the last reference to the background greenlet</span>
+        <span class="s0"># from a different thread. This puts it in the background thread's</span>
+        <span class="s0"># ts_delkey list.</span>
+        <span class="s3">del </span><span class="s1">background_greenlets[:]</span>
+        <span class="s1">background_glet_killed.set()</span>
+
+        <span class="s0"># Now wait for the background thread to die.</span>
+        <span class="s1">t.join(</span><span class="s5">10</span><span class="s1">)</span>
+        <span class="s3">del </span><span class="s1">t</span>
+        <span class="s0"># As part of the fix for 252, we need to cycle the ceval.c</span>
+        <span class="s0"># interpreter loop to be sure it has had a chance to process</span>
+        <span class="s0"># the pending call.</span>
+        <span class="s1">self.wait_for_pending_cleanups()</span>
+
+        <span class="s1">lists_after = self.count_objects(list</span><span class="s3">, </span><span class="s1">exact_kind=</span><span class="s3">True</span><span class="s1">)</span>
+        <span class="s1">greenlets_after = self.count_objects(greenlet.greenlet</span><span class="s3">, </span><span class="s1">exact_kind=</span><span class="s3">False</span><span class="s1">)</span>
+
+        <span class="s0"># On 2.7, we observe that lists_after is smaller than</span>
+        <span class="s0"># lists_before. No idea what lists got cleaned up. All the</span>
+        <span class="s0"># Python 3 versions match exactly.</span>
+        <span class="s1">self.assertLessEqual(lists_after</span><span class="s3">, </span><span class="s1">lists_before)</span>
+        <span class="s0"># On versions after 3.6, we've successfully cleaned up the</span>
+        <span class="s0"># greenlet references thanks to the internal &quot;vectorcall&quot;</span>
+        <span class="s0"># protocol; prior to that, there is a reference path through</span>
+        <span class="s0"># the ``greenlet.switch`` method still on the stack that we</span>
+        <span class="s0"># can't reach to clean up. The C code goes through terrific</span>
+        <span class="s0"># lengths to clean that up.</span>
+        <span class="s3">if not </span><span class="s1">explicit_reference_to_switch </span><span class="s3">and </span><span class="s1">greenlet._greenlet.get_clocks_used_doing_optional_cleanup() </span><span class="s3">is not None</span><span class="s1">:</span>
+            <span class="s0"># If cleanup was disabled, though, we may not find it.</span>
+            <span class="s1">self.assertEqual(greenlets_after</span><span class="s3">, </span><span class="s1">greenlets_before)</span>
+            <span class="s3">if </span><span class="s1">manually_collect_background:</span>
+                <span class="s0"># TODO: Figure out how to make this work!</span>
+                <span class="s0"># The one on the stack is still leaking somehow</span>
+                <span class="s0"># in the non-manually-collect state.</span>
+                <span class="s1">self.assertEqual(HasFinalizerTracksInstances.EXTANT_INSTANCES</span><span class="s3">, </span><span class="s1">set())</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s0"># The explicit reference prevents us from collecting it</span>
+            <span class="s0"># and it isn't always found by the GC either for some</span>
+            <span class="s0"># reason. The entire frame is leaked somehow, on some</span>
+            <span class="s0"># platforms (e.g., MacPorts builds of Python (all</span>
+            <span class="s0"># versions!)), but not on other platforms (the linux and</span>
+            <span class="s0"># windows builds on GitHub actions and Appveyor). So we'd</span>
+            <span class="s0"># like to write a test that proves that the main greenlet</span>
+            <span class="s0"># sticks around, and we can on my machine (macOS 11.6,</span>
+            <span class="s0"># MacPorts builds of everything) but we can't write that</span>
+            <span class="s0"># same test on other platforms. However, hopefully iteration</span>
+            <span class="s0"># done by leakcheck will find it.</span>
+            <span class="s3">pass</span>
+
+        <span class="s3">if </span><span class="s1">greenlet._greenlet.get_clocks_used_doing_optional_cleanup() </span><span class="s3">is not None</span><span class="s1">:</span>
+            <span class="s1">self.assertClocksUsed()</span>
+
+    <span class="s3">def </span><span class="s1">test_issue251_killing_cross_thread_leaks_list(self):</span>
+        <span class="s1">self._check_issue251()</span>
+
+    <span class="s3">def </span><span class="s1">test_issue251_with_cleanup_disabled(self):</span>
+        <span class="s1">greenlet._greenlet.enable_optional_cleanup(</span><span class="s3">False</span><span class="s1">)</span>
+        <span class="s3">try</span><span class="s1">:</span>
+            <span class="s1">self._check_issue251()</span>
+        <span class="s3">finally</span><span class="s1">:</span>
+            <span class="s1">greenlet._greenlet.enable_optional_cleanup(</span><span class="s3">True</span><span class="s1">)</span>
+
+    <span class="s1">@fails_leakcheck</span>
+    <span class="s3">def </span><span class="s1">test_issue251_issue252_need_to_collect_in_background(self):</span>
+        <span class="s0"># Between greenlet 1.1.2 and the next version, this was still</span>
+        <span class="s0"># failing because the leak of the list still exists when we</span>
+        <span class="s0"># don't call a greenlet API before exiting the thread. The</span>
+        <span class="s0"># proximate cause is that neither of the two greenlets from</span>
+        <span class="s0"># the background thread are actually being destroyed, even</span>
+        <span class="s0"># though the GC is in fact visiting both objects. It's not</span>
+        <span class="s0"># clear where that leak is? For some reason the thread-local</span>
+        <span class="s0"># dict holding it isn't being cleaned up.</span>
+        <span class="s0">#</span>
+        <span class="s0"># The leak, I think, is in the CPYthon internal function that</span>
+        <span class="s0"># calls into green_switch(). The argument tuple is still on</span>
+        <span class="s0"># the C stack somewhere and can't be reached? That doesn't</span>
+        <span class="s0"># make sense, because the tuple should be collectable when</span>
+        <span class="s0"># this object goes away.</span>
+        <span class="s0">#</span>
+        <span class="s0"># Note that this test sometimes spuriously passes on Linux,</span>
+        <span class="s0"># for some reason, but I've never seen it pass on macOS.</span>
+        <span class="s1">self._check_issue251(manually_collect_background=</span><span class="s3">False</span><span class="s1">)</span>
+
+    <span class="s1">@fails_leakcheck</span>
+    <span class="s3">def </span><span class="s1">test_issue251_issue252_need_to_collect_in_background_cleanup_disabled(self):</span>
+        <span class="s1">self.expect_greenlet_leak = </span><span class="s3">True</span>
+        <span class="s1">greenlet._greenlet.enable_optional_cleanup(</span><span class="s3">False</span><span class="s1">)</span>
+        <span class="s3">try</span><span class="s1">:</span>
+            <span class="s1">self._check_issue251(manually_collect_background=</span><span class="s3">False</span><span class="s1">)</span>
+        <span class="s3">finally</span><span class="s1">:</span>
+            <span class="s1">greenlet._greenlet.enable_optional_cleanup(</span><span class="s3">True</span><span class="s1">)</span>
+
+    <span class="s1">@fails_leakcheck</span>
+    <span class="s3">def </span><span class="s1">test_issue251_issue252_explicit_reference_not_collectable(self):</span>
+        <span class="s1">self._check_issue251(</span>
+            <span class="s1">manually_collect_background=</span><span class="s3">False,</span>
+            <span class="s1">explicit_reference_to_switch=</span><span class="s3">True</span><span class="s1">)</span>
+
+    <span class="s1">UNTRACK_ATTEMPTS = </span><span class="s5">100</span>
+
+    <span class="s3">def </span><span class="s1">_only_test_some_versions(self):</span>
+        <span class="s0"># We're only looking for this problem specifically on 3.11,</span>
+        <span class="s0"># and this set of tests is relatively fragile, depending on</span>
+        <span class="s0"># OS and memory management details. So we want to run it on 3.11+</span>
+        <span class="s0"># (obviously) but not every older 3.x version in order to reduce</span>
+        <span class="s0"># false negatives.</span>
+        <span class="s3">if </span><span class="s1">sys.version_info[</span><span class="s5">0</span><span class="s1">] &gt;= </span><span class="s5">3 </span><span class="s3">and </span><span class="s1">sys.version_info[:</span><span class="s5">2</span><span class="s1">] &lt; (</span><span class="s5">3</span><span class="s3">, </span><span class="s5">8</span><span class="s1">):</span>
+            <span class="s1">self.skipTest(</span><span class="s4">'Only observed on 3.11'</span><span class="s1">)</span>
+        <span class="s3">if </span><span class="s1">sys.version_info[</span><span class="s5">0</span><span class="s1">] == </span><span class="s5">2 </span><span class="s3">and </span><span class="s1">RUNNING_ON_GITHUB_ACTIONS:</span>
+            <span class="s1">self.skipTest(</span><span class="s4">'Hard to get a stable pattern here'</span><span class="s1">)</span>
+        <span class="s3">if </span><span class="s1">RUNNING_ON_MANYLINUX:</span>
+            <span class="s1">self.skipTest(</span><span class="s4">&quot;Slow and not worth repeating here&quot;</span><span class="s1">)</span>
+
+    <span class="s1">@ignores_leakcheck</span>
+    <span class="s0"># Because we're just trying to track raw memory, not objects, and running</span>
+    <span class="s0"># the leakcheck makes an already slow test slower.</span>
+    <span class="s3">def </span><span class="s1">test_untracked_memory_doesnt_increase(self):</span>
+        <span class="s0"># See https://github.com/gevent/gevent/issues/1924</span>
+        <span class="s0"># and https://github.com/python-greenlet/greenlet/issues/328</span>
+        <span class="s1">self._only_test_some_versions()</span>
+        <span class="s3">def </span><span class="s1">f():</span>
+            <span class="s3">return </span><span class="s5">1</span>
+
+        <span class="s1">ITER = </span><span class="s5">10000</span>
+        <span class="s3">def </span><span class="s1">run_it():</span>
+            <span class="s3">for </span><span class="s1">_ </span><span class="s3">in </span><span class="s1">range(ITER):</span>
+                <span class="s1">greenlet.greenlet(f).switch()</span>
+
+        <span class="s0"># Establish baseline</span>
+        <span class="s3">for </span><span class="s1">_ </span><span class="s3">in </span><span class="s1">range(</span><span class="s5">3</span><span class="s1">):</span>
+            <span class="s1">run_it()</span>
+
+        <span class="s0"># uss: (Linux, macOS, Windows): aka &quot;Unique Set Size&quot;, this is</span>
+        <span class="s0"># the memory which is unique to a process and which would be</span>
+        <span class="s0"># freed if the process was terminated right now.</span>
+        <span class="s1">uss_before = psutil.Process().memory_full_info().uss</span>
+
+        <span class="s3">for </span><span class="s1">count </span><span class="s3">in </span><span class="s1">range(self.UNTRACK_ATTEMPTS):</span>
+            <span class="s1">uss_before = max(uss_before</span><span class="s3">, </span><span class="s1">psutil.Process().memory_full_info().uss)</span>
+            <span class="s1">run_it()</span>
+
+            <span class="s1">uss_after = psutil.Process().memory_full_info().uss</span>
+            <span class="s3">if </span><span class="s1">uss_after &lt;= uss_before </span><span class="s3">and </span><span class="s1">count &gt; </span><span class="s5">1</span><span class="s1">:</span>
+                <span class="s3">break</span>
+
+        <span class="s1">self.assertLessEqual(uss_after</span><span class="s3">, </span><span class="s1">uss_before)</span>
+
+    <span class="s3">def </span><span class="s1">_check_untracked_memory_thread(self</span><span class="s3">, </span><span class="s1">deallocate_in_thread=</span><span class="s3">True</span><span class="s1">):</span>
+        <span class="s1">self._only_test_some_versions()</span>
+        <span class="s0"># Like the above test, but what if there are a bunch of</span>
+        <span class="s0"># unfinished greenlets in a thread that dies?</span>
+        <span class="s0"># Does it matter if we deallocate in the thread or not?</span>
+        <span class="s1">EXIT_COUNT = [</span><span class="s5">0</span><span class="s1">]</span>
+
+        <span class="s3">def </span><span class="s1">f():</span>
+            <span class="s3">try</span><span class="s1">:</span>
+                <span class="s1">greenlet.getcurrent().parent.switch()</span>
+            <span class="s3">except </span><span class="s1">greenlet.GreenletExit:</span>
+                <span class="s1">EXIT_COUNT[</span><span class="s5">0</span><span class="s1">] += </span><span class="s5">1</span>
+                <span class="s3">raise</span>
+            <span class="s3">return </span><span class="s5">1</span>
+
+        <span class="s1">ITER = </span><span class="s5">10000</span>
+        <span class="s3">def </span><span class="s1">run_it():</span>
+            <span class="s1">glets = []</span>
+            <span class="s3">for </span><span class="s1">_ </span><span class="s3">in </span><span class="s1">range(ITER):</span>
+                <span class="s0"># Greenlet starts, switches back to us.</span>
+                <span class="s0"># We keep a strong reference to the greenlet though so it doesn't</span>
+                <span class="s0"># get a GreenletExit exception.</span>
+                <span class="s1">g = greenlet.greenlet(f)</span>
+                <span class="s1">glets.append(g)</span>
+                <span class="s1">g.switch()</span>
+
+            <span class="s3">return </span><span class="s1">glets</span>
+
+        <span class="s1">test = self</span>
+
+        <span class="s3">class </span><span class="s1">ThreadFunc:</span>
+            <span class="s1">uss_before = uss_after = </span><span class="s5">0</span>
+            <span class="s1">glets = ()</span>
+            <span class="s1">ITER = </span><span class="s5">2</span>
+            <span class="s3">def </span><span class="s1">__call__(self):</span>
+                <span class="s1">self.uss_before = psutil.Process().memory_full_info().uss</span>
+
+                <span class="s3">for </span><span class="s1">_ </span><span class="s3">in </span><span class="s1">range(self.ITER):</span>
+                    <span class="s1">self.glets += tuple(run_it())</span>
+
+                <span class="s3">for </span><span class="s1">g </span><span class="s3">in </span><span class="s1">self.glets:</span>
+                    <span class="s1">test.assertIn(</span><span class="s4">'suspended active'</span><span class="s3">, </span><span class="s1">str(g))</span>
+                <span class="s0"># Drop them.</span>
+                <span class="s3">if </span><span class="s1">deallocate_in_thread:</span>
+                    <span class="s1">self.glets = ()</span>
+                <span class="s1">self.uss_after = psutil.Process().memory_full_info().uss</span>
+
+        <span class="s0"># Establish baseline</span>
+        <span class="s1">uss_before = uss_after = </span><span class="s3">None</span>
+        <span class="s3">for </span><span class="s1">count </span><span class="s3">in </span><span class="s1">range(self.UNTRACK_ATTEMPTS):</span>
+            <span class="s1">EXIT_COUNT[</span><span class="s5">0</span><span class="s1">] = </span><span class="s5">0</span>
+            <span class="s1">thread_func = ThreadFunc()</span>
+            <span class="s1">t = threading.Thread(target=thread_func)</span>
+            <span class="s1">t.start()</span>
+            <span class="s1">t.join(</span><span class="s5">30</span><span class="s1">)</span>
+            <span class="s1">self.assertFalse(t.is_alive())</span>
+
+            <span class="s3">if </span><span class="s1">uss_before </span><span class="s3">is None</span><span class="s1">:</span>
+                <span class="s1">uss_before = thread_func.uss_before</span>
+
+            <span class="s1">uss_before = max(uss_before</span><span class="s3">, </span><span class="s1">thread_func.uss_before)</span>
+            <span class="s3">if </span><span class="s1">deallocate_in_thread:</span>
+                <span class="s1">self.assertEqual(thread_func.glets</span><span class="s3">, </span><span class="s1">())</span>
+                <span class="s1">self.assertEqual(EXIT_COUNT[</span><span class="s5">0</span><span class="s1">]</span><span class="s3">, </span><span class="s1">ITER * thread_func.ITER)</span>
+
+            <span class="s3">del </span><span class="s1">thread_func </span><span class="s0"># Deallocate the greenlets; but this won't raise into them</span>
+            <span class="s3">del </span><span class="s1">t</span>
+            <span class="s3">if not </span><span class="s1">deallocate_in_thread:</span>
+                <span class="s1">self.assertEqual(EXIT_COUNT[</span><span class="s5">0</span><span class="s1">]</span><span class="s3">, </span><span class="s5">0</span><span class="s1">)</span>
+            <span class="s3">if </span><span class="s1">deallocate_in_thread:</span>
+                <span class="s1">self.wait_for_pending_cleanups()</span>
+
+            <span class="s1">uss_after = psutil.Process().memory_full_info().uss</span>
+            <span class="s0"># See if we achieve a non-growth state at some point. Break when we do.</span>
+            <span class="s3">if </span><span class="s1">uss_after &lt;= uss_before </span><span class="s3">and </span><span class="s1">count &gt; </span><span class="s5">1</span><span class="s1">:</span>
+                <span class="s3">break</span>
+
+        <span class="s1">self.wait_for_pending_cleanups()</span>
+        <span class="s1">uss_after = psutil.Process().memory_full_info().uss</span>
+        <span class="s1">self.assertLessEqual(uss_after</span><span class="s3">, </span><span class="s1">uss_before</span><span class="s3">, </span><span class="s4">&quot;after attempts %d&quot; </span><span class="s1">% (count</span><span class="s3">,</span><span class="s1">))</span>
+
+    <span class="s1">@ignores_leakcheck</span>
+    <span class="s0"># Because we're just trying to track raw memory, not objects, and running</span>
+    <span class="s0"># the leakcheck makes an already slow test slower.</span>
+    <span class="s3">def </span><span class="s1">test_untracked_memory_doesnt_increase_unfinished_thread_dealloc_in_thread(self):</span>
+        <span class="s1">self._check_untracked_memory_thread(deallocate_in_thread=</span><span class="s3">True</span><span class="s1">)</span>
+
+    <span class="s1">@ignores_leakcheck</span>
+    <span class="s0"># Because the main greenlets from the background threads do not exit in a timely fashion,</span>
+    <span class="s0"># we fail the object-based leakchecks.</span>
+    <span class="s3">def </span><span class="s1">test_untracked_memory_doesnt_increase_unfinished_thread_dealloc_in_main(self):</span>
+        <span class="s1">self._check_untracked_memory_thread(deallocate_in_thread=</span><span class="s3">False</span><span class="s1">)</span>
+
+<span class="s3">if </span><span class="s1">__name__ == </span><span class="s4">'__main__'</span><span class="s1">:</span>
+    <span class="s1">__import__(</span><span class="s4">'unittest'</span><span class="s1">).main()</span>
+</pre>
+</body>
+</html>

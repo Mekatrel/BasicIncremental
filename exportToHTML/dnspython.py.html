@@ -1,0 +1,531 @@
+<html>
+<head>
+<title>dnspython.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #cc7832;}
+.s3 { color: #6a8759;}
+.s4 { color: #6897bb;}
+.s5 { color: #629755; font-style: italic;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+dnspython.py</font>
+</center></td></tr></table>
+<pre><span class="s0"># Copyright (c) 2018  gevent contributors. See LICENSE for details.</span>
+
+<span class="s0"># Portions of this code taken from the gogreen project:</span>
+<span class="s0">#   http://github.com/slideinc/gogreen</span>
+<span class="s0">#</span>
+<span class="s0"># Copyright (c) 2005-2010 Slide, Inc.</span>
+<span class="s0"># All rights reserved.</span>
+<span class="s0">#</span>
+<span class="s0"># Redistribution and use in source and binary forms, with or without</span>
+<span class="s0"># modification, are permitted provided that the following conditions are</span>
+<span class="s0"># met:</span>
+<span class="s0">#</span>
+<span class="s0">#     * Redistributions of source code must retain the above copyright</span>
+<span class="s0">#       notice, this list of conditions and the following disclaimer.</span>
+<span class="s0">#     * Redistributions in binary form must reproduce the above</span>
+<span class="s0">#       copyright notice, this list of conditions and the following</span>
+<span class="s0">#       disclaimer in the documentation and/or other materials provided</span>
+<span class="s0">#       with the distribution.</span>
+<span class="s0">#     * Neither the name of the author nor the names of other</span>
+<span class="s0">#       contributors may be used to endorse or promote products derived</span>
+<span class="s0">#       from this software without specific prior written permission.</span>
+<span class="s0">#</span>
+<span class="s0"># THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS</span>
+<span class="s0"># &quot;AS IS&quot; AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT</span>
+<span class="s0"># LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR</span>
+<span class="s0"># A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT</span>
+<span class="s0"># OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,</span>
+<span class="s0"># SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT</span>
+<span class="s0"># LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,</span>
+<span class="s0"># DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY</span>
+<span class="s0"># THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT</span>
+<span class="s0"># (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE</span>
+<span class="s0"># OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.</span>
+
+<span class="s0"># Portions of this code taken from the eventlet project:</span>
+<span class="s0"># https://github.com/eventlet/eventlet/blob/master/eventlet/support/greendns.py</span>
+
+<span class="s0"># Unless otherwise noted, the files in Eventlet are under the following MIT license:</span>
+
+<span class="s0"># Copyright (c) 2005-2006, Bob Ippolito</span>
+<span class="s0"># Copyright (c) 2007-2010, Linden Research, Inc.</span>
+<span class="s0"># Copyright (c) 2008-2010, Eventlet Contributors (see AUTHORS)</span>
+
+<span class="s0"># Permission is hereby granted, free of charge, to any person obtaining a copy</span>
+<span class="s0"># of this software and associated documentation files (the &quot;Software&quot;), to deal</span>
+<span class="s0"># in the Software without restriction, including without limitation the rights</span>
+<span class="s0"># to use, copy, modify, merge, publish, distribute, sublicense, and/or sell</span>
+<span class="s0"># copies of the Software, and to permit persons to whom the Software is</span>
+<span class="s0"># furnished to do so, subject to the following conditions:</span>
+
+<span class="s0"># The above copyright notice and this permission notice shall be included in</span>
+<span class="s0"># all copies or substantial portions of the Software.</span>
+
+<span class="s0"># THE SOFTWARE IS PROVIDED &quot;AS IS&quot;, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR</span>
+<span class="s0"># IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,</span>
+<span class="s0"># FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE</span>
+<span class="s0"># AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER</span>
+<span class="s0"># LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,</span>
+<span class="s0"># OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN</span>
+<span class="s0"># THE SOFTWARE.</span>
+<span class="s2">from </span><span class="s1">__future__ </span><span class="s2">import </span><span class="s1">absolute_import</span><span class="s2">, </span><span class="s1">print_function</span><span class="s2">, </span><span class="s1">division</span>
+
+<span class="s2">import </span><span class="s1">sys</span>
+<span class="s2">import </span><span class="s1">time</span>
+
+<span class="s2">from </span><span class="s1">_socket </span><span class="s2">import </span><span class="s1">error</span>
+<span class="s2">from </span><span class="s1">_socket </span><span class="s2">import </span><span class="s1">gaierror</span>
+<span class="s2">from </span><span class="s1">_socket </span><span class="s2">import </span><span class="s1">herror</span>
+<span class="s2">from </span><span class="s1">_socket </span><span class="s2">import </span><span class="s1">NI_NUMERICSERV</span>
+<span class="s2">from </span><span class="s1">_socket </span><span class="s2">import </span><span class="s1">AF_INET</span>
+<span class="s2">from </span><span class="s1">_socket </span><span class="s2">import </span><span class="s1">AF_INET6</span>
+<span class="s2">from </span><span class="s1">_socket </span><span class="s2">import </span><span class="s1">AF_UNSPEC</span>
+<span class="s2">from </span><span class="s1">_socket </span><span class="s2">import </span><span class="s1">EAI_NONAME</span>
+<span class="s2">from </span><span class="s1">_socket </span><span class="s2">import </span><span class="s1">EAI_FAMILY</span>
+
+
+<span class="s2">import </span><span class="s1">socket</span>
+
+<span class="s2">from </span><span class="s1">gevent.resolver </span><span class="s2">import </span><span class="s1">AbstractResolver</span>
+<span class="s2">from </span><span class="s1">gevent.resolver._hostsfile </span><span class="s2">import </span><span class="s1">HostsFile</span>
+
+<span class="s2">from </span><span class="s1">gevent.builtins </span><span class="s2">import </span><span class="s1">__import__ </span><span class="s2">as </span><span class="s1">g_import</span>
+
+<span class="s2">from </span><span class="s1">gevent._compat </span><span class="s2">import </span><span class="s1">string_types</span>
+<span class="s2">from </span><span class="s1">gevent._compat </span><span class="s2">import </span><span class="s1">iteritems</span>
+<span class="s2">from </span><span class="s1">gevent._config </span><span class="s2">import </span><span class="s1">config</span>
+
+
+<span class="s1">__all__ = [</span>
+    <span class="s3">'Resolver'</span><span class="s2">,</span>
+<span class="s1">]</span>
+
+<span class="s0"># Import the DNS packages to use the gevent modules,</span>
+<span class="s0"># even if the system is not monkey-patched. If it *is* already</span>
+<span class="s0"># patched, this imports a second copy under a different name,</span>
+<span class="s0"># which is probably not strictly necessary, but matches</span>
+<span class="s0"># what we've historically done, and allows configuring the resolvers</span>
+<span class="s0"># differently.</span>
+
+<span class="s2">def </span><span class="s1">_patch_dns():</span>
+    <span class="s2">from </span><span class="s1">gevent._patcher </span><span class="s2">import </span><span class="s1">import_patched </span><span class="s2">as </span><span class="s1">importer</span>
+    <span class="s0"># The dns package itself is empty but defines __all__</span>
+    <span class="s0"># we make sure to import all of those things now under the</span>
+    <span class="s0"># patch. Note this triggers two DeprecationWarnings,</span>
+    <span class="s0"># one of which we could avoid.</span>
+    <span class="s1">extras = {</span>
+        <span class="s3">'dns'</span><span class="s1">: (</span><span class="s3">'rdata'</span><span class="s2">, </span><span class="s3">'resolver'</span><span class="s2">, </span><span class="s3">'rdtypes'</span><span class="s1">)</span><span class="s2">,</span>
+        <span class="s3">'dns.rdtypes'</span><span class="s1">: (</span><span class="s3">'IN'</span><span class="s2">, </span><span class="s3">'ANY'</span><span class="s2">, </span><span class="s1">)</span><span class="s2">,</span>
+        <span class="s3">'dns.rdtypes.IN'</span><span class="s1">: (</span><span class="s3">'A'</span><span class="s2">, </span><span class="s3">'AAAA'</span><span class="s2">,</span><span class="s1">)</span><span class="s2">,</span>
+        <span class="s3">'dns.rdtypes.ANY'</span><span class="s1">: (</span><span class="s3">'SOA'</span><span class="s2">, </span><span class="s3">'PTR'</span><span class="s1">)</span><span class="s2">,</span>
+    <span class="s1">}</span>
+    <span class="s2">def </span><span class="s1">extra_all(mod_name):</span>
+        <span class="s2">return </span><span class="s1">extras.get(mod_name</span><span class="s2">, </span><span class="s1">())</span>
+
+    <span class="s2">def </span><span class="s1">after_import_hook(dns): </span><span class="s0"># pylint:disable=redefined-outer-name</span>
+        <span class="s0"># Runs while still in the original patching scope.</span>
+        <span class="s0"># The dns.rdata:get_rdata_class() function tries to</span>
+        <span class="s0"># dynamically import modules using __import__ and then walk</span>
+        <span class="s0"># through the attribute tree to find classes in `dns.rdtypes`.</span>
+        <span class="s0"># It is critical that this all matches up, otherwise we can</span>
+        <span class="s0"># get different exception classes that don't get caught.</span>
+        <span class="s0"># We could patch __import__ to do things at runtime, but it's</span>
+        <span class="s0"># easier to enumerate the world and populate the cache now</span>
+        <span class="s0"># before we then switch the names back.</span>
+        <span class="s1">rdata = dns.rdata</span>
+        <span class="s1">get_rdata_class = rdata.get_rdata_class</span>
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s1">rdclass_values = list(dns.rdataclass.RdataClass)</span>
+        <span class="s2">except </span><span class="s1">AttributeError:</span>
+            <span class="s0"># dnspython &lt; 2.0</span>
+            <span class="s1">rdclass_values = dns.rdataclass._by_value</span>
+
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s1">rdtype_values = list(dns.rdatatype.RdataType)</span>
+        <span class="s2">except </span><span class="s1">AttributeError:</span>
+            <span class="s0"># dnspython &lt; 2.0</span>
+            <span class="s1">rdtype_values = dns.rdatatype._by_value</span>
+
+
+        <span class="s2">for </span><span class="s1">rdclass </span><span class="s2">in </span><span class="s1">rdclass_values:</span>
+            <span class="s2">for </span><span class="s1">rdtype </span><span class="s2">in </span><span class="s1">rdtype_values:</span>
+                <span class="s1">get_rdata_class(rdclass</span><span class="s2">, </span><span class="s1">rdtype)</span>
+
+    <span class="s1">patcher = importer(</span><span class="s3">'dns'</span><span class="s2">, </span><span class="s1">extra_all</span><span class="s2">, </span><span class="s1">after_import_hook)</span>
+    <span class="s1">top = patcher.module</span>
+
+    <span class="s0"># Now disable the dynamic imports</span>
+    <span class="s2">def </span><span class="s1">_no_dynamic_imports(name):</span>
+        <span class="s2">raise </span><span class="s1">ValueError(name)</span>
+
+    <span class="s1">top.rdata.__import__ = _no_dynamic_imports</span>
+
+    <span class="s2">return </span><span class="s1">top</span>
+
+<span class="s1">dns = _patch_dns()</span>
+
+<span class="s1">resolver = dns.resolver</span>
+<span class="s1">dTimeout = dns.resolver.Timeout</span>
+
+<span class="s0"># This is a wrapper for dns.resolver._getaddrinfo with two crucial changes.</span>
+<span class="s0"># First, it backports https://github.com/rthalley/dnspython/issues/316</span>
+<span class="s0"># from version 2.0. This can be dropped when we support only dnspython 2</span>
+<span class="s0"># (which means only Python 3.)</span>
+
+<span class="s0"># Second, it adds calls to sys.exc_clear() to avoid failing tests in</span>
+<span class="s0"># test__refcount.py (timeouts) on Python 2. (Actually, this isn't</span>
+<span class="s0"># strictly necessary, it was necessary to increase the timeouts in</span>
+<span class="s0"># that function because dnspython is doing some parsing/regex/host</span>
+<span class="s0"># lookups that are not super fast. But it does have a habit of leaving</span>
+<span class="s0"># exceptions around which can complicate our memleak checks.)</span>
+<span class="s2">def </span><span class="s1">_getaddrinfo(host=</span><span class="s2">None, </span><span class="s1">service=</span><span class="s2">None, </span><span class="s1">family=AF_UNSPEC</span><span class="s2">, </span><span class="s1">socktype=</span><span class="s4">0</span><span class="s2">,</span>
+                 <span class="s1">proto=</span><span class="s4">0</span><span class="s2">, </span><span class="s1">flags=</span><span class="s4">0</span><span class="s2">,</span>
+                 <span class="s1">_orig_gai=resolver._getaddrinfo</span><span class="s2">,</span>
+                 <span class="s1">_exc_clear=getattr(sys</span><span class="s2">, </span><span class="s3">'exc_clear'</span><span class="s2">, lambda</span><span class="s1">: </span><span class="s2">None</span><span class="s1">)):</span>
+    <span class="s2">if </span><span class="s1">flags &amp; (socket.AI_ADDRCONFIG | socket.AI_V4MAPPED) != </span><span class="s4">0</span><span class="s1">:</span>
+        <span class="s0"># Not implemented.  We raise a gaierror as opposed to a</span>
+        <span class="s0"># NotImplementedError as it helps callers handle errors more</span>
+        <span class="s0"># appropriately.  [Issue #316]</span>
+        <span class="s2">raise </span><span class="s1">socket.gaierror(socket.EAI_SYSTEM)</span>
+    <span class="s1">res = _orig_gai(host</span><span class="s2">, </span><span class="s1">service</span><span class="s2">, </span><span class="s1">family</span><span class="s2">, </span><span class="s1">socktype</span><span class="s2">, </span><span class="s1">proto</span><span class="s2">, </span><span class="s1">flags)</span>
+    <span class="s1">_exc_clear()</span>
+    <span class="s2">return </span><span class="s1">res</span>
+
+
+<span class="s1">resolver._getaddrinfo = _getaddrinfo</span>
+
+<span class="s1">HOSTS_TTL = </span><span class="s4">300.0</span>
+
+
+<span class="s2">class </span><span class="s1">_HostsAnswer(dns.resolver.Answer):</span>
+    <span class="s0"># Answer class for HostsResolver object</span>
+
+    <span class="s2">def </span><span class="s1">__init__(self</span><span class="s2">, </span><span class="s1">qname</span><span class="s2">, </span><span class="s1">rdtype</span><span class="s2">, </span><span class="s1">rdclass</span><span class="s2">, </span><span class="s1">rrset</span><span class="s2">, </span><span class="s1">raise_on_no_answer=</span><span class="s2">True</span><span class="s1">):</span>
+        <span class="s1">self.response = </span><span class="s2">None</span>
+        <span class="s1">self.qname = qname</span>
+        <span class="s1">self.rdtype = rdtype</span>
+        <span class="s1">self.rdclass = rdclass</span>
+        <span class="s1">self.canonical_name = qname</span>
+        <span class="s2">if not </span><span class="s1">rrset </span><span class="s2">and </span><span class="s1">raise_on_no_answer:</span>
+            <span class="s2">raise </span><span class="s1">dns.resolver.NoAnswer()</span>
+        <span class="s1">self.rrset = rrset</span>
+        <span class="s1">self.expiration = (time.time() +</span>
+                           <span class="s1">rrset.ttl </span><span class="s2">if </span><span class="s1">hasattr(rrset</span><span class="s2">, </span><span class="s3">'ttl'</span><span class="s1">) </span><span class="s2">else </span><span class="s4">0</span><span class="s1">)</span>
+
+
+<span class="s2">class </span><span class="s1">_HostsResolver(object):</span>
+    <span class="s5">&quot;&quot;&quot; 
+    Class to parse the hosts file 
+    &quot;&quot;&quot;</span>
+
+    <span class="s2">def </span><span class="s1">__init__(self</span><span class="s2">, </span><span class="s1">fname=</span><span class="s2">None, </span><span class="s1">interval=HOSTS_TTL):</span>
+        <span class="s1">self.hosts_file = HostsFile(fname)</span>
+        <span class="s1">self.interval = interval</span>
+        <span class="s1">self._last_load = </span><span class="s4">0</span>
+
+    <span class="s2">def </span><span class="s1">query(self</span><span class="s2">, </span><span class="s1">qname</span><span class="s2">, </span><span class="s1">rdtype=dns.rdatatype.A</span><span class="s2">, </span><span class="s1">rdclass=dns.rdataclass.IN</span><span class="s2">,</span>
+              <span class="s1">tcp=</span><span class="s2">False, </span><span class="s1">source=</span><span class="s2">None, </span><span class="s1">raise_on_no_answer=</span><span class="s2">True</span><span class="s1">): </span><span class="s0"># pylint:disable=unused-argument</span>
+        <span class="s0"># Query the hosts file</span>
+        <span class="s0">#</span>
+        <span class="s0"># The known rdtypes are dns.rdatatype.A, dns.rdatatype.AAAA and</span>
+        <span class="s0"># dns.rdatatype.CNAME.</span>
+        <span class="s0"># The ``rdclass`` parameter must be dns.rdataclass.IN while the</span>
+        <span class="s0"># ``tcp`` and ``source`` parameters are ignored.</span>
+        <span class="s0"># Return a HostAnswer instance or raise a dns.resolver.NoAnswer</span>
+        <span class="s0"># exception.</span>
+
+        <span class="s1">now = time.time()</span>
+        <span class="s1">hosts_file = self.hosts_file</span>
+        <span class="s2">if </span><span class="s1">self._last_load + self.interval &lt; now:</span>
+            <span class="s1">self._last_load = now</span>
+            <span class="s1">hosts_file.load()</span>
+
+        <span class="s1">rdclass = dns.rdataclass.IN </span><span class="s0"># Always</span>
+        <span class="s2">if </span><span class="s1">isinstance(qname</span><span class="s2">, </span><span class="s1">string_types):</span>
+            <span class="s1">name = qname</span>
+            <span class="s1">qname = dns.name.from_text(qname)</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">name = str(qname)</span>
+
+        <span class="s1">name = name.lower()</span>
+        <span class="s1">rrset = dns.rrset.RRset(qname</span><span class="s2">, </span><span class="s1">rdclass</span><span class="s2">, </span><span class="s1">rdtype)</span>
+        <span class="s1">rrset.ttl = self._last_load + self.interval - now</span>
+
+        <span class="s2">if </span><span class="s1">rdtype == dns.rdatatype.A:</span>
+            <span class="s1">mapping = hosts_file.v4</span>
+            <span class="s1">kind = dns.rdtypes.IN.A.A</span>
+        <span class="s2">elif </span><span class="s1">rdtype == dns.rdatatype.AAAA:</span>
+            <span class="s1">mapping = hosts_file.v6</span>
+            <span class="s1">kind = dns.rdtypes.IN.AAAA.AAAA</span>
+        <span class="s2">elif </span><span class="s1">rdtype == dns.rdatatype.CNAME:</span>
+            <span class="s1">mapping = hosts_file.aliases</span>
+            <span class="s1">kind = </span><span class="s2">lambda </span><span class="s1">c</span><span class="s2">, </span><span class="s1">t</span><span class="s2">, </span><span class="s1">addr: dns.rdtypes.ANY.CNAME.CNAME(c</span><span class="s2">, </span><span class="s1">t</span><span class="s2">, </span><span class="s1">dns.name.from_text(addr))</span>
+        <span class="s2">elif </span><span class="s1">rdtype == dns.rdatatype.PTR:</span>
+            <span class="s1">mapping = hosts_file.reverse</span>
+            <span class="s1">kind = </span><span class="s2">lambda </span><span class="s1">c</span><span class="s2">, </span><span class="s1">t</span><span class="s2">, </span><span class="s1">addr: dns.rdtypes.ANY.PTR.PTR(c</span><span class="s2">, </span><span class="s1">t</span><span class="s2">, </span><span class="s1">dns.name.from_text(addr))</span>
+
+
+        <span class="s1">addr = mapping.get(name)</span>
+        <span class="s2">if not </span><span class="s1">addr </span><span class="s2">and </span><span class="s1">qname.is_absolute():</span>
+            <span class="s1">addr = mapping.get(name[:-</span><span class="s4">1</span><span class="s1">])</span>
+        <span class="s2">if </span><span class="s1">addr:</span>
+            <span class="s1">rrset.add(kind(rdclass</span><span class="s2">, </span><span class="s1">rdtype</span><span class="s2">, </span><span class="s1">addr))</span>
+        <span class="s2">return </span><span class="s1">_HostsAnswer(qname</span><span class="s2">, </span><span class="s1">rdtype</span><span class="s2">, </span><span class="s1">rdclass</span><span class="s2">, </span><span class="s1">rrset</span><span class="s2">, </span><span class="s1">raise_on_no_answer)</span>
+
+    <span class="s2">def </span><span class="s1">getaliases(self</span><span class="s2">, </span><span class="s1">hostname):</span>
+        <span class="s0"># Return a list of all the aliases of a given cname</span>
+
+        <span class="s0"># Due to the way store aliases this is a bit inefficient, this</span>
+        <span class="s0"># clearly was an afterthought.  But this is only used by</span>
+        <span class="s0"># gethostbyname_ex so it's probably fine.</span>
+        <span class="s1">aliases = self.hosts_file.aliases</span>
+        <span class="s1">result = []</span>
+        <span class="s2">if </span><span class="s1">hostname </span><span class="s2">in </span><span class="s1">aliases: </span><span class="s0"># pylint:disable=consider-using-get</span>
+            <span class="s1">cannon = aliases[hostname]</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">cannon = hostname</span>
+        <span class="s1">result.append(cannon)</span>
+        <span class="s2">for </span><span class="s1">alias</span><span class="s2">, </span><span class="s1">cname </span><span class="s2">in </span><span class="s1">iteritems(aliases):</span>
+            <span class="s2">if </span><span class="s1">cannon == cname:</span>
+                <span class="s1">result.append(alias)</span>
+        <span class="s1">result.remove(hostname)</span>
+        <span class="s2">return </span><span class="s1">result</span>
+
+<span class="s2">class </span><span class="s1">_DualResolver(object):</span>
+
+    <span class="s2">def </span><span class="s1">__init__(self):</span>
+        <span class="s1">self.hosts_resolver = _HostsResolver()</span>
+        <span class="s1">self.network_resolver = resolver.get_default_resolver()</span>
+        <span class="s1">self.network_resolver.cache = resolver.LRUCache()</span>
+
+    <span class="s2">def </span><span class="s1">query(self</span><span class="s2">, </span><span class="s1">qname</span><span class="s2">, </span><span class="s1">rdtype=dns.rdatatype.A</span><span class="s2">, </span><span class="s1">rdclass=dns.rdataclass.IN</span><span class="s2">,</span>
+              <span class="s1">tcp=</span><span class="s2">False, </span><span class="s1">source=</span><span class="s2">None, </span><span class="s1">raise_on_no_answer=</span><span class="s2">True,</span>
+              <span class="s1">_hosts_rdtypes=(dns.rdatatype.A</span><span class="s2">, </span><span class="s1">dns.rdatatype.AAAA</span><span class="s2">, </span><span class="s1">dns.rdatatype.PTR)):</span>
+        <span class="s0"># Query the resolver, using /etc/hosts</span>
+
+        <span class="s0"># Behavior:</span>
+        <span class="s0"># 1. if hosts is enabled and contains answer, return it now</span>
+        <span class="s0"># 2. query nameservers for qname</span>
+        <span class="s2">if </span><span class="s1">qname </span><span class="s2">is None</span><span class="s1">:</span>
+            <span class="s1">qname = </span><span class="s3">'0.0.0.0'</span>
+
+        <span class="s2">if not </span><span class="s1">isinstance(qname</span><span class="s2">, </span><span class="s1">string_types):</span>
+            <span class="s2">if </span><span class="s1">isinstance(qname</span><span class="s2">, </span><span class="s1">bytes):</span>
+                <span class="s1">qname = qname.decode(</span><span class="s3">&quot;idna&quot;</span><span class="s1">)</span>
+
+        <span class="s2">if </span><span class="s1">isinstance(qname</span><span class="s2">, </span><span class="s1">string_types):</span>
+            <span class="s1">qname = dns.name.from_text(qname</span><span class="s2">, None</span><span class="s1">)</span>
+
+        <span class="s2">if </span><span class="s1">isinstance(rdtype</span><span class="s2">, </span><span class="s1">string_types):</span>
+            <span class="s1">rdtype = dns.rdatatype.from_text(rdtype)</span>
+
+        <span class="s2">if </span><span class="s1">rdclass == dns.rdataclass.IN </span><span class="s2">and </span><span class="s1">rdtype </span><span class="s2">in </span><span class="s1">_hosts_rdtypes:</span>
+            <span class="s2">try</span><span class="s1">:</span>
+                <span class="s1">answer = self.hosts_resolver.query(qname</span><span class="s2">, </span><span class="s1">rdtype</span><span class="s2">, </span><span class="s1">raise_on_no_answer=</span><span class="s2">False</span><span class="s1">)</span>
+            <span class="s2">except </span><span class="s1">Exception: </span><span class="s0"># pylint: disable=broad-except</span>
+                <span class="s2">from </span><span class="s1">gevent </span><span class="s2">import </span><span class="s1">get_hub</span>
+                <span class="s1">get_hub().handle_error(self</span><span class="s2">, </span><span class="s1">*sys.exc_info())</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s2">if </span><span class="s1">answer.rrset:</span>
+                    <span class="s2">return </span><span class="s1">answer</span>
+
+        <span class="s2">return </span><span class="s1">self.network_resolver.query(qname</span><span class="s2">, </span><span class="s1">rdtype</span><span class="s2">, </span><span class="s1">rdclass</span><span class="s2">,</span>
+                                           <span class="s1">tcp</span><span class="s2">, </span><span class="s1">source</span><span class="s2">, </span><span class="s1">raise_on_no_answer=raise_on_no_answer)</span>
+
+<span class="s2">def </span><span class="s1">_family_to_rdtype(family):</span>
+    <span class="s2">if </span><span class="s1">family == socket.AF_INET:</span>
+        <span class="s1">rdtype = dns.rdatatype.A</span>
+    <span class="s2">elif </span><span class="s1">family == socket.AF_INET6:</span>
+        <span class="s1">rdtype = dns.rdatatype.AAAA</span>
+    <span class="s2">else</span><span class="s1">:</span>
+        <span class="s2">raise </span><span class="s1">socket.gaierror(socket.EAI_FAMILY</span><span class="s2">,</span>
+                              <span class="s3">'Address family not supported'</span><span class="s1">)</span>
+    <span class="s2">return </span><span class="s1">rdtype</span>
+
+
+<span class="s2">class </span><span class="s1">Resolver(AbstractResolver):</span>
+    <span class="s5">&quot;&quot;&quot; 
+    An *experimental* resolver that uses `dnspython`_. 
+ 
+    This is typically slower than the default threaded resolver 
+    (unless there's a cache hit, in which case it can be much faster). 
+    It is usually much faster than the c-ares resolver. It tends to 
+    scale well as more concurrent resolutions are attempted. 
+ 
+    Under Python 2, if the ``idna`` package is installed, this 
+    resolver can resolve Unicode host names that the system resolver 
+    cannot. 
+ 
+    .. note:: 
+ 
+        This **does not** use dnspython's default resolver object, or share any 
+        classes with ``import dns``. A separate copy of the objects is imported to 
+        be able to function in a non monkey-patched process. The documentation for the resolver 
+        object still applies. 
+ 
+        The resolver that we use is available as the :attr:`resolver` attribute 
+        of this object (typically ``gevent.get_hub().resolver.resolver``). 
+ 
+    .. caution:: 
+ 
+        Many of the same caveats about DNS results apply here as are documented 
+        for :class:`gevent.resolver.ares.Resolver`. In addition, the handling of 
+        symbolic scope IDs in IPv6 addresses passed to ``getaddrinfo`` exhibits 
+        some differences. 
+ 
+        On PyPy, ``getnameinfo`` can produce results when CPython raises 
+        ``socket.error``, and gevent's DNSPython resolver also 
+        raises ``socket.error``. 
+ 
+    .. caution:: 
+ 
+        This resolver is experimental. It may be removed or modified in 
+        the future. As always, feedback is welcome. 
+ 
+    .. versionadded:: 1.3a2 
+ 
+    .. versionchanged:: 20.5.0 
+       The errors raised are now much more consistent with those 
+       raised by the standard library resolvers. 
+ 
+       Handling of localhost and broadcast names is now more consistent. 
+ 
+    .. _dnspython: http://www.dnspython.org 
+    &quot;&quot;&quot;</span>
+
+    <span class="s2">def </span><span class="s1">__init__(self</span><span class="s2">, </span><span class="s1">hub=</span><span class="s2">None</span><span class="s1">): </span><span class="s0"># pylint: disable=unused-argument</span>
+        <span class="s2">if </span><span class="s1">resolver._resolver </span><span class="s2">is None</span><span class="s1">:</span>
+            <span class="s1">_resolver = resolver._resolver = _DualResolver()</span>
+            <span class="s2">if </span><span class="s1">config.resolver_nameservers:</span>
+                <span class="s1">_resolver.network_resolver.nameservers[:] = config.resolver_nameservers</span>
+            <span class="s2">if </span><span class="s1">config.resolver_timeout:</span>
+                <span class="s1">_resolver.network_resolver.lifetime = config.resolver_timeout</span>
+        <span class="s0"># Different hubs in different threads could be sharing the same</span>
+        <span class="s0"># resolver.</span>
+        <span class="s2">assert </span><span class="s1">isinstance(resolver._resolver</span><span class="s2">, </span><span class="s1">_DualResolver)</span>
+        <span class="s1">self._resolver = resolver._resolver</span>
+
+    <span class="s1">@property</span>
+    <span class="s2">def </span><span class="s1">resolver(self):</span>
+        <span class="s5">&quot;&quot;&quot; 
+        The dnspython resolver object we use. 
+ 
+        This object has several useful attributes that can be used to 
+        adjust the behaviour of the DNS system: 
+ 
+        * ``cache`` is a :class:`dns.resolver.LRUCache`. Its maximum size 
+          can be configured by calling :meth:`resolver.cache.set_max_size` 
+        * ``nameservers`` controls which nameservers to talk to 
+        * ``lifetime`` configures a timeout for each individual query. 
+        &quot;&quot;&quot;</span>
+        <span class="s2">return </span><span class="s1">self._resolver.network_resolver</span>
+
+    <span class="s2">def </span><span class="s1">close(self):</span>
+        <span class="s2">pass</span>
+
+    <span class="s2">def </span><span class="s1">_getaliases(self</span><span class="s2">, </span><span class="s1">hostname</span><span class="s2">, </span><span class="s1">family):</span>
+        <span class="s2">if not </span><span class="s1">isinstance(hostname</span><span class="s2">, </span><span class="s1">str):</span>
+            <span class="s2">if </span><span class="s1">isinstance(hostname</span><span class="s2">, </span><span class="s1">bytes):</span>
+                <span class="s1">hostname = hostname.decode(</span><span class="s3">&quot;idna&quot;</span><span class="s1">)</span>
+        <span class="s1">aliases = self._resolver.hosts_resolver.getaliases(hostname)</span>
+        <span class="s1">net_resolver = self._resolver.network_resolver</span>
+        <span class="s1">rdtype = _family_to_rdtype(family)</span>
+        <span class="s2">while </span><span class="s4">1</span><span class="s1">:</span>
+            <span class="s2">try</span><span class="s1">:</span>
+                <span class="s1">ans = net_resolver.query(hostname</span><span class="s2">, </span><span class="s1">dns.rdatatype.CNAME</span><span class="s2">, </span><span class="s1">rdtype)</span>
+            <span class="s2">except </span><span class="s1">(dns.resolver.NoAnswer</span><span class="s2">, </span><span class="s1">dns.resolver.NXDOMAIN</span><span class="s2">, </span><span class="s1">dns.resolver.NoNameservers):</span>
+                <span class="s2">break</span>
+            <span class="s2">except </span><span class="s1">dTimeout:</span>
+                <span class="s2">break</span>
+            <span class="s2">except </span><span class="s1">AttributeError </span><span class="s2">as </span><span class="s1">ex:</span>
+                <span class="s2">if </span><span class="s1">hostname </span><span class="s2">is None or </span><span class="s1">isinstance(hostname</span><span class="s2">, </span><span class="s1">int):</span>
+                    <span class="s2">raise </span><span class="s1">TypeError(ex)</span>
+                <span class="s2">raise</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s1">aliases.extend(str(rr.target) </span><span class="s2">for </span><span class="s1">rr </span><span class="s2">in </span><span class="s1">ans.rrset)</span>
+                <span class="s1">hostname = ans[</span><span class="s4">0</span><span class="s1">].target</span>
+        <span class="s2">return </span><span class="s1">aliases</span>
+
+    <span class="s2">def </span><span class="s1">_getaddrinfo(self</span><span class="s2">, </span><span class="s1">host_bytes</span><span class="s2">, </span><span class="s1">port</span><span class="s2">, </span><span class="s1">family</span><span class="s2">, </span><span class="s1">socktype</span><span class="s2">, </span><span class="s1">proto</span><span class="s2">, </span><span class="s1">flags):</span>
+        <span class="s0"># dnspython really wants the host to be in native format.</span>
+        <span class="s2">if not </span><span class="s1">isinstance(host_bytes</span><span class="s2">, </span><span class="s1">str):</span>
+            <span class="s1">host_bytes = host_bytes.decode(self.HOSTNAME_ENCODING)</span>
+
+        <span class="s2">if </span><span class="s1">host_bytes == </span><span class="s3">'ff02::1de:c0:face:8D'</span><span class="s1">:</span>
+            <span class="s0"># This is essentially a hack to make stdlib</span>
+            <span class="s0"># test_socket:GeneralModuleTests.test_getaddrinfo_ipv6_basic</span>
+            <span class="s0"># pass. They expect to get back a lowercase ``D``, but</span>
+            <span class="s0"># dnspython does not do that.</span>
+            <span class="s0"># ``test_getaddrinfo_ipv6_scopeid_symbolic`` also expect</span>
+            <span class="s0"># the scopeid to be dropped, but again, dnspython does not</span>
+            <span class="s0"># do that; we cant fix that here so we skip that test.</span>
+            <span class="s1">host_bytes = </span><span class="s3">'ff02::1de:c0:face:8d'</span>
+
+        <span class="s2">if </span><span class="s1">family == AF_UNSPEC:</span>
+            <span class="s0"># This tends to raise in the case that a v6 address did not exist</span>
+            <span class="s0"># but a v4 does. So we break it into two parts.</span>
+
+            <span class="s0"># Note that if there is no ipv6 in the hosts file, but there *is*</span>
+            <span class="s0"># an ipv4, and there *is* an ipv6 in the nameservers, we will return</span>
+            <span class="s0"># both (from the first call). The system resolver on OS X only returns</span>
+            <span class="s0"># the results from the hosts file. doubleclick.com is one example.</span>
+
+            <span class="s0"># See also https://github.com/gevent/gevent/issues/1012</span>
+            <span class="s2">try</span><span class="s1">:</span>
+                <span class="s2">return </span><span class="s1">_getaddrinfo(host_bytes</span><span class="s2">, </span><span class="s1">port</span><span class="s2">, </span><span class="s1">family</span><span class="s2">, </span><span class="s1">socktype</span><span class="s2">, </span><span class="s1">proto</span><span class="s2">, </span><span class="s1">flags)</span>
+            <span class="s2">except </span><span class="s1">gaierror:</span>
+                <span class="s2">try</span><span class="s1">:</span>
+                    <span class="s2">return </span><span class="s1">_getaddrinfo(host_bytes</span><span class="s2">, </span><span class="s1">port</span><span class="s2">, </span><span class="s1">AF_INET6</span><span class="s2">, </span><span class="s1">socktype</span><span class="s2">, </span><span class="s1">proto</span><span class="s2">, </span><span class="s1">flags)</span>
+                <span class="s2">except </span><span class="s1">gaierror:</span>
+                    <span class="s2">return </span><span class="s1">_getaddrinfo(host_bytes</span><span class="s2">, </span><span class="s1">port</span><span class="s2">, </span><span class="s1">AF_INET</span><span class="s2">, </span><span class="s1">socktype</span><span class="s2">, </span><span class="s1">proto</span><span class="s2">, </span><span class="s1">flags)</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s2">try</span><span class="s1">:</span>
+                <span class="s2">return </span><span class="s1">_getaddrinfo(host_bytes</span><span class="s2">, </span><span class="s1">port</span><span class="s2">, </span><span class="s1">family</span><span class="s2">, </span><span class="s1">socktype</span><span class="s2">, </span><span class="s1">proto</span><span class="s2">, </span><span class="s1">flags)</span>
+            <span class="s2">except </span><span class="s1">gaierror </span><span class="s2">as </span><span class="s1">ex:</span>
+                <span class="s2">if </span><span class="s1">ex.args[</span><span class="s4">0</span><span class="s1">] == EAI_NONAME </span><span class="s2">and </span><span class="s1">family </span><span class="s2">not in </span><span class="s1">self._KNOWN_ADDR_FAMILIES:</span>
+                    <span class="s0"># It's possible that we got sent an unsupported family. Check</span>
+                    <span class="s0"># that.</span>
+                    <span class="s1">ex.args = (EAI_FAMILY</span><span class="s2">, </span><span class="s1">self.EAI_FAMILY_MSG)</span>
+                    <span class="s1">ex.errno = EAI_FAMILY</span>
+                <span class="s2">raise</span>
+
+    <span class="s2">def </span><span class="s1">_getnameinfo(self</span><span class="s2">, </span><span class="s1">address_bytes</span><span class="s2">, </span><span class="s1">port</span><span class="s2">, </span><span class="s1">sockaddr</span><span class="s2">, </span><span class="s1">flags):</span>
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s2">return </span><span class="s1">resolver._getnameinfo(sockaddr</span><span class="s2">, </span><span class="s1">flags)</span>
+        <span class="s2">except </span><span class="s1">error:</span>
+            <span class="s2">if not </span><span class="s1">flags:</span>
+                <span class="s0"># dnspython doesn't like getting ports it can't resolve.</span>
+                <span class="s0"># We have one test, test__socket_dns.py:Test_getnameinfo_geventorg.test_port_zero</span>
+                <span class="s0"># that does this. We conservatively fix it here; this could be expanded later.</span>
+                <span class="s2">return </span><span class="s1">resolver._getnameinfo(sockaddr</span><span class="s2">, </span><span class="s1">NI_NUMERICSERV)</span>
+
+    <span class="s2">def </span><span class="s1">_gethostbyaddr(self</span><span class="s2">, </span><span class="s1">ip_address_bytes):</span>
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s2">return </span><span class="s1">resolver._gethostbyaddr(ip_address_bytes)</span>
+        <span class="s2">except </span><span class="s1">gaierror </span><span class="s2">as </span><span class="s1">ex:</span>
+            <span class="s2">if </span><span class="s1">ex.args[</span><span class="s4">0</span><span class="s1">] == EAI_NONAME:</span>
+                <span class="s0"># Note: The system doesn't *always* raise herror;</span>
+                <span class="s0"># sometimes the original gaierror propagates through.</span>
+                <span class="s0"># It's impossible to say ahead of time or just based</span>
+                <span class="s0"># on the name which it should be. The herror seems to</span>
+                <span class="s0"># be by far the most common, though.</span>
+                <span class="s2">raise </span><span class="s1">herror(</span><span class="s4">1</span><span class="s2">, </span><span class="s3">&quot;Unknown host&quot;</span><span class="s1">)</span>
+            <span class="s2">raise</span>
+
+    <span class="s0"># Things that need proper error handling</span>
+    <span class="s1">getnameinfo = AbstractResolver.fixup_gaierror(AbstractResolver.getnameinfo)</span>
+    <span class="s1">gethostbyaddr = AbstractResolver.fixup_gaierror(AbstractResolver.gethostbyaddr)</span>
+    <span class="s1">gethostbyname_ex = AbstractResolver.fixup_gaierror(AbstractResolver.gethostbyname_ex)</span>
+    <span class="s1">getaddrinfo = AbstractResolver.fixup_gaierror(AbstractResolver.getaddrinfo)</span>
+</pre>
+</body>
+</html>

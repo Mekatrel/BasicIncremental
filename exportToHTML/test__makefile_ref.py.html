@@ -1,0 +1,568 @@
+<html>
+<head>
+<title>test__makefile_ref.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #cc7832;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #6a8759;}
+.s3 { color: #808080;}
+.s4 { color: #6897bb;}
+.s5 { color: #a5c261;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+test__makefile_ref.py</font>
+</center></td></tr></table>
+<pre><span class="s0">from </span><span class="s1">__future__ </span><span class="s0">import </span><span class="s1">print_function</span>
+<span class="s0">import </span><span class="s1">os</span>
+<span class="s0">from </span><span class="s1">gevent </span><span class="s0">import </span><span class="s1">monkey; monkey.patch_all()</span>
+<span class="s0">import </span><span class="s1">socket</span>
+<span class="s0">import </span><span class="s1">ssl</span>
+<span class="s0">import </span><span class="s1">threading</span>
+<span class="s0">import </span><span class="s1">errno</span>
+<span class="s0">import </span><span class="s1">weakref</span>
+
+
+<span class="s0">import </span><span class="s1">gevent.testing </span><span class="s0">as </span><span class="s1">greentest</span>
+<span class="s0">from </span><span class="s1">gevent.testing.params </span><span class="s0">import </span><span class="s1">DEFAULT_BIND_ADDR_TUPLE</span>
+<span class="s0">from </span><span class="s1">gevent.testing.params </span><span class="s0">import </span><span class="s1">DEFAULT_CONNECT</span>
+<span class="s0">from </span><span class="s1">gevent.testing.sockets </span><span class="s0">import </span><span class="s1">tcp_listener</span>
+
+<span class="s1">dirname = os.path.dirname(os.path.abspath(__file__))</span>
+<span class="s1">certfile = os.path.join(dirname</span><span class="s0">, </span><span class="s2">'2_7_keycert.pem'</span><span class="s1">)</span>
+<span class="s1">pid = os.getpid()</span>
+
+<span class="s1">PY3 = greentest.PY3</span>
+<span class="s1">PYPY = greentest.PYPY</span>
+<span class="s1">CPYTHON = </span><span class="s0">not </span><span class="s1">PYPY</span>
+<span class="s1">PY2 = </span><span class="s0">not </span><span class="s1">PY3</span>
+<span class="s1">fd_types = int</span>
+<span class="s0">if </span><span class="s1">PY3:</span>
+    <span class="s1">long = int</span>
+<span class="s1">fd_types = (int</span><span class="s0">, </span><span class="s1">long)</span>
+<span class="s1">WIN = greentest.WIN</span>
+
+<span class="s0">from </span><span class="s1">gevent.testing </span><span class="s0">import </span><span class="s1">get_open_files</span>
+<span class="s0">try</span><span class="s1">:</span>
+    <span class="s0">import </span><span class="s1">psutil</span>
+<span class="s0">except </span><span class="s1">ImportError:</span>
+    <span class="s1">psutil = </span><span class="s0">None</span>
+
+<span class="s3"># wrap_socket() is considered deprecated in 3.9</span>
+<span class="s3"># pylint:disable=deprecated-method</span>
+
+<span class="s0">class </span><span class="s1">Test(greentest.TestCase):</span>
+
+    <span class="s1">extra_allowed_open_states = ()</span>
+
+    <span class="s0">def </span><span class="s1">tearDown(self):</span>
+        <span class="s1">self.extra_allowed_open_states = ()</span>
+        <span class="s1">super(Test</span><span class="s0">, </span><span class="s1">self).tearDown()</span>
+
+    <span class="s0">def </span><span class="s1">assert_raises_EBADF(self</span><span class="s0">, </span><span class="s1">func):</span>
+        <span class="s0">try</span><span class="s1">:</span>
+            <span class="s1">result = func()</span>
+        <span class="s0">except </span><span class="s1">(socket.error</span><span class="s0">, </span><span class="s1">OSError) </span><span class="s0">as </span><span class="s1">ex:</span>
+            <span class="s3"># Windows/Py3 raises &quot;OSError: [WinError 10038]&quot;</span>
+            <span class="s0">if </span><span class="s1">ex.args[</span><span class="s4">0</span><span class="s1">] == errno.EBADF:</span>
+                <span class="s0">return</span>
+            <span class="s0">if </span><span class="s1">WIN </span><span class="s0">and </span><span class="s1">ex.args[</span><span class="s4">0</span><span class="s1">] == </span><span class="s4">10038</span><span class="s1">:</span>
+                <span class="s0">return</span>
+            <span class="s0">raise</span>
+        <span class="s0">raise </span><span class="s1">AssertionError(</span><span class="s2">'NOT RAISED EBADF: %r() returned %r' </span><span class="s1">% (func</span><span class="s0">, </span><span class="s1">result))</span>
+
+    <span class="s0">if </span><span class="s1">WIN </span><span class="s0">or </span><span class="s1">(PYPY </span><span class="s0">and </span><span class="s1">greentest.LINUX):</span>
+        <span class="s0">def </span><span class="s1">__assert_fd_open(self</span><span class="s0">, </span><span class="s1">fileno):</span>
+            <span class="s3"># We can't detect open file descriptors on Windows.</span>
+            <span class="s3"># On PyPy 3.6-7.3 on Travis CI (linux), for some reason the</span>
+            <span class="s3"># client file descriptors don't always show as open. Don't know why,</span>
+            <span class="s3"># was fine in 7.2.</span>
+            <span class="s3"># On March 23 2020 we had to pin psutil back to a version</span>
+            <span class="s3"># for PyPy 2 (see setup.py) and this same problem started happening there.</span>
+            <span class="s3"># PyPy on macOS was unaffected.</span>
+            <span class="s0">pass</span>
+    <span class="s0">else</span><span class="s1">:</span>
+        <span class="s0">def </span><span class="s1">__assert_fd_open(self</span><span class="s0">, </span><span class="s1">fileno):</span>
+            <span class="s0">assert </span><span class="s1">isinstance(fileno</span><span class="s0">, </span><span class="s1">fd_types)</span>
+            <span class="s1">open_files = get_open_files()</span>
+            <span class="s0">if </span><span class="s1">fileno </span><span class="s0">not in </span><span class="s1">open_files:</span>
+                <span class="s0">raise </span><span class="s1">AssertionError(</span><span class="s2">'%r is not open:</span><span class="s0">\n</span><span class="s2">%s' </span><span class="s1">% (fileno</span><span class="s0">, </span><span class="s1">open_files[</span><span class="s2">'data'</span><span class="s1">]))</span>
+
+    <span class="s0">def </span><span class="s1">assert_fd_closed(self</span><span class="s0">, </span><span class="s1">fileno):</span>
+        <span class="s0">assert </span><span class="s1">isinstance(fileno</span><span class="s0">, </span><span class="s1">fd_types)</span><span class="s0">, </span><span class="s1">repr(fileno)</span>
+        <span class="s0">assert </span><span class="s1">fileno &gt; </span><span class="s4">0</span><span class="s0">, </span><span class="s1">fileno</span>
+        <span class="s3"># Here, if we're in the process of closing, don't consider it open.</span>
+        <span class="s3"># This goes into details of psutil</span>
+        <span class="s1">open_files = get_open_files(count_closing_as_open=</span><span class="s0">False</span><span class="s1">)</span>
+        <span class="s0">if </span><span class="s1">fileno </span><span class="s0">in </span><span class="s1">open_files:</span>
+            <span class="s0">raise </span><span class="s1">AssertionError(</span><span class="s2">'%r is not closed:</span><span class="s0">\n</span><span class="s2">%s' </span><span class="s1">% (fileno</span><span class="s0">, </span><span class="s1">open_files[</span><span class="s2">'data'</span><span class="s1">]))</span>
+
+    <span class="s0">def </span><span class="s1">_assert_sock_open(self</span><span class="s0">, </span><span class="s1">sock):</span>
+        <span class="s3"># requires the psutil output</span>
+        <span class="s1">open_files = get_open_files()</span>
+        <span class="s1">sockname = sock.getsockname()</span>
+        <span class="s0">for </span><span class="s1">x </span><span class="s0">in </span><span class="s1">open_files[</span><span class="s2">'data'</span><span class="s1">]:</span>
+            <span class="s0">if </span><span class="s1">getattr(x</span><span class="s0">, </span><span class="s2">'laddr'</span><span class="s0">, None</span><span class="s1">) == sockname:</span>
+                <span class="s0">assert </span><span class="s1">x.status </span><span class="s0">in </span><span class="s1">(psutil.CONN_LISTEN</span><span class="s0">, </span><span class="s1">psutil.CONN_ESTABLISHED) + self.extra_allowed_open_states</span><span class="s0">, </span><span class="s1">x.status</span>
+                <span class="s0">return</span>
+        <span class="s0">raise </span><span class="s1">AssertionError(</span><span class="s2">&quot;%r is not open:</span><span class="s0">\n</span><span class="s2">%s&quot; </span><span class="s1">% (sock</span><span class="s0">, </span><span class="s1">open_files[</span><span class="s2">'data'</span><span class="s1">]))</span>
+
+    <span class="s0">def </span><span class="s1">assert_open(self</span><span class="s0">, </span><span class="s1">sock</span><span class="s0">, </span><span class="s1">*rest):</span>
+        <span class="s0">if </span><span class="s1">isinstance(sock</span><span class="s0">, </span><span class="s1">fd_types):</span>
+            <span class="s1">self.__assert_fd_open(sock)</span>
+        <span class="s0">else</span><span class="s1">:</span>
+            <span class="s1">fileno = sock.fileno()</span>
+            <span class="s0">assert </span><span class="s1">isinstance(fileno</span><span class="s0">, </span><span class="s1">fd_types)</span><span class="s0">, </span><span class="s1">fileno</span>
+            <span class="s1">sockname = sock.getsockname()</span>
+            <span class="s0">assert </span><span class="s1">isinstance(sockname</span><span class="s0">, </span><span class="s1">tuple)</span><span class="s0">, </span><span class="s1">sockname</span>
+            <span class="s0">if not </span><span class="s1">WIN:</span>
+                <span class="s1">self.__assert_fd_open(fileno)</span>
+            <span class="s0">else</span><span class="s1">:</span>
+                <span class="s1">self._assert_sock_open(sock)</span>
+        <span class="s0">if </span><span class="s1">rest:</span>
+            <span class="s1">self.assert_open(rest[</span><span class="s4">0</span><span class="s1">]</span><span class="s0">, </span><span class="s1">*rest[</span><span class="s4">1</span><span class="s1">:])</span>
+
+    <span class="s0">def </span><span class="s1">assert_closed(self</span><span class="s0">, </span><span class="s1">sock</span><span class="s0">, </span><span class="s1">*rest):</span>
+        <span class="s0">if </span><span class="s1">isinstance(sock</span><span class="s0">, </span><span class="s1">fd_types):</span>
+            <span class="s1">self.assert_fd_closed(sock)</span>
+        <span class="s0">else</span><span class="s1">:</span>
+            <span class="s3"># Under Python3, the socket module returns -1 for a fileno</span>
+            <span class="s3"># of a closed socket; under Py2 it raises</span>
+            <span class="s0">if </span><span class="s1">PY3:</span>
+                <span class="s1">self.assertEqual(sock.fileno()</span><span class="s0">, </span><span class="s1">-</span><span class="s4">1</span><span class="s1">)</span>
+            <span class="s0">else</span><span class="s1">:</span>
+                <span class="s1">self.assert_raises_EBADF(sock.fileno)</span>
+            <span class="s1">self.assert_raises_EBADF(sock.getsockname)</span>
+            <span class="s1">self.assert_raises_EBADF(sock.accept)</span>
+        <span class="s0">if </span><span class="s1">rest:</span>
+            <span class="s1">self.assert_closed(rest[</span><span class="s4">0</span><span class="s1">]</span><span class="s0">, </span><span class="s1">*rest[</span><span class="s4">1</span><span class="s1">:])</span>
+
+    <span class="s0">def </span><span class="s1">make_open_socket(self):</span>
+        <span class="s1">s = socket.socket()</span>
+        <span class="s0">try</span><span class="s1">:</span>
+            <span class="s1">s.bind(DEFAULT_BIND_ADDR_TUPLE)</span>
+            <span class="s0">if </span><span class="s1">WIN </span><span class="s0">or </span><span class="s1">greentest.LINUX:</span>
+                <span class="s3"># Windows and linux (with psutil) doesn't show as open until</span>
+                <span class="s3"># we call listen (linux with lsof accepts either)</span>
+                <span class="s1">s.listen(</span><span class="s4">1</span><span class="s1">)</span>
+            <span class="s1">self.assert_open(s</span><span class="s0">, </span><span class="s1">s.fileno())</span>
+        <span class="s0">except</span><span class="s1">:</span>
+            <span class="s1">s.close()</span>
+            <span class="s1">s = </span><span class="s0">None</span>
+            <span class="s0">raise</span>
+        <span class="s0">return </span><span class="s1">s</span>
+
+<span class="s3"># Sometimes its this one, sometimes it's test_ssl. No clue why or how.</span>
+<span class="s1">@greentest.skipOnAppVeyor(</span><span class="s2">&quot;This sometimes times out for no apparent reason.&quot;</span><span class="s1">)</span>
+<span class="s0">class </span><span class="s1">TestSocket(Test):</span>
+
+    <span class="s0">def </span><span class="s1">test_simple_close(self):</span>
+        <span class="s0">with </span><span class="s1">Closing() </span><span class="s0">as </span><span class="s1">closer:</span>
+            <span class="s1">s = closer(self.make_open_socket())</span>
+            <span class="s1">fileno = s.fileno()</span>
+            <span class="s1">s.close()</span>
+        <span class="s1">self.assert_closed(s</span><span class="s0">, </span><span class="s1">fileno)</span>
+
+    <span class="s0">def </span><span class="s1">test_makefile1(self):</span>
+        <span class="s0">with </span><span class="s1">Closing() </span><span class="s0">as </span><span class="s1">closer:</span>
+            <span class="s1">s = closer(self.make_open_socket())</span>
+            <span class="s1">fileno = s.fileno()</span>
+            <span class="s1">f = closer(s.makefile())</span>
+
+            <span class="s1">self.assert_open(s</span><span class="s0">, </span><span class="s1">fileno)</span>
+            <span class="s3"># Under python 2, this closes socket wrapper object but not the file descriptor;</span>
+            <span class="s3"># under python 3, both stay open</span>
+            <span class="s1">s.close()</span>
+            <span class="s0">if </span><span class="s1">PY3:</span>
+                <span class="s1">self.assert_open(s</span><span class="s0">, </span><span class="s1">fileno)</span>
+            <span class="s0">else</span><span class="s1">:</span>
+                <span class="s1">self.assert_closed(s)</span>
+                <span class="s1">self.assert_open(fileno)</span>
+            <span class="s1">f.close()</span>
+            <span class="s1">self.assert_closed(s)</span>
+            <span class="s1">self.assert_closed(fileno)</span>
+
+    <span class="s0">def </span><span class="s1">test_makefile2(self):</span>
+        <span class="s0">with </span><span class="s1">Closing() </span><span class="s0">as </span><span class="s1">closer:</span>
+            <span class="s1">s = closer(self.make_open_socket())</span>
+            <span class="s1">fileno = s.fileno()</span>
+            <span class="s1">self.assert_open(s</span><span class="s0">, </span><span class="s1">fileno)</span>
+            <span class="s1">f = closer(s.makefile())</span>
+            <span class="s1">self.assert_open(s)</span>
+            <span class="s1">self.assert_open(s</span><span class="s0">, </span><span class="s1">fileno)</span>
+            <span class="s1">f.close()</span>
+            <span class="s3"># closing fileobject does not close the socket</span>
+            <span class="s1">self.assert_open(s</span><span class="s0">, </span><span class="s1">fileno)</span>
+            <span class="s1">s.close()</span>
+            <span class="s1">self.assert_closed(s</span><span class="s0">, </span><span class="s1">fileno)</span>
+
+    <span class="s0">def </span><span class="s1">test_server_simple(self):</span>
+        <span class="s0">with </span><span class="s1">Closing() </span><span class="s0">as </span><span class="s1">closer:</span>
+            <span class="s1">listener = closer(tcp_listener(backlog=</span><span class="s4">1</span><span class="s1">))</span>
+            <span class="s1">port = listener.getsockname()[</span><span class="s4">1</span><span class="s1">]</span>
+
+            <span class="s1">connector = closer(socket.socket())</span>
+
+            <span class="s0">def </span><span class="s1">connect():</span>
+                <span class="s1">connector.connect((DEFAULT_CONNECT</span><span class="s0">, </span><span class="s1">port))</span>
+
+            <span class="s1">closer.running_task(threading.Thread(target=connect))</span>
+
+            <span class="s1">client_socket = closer.accept(listener)</span>
+            <span class="s1">fileno = client_socket.fileno()</span>
+            <span class="s1">self.assert_open(client_socket</span><span class="s0">, </span><span class="s1">fileno)</span>
+            <span class="s1">client_socket.close()</span>
+            <span class="s1">self.assert_closed(client_socket)</span>
+
+    <span class="s0">def </span><span class="s1">test_server_makefile1(self):</span>
+        <span class="s0">with </span><span class="s1">Closing() </span><span class="s0">as </span><span class="s1">closer:</span>
+            <span class="s1">listener = closer(tcp_listener(backlog=</span><span class="s4">1</span><span class="s1">))</span>
+            <span class="s1">port = listener.getsockname()[</span><span class="s4">1</span><span class="s1">]</span>
+
+            <span class="s1">connector = closer(socket.socket())</span>
+
+            <span class="s0">def </span><span class="s1">connect():</span>
+                <span class="s1">connector.connect((DEFAULT_CONNECT</span><span class="s0">, </span><span class="s1">port))</span>
+
+            <span class="s1">closer.running_task(threading.Thread(target=connect))</span>
+
+
+            <span class="s1">client_socket = closer.accept(listener)</span>
+            <span class="s1">fileno = client_socket.fileno()</span>
+            <span class="s1">f = closer(client_socket.makefile())</span>
+            <span class="s1">self.assert_open(client_socket</span><span class="s0">, </span><span class="s1">fileno)</span>
+            <span class="s1">client_socket.close()</span>
+            <span class="s3"># Under python 2, this closes socket wrapper object but not the file descriptor;</span>
+            <span class="s3"># under python 3, both stay open</span>
+            <span class="s0">if </span><span class="s1">PY3:</span>
+                <span class="s1">self.assert_open(client_socket</span><span class="s0">, </span><span class="s1">fileno)</span>
+            <span class="s0">else</span><span class="s1">:</span>
+                <span class="s1">self.assert_closed(client_socket)</span>
+                <span class="s1">self.assert_open(fileno)</span>
+            <span class="s1">f.close()</span>
+            <span class="s1">self.assert_closed(client_socket</span><span class="s0">, </span><span class="s1">fileno)</span>
+
+    <span class="s0">def </span><span class="s1">test_server_makefile2(self):</span>
+        <span class="s0">with </span><span class="s1">Closing() </span><span class="s0">as </span><span class="s1">closer:</span>
+            <span class="s1">listener = closer(tcp_listener(backlog=</span><span class="s4">1</span><span class="s1">))</span>
+            <span class="s1">port = listener.getsockname()[</span><span class="s4">1</span><span class="s1">]</span>
+
+            <span class="s1">connector = closer(socket.socket())</span>
+
+            <span class="s0">def </span><span class="s1">connect():</span>
+                <span class="s1">connector.connect((DEFAULT_CONNECT</span><span class="s0">, </span><span class="s1">port))</span>
+
+            <span class="s1">closer.running_task(threading.Thread(target=connect))</span>
+            <span class="s1">client_socket = closer.accept(listener)</span>
+
+            <span class="s1">fileno = client_socket.fileno()</span>
+            <span class="s1">f = closer(client_socket.makefile())</span>
+            <span class="s1">self.assert_open(client_socket</span><span class="s0">, </span><span class="s1">fileno)</span>
+            <span class="s3"># closing fileobject does not close the socket</span>
+            <span class="s1">f.close()</span>
+            <span class="s1">self.assert_open(client_socket</span><span class="s0">, </span><span class="s1">fileno)</span>
+            <span class="s1">client_socket.close()</span>
+            <span class="s1">self.assert_closed(client_socket</span><span class="s0">, </span><span class="s1">fileno)</span>
+
+
+<span class="s1">@greentest.skipOnAppVeyor(</span><span class="s2">&quot;This sometimes times out for no apparent reason.&quot;</span><span class="s1">)</span>
+<span class="s0">class </span><span class="s1">TestSSL(Test):</span>
+
+    <span class="s0">def </span><span class="s1">_ssl_connect_task(self</span><span class="s0">, </span><span class="s1">connector</span><span class="s0">, </span><span class="s1">port</span><span class="s0">, </span><span class="s1">accepted_event):</span>
+        <span class="s1">connector.connect((DEFAULT_CONNECT</span><span class="s0">, </span><span class="s1">port))</span>
+
+        <span class="s0">try</span><span class="s1">:</span>
+            <span class="s3"># Note: We get ResourceWarning about 'x'</span>
+            <span class="s3"># on Python 3 if we don't join the spawned thread</span>
+            <span class="s1">x = ssl.wrap_socket(connector)</span>
+            <span class="s3"># Wait to be fully accepted. We could otherwise raise ahead</span>
+            <span class="s3"># of the server and close ourself before it's ready to read.</span>
+            <span class="s1">accepted_event.wait()</span>
+        <span class="s0">except </span><span class="s1">socket.error:</span>
+            <span class="s3"># Observed on Windows with PyPy2 5.9.0 and libuv:</span>
+            <span class="s3"># if we don't switch in a timely enough fashion,</span>
+            <span class="s3"># the server side runs ahead of us and closes</span>
+            <span class="s3"># our socket first, so this fails.</span>
+            <span class="s0">pass</span>
+        <span class="s0">else</span><span class="s1">:</span>
+            <span class="s1">x.close()</span>
+
+    <span class="s0">def </span><span class="s1">_make_ssl_connect_task(self</span><span class="s0">, </span><span class="s1">connector</span><span class="s0">, </span><span class="s1">port):</span>
+        <span class="s1">accepted_event = threading.Event()</span>
+        <span class="s1">t = threading.Thread(target=self._ssl_connect_task</span><span class="s0">,</span>
+                             <span class="s1">args=(connector</span><span class="s0">, </span><span class="s1">port</span><span class="s0">, </span><span class="s1">accepted_event))</span>
+        <span class="s1">t.daemon = </span><span class="s0">True</span>
+        <span class="s1">t.accepted_event = accepted_event</span>
+        <span class="s0">return </span><span class="s1">t</span>
+
+    <span class="s0">def </span><span class="s1">test_simple_close(self):</span>
+        <span class="s0">with </span><span class="s1">Closing() </span><span class="s0">as </span><span class="s1">closer:</span>
+            <span class="s1">s = closer(self.make_open_socket())</span>
+            <span class="s1">fileno = s.fileno()</span>
+            <span class="s1">s = closer(ssl.wrap_socket(s))</span>
+            <span class="s1">fileno = s.fileno()</span>
+            <span class="s1">self.assert_open(s</span><span class="s0">, </span><span class="s1">fileno)</span>
+            <span class="s1">s.close()</span>
+            <span class="s1">self.assert_closed(s</span><span class="s0">, </span><span class="s1">fileno)</span>
+
+    <span class="s0">def </span><span class="s1">test_makefile1(self):</span>
+        <span class="s0">with </span><span class="s1">Closing() </span><span class="s0">as </span><span class="s1">closer:</span>
+            <span class="s1">raw_s = closer(self.make_open_socket())</span>
+            <span class="s1">s = closer(ssl.wrap_socket(raw_s))</span>
+
+            <span class="s1">fileno = s.fileno()</span>
+            <span class="s1">self.assert_open(s</span><span class="s0">, </span><span class="s1">fileno)</span>
+            <span class="s1">f = closer(s.makefile())</span>
+            <span class="s1">self.assert_open(s</span><span class="s0">, </span><span class="s1">fileno)</span>
+            <span class="s1">s.close()</span>
+            <span class="s1">self.assert_open(s</span><span class="s0">, </span><span class="s1">fileno)</span>
+            <span class="s1">f.close()</span>
+            <span class="s1">raw_s.close()</span>
+            <span class="s1">self.assert_closed(s</span><span class="s0">, </span><span class="s1">fileno)</span>
+
+    <span class="s0">def </span><span class="s1">test_makefile2(self):</span>
+        <span class="s0">with </span><span class="s1">Closing() </span><span class="s0">as </span><span class="s1">closer:</span>
+            <span class="s1">s = closer(self.make_open_socket())</span>
+            <span class="s1">fileno = s.fileno()</span>
+
+            <span class="s1">s = closer(ssl.wrap_socket(s))</span>
+            <span class="s1">fileno = s.fileno()</span>
+            <span class="s1">self.assert_open(s</span><span class="s0">, </span><span class="s1">fileno)</span>
+            <span class="s1">f = closer(s.makefile())</span>
+            <span class="s1">self.assert_open(s</span><span class="s0">, </span><span class="s1">fileno)</span>
+            <span class="s1">f.close()</span>
+            <span class="s3"># closing fileobject does not close the socket</span>
+            <span class="s1">self.assert_open(s</span><span class="s0">, </span><span class="s1">fileno)</span>
+            <span class="s1">s.close()</span>
+            <span class="s1">self.assert_closed(s</span><span class="s0">, </span><span class="s1">fileno)</span>
+
+    <span class="s0">def </span><span class="s1">test_server_simple(self):</span>
+        <span class="s0">with </span><span class="s1">Closing() </span><span class="s0">as </span><span class="s1">closer:</span>
+            <span class="s1">listener = closer(tcp_listener(backlog=</span><span class="s4">1</span><span class="s1">))</span>
+            <span class="s1">port = listener.getsockname()[</span><span class="s4">1</span><span class="s1">]</span>
+
+            <span class="s1">connector = closer(socket.socket())</span>
+
+            <span class="s1">t = self._make_ssl_connect_task(connector</span><span class="s0">, </span><span class="s1">port)</span>
+            <span class="s1">closer.running_task(t)</span>
+
+            <span class="s1">client_socket = closer.accept(listener)</span>
+            <span class="s1">t.accepted_event.set()</span>
+            <span class="s1">client_socket = closer(</span>
+                <span class="s1">ssl.wrap_socket(client_socket</span><span class="s0">, </span><span class="s1">keyfile=certfile</span><span class="s0">, </span><span class="s1">certfile=certfile</span><span class="s0">,</span>
+                                <span class="s1">server_side=</span><span class="s0">True</span><span class="s1">))</span>
+            <span class="s1">fileno = client_socket.fileno()</span>
+            <span class="s1">self.assert_open(client_socket</span><span class="s0">, </span><span class="s1">fileno)</span>
+            <span class="s1">client_socket.close()</span>
+            <span class="s1">self.assert_closed(client_socket</span><span class="s0">, </span><span class="s1">fileno)</span>
+
+    <span class="s0">def </span><span class="s1">test_server_makefile1(self):</span>
+        <span class="s0">with </span><span class="s1">Closing() </span><span class="s0">as </span><span class="s1">closer:</span>
+            <span class="s1">listener = closer(tcp_listener(backlog=</span><span class="s4">1</span><span class="s1">))</span>
+            <span class="s1">port = listener.getsockname()[</span><span class="s4">1</span><span class="s1">]</span>
+
+            <span class="s1">connector = closer(socket.socket())</span>
+
+            <span class="s1">t = self._make_ssl_connect_task(connector</span><span class="s0">, </span><span class="s1">port)</span>
+            <span class="s1">closer.running_task(t)</span>
+
+            <span class="s1">client_socket = closer.accept(listener)</span>
+            <span class="s1">t.accepted_event.set()</span>
+            <span class="s1">client_socket = closer(</span>
+                <span class="s1">ssl.wrap_socket(client_socket</span><span class="s0">, </span><span class="s1">keyfile=certfile</span><span class="s0">, </span><span class="s1">certfile=certfile</span><span class="s0">,</span>
+                                <span class="s1">server_side=</span><span class="s0">True</span><span class="s1">))</span>
+            <span class="s1">fileno = client_socket.fileno()</span>
+            <span class="s1">self.assert_open(client_socket</span><span class="s0">, </span><span class="s1">fileno)</span>
+            <span class="s1">f = client_socket.makefile()</span>
+            <span class="s1">self.assert_open(client_socket</span><span class="s0">, </span><span class="s1">fileno)</span>
+            <span class="s1">client_socket.close()</span>
+            <span class="s1">self.assert_open(client_socket</span><span class="s0">, </span><span class="s1">fileno)</span>
+            <span class="s1">f.close()</span>
+            <span class="s1">self.assert_closed(client_socket</span><span class="s0">, </span><span class="s1">fileno)</span>
+
+    <span class="s0">def </span><span class="s1">test_server_makefile2(self):</span>
+        <span class="s0">with </span><span class="s1">Closing() </span><span class="s0">as </span><span class="s1">closer:</span>
+            <span class="s1">listener = closer(tcp_listener(backlog=</span><span class="s4">1</span><span class="s1">))</span>
+            <span class="s1">port = listener.getsockname()[</span><span class="s4">1</span><span class="s1">]</span>
+
+            <span class="s1">connector = closer(socket.socket())</span>
+            <span class="s1">t = self._make_ssl_connect_task(connector</span><span class="s0">, </span><span class="s1">port)</span>
+            <span class="s1">closer.running_task(t)</span>
+
+            <span class="s1">t.accepted_event.set()</span>
+            <span class="s1">client_socket = closer.accept(listener)</span>
+            <span class="s1">client_socket = closer(</span>
+                <span class="s1">ssl.wrap_socket(client_socket</span><span class="s0">, </span><span class="s1">keyfile=certfile</span><span class="s0">, </span><span class="s1">certfile=certfile</span><span class="s0">,</span>
+                                <span class="s1">server_side=</span><span class="s0">True</span><span class="s1">))</span>
+
+            <span class="s1">fileno = client_socket.fileno()</span>
+            <span class="s1">self.assert_open(client_socket</span><span class="s0">, </span><span class="s1">fileno)</span>
+            <span class="s1">f = client_socket.makefile()</span>
+            <span class="s1">self.assert_open(client_socket</span><span class="s0">, </span><span class="s1">fileno)</span>
+            <span class="s3"># Closing fileobject does not close SSLObject</span>
+            <span class="s1">f.close()</span>
+            <span class="s1">self.assert_open(client_socket</span><span class="s0">, </span><span class="s1">fileno)</span>
+            <span class="s1">client_socket.close()</span>
+            <span class="s1">self.assert_closed(client_socket</span><span class="s0">, </span><span class="s1">fileno)</span>
+
+    <span class="s0">def </span><span class="s1">test_serverssl_makefile1(self):</span>
+        <span class="s1">raw_listener = tcp_listener(backlog=</span><span class="s4">1</span><span class="s1">)</span>
+        <span class="s1">fileno = raw_listener.fileno()</span>
+        <span class="s1">port = raw_listener.getsockname()[</span><span class="s4">1</span><span class="s1">]</span>
+        <span class="s1">listener = ssl.wrap_socket(raw_listener</span><span class="s0">, </span><span class="s1">keyfile=certfile</span><span class="s0">, </span><span class="s1">certfile=certfile)</span>
+
+        <span class="s1">connector = socket.socket()</span>
+        <span class="s1">t = self._make_ssl_connect_task(connector</span><span class="s0">, </span><span class="s1">port)</span>
+        <span class="s1">t.start()</span>
+
+        <span class="s0">with </span><span class="s1">CleaningUp(t</span><span class="s0">, </span><span class="s1">listener</span><span class="s0">, </span><span class="s1">raw_listener</span><span class="s0">, </span><span class="s1">connector) </span><span class="s0">as </span><span class="s1">client_socket:</span>
+            <span class="s1">t.accepted_event.set()</span>
+            <span class="s1">fileno = client_socket.fileno()</span>
+            <span class="s1">self.assert_open(client_socket</span><span class="s0">, </span><span class="s1">fileno)</span>
+            <span class="s1">f = client_socket.makefile()</span>
+            <span class="s1">self.assert_open(client_socket</span><span class="s0">, </span><span class="s1">fileno)</span>
+            <span class="s1">client_socket.close()</span>
+            <span class="s1">self.assert_open(client_socket</span><span class="s0">, </span><span class="s1">fileno)</span>
+            <span class="s1">f.close()</span>
+            <span class="s1">self.assert_closed(client_socket</span><span class="s0">, </span><span class="s1">fileno)</span>
+
+    <span class="s0">def </span><span class="s1">test_serverssl_makefile2(self):</span>
+        <span class="s1">raw_listener = tcp_listener(backlog=</span><span class="s4">1</span><span class="s1">)</span>
+        <span class="s1">port = raw_listener.getsockname()[</span><span class="s4">1</span><span class="s1">]</span>
+        <span class="s1">listener = ssl.wrap_socket(raw_listener</span><span class="s0">, </span><span class="s1">keyfile=certfile</span><span class="s0">, </span><span class="s1">certfile=certfile)</span>
+
+        <span class="s1">accepted_event = threading.Event()</span>
+        <span class="s0">def </span><span class="s1">connect(connector=socket.socket()):</span>
+            <span class="s0">try</span><span class="s1">:</span>
+                <span class="s1">connector.connect((DEFAULT_CONNECT</span><span class="s0">, </span><span class="s1">port))</span>
+                <span class="s1">s = ssl.wrap_socket(connector)</span>
+                <span class="s1">accepted_event.wait()</span>
+                <span class="s1">s.sendall(</span><span class="s5">b'test_serverssl_makefile2'</span><span class="s1">)</span>
+                <span class="s1">s.shutdown(socket.SHUT_RDWR)</span>
+                <span class="s1">s.close()</span>
+            <span class="s0">finally</span><span class="s1">:</span>
+                <span class="s1">connector.close()</span>
+
+        <span class="s1">t = threading.Thread(target=connect)</span>
+        <span class="s1">t.daemon = </span><span class="s0">True</span>
+        <span class="s1">t.start()</span>
+        <span class="s1">client_socket = </span><span class="s0">None</span>
+        <span class="s0">with </span><span class="s1">CleaningUp(t</span><span class="s0">, </span><span class="s1">listener</span><span class="s0">, </span><span class="s1">raw_listener) </span><span class="s0">as </span><span class="s1">client_socket:</span>
+            <span class="s1">accepted_event.set()</span>
+            <span class="s1">fileno = client_socket.fileno()</span>
+            <span class="s1">self.assert_open(client_socket</span><span class="s0">, </span><span class="s1">fileno)</span>
+            <span class="s1">f = client_socket.makefile()</span>
+            <span class="s1">self.assert_open(client_socket</span><span class="s0">, </span><span class="s1">fileno)</span>
+            <span class="s1">self.assertEqual(f.read()</span><span class="s0">, </span><span class="s2">'test_serverssl_makefile2'</span><span class="s1">)</span>
+            <span class="s1">self.assertEqual(f.read()</span><span class="s0">, </span><span class="s2">''</span><span class="s1">)</span>
+            <span class="s3"># Closing file object does not close the socket.</span>
+            <span class="s1">f.close()</span>
+            <span class="s0">if </span><span class="s1">WIN </span><span class="s0">and </span><span class="s1">psutil:</span>
+                <span class="s3"># Hmm?</span>
+                <span class="s1">self.extra_allowed_open_states = (psutil.CONN_CLOSE_WAIT</span><span class="s0">,</span><span class="s1">)</span>
+
+            <span class="s1">self.assert_open(client_socket</span><span class="s0">, </span><span class="s1">fileno)</span>
+            <span class="s1">client_socket.close()</span>
+            <span class="s1">self.assert_closed(client_socket</span><span class="s0">, </span><span class="s1">fileno)</span>
+
+
+<span class="s0">class </span><span class="s1">Closing(object):</span>
+
+    <span class="s0">def </span><span class="s1">__init__(self</span><span class="s0">, </span><span class="s1">*init):</span>
+        <span class="s1">self._objects = []</span>
+        <span class="s0">for </span><span class="s1">i </span><span class="s0">in </span><span class="s1">init:</span>
+            <span class="s1">self.closing(i)</span>
+        <span class="s1">self.task = </span><span class="s0">None</span>
+
+    <span class="s0">def </span><span class="s1">accept(self</span><span class="s0">, </span><span class="s1">listener):</span>
+        <span class="s1">client_socket</span><span class="s0">, </span><span class="s1">_addr = listener.accept()</span>
+        <span class="s0">return </span><span class="s1">self.closing(client_socket)</span>
+
+    <span class="s0">def </span><span class="s1">__enter__(self):</span>
+        <span class="s1">o = self.objects()</span>
+        <span class="s0">if </span><span class="s1">len(o) == </span><span class="s4">1</span><span class="s1">:</span>
+            <span class="s0">return </span><span class="s1">o[</span><span class="s4">0</span><span class="s1">]</span>
+        <span class="s0">return </span><span class="s1">self</span>
+
+    <span class="s0">if </span><span class="s1">PY2 </span><span class="s0">and </span><span class="s1">CPYTHON:</span>
+        <span class="s3"># This implementation depends or refcounting</span>
+        <span class="s3"># for things to close. Eww.</span>
+        <span class="s0">def </span><span class="s1">closing(self</span><span class="s0">, </span><span class="s1">o):</span>
+            <span class="s1">self._objects.append(weakref.ref(o))</span>
+            <span class="s0">return </span><span class="s1">o</span>
+        <span class="s0">def </span><span class="s1">objects(self):</span>
+            <span class="s0">return </span><span class="s1">[r() </span><span class="s0">for </span><span class="s1">r </span><span class="s0">in </span><span class="s1">self._objects </span><span class="s0">if </span><span class="s1">r() </span><span class="s0">is not None</span><span class="s1">]</span>
+
+    <span class="s0">else</span><span class="s1">:</span>
+        <span class="s0">def </span><span class="s1">objects(self):</span>
+            <span class="s3"># PyPy returns an object without __len__...</span>
+            <span class="s0">return </span><span class="s1">list(reversed(self._objects))</span>
+
+        <span class="s0">def </span><span class="s1">closing(self</span><span class="s0">, </span><span class="s1">o):</span>
+            <span class="s1">self._objects.append(o)</span>
+            <span class="s0">return </span><span class="s1">o</span>
+
+    <span class="s1">__call__ = closing</span>
+
+    <span class="s0">def </span><span class="s1">running_task(self</span><span class="s0">, </span><span class="s1">thread):</span>
+        <span class="s0">assert </span><span class="s1">self.task </span><span class="s0">is None</span>
+        <span class="s1">self.task = thread</span>
+        <span class="s1">self.task.start()</span>
+        <span class="s0">return </span><span class="s1">self.task</span>
+
+    <span class="s0">def </span><span class="s1">__exit__(self</span><span class="s0">, </span><span class="s1">t</span><span class="s0">, </span><span class="s1">v</span><span class="s0">, </span><span class="s1">tb):</span>
+        <span class="s3"># workaround for test_server_makefile1, test_server_makefile2,</span>
+        <span class="s3"># test_server_simple, test_serverssl_makefile1.</span>
+
+        <span class="s3"># On PyPy on Linux, it is important to join the SSL Connect</span>
+        <span class="s3"># Task FIRST, before closing the sockets. If we do it after</span>
+        <span class="s3"># (which makes more sense) we hang. It's not clear why, except</span>
+        <span class="s3"># that it has something to do with context switches. Inserting a call to</span>
+        <span class="s3"># gevent.sleep(0.1) instead of joining the task has the same</span>
+        <span class="s3"># effect. If the previous tests hang, then later tests can fail with</span>
+        <span class="s3"># SSLError: unknown alert type.</span>
+
+        <span class="s3"># XXX: Why do those two things happen?</span>
+
+        <span class="s3"># On PyPy on macOS, we don't have that problem and can use the</span>
+        <span class="s3"># more logical order.</span>
+        <span class="s0">try</span><span class="s1">:</span>
+            <span class="s0">if </span><span class="s1">self.task </span><span class="s0">is not None</span><span class="s1">:</span>
+                <span class="s1">self.task.join()</span>
+        <span class="s0">finally</span><span class="s1">:</span>
+            <span class="s1">self.task = </span><span class="s0">None</span>
+            <span class="s0">for </span><span class="s1">o </span><span class="s0">in </span><span class="s1">self.objects():</span>
+                <span class="s0">try</span><span class="s1">:</span>
+                    <span class="s1">o.close()</span>
+                <span class="s0">except </span><span class="s1">Exception: </span><span class="s3"># pylint:disable=broad-except</span>
+                    <span class="s0">pass</span>
+
+        <span class="s1">self._objects = ()</span>
+
+<span class="s0">class </span><span class="s1">CleaningUp(Closing):</span>
+
+    <span class="s0">def </span><span class="s1">__init__(self</span><span class="s0">, </span><span class="s1">task</span><span class="s0">, </span><span class="s1">listener</span><span class="s0">, </span><span class="s1">*other_sockets):</span>
+        <span class="s1">super(CleaningUp</span><span class="s0">, </span><span class="s1">self).__init__(listener</span><span class="s0">, </span><span class="s1">*other_sockets)</span>
+        <span class="s1">self.task = task</span>
+        <span class="s1">self.listener = listener</span>
+
+    <span class="s0">def </span><span class="s1">__enter__(self):</span>
+        <span class="s0">return </span><span class="s1">self.accept(self.listener)</span>
+
+    <span class="s0">def </span><span class="s1">__exit__(self</span><span class="s0">, </span><span class="s1">t</span><span class="s0">, </span><span class="s1">v</span><span class="s0">, </span><span class="s1">tb):</span>
+        <span class="s0">try</span><span class="s1">:</span>
+            <span class="s1">Closing.__exit__(self</span><span class="s0">, </span><span class="s1">t</span><span class="s0">, </span><span class="s1">v</span><span class="s0">, </span><span class="s1">tb)</span>
+        <span class="s0">finally</span><span class="s1">:</span>
+            <span class="s1">self.listener = </span><span class="s0">None</span>
+
+
+
+<span class="s0">if </span><span class="s1">__name__ == </span><span class="s2">'__main__'</span><span class="s1">:</span>
+    <span class="s1">greentest.main()</span>
+</pre>
+</body>
+</html>

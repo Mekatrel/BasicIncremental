@@ -1,0 +1,1089 @@
+<html>
+<head>
+<title>optparse.tcl</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #a9b7c6;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+optparse.tcl</font>
+</center></td></tr></table>
+<pre><span class="s0"># optparse.tcl --</span>
+<span class="s0">#</span>
+<span class="s0">#       (private) Option parsing package</span>
+<span class="s0">#       Primarily used internally by the safe:: code.</span>
+<span class="s0">#</span>
+<span class="s0">#	WARNING: This code will go away in a future release</span>
+<span class="s0">#	of Tcl.  It is NOT supported and you should not rely</span>
+<span class="s0">#	on it.  If your code does rely on this package you</span>
+<span class="s0">#	may directly incorporate this code into your application.</span>
+
+<span class="s0">package require Tcl 8.2</span>
+<span class="s0"># When this version number changes, update the pkgIndex.tcl file</span>
+<span class="s0"># and the install directory in the Makefiles.</span>
+<span class="s0">package provide opt 0.4.6</span>
+
+<span class="s0">namespace eval ::tcl {</span>
+
+    <span class="s0"># Exported APIs</span>
+    <span class="s0">namespace export OptKeyRegister OptKeyDelete OptKeyError OptKeyParse \</span>
+             <span class="s0">OptProc OptProcArgGiven OptParse \</span>
+	     <span class="s0">Lempty Lget \</span>
+             <span class="s0">Lassign Lvarpop Lvarpop1 Lvarset Lvarincr \</span>
+             <span class="s0">SetMax SetMin</span>
+
+
+<span class="s0">#################  Example of use / 'user documentation'  ###################</span>
+
+    <span class="s0">proc OptCreateTestProc {} {</span>
+
+	<span class="s0"># Defines ::tcl::OptParseTest as a test proc with parsed arguments</span>
+	<span class="s0"># (can't be defined before the code below is loaded (before &quot;OptProc&quot;))</span>
+
+	<span class="s0"># Every OptProc give usage information on &quot;procname -help&quot;.</span>
+	<span class="s0"># Try &quot;tcl::OptParseTest -help&quot; and &quot;tcl::OptParseTest -a&quot; and</span>
+	<span class="s0"># then other arguments.</span>
+	<span class="s0">#</span>
+	<span class="s0"># example of 'valid' call:</span>
+	<span class="s0"># ::tcl::OptParseTest save -4 -pr 23 -libsok SybTcl\</span>
+	<span class="s0">#		-nostatics false ch1</span>
+	<span class="s0">OptProc OptParseTest {</span>
+            <span class="s0">{subcommand -choice {save print} &quot;sub command&quot;}</span>
+            <span class="s0">{arg1 3 &quot;some number&quot;}</span>
+            <span class="s0">{-aflag}</span>
+            <span class="s0">{-intflag      7}</span>
+            <span class="s0">{-weirdflag                    &quot;help string&quot;}</span>
+            <span class="s0">{-noStatics                    &quot;Not ok to load static packages&quot;}</span>
+            <span class="s0">{-nestedloading1 true           &quot;OK to load into nested slaves&quot;}</span>
+            <span class="s0">{-nestedloading2 -boolean true &quot;OK to load into nested slaves&quot;}</span>
+            <span class="s0">{-libsOK        -choice {Tk SybTcl}</span>
+		                      <span class="s0">&quot;List of packages that can be loaded&quot;}</span>
+            <span class="s0">{-precision     -int 12        &quot;Number of digits of precision&quot;}</span>
+            <span class="s0">{-intval        7               &quot;An integer&quot;}</span>
+            <span class="s0">{-scale         -float 1.0     &quot;Scale factor&quot;}</span>
+            <span class="s0">{-zoom          1.0             &quot;Zoom factor&quot;}</span>
+            <span class="s0">{-arbitrary     foobar          &quot;Arbitrary string&quot;}</span>
+            <span class="s0">{-random        -string 12   &quot;Random string&quot;}</span>
+            <span class="s0">{-listval       -list {}       &quot;List value&quot;}</span>
+            <span class="s0">{-blahflag       -blah abc       &quot;Funny type&quot;}</span>
+	    <span class="s0">{arg2 -boolean &quot;a boolean&quot;}</span>
+	    <span class="s0">{arg3 -choice &quot;ch1 ch2&quot;}</span>
+	    <span class="s0">{?optarg? -list {} &quot;optional argument&quot;}</span>
+        <span class="s0">} {</span>
+	    <span class="s0">foreach v [info locals] {</span>
+		<span class="s0">puts stderr [format &quot;%14s : %s&quot; $v [set $v]]</span>
+	    <span class="s0">}</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+
+<span class="s0">###################  No User serviceable part below ! ###############</span>
+
+    <span class="s0"># Array storing the parsed descriptions</span>
+    <span class="s0">variable OptDesc</span>
+    <span class="s0">array set OptDesc {}</span>
+    <span class="s0"># Next potentially free key id (numeric)</span>
+    <span class="s0">variable OptDescN 0</span>
+
+<span class="s0"># Inside algorithm/mechanism description:</span>
+<span class="s0"># (not for the faint hearted ;-)</span>
+<span class="s0">#</span>
+<span class="s0"># The argument description is parsed into a &quot;program tree&quot;</span>
+<span class="s0"># It is called a &quot;program&quot; because it is the program used by</span>
+<span class="s0"># the state machine interpreter that use that program to</span>
+<span class="s0"># actually parse the arguments at run time.</span>
+<span class="s0">#</span>
+<span class="s0"># The general structure of a &quot;program&quot; is</span>
+<span class="s0"># notation (pseudo bnf like)</span>
+<span class="s0">#    name :== definition        defines &quot;name&quot; as being &quot;definition&quot;</span>
+<span class="s0">#    { x y z }                  means list of x, y, and z</span>
+<span class="s0">#    x*                         means x repeated 0 or more time</span>
+<span class="s0">#    x+                         means &quot;x x*&quot;</span>
+<span class="s0">#    x?                         means optionally x</span>
+<span class="s0">#    x | y                      means x or y</span>
+<span class="s0">#    &quot;cccc&quot;                     means the literal string</span>
+<span class="s0">#</span>
+<span class="s0">#    program        :== { programCounter programStep* }</span>
+<span class="s0">#</span>
+<span class="s0">#    programStep    :== program | singleStep</span>
+<span class="s0">#</span>
+<span class="s0">#    programCounter :== {&quot;P&quot; integer+ }</span>
+<span class="s0">#</span>
+<span class="s0">#    singleStep     :== { instruction parameters* }</span>
+<span class="s0">#</span>
+<span class="s0">#    instruction    :== single element list</span>
+<span class="s0">#</span>
+<span class="s0"># (the difference between singleStep and program is that \</span>
+<span class="s0">#   llength [lindex $program 0] &gt;= 2</span>
+<span class="s0"># while</span>
+<span class="s0">#   llength [lindex $singleStep 0] == 1</span>
+<span class="s0"># )</span>
+<span class="s0">#</span>
+<span class="s0"># And for this application:</span>
+<span class="s0">#</span>
+<span class="s0">#    singleStep     :== { instruction varname {hasBeenSet currentValue} type</span>
+<span class="s0">#                         typeArgs help }</span>
+<span class="s0">#    instruction    :== &quot;flags&quot; | &quot;value&quot;</span>
+<span class="s0">#    type           :== knowType | anyword</span>
+<span class="s0">#    knowType       :== &quot;string&quot; | &quot;int&quot; | &quot;boolean&quot; | &quot;boolflag&quot; | &quot;float&quot;</span>
+<span class="s0">#                       | &quot;choice&quot;</span>
+<span class="s0">#</span>
+<span class="s0"># for type &quot;choice&quot; typeArgs is a list of possible choices, the first one</span>
+<span class="s0"># is the default value. for all other types the typeArgs is the default value</span>
+<span class="s0">#</span>
+<span class="s0"># a &quot;boolflag&quot; is the type for a flag whose presence or absence, without</span>
+<span class="s0"># additional arguments means respectively true or false (default flag type).</span>
+<span class="s0">#</span>
+<span class="s0"># programCounter is the index in the list of the currently processed</span>
+<span class="s0"># programStep (thus starting at 1 (0 is {&quot;P&quot; prgCounterValue}).</span>
+<span class="s0"># If it is a list it points toward each currently selected programStep.</span>
+<span class="s0"># (like for &quot;flags&quot;, as they are optional, form a set and programStep).</span>
+
+<span class="s0"># Performance/Implementation issues</span>
+<span class="s0"># ---------------------------------</span>
+<span class="s0"># We use tcl lists instead of arrays because with tcl8.0</span>
+<span class="s0"># they should start to be much faster.</span>
+<span class="s0"># But this code use a lot of helper procs (like Lvarset)</span>
+<span class="s0"># which are quite slow and would be helpfully optimized</span>
+<span class="s0"># for instance by being written in C. Also our struture</span>
+<span class="s0"># is complex and there is maybe some places where the</span>
+<span class="s0"># string rep might be calculated at great exense. to be checked.</span>
+
+<span class="s0">#</span>
+<span class="s0"># Parse a given description and saves it here under the given key</span>
+<span class="s0"># generate a unused keyid if not given</span>
+<span class="s0">#</span>
+<span class="s0">proc ::tcl::OptKeyRegister {desc {key &quot;&quot;}} {</span>
+    <span class="s0">variable OptDesc</span>
+    <span class="s0">variable OptDescN</span>
+    <span class="s0">if {[string equal $key &quot;&quot;]} {</span>
+        <span class="s0"># in case a key given to us as a parameter was a number</span>
+        <span class="s0">while {[info exists OptDesc($OptDescN)]} {incr OptDescN}</span>
+        <span class="s0">set key $OptDescN</span>
+        <span class="s0">incr OptDescN</span>
+    <span class="s0">}</span>
+    <span class="s0"># program counter</span>
+    <span class="s0">set program [list [list &quot;P&quot; 1]]</span>
+
+    <span class="s0"># are we processing flags (which makes a single program step)</span>
+    <span class="s0">set inflags 0</span>
+
+    <span class="s0">set state {}</span>
+
+    <span class="s0"># flag used to detect that we just have a single (flags set) subprogram.</span>
+    <span class="s0">set empty 1</span>
+
+    <span class="s0">foreach item $desc {</span>
+	<span class="s0">if {$state == &quot;args&quot;} {</span>
+	    <span class="s0"># more items after 'args'...</span>
+	    <span class="s0">return -code error &quot;'args' special argument must be the last one&quot;</span>
+	<span class="s0">}</span>
+        <span class="s0">set res [OptNormalizeOne $item]</span>
+        <span class="s0">set state [lindex $res 0]</span>
+        <span class="s0">if {$inflags} {</span>
+            <span class="s0">if {$state == &quot;flags&quot;} {</span>
+		<span class="s0"># add to 'subprogram'</span>
+                <span class="s0">lappend flagsprg $res</span>
+            <span class="s0">} else {</span>
+                <span class="s0"># put in the flags</span>
+                <span class="s0"># structure for flag programs items is a list of</span>
+                <span class="s0"># {subprgcounter {prg flag 1} {prg flag 2} {...}}</span>
+                <span class="s0">lappend program $flagsprg</span>
+                <span class="s0"># put the other regular stuff</span>
+                <span class="s0">lappend program $res</span>
+		<span class="s0">set inflags 0</span>
+		<span class="s0">set empty 0</span>
+            <span class="s0">}</span>
+        <span class="s0">} else {</span>
+           <span class="s0">if {$state == &quot;flags&quot;} {</span>
+               <span class="s0">set inflags 1</span>
+               <span class="s0"># sub program counter + first sub program</span>
+               <span class="s0">set flagsprg [list [list &quot;P&quot; 1] $res]</span>
+           <span class="s0">} else {</span>
+               <span class="s0">lappend program $res</span>
+               <span class="s0">set empty 0</span>
+           <span class="s0">}</span>
+       <span class="s0">}</span>
+   <span class="s0">}</span>
+   <span class="s0">if {$inflags} {</span>
+       <span class="s0">if {$empty} {</span>
+	   <span class="s0"># We just have the subprogram, optimize and remove</span>
+	   <span class="s0"># unneeded level:</span>
+	   <span class="s0">set program $flagsprg</span>
+       <span class="s0">} else {</span>
+	   <span class="s0">lappend program $flagsprg</span>
+       <span class="s0">}</span>
+   <span class="s0">}</span>
+
+   <span class="s0">set OptDesc($key) $program</span>
+
+   <span class="s0">return $key</span>
+<span class="s0">}</span>
+
+<span class="s0">#</span>
+<span class="s0"># Free the storage for that given key</span>
+<span class="s0">#</span>
+<span class="s0">proc ::tcl::OptKeyDelete {key} {</span>
+    <span class="s0">variable OptDesc</span>
+    <span class="s0">unset OptDesc($key)</span>
+<span class="s0">}</span>
+
+    <span class="s0"># Get the parsed description stored under the given key.</span>
+    <span class="s0">proc OptKeyGetDesc {descKey} {</span>
+        <span class="s0">variable OptDesc</span>
+        <span class="s0">if {![info exists OptDesc($descKey)]} {</span>
+            <span class="s0">return -code error &quot;Unknown option description key \&quot;$descKey\&quot;&quot;</span>
+        <span class="s0">}</span>
+        <span class="s0">set OptDesc($descKey)</span>
+    <span class="s0">}</span>
+
+<span class="s0"># Parse entry point for ppl who don't want to register with a key,</span>
+<span class="s0"># for instance because the description changes dynamically.</span>
+<span class="s0">#  (otherwise one should really use OptKeyRegister once + OptKeyParse</span>
+<span class="s0">#   as it is way faster or simply OptProc which does it all)</span>
+<span class="s0"># Assign a temporary key, call OptKeyParse and then free the storage</span>
+<span class="s0">proc ::tcl::OptParse {desc arglist} {</span>
+    <span class="s0">set tempkey [OptKeyRegister $desc]</span>
+    <span class="s0">set ret [catch {uplevel 1 [list ::tcl::OptKeyParse $tempkey $arglist]} res]</span>
+    <span class="s0">OptKeyDelete $tempkey</span>
+    <span class="s0">return -code $ret $res</span>
+<span class="s0">}</span>
+
+<span class="s0"># Helper function, replacement for proc that both</span>
+<span class="s0"># register the description under a key which is the name of the proc</span>
+<span class="s0"># (and thus unique to that code)</span>
+<span class="s0"># and add a first line to the code to call the OptKeyParse proc</span>
+<span class="s0"># Stores the list of variables that have been actually given by the user</span>
+<span class="s0"># (the other will be sets to their default value)</span>
+<span class="s0"># into local variable named &quot;Args&quot;.</span>
+<span class="s0">proc ::tcl::OptProc {name desc body} {</span>
+    <span class="s0">set namespace [uplevel 1 [list ::namespace current]]</span>
+    <span class="s0">if {[string match &quot;::*&quot; $name] || [string equal $namespace &quot;::&quot;]} {</span>
+        <span class="s0"># absolute name or global namespace, name is the key</span>
+        <span class="s0">set key $name</span>
+    <span class="s0">} else {</span>
+        <span class="s0"># we are relative to some non top level namespace:</span>
+        <span class="s0">set key &quot;${namespace}::${name}&quot;</span>
+    <span class="s0">}</span>
+    <span class="s0">OptKeyRegister $desc $key</span>
+    <span class="s0">uplevel 1 [list ::proc $name args &quot;set Args \[::tcl::OptKeyParse $key \$args\]\n$body&quot;]</span>
+    <span class="s0">return $key</span>
+<span class="s0">}</span>
+<span class="s0"># Check that a argument has been given</span>
+<span class="s0"># assumes that &quot;OptProc&quot; has been used as it will check in &quot;Args&quot; list</span>
+<span class="s0">proc ::tcl::OptProcArgGiven {argname} {</span>
+    <span class="s0">upvar Args alist</span>
+    <span class="s0">expr {[lsearch $alist $argname] &gt;=0}</span>
+<span class="s0">}</span>
+
+    <span class="s0">#######</span>
+    <span class="s0"># Programs/Descriptions manipulation</span>
+
+    <span class="s0"># Return the instruction word/list of a given step/(sub)program</span>
+    <span class="s0">proc OptInstr {lst} {</span>
+	<span class="s0">lindex $lst 0</span>
+    <span class="s0">}</span>
+    <span class="s0"># Is a (sub) program or a plain instruction ?</span>
+    <span class="s0">proc OptIsPrg {lst} {</span>
+	<span class="s0">expr {[llength [OptInstr $lst]]&gt;=2}</span>
+    <span class="s0">}</span>
+    <span class="s0"># Is this instruction a program counter or a real instr</span>
+    <span class="s0">proc OptIsCounter {item} {</span>
+	<span class="s0">expr {[lindex $item 0]==&quot;P&quot;}</span>
+    <span class="s0">}</span>
+    <span class="s0"># Current program counter (2nd word of first word)</span>
+    <span class="s0">proc OptGetPrgCounter {lst} {</span>
+	<span class="s0">Lget $lst {0 1}</span>
+    <span class="s0">}</span>
+    <span class="s0"># Current program counter (2nd word of first word)</span>
+    <span class="s0">proc OptSetPrgCounter {lstName newValue} {</span>
+	<span class="s0">upvar $lstName lst</span>
+	<span class="s0">set lst [lreplace $lst 0 0 [concat &quot;P&quot; $newValue]]</span>
+    <span class="s0">}</span>
+    <span class="s0"># returns a list of currently selected items.</span>
+    <span class="s0">proc OptSelection {lst} {</span>
+	<span class="s0">set res {}</span>
+	<span class="s0">foreach idx [lrange [lindex $lst 0] 1 end] {</span>
+	    <span class="s0">lappend res [Lget $lst $idx]</span>
+	<span class="s0">}</span>
+	<span class="s0">return $res</span>
+    <span class="s0">}</span>
+
+    <span class="s0"># Advance to next description</span>
+    <span class="s0">proc OptNextDesc {descName} {</span>
+        <span class="s0">uplevel 1 [list Lvarincr $descName {0 1}]</span>
+    <span class="s0">}</span>
+
+    <span class="s0"># Get the current description, eventually descend</span>
+    <span class="s0">proc OptCurDesc {descriptions} {</span>
+        <span class="s0">lindex $descriptions [OptGetPrgCounter $descriptions]</span>
+    <span class="s0">}</span>
+    <span class="s0"># get the current description, eventually descend</span>
+    <span class="s0"># through sub programs as needed.</span>
+    <span class="s0">proc OptCurDescFinal {descriptions} {</span>
+        <span class="s0">set item [OptCurDesc $descriptions]</span>
+	<span class="s0"># Descend untill we get the actual item and not a sub program</span>
+        <span class="s0">while {[OptIsPrg $item]} {</span>
+            <span class="s0">set item [OptCurDesc $item]</span>
+        <span class="s0">}</span>
+	<span class="s0">return $item</span>
+    <span class="s0">}</span>
+    <span class="s0"># Current final instruction adress</span>
+    <span class="s0">proc OptCurAddr {descriptions {start {}}} {</span>
+	<span class="s0">set adress [OptGetPrgCounter $descriptions]</span>
+	<span class="s0">lappend start $adress</span>
+	<span class="s0">set item [lindex $descriptions $adress]</span>
+	<span class="s0">if {[OptIsPrg $item]} {</span>
+	    <span class="s0">return [OptCurAddr $item $start]</span>
+	<span class="s0">} else {</span>
+	    <span class="s0">return $start</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+    <span class="s0"># Set the value field of the current instruction</span>
+    <span class="s0">proc OptCurSetValue {descriptionsName value} {</span>
+	<span class="s0">upvar $descriptionsName descriptions</span>
+	<span class="s0"># get the current item full adress</span>
+        <span class="s0">set adress [OptCurAddr $descriptions]</span>
+	<span class="s0"># use the 3th field of the item  (see OptValue / OptNewInst)</span>
+	<span class="s0">lappend adress 2</span>
+	<span class="s0">Lvarset descriptions $adress [list 1 $value]</span>
+	<span class="s0">#                                  ^hasBeenSet flag</span>
+    <span class="s0">}</span>
+
+    <span class="s0"># empty state means done/paste the end of the program</span>
+    <span class="s0">proc OptState {item} {</span>
+        <span class="s0">lindex $item 0</span>
+    <span class="s0">}</span>
+
+    <span class="s0"># current state</span>
+    <span class="s0">proc OptCurState {descriptions} {</span>
+        <span class="s0">OptState [OptCurDesc $descriptions]</span>
+    <span class="s0">}</span>
+
+    <span class="s0">#######</span>
+    <span class="s0"># Arguments manipulation</span>
+
+    <span class="s0"># Returns the argument that has to be processed now</span>
+    <span class="s0">proc OptCurrentArg {lst} {</span>
+        <span class="s0">lindex $lst 0</span>
+    <span class="s0">}</span>
+    <span class="s0"># Advance to next argument</span>
+    <span class="s0">proc OptNextArg {argsName} {</span>
+        <span class="s0">uplevel 1 [list Lvarpop1 $argsName]</span>
+    <span class="s0">}</span>
+    <span class="s0">#######</span>
+
+
+
+
+
+    <span class="s0"># Loop over all descriptions, calling OptDoOne which will</span>
+    <span class="s0"># eventually eat all the arguments.</span>
+    <span class="s0">proc OptDoAll {descriptionsName argumentsName} {</span>
+	<span class="s0">upvar $descriptionsName descriptions</span>
+	<span class="s0">upvar $argumentsName arguments</span>
+<span class="s0">#	puts &quot;entered DoAll&quot;</span>
+	<span class="s0"># Nb: the places where &quot;state&quot; can be set are tricky to figure</span>
+	<span class="s0">#     because DoOne sets the state to flagsValue and return -continue</span>
+	<span class="s0">#     when needed...</span>
+	<span class="s0">set state [OptCurState $descriptions]</span>
+	<span class="s0"># We'll exit the loop in &quot;OptDoOne&quot; or when state is empty.</span>
+        <span class="s0">while 1 {</span>
+	    <span class="s0">set curitem [OptCurDesc $descriptions]</span>
+	    <span class="s0"># Do subprograms if needed, call ourselves on the sub branch</span>
+	    <span class="s0">while {[OptIsPrg $curitem]} {</span>
+		<span class="s0">OptDoAll curitem arguments</span>
+<span class="s0">#		puts &quot;done DoAll sub&quot;</span>
+		<span class="s0"># Insert back the results in current tree</span>
+		<span class="s0">Lvarset1nc descriptions [OptGetPrgCounter $descriptions]\</span>
+			<span class="s0">$curitem</span>
+		<span class="s0">OptNextDesc descriptions</span>
+		<span class="s0">set curitem [OptCurDesc $descriptions]</span>
+                <span class="s0">set state [OptCurState $descriptions]</span>
+	    <span class="s0">}</span>
+<span class="s0">#           puts &quot;state = \&quot;$state\&quot; - arguments=($arguments)&quot;</span>
+	    <span class="s0">if {[Lempty $state]} {</span>
+		<span class="s0"># Nothing left to do, we are done in this branch:</span>
+		<span class="s0">break</span>
+	    <span class="s0">}</span>
+	    <span class="s0"># The following statement can make us terminate/continue</span>
+	    <span class="s0"># as it use return -code {break, continue, return and error}</span>
+	    <span class="s0"># codes</span>
+            <span class="s0">OptDoOne descriptions state arguments</span>
+	    <span class="s0"># If we are here, no special return code where issued,</span>
+	    <span class="s0"># we'll step to next instruction :</span>
+<span class="s0">#           puts &quot;new state  = \&quot;$state\&quot;&quot;</span>
+	    <span class="s0">OptNextDesc descriptions</span>
+	    <span class="s0">set state [OptCurState $descriptions]</span>
+        <span class="s0">}</span>
+    <span class="s0">}</span>
+
+    <span class="s0"># Process one step for the state machine,</span>
+    <span class="s0"># eventually consuming the current argument.</span>
+    <span class="s0">proc OptDoOne {descriptionsName stateName argumentsName} {</span>
+        <span class="s0">upvar $argumentsName arguments</span>
+        <span class="s0">upvar $descriptionsName descriptions</span>
+	<span class="s0">upvar $stateName state</span>
+
+	<span class="s0"># the special state/instruction &quot;args&quot; eats all</span>
+	<span class="s0"># the remaining args (if any)</span>
+	<span class="s0">if {($state == &quot;args&quot;)} {</span>
+	    <span class="s0">if {![Lempty $arguments]} {</span>
+		<span class="s0"># If there is no additional arguments, leave the default value</span>
+		<span class="s0"># in.</span>
+		<span class="s0">OptCurSetValue descriptions $arguments</span>
+		<span class="s0">set arguments {}</span>
+	    <span class="s0">}</span>
+<span class="s0">#            puts &quot;breaking out ('args' state: consuming every reminding args)&quot;</span>
+	    <span class="s0">return -code break</span>
+	<span class="s0">}</span>
+
+	<span class="s0">if {[Lempty $arguments]} {</span>
+	    <span class="s0">if {$state == &quot;flags&quot;} {</span>
+		<span class="s0"># no argument and no flags : we're done</span>
+<span class="s0">#                puts &quot;returning to previous (sub)prg (no more args)&quot;</span>
+		<span class="s0">return -code return</span>
+	    <span class="s0">} elseif {$state == &quot;optValue&quot;} {</span>
+		<span class="s0">set state next; # not used, for debug only</span>
+		<span class="s0"># go to next state</span>
+		<span class="s0">return</span>
+	    <span class="s0">} else {</span>
+		<span class="s0">return -code error [OptMissingValue $descriptions]</span>
+	    <span class="s0">}</span>
+	<span class="s0">} else {</span>
+	    <span class="s0">set arg [OptCurrentArg $arguments]</span>
+	<span class="s0">}</span>
+
+        <span class="s0">switch $state {</span>
+            <span class="s0">flags {</span>
+                <span class="s0"># A non-dash argument terminates the options, as does --</span>
+
+                <span class="s0"># Still a flag ?</span>
+                <span class="s0">if {![OptIsFlag $arg]} {</span>
+                    <span class="s0"># don't consume the argument, return to previous prg</span>
+                    <span class="s0">return -code return</span>
+                <span class="s0">}</span>
+                <span class="s0"># consume the flag</span>
+                <span class="s0">OptNextArg arguments</span>
+                <span class="s0">if {[string equal &quot;--&quot; $arg]} {</span>
+                    <span class="s0"># return from 'flags' state</span>
+                    <span class="s0">return -code return</span>
+                <span class="s0">}</span>
+
+                <span class="s0">set hits [OptHits descriptions $arg]</span>
+                <span class="s0">if {$hits &gt; 1} {</span>
+                    <span class="s0">return -code error [OptAmbigous $descriptions $arg]</span>
+                <span class="s0">} elseif {$hits == 0} {</span>
+                    <span class="s0">return -code error [OptFlagUsage $descriptions $arg]</span>
+                <span class="s0">}</span>
+		<span class="s0">set item [OptCurDesc $descriptions]</span>
+                <span class="s0">if {[OptNeedValue $item]} {</span>
+		    <span class="s0"># we need a value, next state is</span>
+		    <span class="s0">set state flagValue</span>
+                <span class="s0">} else {</span>
+                    <span class="s0">OptCurSetValue descriptions 1</span>
+                <span class="s0">}</span>
+		<span class="s0"># continue</span>
+		<span class="s0">return -code continue</span>
+            <span class="s0">}</span>
+	    <span class="s0">flagValue -</span>
+	    <span class="s0">value {</span>
+		<span class="s0">set item [OptCurDesc $descriptions]</span>
+                <span class="s0"># Test the values against their required type</span>
+		<span class="s0">if {[catch {OptCheckType $arg\</span>
+			<span class="s0">[OptType $item] [OptTypeArgs $item]} val]} {</span>
+		    <span class="s0">return -code error [OptBadValue $item $arg $val]</span>
+		<span class="s0">}</span>
+                <span class="s0"># consume the value</span>
+                <span class="s0">OptNextArg arguments</span>
+		<span class="s0"># set the value</span>
+		<span class="s0">OptCurSetValue descriptions $val</span>
+		<span class="s0"># go to next state</span>
+		<span class="s0">if {$state == &quot;flagValue&quot;} {</span>
+		    <span class="s0">set state flags</span>
+		    <span class="s0">return -code continue</span>
+		<span class="s0">} else {</span>
+		    <span class="s0">set state next; # not used, for debug only</span>
+		    <span class="s0">return ; # will go on next step</span>
+		<span class="s0">}</span>
+	    <span class="s0">}</span>
+	    <span class="s0">optValue {</span>
+		<span class="s0">set item [OptCurDesc $descriptions]</span>
+                <span class="s0"># Test the values against their required type</span>
+		<span class="s0">if {![catch {OptCheckType $arg\</span>
+			<span class="s0">[OptType $item] [OptTypeArgs $item]} val]} {</span>
+		    <span class="s0"># right type, so :</span>
+		    <span class="s0"># consume the value</span>
+		    <span class="s0">OptNextArg arguments</span>
+		    <span class="s0"># set the value</span>
+		    <span class="s0">OptCurSetValue descriptions $val</span>
+		<span class="s0">}</span>
+		<span class="s0"># go to next state</span>
+		<span class="s0">set state next; # not used, for debug only</span>
+		<span class="s0">return ; # will go on next step</span>
+	    <span class="s0">}</span>
+        <span class="s0">}</span>
+	<span class="s0"># If we reach this point: an unknown</span>
+	<span class="s0"># state as been entered !</span>
+	<span class="s0">return -code error &quot;Bug! unknown state in DoOne \&quot;$state\&quot;\</span>
+		<span class="s0">(prg counter [OptGetPrgCounter $descriptions]:\</span>
+			<span class="s0">[OptCurDesc $descriptions])&quot;</span>
+    <span class="s0">}</span>
+
+<span class="s0"># Parse the options given the key to previously registered description</span>
+<span class="s0"># and arguments list</span>
+<span class="s0">proc ::tcl::OptKeyParse {descKey arglist} {</span>
+
+    <span class="s0">set desc [OptKeyGetDesc $descKey]</span>
+
+    <span class="s0"># make sure -help always give usage</span>
+    <span class="s0">if {[string equal -nocase &quot;-help&quot; $arglist]} {</span>
+	<span class="s0">return -code error [OptError &quot;Usage information:&quot; $desc 1]</span>
+    <span class="s0">}</span>
+
+    <span class="s0">OptDoAll desc arglist</span>
+
+    <span class="s0">if {![Lempty $arglist]} {</span>
+	<span class="s0">return -code error [OptTooManyArgs $desc $arglist]</span>
+    <span class="s0">}</span>
+
+    <span class="s0"># Analyse the result</span>
+    <span class="s0"># Walk through the tree:</span>
+    <span class="s0">OptTreeVars $desc &quot;#[expr {[info level]-1}]&quot;</span>
+<span class="s0">}</span>
+
+    <span class="s0"># determine string length for nice tabulated output</span>
+    <span class="s0">proc OptTreeVars {desc level {vnamesLst {}}} {</span>
+	<span class="s0">foreach item $desc {</span>
+	    <span class="s0">if {[OptIsCounter $item]} continue</span>
+	    <span class="s0">if {[OptIsPrg $item]} {</span>
+		<span class="s0">set vnamesLst [OptTreeVars $item $level $vnamesLst]</span>
+	    <span class="s0">} else {</span>
+		<span class="s0">set vname [OptVarName $item]</span>
+		<span class="s0">upvar $level $vname var</span>
+		<span class="s0">if {[OptHasBeenSet $item]} {</span>
+<span class="s0">#		    puts &quot;adding $vname&quot;</span>
+		    <span class="s0"># lets use the input name for the returned list</span>
+		    <span class="s0"># it is more usefull, for instance you can check that</span>
+		    <span class="s0"># no flags at all was given with expr</span>
+		    <span class="s0"># {![string match &quot;*-*&quot; $Args]}</span>
+		    <span class="s0">lappend vnamesLst [OptName $item]</span>
+		    <span class="s0">set var [OptValue $item]</span>
+		<span class="s0">} else {</span>
+		    <span class="s0">set var [OptDefaultValue $item]</span>
+		<span class="s0">}</span>
+	    <span class="s0">}</span>
+	<span class="s0">}</span>
+	<span class="s0">return $vnamesLst</span>
+    <span class="s0">}</span>
+
+
+<span class="s0"># Check the type of a value</span>
+<span class="s0"># and emit an error if arg is not of the correct type</span>
+<span class="s0"># otherwise returns the canonical value of that arg (ie 0/1 for booleans)</span>
+<span class="s0">proc ::tcl::OptCheckType {arg type {typeArgs &quot;&quot;}} {</span>
+<span class="s0">#    puts &quot;checking '$arg' against '$type' ($typeArgs)&quot;</span>
+
+    <span class="s0"># only types &quot;any&quot;, &quot;choice&quot;, and numbers can have leading &quot;-&quot;</span>
+
+    <span class="s0">switch -exact -- $type {</span>
+        <span class="s0">int {</span>
+            <span class="s0">if {![string is integer -strict $arg]} {</span>
+                <span class="s0">error &quot;not an integer&quot;</span>
+            <span class="s0">}</span>
+	    <span class="s0">return $arg</span>
+        <span class="s0">}</span>
+        <span class="s0">float {</span>
+            <span class="s0">return [expr {double($arg)}]</span>
+        <span class="s0">}</span>
+	<span class="s0">script -</span>
+        <span class="s0">list {</span>
+	    <span class="s0"># if llength fail : malformed list</span>
+            <span class="s0">if {[llength $arg]==0 &amp;&amp; [OptIsFlag $arg]} {</span>
+		<span class="s0">error &quot;no values with leading -&quot;</span>
+	    <span class="s0">}</span>
+	    <span class="s0">return $arg</span>
+        <span class="s0">}</span>
+        <span class="s0">boolean {</span>
+	    <span class="s0">if {![string is boolean -strict $arg]} {</span>
+		<span class="s0">error &quot;non canonic boolean&quot;</span>
+            <span class="s0">}</span>
+	    <span class="s0"># convert true/false because expr/if is broken with &quot;!,...</span>
+	    <span class="s0">return [expr {$arg ? 1 : 0}]</span>
+        <span class="s0">}</span>
+        <span class="s0">choice {</span>
+            <span class="s0">if {[lsearch -exact $typeArgs $arg] &lt; 0} {</span>
+                <span class="s0">error &quot;invalid choice&quot;</span>
+            <span class="s0">}</span>
+	    <span class="s0">return $arg</span>
+        <span class="s0">}</span>
+	<span class="s0">any {</span>
+	    <span class="s0">return $arg</span>
+	<span class="s0">}</span>
+	<span class="s0">string -</span>
+	<span class="s0">default {</span>
+            <span class="s0">if {[OptIsFlag $arg]} {</span>
+                <span class="s0">error &quot;no values with leading -&quot;</span>
+            <span class="s0">}</span>
+	    <span class="s0">return $arg</span>
+        <span class="s0">}</span>
+    <span class="s0">}</span>
+    <span class="s0">return neverReached</span>
+<span class="s0">}</span>
+
+    <span class="s0"># internal utilities</span>
+
+    <span class="s0"># returns the number of flags matching the given arg</span>
+    <span class="s0"># sets the (local) prg counter to the list of matches</span>
+    <span class="s0">proc OptHits {descName arg} {</span>
+        <span class="s0">upvar $descName desc</span>
+        <span class="s0">set hits 0</span>
+        <span class="s0">set hitems {}</span>
+	<span class="s0">set i 1</span>
+
+	<span class="s0">set larg [string tolower $arg]</span>
+	<span class="s0">set len  [string length $larg]</span>
+	<span class="s0">set last [expr {$len-1}]</span>
+
+        <span class="s0">foreach item [lrange $desc 1 end] {</span>
+            <span class="s0">set flag [OptName $item]</span>
+	    <span class="s0"># lets try to match case insensitively</span>
+	    <span class="s0"># (string length ought to be cheap)</span>
+	    <span class="s0">set lflag [string tolower $flag]</span>
+	    <span class="s0">if {$len == [string length $lflag]} {</span>
+		<span class="s0">if {[string equal $larg $lflag]} {</span>
+		    <span class="s0"># Exact match case</span>
+		    <span class="s0">OptSetPrgCounter desc $i</span>
+		    <span class="s0">return 1</span>
+		<span class="s0">}</span>
+	    <span class="s0">} elseif {[string equal $larg [string range $lflag 0 $last]]} {</span>
+		<span class="s0">lappend hitems $i</span>
+		<span class="s0">incr hits</span>
+            <span class="s0">}</span>
+	    <span class="s0">incr i</span>
+        <span class="s0">}</span>
+	<span class="s0">if {$hits} {</span>
+	    <span class="s0">OptSetPrgCounter desc $hitems</span>
+	<span class="s0">}</span>
+        <span class="s0">return $hits</span>
+    <span class="s0">}</span>
+
+    <span class="s0"># Extract fields from the list structure:</span>
+
+    <span class="s0">proc OptName {item} {</span>
+        <span class="s0">lindex $item 1</span>
+    <span class="s0">}</span>
+    <span class="s0">proc OptHasBeenSet {item} {</span>
+	<span class="s0">Lget $item {2 0}</span>
+    <span class="s0">}</span>
+    <span class="s0">proc OptValue {item} {</span>
+	<span class="s0">Lget $item {2 1}</span>
+    <span class="s0">}</span>
+
+    <span class="s0">proc OptIsFlag {name} {</span>
+        <span class="s0">string match &quot;-*&quot; $name</span>
+    <span class="s0">}</span>
+    <span class="s0">proc OptIsOpt {name} {</span>
+        <span class="s0">string match {\?*} $name</span>
+    <span class="s0">}</span>
+    <span class="s0">proc OptVarName {item} {</span>
+        <span class="s0">set name [OptName $item]</span>
+        <span class="s0">if {[OptIsFlag $name]} {</span>
+            <span class="s0">return [string range $name 1 end]</span>
+        <span class="s0">} elseif {[OptIsOpt $name]} {</span>
+	    <span class="s0">return [string trim $name &quot;?&quot;]</span>
+	<span class="s0">} else {</span>
+            <span class="s0">return $name</span>
+        <span class="s0">}</span>
+    <span class="s0">}</span>
+    <span class="s0">proc OptType {item} {</span>
+        <span class="s0">lindex $item 3</span>
+    <span class="s0">}</span>
+    <span class="s0">proc OptTypeArgs {item} {</span>
+        <span class="s0">lindex $item 4</span>
+    <span class="s0">}</span>
+    <span class="s0">proc OptHelp {item} {</span>
+        <span class="s0">lindex $item 5</span>
+    <span class="s0">}</span>
+    <span class="s0">proc OptNeedValue {item} {</span>
+        <span class="s0">expr {![string equal [OptType $item] boolflag]}</span>
+    <span class="s0">}</span>
+    <span class="s0">proc OptDefaultValue {item} {</span>
+        <span class="s0">set val [OptTypeArgs $item]</span>
+        <span class="s0">switch -exact -- [OptType $item] {</span>
+            <span class="s0">choice {return [lindex $val 0]}</span>
+	    <span class="s0">boolean -</span>
+	    <span class="s0">boolflag {</span>
+		<span class="s0"># convert back false/true to 0/1 because expr !$bool</span>
+		<span class="s0"># is broken..</span>
+		<span class="s0">if {$val} {</span>
+		    <span class="s0">return 1</span>
+		<span class="s0">} else {</span>
+		    <span class="s0">return 0</span>
+		<span class="s0">}</span>
+	    <span class="s0">}</span>
+        <span class="s0">}</span>
+        <span class="s0">return $val</span>
+    <span class="s0">}</span>
+
+    <span class="s0"># Description format error helper</span>
+    <span class="s0">proc OptOptUsage {item {what &quot;&quot;}} {</span>
+        <span class="s0">return -code error &quot;invalid description format$what: $item\n\</span>
+                <span class="s0">should be a list of {varname|-flagname ?-type? ?defaultvalue?\</span>
+                <span class="s0">?helpstring?}&quot;</span>
+    <span class="s0">}</span>
+
+
+    <span class="s0"># Generate a canonical form single instruction</span>
+    <span class="s0">proc OptNewInst {state varname type typeArgs help} {</span>
+	<span class="s0">list $state $varname [list 0 {}] $type $typeArgs $help</span>
+	<span class="s0">#                          ^  ^</span>
+	<span class="s0">#                          |  |</span>
+	<span class="s0">#               hasBeenSet=+  +=currentValue</span>
+    <span class="s0">}</span>
+
+    <span class="s0"># Translate one item to canonical form</span>
+    <span class="s0">proc OptNormalizeOne {item} {</span>
+        <span class="s0">set lg [Lassign $item varname arg1 arg2 arg3]</span>
+<span class="s0">#       puts &quot;called optnormalizeone '$item' v=($varname), lg=$lg&quot;</span>
+        <span class="s0">set isflag [OptIsFlag $varname]</span>
+	<span class="s0">set isopt  [OptIsOpt  $varname]</span>
+        <span class="s0">if {$isflag} {</span>
+            <span class="s0">set state &quot;flags&quot;</span>
+        <span class="s0">} elseif {$isopt} {</span>
+	    <span class="s0">set state &quot;optValue&quot;</span>
+	<span class="s0">} elseif {![string equal $varname &quot;args&quot;]} {</span>
+	    <span class="s0">set state &quot;value&quot;</span>
+	<span class="s0">} else {</span>
+	    <span class="s0">set state &quot;args&quot;</span>
+	<span class="s0">}</span>
+
+	<span class="s0"># apply 'smart' 'fuzzy' logic to try to make</span>
+	<span class="s0"># description writer's life easy, and our's difficult :</span>
+	<span class="s0"># let's guess the missing arguments :-)</span>
+
+        <span class="s0">switch $lg {</span>
+            <span class="s0">1 {</span>
+                <span class="s0">if {$isflag} {</span>
+                    <span class="s0">return [OptNewInst $state $varname boolflag false &quot;&quot;]</span>
+                <span class="s0">} else {</span>
+                    <span class="s0">return [OptNewInst $state $varname any &quot;&quot; &quot;&quot;]</span>
+                <span class="s0">}</span>
+            <span class="s0">}</span>
+            <span class="s0">2 {</span>
+                <span class="s0"># varname default</span>
+                <span class="s0"># varname help</span>
+                <span class="s0">set type [OptGuessType $arg1]</span>
+                <span class="s0">if {[string equal $type &quot;string&quot;]} {</span>
+                    <span class="s0">if {$isflag} {</span>
+			<span class="s0">set type boolflag</span>
+			<span class="s0">set def false</span>
+		    <span class="s0">} else {</span>
+			<span class="s0">set type any</span>
+			<span class="s0">set def &quot;&quot;</span>
+		    <span class="s0">}</span>
+		    <span class="s0">set help $arg1</span>
+                <span class="s0">} else {</span>
+                    <span class="s0">set help &quot;&quot;</span>
+                    <span class="s0">set def $arg1</span>
+                <span class="s0">}</span>
+                <span class="s0">return [OptNewInst $state $varname $type $def $help]</span>
+            <span class="s0">}</span>
+            <span class="s0">3 {</span>
+                <span class="s0"># varname type value</span>
+                <span class="s0"># varname value comment</span>
+
+                <span class="s0">if {[regexp {^-(.+)$} $arg1 x type]} {</span>
+		    <span class="s0"># flags/optValue as they are optional, need a &quot;value&quot;,</span>
+		    <span class="s0"># on the contrary, for a variable (non optional),</span>
+	            <span class="s0"># default value is pointless, 'cept for choices :</span>
+		    <span class="s0">if {$isflag || $isopt || ($type == &quot;choice&quot;)} {</span>
+			<span class="s0">return [OptNewInst $state $varname $type $arg2 &quot;&quot;]</span>
+		    <span class="s0">} else {</span>
+			<span class="s0">return [OptNewInst $state $varname $type &quot;&quot; $arg2]</span>
+		    <span class="s0">}</span>
+                <span class="s0">} else {</span>
+                    <span class="s0">return [OptNewInst $state $varname\</span>
+			    <span class="s0">[OptGuessType $arg1] $arg1 $arg2]</span>
+                <span class="s0">}</span>
+            <span class="s0">}</span>
+            <span class="s0">4 {</span>
+                <span class="s0">if {[regexp {^-(.+)$} $arg1 x type]} {</span>
+		    <span class="s0">return [OptNewInst $state $varname $type $arg2 $arg3]</span>
+                <span class="s0">} else {</span>
+                    <span class="s0">return -code error [OptOptUsage $item]</span>
+                <span class="s0">}</span>
+            <span class="s0">}</span>
+            <span class="s0">default {</span>
+                <span class="s0">return -code error [OptOptUsage $item]</span>
+            <span class="s0">}</span>
+        <span class="s0">}</span>
+    <span class="s0">}</span>
+
+    <span class="s0"># Auto magic lazy type determination</span>
+    <span class="s0">proc OptGuessType {arg} {</span>
+ 	 <span class="s0">if { $arg == &quot;true&quot; || $arg == &quot;false&quot; } {</span>
+            <span class="s0">return boolean</span>
+        <span class="s0">}</span>
+        <span class="s0">if {[string is integer -strict $arg]} {</span>
+            <span class="s0">return int</span>
+        <span class="s0">}</span>
+        <span class="s0">if {[string is double -strict $arg]} {</span>
+            <span class="s0">return float</span>
+        <span class="s0">}</span>
+        <span class="s0">return string</span>
+    <span class="s0">}</span>
+
+    <span class="s0"># Error messages front ends</span>
+
+    <span class="s0">proc OptAmbigous {desc arg} {</span>
+        <span class="s0">OptError &quot;ambigous option \&quot;$arg\&quot;, choose from:&quot; [OptSelection $desc]</span>
+    <span class="s0">}</span>
+    <span class="s0">proc OptFlagUsage {desc arg} {</span>
+        <span class="s0">OptError &quot;bad flag \&quot;$arg\&quot;, must be one of&quot; $desc</span>
+    <span class="s0">}</span>
+    <span class="s0">proc OptTooManyArgs {desc arguments} {</span>
+        <span class="s0">OptError &quot;too many arguments (unexpected argument(s): $arguments),\</span>
+		<span class="s0">usage:&quot;\</span>
+		<span class="s0">$desc 1</span>
+    <span class="s0">}</span>
+    <span class="s0">proc OptParamType {item} {</span>
+	<span class="s0">if {[OptIsFlag $item]} {</span>
+	    <span class="s0">return &quot;flag&quot;</span>
+	<span class="s0">} else {</span>
+	    <span class="s0">return &quot;parameter&quot;</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+    <span class="s0">proc OptBadValue {item arg {err {}}} {</span>
+<span class="s0">#       puts &quot;bad val err = \&quot;$err\&quot;&quot;</span>
+        <span class="s0">OptError &quot;bad value \&quot;$arg\&quot; for [OptParamType $item]&quot;\</span>
+		<span class="s0">[list $item]</span>
+    <span class="s0">}</span>
+    <span class="s0">proc OptMissingValue {descriptions} {</span>
+<span class="s0">#        set item [OptCurDescFinal $descriptions]</span>
+        <span class="s0">set item [OptCurDesc $descriptions]</span>
+        <span class="s0">OptError &quot;no value given for [OptParamType $item] \&quot;[OptName $item]\&quot;\</span>
+		<span class="s0">(use -help for full usage) :&quot;\</span>
+		<span class="s0">[list $item]</span>
+    <span class="s0">}</span>
+
+<span class="s0">proc ::tcl::OptKeyError {prefix descKey {header 0}} {</span>
+    <span class="s0">OptError $prefix [OptKeyGetDesc $descKey] $header</span>
+<span class="s0">}</span>
+
+    <span class="s0"># determine string length for nice tabulated output</span>
+    <span class="s0">proc OptLengths {desc nlName tlName dlName} {</span>
+	<span class="s0">upvar $nlName nl</span>
+	<span class="s0">upvar $tlName tl</span>
+	<span class="s0">upvar $dlName dl</span>
+	<span class="s0">foreach item $desc {</span>
+	    <span class="s0">if {[OptIsCounter $item]} continue</span>
+	    <span class="s0">if {[OptIsPrg $item]} {</span>
+		<span class="s0">OptLengths $item nl tl dl</span>
+	    <span class="s0">} else {</span>
+		<span class="s0">SetMax nl [string length [OptName $item]]</span>
+		<span class="s0">SetMax tl [string length [OptType $item]]</span>
+		<span class="s0">set dv [OptTypeArgs $item]</span>
+		<span class="s0">if {[OptState $item] != &quot;header&quot;} {</span>
+		    <span class="s0">set dv &quot;($dv)&quot;</span>
+		<span class="s0">}</span>
+		<span class="s0">set l [string length $dv]</span>
+		<span class="s0"># limit the space allocated to potentially big &quot;choices&quot;</span>
+		<span class="s0">if {([OptType $item] != &quot;choice&quot;) || ($l&lt;=12)} {</span>
+		    <span class="s0">SetMax dl $l</span>
+		<span class="s0">} else {</span>
+		    <span class="s0">if {![info exists dl]} {</span>
+			<span class="s0">set dl 0</span>
+		    <span class="s0">}</span>
+		<span class="s0">}</span>
+	    <span class="s0">}</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+    <span class="s0"># output the tree</span>
+    <span class="s0">proc OptTree {desc nl tl dl} {</span>
+	<span class="s0">set res &quot;&quot;</span>
+	<span class="s0">foreach item $desc {</span>
+	    <span class="s0">if {[OptIsCounter $item]} continue</span>
+	    <span class="s0">if {[OptIsPrg $item]} {</span>
+		<span class="s0">append res [OptTree $item $nl $tl $dl]</span>
+	    <span class="s0">} else {</span>
+		<span class="s0">set dv [OptTypeArgs $item]</span>
+		<span class="s0">if {[OptState $item] != &quot;header&quot;} {</span>
+		    <span class="s0">set dv &quot;($dv)&quot;</span>
+		<span class="s0">}</span>
+		<span class="s0">append res [string trimright [format &quot;\n    %-*s %-*s %-*s %s&quot; \</span>
+			<span class="s0">$nl [OptName $item] $tl [OptType $item] \</span>
+			<span class="s0">$dl $dv [OptHelp $item]]]</span>
+	    <span class="s0">}</span>
+	<span class="s0">}</span>
+	<span class="s0">return $res</span>
+    <span class="s0">}</span>
+
+<span class="s0"># Give nice usage string</span>
+<span class="s0">proc ::tcl::OptError {prefix desc {header 0}} {</span>
+    <span class="s0"># determine length</span>
+    <span class="s0">if {$header} {</span>
+	<span class="s0"># add faked instruction</span>
+	<span class="s0">set h [list [OptNewInst header Var/FlagName Type Value Help]]</span>
+	<span class="s0">lappend h   [OptNewInst header ------------ ---- ----- ----]</span>
+	<span class="s0">lappend h   [OptNewInst header {(-help} &quot;&quot; &quot;&quot; {gives this help)}]</span>
+	<span class="s0">set desc [concat $h $desc]</span>
+    <span class="s0">}</span>
+    <span class="s0">OptLengths $desc nl tl dl</span>
+    <span class="s0"># actually output</span>
+    <span class="s0">return &quot;$prefix[OptTree $desc $nl $tl $dl]&quot;</span>
+<span class="s0">}</span>
+
+
+<span class="s0">################     General Utility functions   #######################</span>
+
+<span class="s0">#</span>
+<span class="s0"># List utility functions</span>
+<span class="s0"># Naming convention:</span>
+<span class="s0">#     &quot;Lvarxxx&quot; take the list VARiable name as argument</span>
+<span class="s0">#     &quot;Lxxxx&quot;   take the list value as argument</span>
+<span class="s0">#               (which is not costly with Tcl8 objects system</span>
+<span class="s0">#                as it's still a reference and not a copy of the values)</span>
+<span class="s0">#</span>
+
+<span class="s0"># Is that list empty ?</span>
+<span class="s0">proc ::tcl::Lempty {list} {</span>
+    <span class="s0">expr {[llength $list]==0}</span>
+<span class="s0">}</span>
+
+<span class="s0"># Gets the value of one leaf of a lists tree</span>
+<span class="s0">proc ::tcl::Lget {list indexLst} {</span>
+    <span class="s0">if {[llength $indexLst] &lt;= 1} {</span>
+        <span class="s0">return [lindex $list $indexLst]</span>
+    <span class="s0">}</span>
+    <span class="s0">Lget [lindex $list [lindex $indexLst 0]] [lrange $indexLst 1 end]</span>
+<span class="s0">}</span>
+<span class="s0"># Sets the value of one leaf of a lists tree</span>
+<span class="s0"># (we use the version that does not create the elements because</span>
+<span class="s0">#  it would be even slower... needs to be written in C !)</span>
+<span class="s0"># (nb: there is a non trivial recursive problem with indexes 0,</span>
+<span class="s0">#  which appear because there is no difference between a list</span>
+<span class="s0">#  of 1 element and 1 element alone : [list &quot;a&quot;] == &quot;a&quot; while</span>
+<span class="s0">#  it should be {a} and [listp a] should be 0 while [listp {a b}] would be 1</span>
+<span class="s0">#  and [listp &quot;a b&quot;] maybe 0. listp does not exist either...)</span>
+<span class="s0">proc ::tcl::Lvarset {listName indexLst newValue} {</span>
+    <span class="s0">upvar $listName list</span>
+    <span class="s0">if {[llength $indexLst] &lt;= 1} {</span>
+        <span class="s0">Lvarset1nc list $indexLst $newValue</span>
+    <span class="s0">} else {</span>
+        <span class="s0">set idx [lindex $indexLst 0]</span>
+        <span class="s0">set targetList [lindex $list $idx]</span>
+        <span class="s0"># reduce refcount on targetList (not really usefull now,</span>
+	<span class="s0"># could be with optimizing compiler)</span>
+<span class="s0">#        Lvarset1 list $idx {}</span>
+        <span class="s0"># recursively replace in targetList</span>
+        <span class="s0">Lvarset targetList [lrange $indexLst 1 end] $newValue</span>
+        <span class="s0"># put updated sub list back in the tree</span>
+        <span class="s0">Lvarset1nc list $idx $targetList</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+<span class="s0"># Set one cell to a value, eventually create all the needed elements</span>
+<span class="s0"># (on level-1 of lists)</span>
+<span class="s0">variable emptyList {}</span>
+<span class="s0">proc ::tcl::Lvarset1 {listName index newValue} {</span>
+    <span class="s0">upvar $listName list</span>
+    <span class="s0">if {$index &lt; 0} {return -code error &quot;invalid negative index&quot;}</span>
+    <span class="s0">set lg [llength $list]</span>
+    <span class="s0">if {$index &gt;= $lg} {</span>
+        <span class="s0">variable emptyList</span>
+        <span class="s0">for {set i $lg} {$i&lt;$index} {incr i} {</span>
+            <span class="s0">lappend list $emptyList</span>
+        <span class="s0">}</span>
+        <span class="s0">lappend list $newValue</span>
+    <span class="s0">} else {</span>
+        <span class="s0">set list [lreplace $list $index $index $newValue]</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+<span class="s0"># same as Lvarset1 but no bound checking / creation</span>
+<span class="s0">proc ::tcl::Lvarset1nc {listName index newValue} {</span>
+    <span class="s0">upvar $listName list</span>
+    <span class="s0">set list [lreplace $list $index $index $newValue]</span>
+<span class="s0">}</span>
+<span class="s0"># Increments the value of one leaf of a lists tree</span>
+<span class="s0"># (which must exists)</span>
+<span class="s0">proc ::tcl::Lvarincr {listName indexLst {howMuch 1}} {</span>
+    <span class="s0">upvar $listName list</span>
+    <span class="s0">if {[llength $indexLst] &lt;= 1} {</span>
+        <span class="s0">Lvarincr1 list $indexLst $howMuch</span>
+    <span class="s0">} else {</span>
+        <span class="s0">set idx [lindex $indexLst 0]</span>
+        <span class="s0">set targetList [lindex $list $idx]</span>
+        <span class="s0"># reduce refcount on targetList</span>
+        <span class="s0">Lvarset1nc list $idx {}</span>
+        <span class="s0"># recursively replace in targetList</span>
+        <span class="s0">Lvarincr targetList [lrange $indexLst 1 end] $howMuch</span>
+        <span class="s0"># put updated sub list back in the tree</span>
+        <span class="s0">Lvarset1nc list $idx $targetList</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+<span class="s0"># Increments the value of one cell of a list</span>
+<span class="s0">proc ::tcl::Lvarincr1 {listName index {howMuch 1}} {</span>
+    <span class="s0">upvar $listName list</span>
+    <span class="s0">set newValue [expr {[lindex $list $index]+$howMuch}]</span>
+    <span class="s0">set list [lreplace $list $index $index $newValue]</span>
+    <span class="s0">return $newValue</span>
+<span class="s0">}</span>
+<span class="s0"># Removes the first element of a list</span>
+<span class="s0"># and returns the new list value</span>
+<span class="s0">proc ::tcl::Lvarpop1 {listName} {</span>
+    <span class="s0">upvar $listName list</span>
+    <span class="s0">set list [lrange $list 1 end]</span>
+<span class="s0">}</span>
+<span class="s0"># Same but returns the removed element</span>
+<span class="s0"># (Like the tclX version)</span>
+<span class="s0">proc ::tcl::Lvarpop {listName} {</span>
+    <span class="s0">upvar $listName list</span>
+    <span class="s0">set el [lindex $list 0]</span>
+    <span class="s0">set list [lrange $list 1 end]</span>
+    <span class="s0">return $el</span>
+<span class="s0">}</span>
+<span class="s0"># Assign list elements to variables and return the length of the list</span>
+<span class="s0">proc ::tcl::Lassign {list args} {</span>
+    <span class="s0"># faster than direct blown foreach (which does not byte compile)</span>
+    <span class="s0">set i 0</span>
+    <span class="s0">set lg [llength $list]</span>
+    <span class="s0">foreach vname $args {</span>
+        <span class="s0">if {$i&gt;=$lg} break</span>
+        <span class="s0">uplevel 1 [list ::set $vname [lindex $list $i]]</span>
+        <span class="s0">incr i</span>
+    <span class="s0">}</span>
+    <span class="s0">return $lg</span>
+<span class="s0">}</span>
+
+<span class="s0"># Misc utilities</span>
+
+<span class="s0"># Set the varname to value if value is greater than varname's current value</span>
+<span class="s0"># or if varname is undefined</span>
+<span class="s0">proc ::tcl::SetMax {varname value} {</span>
+    <span class="s0">upvar 1 $varname var</span>
+    <span class="s0">if {![info exists var] || $value &gt; $var} {</span>
+        <span class="s0">set var $value</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+
+<span class="s0"># Set the varname to value if value is smaller than varname's current value</span>
+<span class="s0"># or if varname is undefined</span>
+<span class="s0">proc ::tcl::SetMin {varname value} {</span>
+    <span class="s0">upvar 1 $varname var</span>
+    <span class="s0">if {![info exists var] || $value &lt; $var} {</span>
+        <span class="s0">set var $value</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+
+
+    <span class="s0"># everything loaded fine, lets create the test proc:</span>
+ <span class="s0">#    OptCreateTestProc</span>
+    <span class="s0"># Don't need the create temp proc anymore:</span>
+ <span class="s0">#    rename OptCreateTestProc {}</span>
+<span class="s0">}</span>
+</pre>
+</body>
+</html>

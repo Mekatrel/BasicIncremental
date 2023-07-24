@@ -1,0 +1,256 @@
+<html>
+<head>
+<title>wamp.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #cc7832;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #6a8759;}
+.s3 { color: #6897bb;}
+.s4 { color: #808080;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+wamp.py</font>
+</center></td></tr></table>
+<pre><span class="s0">import </span><span class="s1">inspect</span>
+<span class="s0">import </span><span class="s1">random</span>
+<span class="s0">import </span><span class="s1">string</span>
+<span class="s0">import </span><span class="s1">types</span>
+
+<span class="s0">try</span><span class="s1">:</span>
+    <span class="s0">import </span><span class="s1">ujson </span><span class="s0">as </span><span class="s1">json</span>
+<span class="s0">except </span><span class="s1">ImportError:</span>
+    <span class="s0">try</span><span class="s1">:</span>
+        <span class="s0">import </span><span class="s1">simplejson </span><span class="s0">as </span><span class="s1">json</span>
+    <span class="s0">except </span><span class="s1">ImportError:</span>
+        <span class="s0">import </span><span class="s1">json</span>
+
+<span class="s0">from </span><span class="s1">.._compat </span><span class="s0">import </span><span class="s1">range_type</span><span class="s0">, </span><span class="s1">string_types</span>
+<span class="s0">from </span><span class="s1">..exceptions </span><span class="s0">import </span><span class="s1">WebSocketError</span>
+<span class="s0">from </span><span class="s1">.base </span><span class="s0">import </span><span class="s1">BaseProtocol</span>
+
+
+<span class="s0">def </span><span class="s1">export_rpc(arg=</span><span class="s0">None</span><span class="s1">):</span>
+    <span class="s0">if </span><span class="s1">isinstance(arg</span><span class="s0">, </span><span class="s1">types.FunctionType):</span>
+        <span class="s1">arg._rpc = arg.__name__</span>
+    <span class="s0">return </span><span class="s1">arg</span>
+
+
+<span class="s0">def </span><span class="s1">serialize(data):</span>
+    <span class="s0">return </span><span class="s1">json.dumps(data)</span>
+
+
+<span class="s0">class </span><span class="s1">Prefixes(object):</span>
+    <span class="s0">def </span><span class="s1">__init__(self):</span>
+        <span class="s1">self.prefixes = {}</span>
+
+    <span class="s0">def </span><span class="s1">add(self</span><span class="s0">, </span><span class="s1">prefix</span><span class="s0">, </span><span class="s1">uri):</span>
+        <span class="s1">self.prefixes[prefix] = uri</span>
+
+    <span class="s0">def </span><span class="s1">resolve(self</span><span class="s0">, </span><span class="s1">curie_or_uri):</span>
+        <span class="s0">if </span><span class="s2">&quot;http://&quot; </span><span class="s0">in </span><span class="s1">curie_or_uri:</span>
+            <span class="s0">return </span><span class="s1">curie_or_uri</span>
+        <span class="s0">elif </span><span class="s2">':' </span><span class="s0">in </span><span class="s1">curie_or_uri:</span>
+            <span class="s1">prefix</span><span class="s0">, </span><span class="s1">proc = curie_or_uri.split(</span><span class="s2">':'</span><span class="s0">, </span><span class="s3">1</span><span class="s1">)</span>
+            <span class="s0">return </span><span class="s1">self.prefixes[prefix] + proc</span>
+        <span class="s0">else</span><span class="s1">:</span>
+            <span class="s0">raise </span><span class="s1">Exception(curie_or_uri)</span>
+
+
+<span class="s0">class </span><span class="s1">RemoteProcedures(object):</span>
+    <span class="s0">def </span><span class="s1">__init__(self):</span>
+        <span class="s1">self.calls = {}</span>
+
+    <span class="s0">def </span><span class="s1">register_procedure(self</span><span class="s0">, </span><span class="s1">uri</span><span class="s0">, </span><span class="s1">proc):</span>
+        <span class="s1">self.calls[uri] = proc</span>
+
+    <span class="s0">def </span><span class="s1">register_object(self</span><span class="s0">, </span><span class="s1">uri</span><span class="s0">, </span><span class="s1">obj):</span>
+        <span class="s0">for </span><span class="s1">k </span><span class="s0">in </span><span class="s1">inspect.getmembers(obj</span><span class="s0">, </span><span class="s1">inspect.ismethod):</span>
+            <span class="s0">if </span><span class="s2">'_rpc' </span><span class="s0">in </span><span class="s1">k[</span><span class="s3">1</span><span class="s1">].__dict__:</span>
+                <span class="s1">proc_uri = uri + k[</span><span class="s3">1</span><span class="s1">]._rpc</span>
+                <span class="s1">self.calls[proc_uri] = (obj</span><span class="s0">, </span><span class="s1">k[</span><span class="s3">1</span><span class="s1">])</span>
+
+    <span class="s0">def </span><span class="s1">call(self</span><span class="s0">, </span><span class="s1">uri</span><span class="s0">, </span><span class="s1">args):</span>
+        <span class="s0">if </span><span class="s1">uri </span><span class="s0">in </span><span class="s1">self.calls:</span>
+            <span class="s1">proc = self.calls[uri]</span>
+
+            <span class="s4"># Do the correct call whether it's a function or instance method.</span>
+            <span class="s0">if </span><span class="s1">isinstance(proc</span><span class="s0">, </span><span class="s1">tuple):</span>
+                <span class="s0">if </span><span class="s1">proc[</span><span class="s3">1</span><span class="s1">].__self__ </span><span class="s0">is None</span><span class="s1">:</span>
+                    <span class="s4"># Create instance of object and call method</span>
+                    <span class="s0">return </span><span class="s1">proc[</span><span class="s3">1</span><span class="s1">](proc[</span><span class="s3">0</span><span class="s1">]()</span><span class="s0">, </span><span class="s1">*args)</span>
+                <span class="s0">else</span><span class="s1">:</span>
+                    <span class="s4"># Call bound method on instance</span>
+                    <span class="s0">return </span><span class="s1">proc[</span><span class="s3">1</span><span class="s1">](*args)</span>
+            <span class="s0">else</span><span class="s1">:</span>
+                <span class="s0">return </span><span class="s1">self.calls[uri](*args)</span>
+        <span class="s0">else</span><span class="s1">:</span>
+            <span class="s0">raise </span><span class="s1">Exception(</span><span class="s2">&quot;no such uri '{}'&quot;</span><span class="s1">.format(uri))</span>
+
+
+<span class="s0">class </span><span class="s1">Channels(object):</span>
+    <span class="s0">def </span><span class="s1">__init__(self):</span>
+        <span class="s1">self.channels = {}</span>
+
+    <span class="s0">def </span><span class="s1">create(self</span><span class="s0">, </span><span class="s1">uri</span><span class="s0">, </span><span class="s1">prefix_matching=</span><span class="s0">False</span><span class="s1">):</span>
+        <span class="s0">if </span><span class="s1">uri </span><span class="s0">not in </span><span class="s1">self.channels:</span>
+            <span class="s1">self.channels[uri] = []</span>
+
+        <span class="s4"># TODO: implement prefix matching</span>
+
+    <span class="s0">def </span><span class="s1">subscribe(self</span><span class="s0">, </span><span class="s1">uri</span><span class="s0">, </span><span class="s1">client):</span>
+        <span class="s0">if </span><span class="s1">uri </span><span class="s0">in </span><span class="s1">self.channels:</span>
+            <span class="s1">self.channels[uri].append(client)</span>
+
+    <span class="s0">def </span><span class="s1">unsubscribe(self</span><span class="s0">, </span><span class="s1">uri</span><span class="s0">, </span><span class="s1">client):</span>
+        <span class="s0">if </span><span class="s1">uri </span><span class="s0">not in </span><span class="s1">self.channels:</span>
+            <span class="s0">return</span>
+
+        <span class="s1">client_index = self.channels[uri].index(client)</span>
+        <span class="s1">self.channels[uri].pop(client_index)</span>
+
+        <span class="s0">if </span><span class="s1">len(self.channels[uri]) == </span><span class="s3">0</span><span class="s1">:</span>
+            <span class="s0">del </span><span class="s1">self.channels[uri]</span>
+
+    <span class="s0">def </span><span class="s1">publish(self</span><span class="s0">, </span><span class="s1">uri</span><span class="s0">, </span><span class="s1">event</span><span class="s0">, </span><span class="s1">exclude=</span><span class="s0">None, </span><span class="s1">eligible=</span><span class="s0">None</span><span class="s1">):</span>
+        <span class="s0">if </span><span class="s1">uri </span><span class="s0">not in </span><span class="s1">self.channels:</span>
+            <span class="s0">return</span>
+
+        <span class="s4"># TODO: exclude &amp; eligible</span>
+
+        <span class="s1">msg = [WampProtocol.MSG_EVENT</span><span class="s0">, </span><span class="s1">uri</span><span class="s0">, </span><span class="s1">event]</span>
+
+        <span class="s0">for </span><span class="s1">client </span><span class="s0">in </span><span class="s1">self.channels[uri]:</span>
+            <span class="s0">try</span><span class="s1">:</span>
+                <span class="s1">client.ws.send(serialize(msg))</span>
+            <span class="s0">except </span><span class="s1">WebSocketError:</span>
+                <span class="s4"># Seems someone didn't unsubscribe before disconnecting</span>
+                <span class="s1">self.channels[uri].remove(client)</span>
+
+
+<span class="s0">class </span><span class="s1">WampProtocol(BaseProtocol):</span>
+    <span class="s1">MSG_WELCOME = </span><span class="s3">0</span>
+    <span class="s1">MSG_PREFIX = </span><span class="s3">1</span>
+    <span class="s1">MSG_CALL = </span><span class="s3">2</span>
+    <span class="s1">MSG_CALL_RESULT = </span><span class="s3">3</span>
+    <span class="s1">MSG_CALL_ERROR = </span><span class="s3">4</span>
+    <span class="s1">MSG_SUBSCRIBE = </span><span class="s3">5</span>
+    <span class="s1">MSG_UNSUBSCRIBE = </span><span class="s3">6</span>
+    <span class="s1">MSG_PUBLISH = </span><span class="s3">7</span>
+    <span class="s1">MSG_EVENT = </span><span class="s3">8</span>
+
+    <span class="s1">PROTOCOL_NAME = </span><span class="s2">&quot;wamp&quot;</span>
+
+    <span class="s0">def </span><span class="s1">__init__(self</span><span class="s0">, </span><span class="s1">*args</span><span class="s0">, </span><span class="s1">**kwargs):</span>
+        <span class="s1">self.procedures = RemoteProcedures()</span>
+        <span class="s1">self.prefixes = Prefixes()</span>
+        <span class="s1">self.session_id = </span><span class="s2">''</span><span class="s1">.join(</span>
+            <span class="s1">[random.choice(string.digits + string.letters)</span>
+                <span class="s0">for </span><span class="s1">i </span><span class="s0">in </span><span class="s1">range_type(</span><span class="s3">16</span><span class="s1">)])</span>
+
+        <span class="s1">super(WampProtocol</span><span class="s0">, </span><span class="s1">self).__init__(*args</span><span class="s0">, </span><span class="s1">**kwargs)</span>
+
+    <span class="s0">def </span><span class="s1">register_procedure(self</span><span class="s0">, </span><span class="s1">*args</span><span class="s0">, </span><span class="s1">**kwargs):</span>
+        <span class="s1">self.procedures.register_procedure(*args</span><span class="s0">, </span><span class="s1">**kwargs)</span>
+
+    <span class="s0">def </span><span class="s1">register_object(self</span><span class="s0">, </span><span class="s1">*args</span><span class="s0">, </span><span class="s1">**kwargs):</span>
+        <span class="s1">self.procedures.register_object(*args</span><span class="s0">, </span><span class="s1">**kwargs)</span>
+
+    <span class="s0">def </span><span class="s1">register_pubsub(self</span><span class="s0">, </span><span class="s1">*args</span><span class="s0">, </span><span class="s1">**kwargs):</span>
+        <span class="s0">if not </span><span class="s1">hasattr(self.server</span><span class="s0">, </span><span class="s2">'channels'</span><span class="s1">):</span>
+            <span class="s1">self.server.channels = Channels()</span>
+
+        <span class="s1">self.server.channels.create(*args</span><span class="s0">, </span><span class="s1">**kwargs)</span>
+
+    <span class="s0">def </span><span class="s1">do_handshake(self):</span>
+        <span class="s0">from </span><span class="s1">geventwebsocket </span><span class="s0">import </span><span class="s1">get_version</span>
+
+        <span class="s1">welcome = [</span>
+            <span class="s1">self.MSG_WELCOME</span><span class="s0">,</span>
+            <span class="s1">self.session_id</span><span class="s0">,</span>
+            <span class="s3">1</span><span class="s0">,</span>
+            <span class="s2">'gevent-websocket/' </span><span class="s1">+ get_version()</span>
+        <span class="s1">]</span>
+        <span class="s1">self.app.ws.send(serialize(welcome))</span>
+
+    <span class="s0">def </span><span class="s1">_get_exception_info(self</span><span class="s0">, </span><span class="s1">e):</span>
+        <span class="s1">uri = </span><span class="s2">'http://TODO#generic'</span>
+        <span class="s1">desc = str(type(e))</span>
+        <span class="s1">details = str(e)</span>
+        <span class="s0">return </span><span class="s1">[uri</span><span class="s0">, </span><span class="s1">desc</span><span class="s0">, </span><span class="s1">details]</span>
+
+    <span class="s0">def </span><span class="s1">rpc_call(self</span><span class="s0">, </span><span class="s1">data):</span>
+        <span class="s1">call_id</span><span class="s0">, </span><span class="s1">curie_or_uri = data[</span><span class="s3">1</span><span class="s1">:</span><span class="s3">3</span><span class="s1">]</span>
+        <span class="s1">args = data[</span><span class="s3">3</span><span class="s1">:]</span>
+
+        <span class="s0">if not </span><span class="s1">isinstance(call_id</span><span class="s0">, </span><span class="s1">string_types):</span>
+            <span class="s0">raise </span><span class="s1">Exception()</span>
+        <span class="s0">if not </span><span class="s1">isinstance(curie_or_uri</span><span class="s0">, </span><span class="s1">string_types):</span>
+            <span class="s0">raise </span><span class="s1">Exception()</span>
+
+        <span class="s1">uri = self.prefixes.resolve(curie_or_uri)</span>
+
+        <span class="s0">try</span><span class="s1">:</span>
+            <span class="s1">result = self.procedures.call(uri</span><span class="s0">, </span><span class="s1">args)</span>
+            <span class="s1">result_msg = [self.MSG_CALL_RESULT</span><span class="s0">, </span><span class="s1">call_id</span><span class="s0">, </span><span class="s1">result]</span>
+        <span class="s0">except </span><span class="s1">Exception </span><span class="s0">as </span><span class="s1">e:</span>
+            <span class="s1">result_msg = [self.MSG_CALL_ERROR</span><span class="s0">,</span>
+                          <span class="s1">call_id] + self._get_exception_info(e)</span>
+
+        <span class="s1">self.app.on_message(serialize(result_msg))</span>
+
+    <span class="s0">def </span><span class="s1">pubsub_action(self</span><span class="s0">, </span><span class="s1">data):</span>
+        <span class="s1">action = data[</span><span class="s3">0</span><span class="s1">]</span>
+        <span class="s1">curie_or_uri = data[</span><span class="s3">1</span><span class="s1">]</span>
+
+        <span class="s0">if not </span><span class="s1">isinstance(action</span><span class="s0">, </span><span class="s1">int):</span>
+            <span class="s0">raise </span><span class="s1">Exception()</span>
+        <span class="s0">if not </span><span class="s1">isinstance(curie_or_uri</span><span class="s0">, </span><span class="s1">string_types):</span>
+            <span class="s0">raise </span><span class="s1">Exception()</span>
+
+        <span class="s1">uri = self.prefixes.resolve(curie_or_uri)</span>
+
+        <span class="s0">if </span><span class="s1">action == self.MSG_SUBSCRIBE </span><span class="s0">and </span><span class="s1">len(data) == </span><span class="s3">2</span><span class="s1">:</span>
+            <span class="s1">self.server.channels.subscribe(data[</span><span class="s3">1</span><span class="s1">]</span><span class="s0">, </span><span class="s1">self.handler.active_client)</span>
+
+        <span class="s0">elif </span><span class="s1">action == self.MSG_UNSUBSCRIBE </span><span class="s0">and </span><span class="s1">len(data) == </span><span class="s3">2</span><span class="s1">:</span>
+            <span class="s1">self.server.channels.unsubscribe(</span>
+                <span class="s1">data[</span><span class="s3">1</span><span class="s1">]</span><span class="s0">, </span><span class="s1">self.handler.active_client)</span>
+
+        <span class="s0">elif </span><span class="s1">action == self.MSG_PUBLISH </span><span class="s0">and </span><span class="s1">len(data) &gt;= </span><span class="s3">3</span><span class="s1">:</span>
+            <span class="s1">payload = data[</span><span class="s3">2</span><span class="s1">] </span><span class="s0">if </span><span class="s1">len(data) &gt;= </span><span class="s3">3 </span><span class="s0">else None</span>
+            <span class="s1">exclude = data[</span><span class="s3">3</span><span class="s1">] </span><span class="s0">if </span><span class="s1">len(data) &gt;= </span><span class="s3">4 </span><span class="s0">else None</span>
+            <span class="s1">eligible = data[</span><span class="s3">4</span><span class="s1">] </span><span class="s0">if </span><span class="s1">len(data) &gt;= </span><span class="s3">5 </span><span class="s0">else None</span>
+
+            <span class="s1">self.server.channels.publish(uri</span><span class="s0">, </span><span class="s1">payload</span><span class="s0">, </span><span class="s1">exclude</span><span class="s0">, </span><span class="s1">eligible)</span>
+
+    <span class="s0">def </span><span class="s1">on_open(self):</span>
+        <span class="s1">self.app.on_open()</span>
+        <span class="s1">self.do_handshake()</span>
+
+    <span class="s0">def </span><span class="s1">on_message(self</span><span class="s0">, </span><span class="s1">message):</span>
+        <span class="s1">data = json.loads(message)</span>
+
+        <span class="s0">if not </span><span class="s1">isinstance(data</span><span class="s0">, </span><span class="s1">list):</span>
+            <span class="s0">raise </span><span class="s1">Exception(</span><span class="s2">'incoming data is no list'</span><span class="s1">)</span>
+
+        <span class="s0">if </span><span class="s1">data[</span><span class="s3">0</span><span class="s1">] == self.MSG_PREFIX </span><span class="s0">and </span><span class="s1">len(data) == </span><span class="s3">3</span><span class="s1">:</span>
+            <span class="s1">prefix</span><span class="s0">, </span><span class="s1">uri = data[</span><span class="s3">1</span><span class="s1">:</span><span class="s3">3</span><span class="s1">]</span>
+            <span class="s1">self.prefixes.add(prefix</span><span class="s0">, </span><span class="s1">uri)</span>
+
+        <span class="s0">elif </span><span class="s1">data[</span><span class="s3">0</span><span class="s1">] == self.MSG_CALL </span><span class="s0">and </span><span class="s1">len(data) &gt;= </span><span class="s3">3</span><span class="s1">:</span>
+            <span class="s0">return </span><span class="s1">self.rpc_call(data)</span>
+
+        <span class="s0">elif </span><span class="s1">data[</span><span class="s3">0</span><span class="s1">] </span><span class="s0">in </span><span class="s1">(self.MSG_SUBSCRIBE</span><span class="s0">, </span><span class="s1">self.MSG_UNSUBSCRIBE</span><span class="s0">,</span>
+                         <span class="s1">self.MSG_PUBLISH):</span>
+            <span class="s0">return </span><span class="s1">self.pubsub_action(data)</span>
+        <span class="s0">else</span><span class="s1">:</span>
+            <span class="s0">raise </span><span class="s1">Exception(</span><span class="s2">&quot;Unknown call&quot;</span><span class="s1">)</span>
+
+</pre>
+</body>
+</html>

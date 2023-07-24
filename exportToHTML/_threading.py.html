@@ -1,0 +1,269 @@
+<html>
+<head>
+<title>_threading.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #629755; font-style: italic;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #cc7832;}
+.s3 { color: #6a8759;}
+.s4 { color: #808080;}
+.s5 { color: #6897bb;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+_threading.py</font>
+</center></td></tr></table>
+<pre><span class="s0">&quot;&quot;&quot; 
+A small selection of primitives that always work with 
+native threads. This has very limited utility and is 
+targeted only for the use of gevent's threadpool. 
+&quot;&quot;&quot;</span>
+<span class="s2">from </span><span class="s1">__future__ </span><span class="s2">import </span><span class="s1">absolute_import</span>
+
+<span class="s2">from </span><span class="s1">collections </span><span class="s2">import </span><span class="s1">deque</span>
+
+<span class="s2">from </span><span class="s1">gevent </span><span class="s2">import </span><span class="s1">monkey</span>
+<span class="s2">from </span><span class="s1">gevent._compat </span><span class="s2">import </span><span class="s1">thread_mod_name</span>
+<span class="s2">from </span><span class="s1">gevent._compat </span><span class="s2">import </span><span class="s1">PY3</span>
+
+
+<span class="s1">__all__ = [</span>
+    <span class="s3">'Lock'</span><span class="s2">,</span>
+    <span class="s3">'Queue'</span><span class="s2">,</span>
+    <span class="s3">'EmptyTimeout'</span><span class="s2">,</span>
+<span class="s1">]</span>
+
+
+<span class="s1">start_new_thread</span><span class="s2">, </span><span class="s1">Lock</span><span class="s2">, </span><span class="s1">get_thread_ident</span><span class="s2">, </span><span class="s1">= monkey.get_original(thread_mod_name</span><span class="s2">, </span><span class="s1">[</span>
+    <span class="s3">'start_new_thread'</span><span class="s2">, </span><span class="s3">'allocate_lock'</span><span class="s2">, </span><span class="s3">'get_ident'</span><span class="s2">,</span>
+<span class="s1">])</span>
+
+
+<span class="s4"># We want to support timeouts on locks. In this way, we can allow idle threads to</span>
+<span class="s4"># expire from a thread pool. On Python 3, this is native behaviour; on Python 2,</span>
+<span class="s4"># we have to emulate it. For Python 3, we want this to have the lowest possible overhead,</span>
+<span class="s4"># so we'd prefer to use a direct call, rather than go through a wrapper. But we also</span>
+<span class="s4"># don't want to allocate locks at import time because..., so we swizzle out the method</span>
+<span class="s4"># at runtime.</span>
+<span class="s4">#</span>
+<span class="s4">#</span>
+<span class="s4"># In all cases, a timeout value of -1 means &quot;infinite&quot;. Sigh.</span>
+<span class="s2">if </span><span class="s1">PY3:</span>
+    <span class="s2">def </span><span class="s1">acquire_with_timeout(lock</span><span class="s2">, </span><span class="s1">timeout=-</span><span class="s5">1</span><span class="s1">):</span>
+        <span class="s1">globals()[</span><span class="s3">'acquire_with_timeout'</span><span class="s1">] = type(lock).acquire</span>
+        <span class="s2">return </span><span class="s1">lock.acquire(timeout=timeout)</span>
+<span class="s2">else</span><span class="s1">:</span>
+    <span class="s2">def </span><span class="s1">acquire_with_timeout(lock</span><span class="s2">, </span><span class="s1">timeout=-</span><span class="s5">1</span><span class="s2">,</span>
+                             <span class="s1">_time=monkey.get_original(</span><span class="s3">'time'</span><span class="s2">, </span><span class="s3">'time'</span><span class="s1">)</span><span class="s2">,</span>
+                             <span class="s1">_sleep=monkey.get_original(</span><span class="s3">'time'</span><span class="s2">, </span><span class="s3">'sleep'</span><span class="s1">)):</span>
+        <span class="s1">deadline = _time() + timeout </span><span class="s2">if </span><span class="s1">timeout != -</span><span class="s5">1 </span><span class="s2">else None</span>
+        <span class="s2">while </span><span class="s5">1</span><span class="s1">:</span>
+            <span class="s2">if </span><span class="s1">lock.acquire(</span><span class="s2">False</span><span class="s1">): </span><span class="s4"># Can we acquire non-blocking?</span>
+                <span class="s2">return True</span>
+            <span class="s2">if </span><span class="s1">deadline </span><span class="s2">is not None and </span><span class="s1">_time() &gt;= deadline:</span>
+                <span class="s2">return False</span>
+            <span class="s1">_sleep(</span><span class="s5">0.005</span><span class="s1">)</span>
+
+<span class="s2">class </span><span class="s1">_Condition(object):</span>
+    <span class="s4"># We could use libuv's ``uv_cond_wait`` to implement this whole</span>
+    <span class="s4"># class and get native timeouts and native performance everywhere.</span>
+
+    <span class="s4"># pylint:disable=method-hidden</span>
+
+    <span class="s1">__slots__ = (</span>
+        <span class="s3">'_lock'</span><span class="s2">,</span>
+        <span class="s3">'_waiters'</span><span class="s2">,</span>
+    <span class="s1">)</span>
+
+    <span class="s2">def </span><span class="s1">__init__(self</span><span class="s2">, </span><span class="s1">lock):</span>
+        <span class="s4"># This lock is used to protect our own data structures;</span>
+        <span class="s4"># calls to ``wait`` and ``notify_one`` *must* be holding this</span>
+        <span class="s4"># lock.</span>
+        <span class="s1">self._lock = lock</span>
+        <span class="s1">self._waiters = []</span>
+
+        <span class="s4"># No need to special case for _release_save and</span>
+        <span class="s4"># _acquire_restore; those are only used for RLock, and</span>
+        <span class="s4"># we don't use those.</span>
+
+    <span class="s2">def </span><span class="s1">__enter__(self):</span>
+        <span class="s2">return </span><span class="s1">self._lock.__enter__()</span>
+
+    <span class="s2">def </span><span class="s1">__exit__(self</span><span class="s2">, </span><span class="s1">t</span><span class="s2">, </span><span class="s1">v</span><span class="s2">, </span><span class="s1">tb):</span>
+        <span class="s2">return </span><span class="s1">self._lock.__exit__(t</span><span class="s2">, </span><span class="s1">v</span><span class="s2">, </span><span class="s1">tb)</span>
+
+    <span class="s2">def </span><span class="s1">__repr__(self):</span>
+        <span class="s2">return </span><span class="s3">&quot;&lt;Condition(%s, %d)&gt;&quot; </span><span class="s1">% (self._lock</span><span class="s2">, </span><span class="s1">len(self._waiters))</span>
+
+    <span class="s2">def </span><span class="s1">wait(self</span><span class="s2">, </span><span class="s1">wait_lock</span><span class="s2">, </span><span class="s1">timeout=-</span><span class="s5">1</span><span class="s2">, </span><span class="s1">_wait_for_notify=acquire_with_timeout):</span>
+        <span class="s4"># This variable is for the monitoring utils to know that</span>
+        <span class="s4"># this is an idle frame and shouldn't be counted.</span>
+        <span class="s1">gevent_threadpool_worker_idle = </span><span class="s2">True </span><span class="s4"># pylint:disable=unused-variable</span>
+
+        <span class="s4"># The _lock must be held.</span>
+        <span class="s4"># The ``wait_lock`` must be *un*owned, so the timeout doesn't apply there.</span>
+        <span class="s4"># Take that lock now.</span>
+        <span class="s1">wait_lock.acquire()</span>
+        <span class="s1">self._waiters.append(wait_lock)</span>
+
+        <span class="s1">self._lock.release()</span>
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s4"># We're already holding this native lock, so when we try to acquire it again,</span>
+            <span class="s4"># that won't work and we'll block until someone calls notify_one() (which might</span>
+            <span class="s4"># have already happened).</span>
+            <span class="s1">notified = _wait_for_notify(wait_lock</span><span class="s2">, </span><span class="s1">timeout)</span>
+        <span class="s2">finally</span><span class="s1">:</span>
+            <span class="s1">self._lock.acquire()</span>
+
+        <span class="s4"># Now that we've acquired _lock again, no one can call notify_one(), or this</span>
+        <span class="s4"># method.</span>
+        <span class="s2">if not </span><span class="s1">notified:</span>
+            <span class="s4"># We need to come out of the waiters list. IF we're still there; it's</span>
+            <span class="s4"># possible that between the call to _acquire() returning False,</span>
+            <span class="s4"># and the time that we acquired _lock, someone did a ``notify_one``</span>
+            <span class="s4"># and released the lock. For that reason, do a non-blocking acquire()</span>
+            <span class="s1">notified = wait_lock.acquire(</span><span class="s2">False</span><span class="s1">)</span>
+        <span class="s2">if not </span><span class="s1">notified:</span>
+            <span class="s4"># Well narf. No go. We must stil be in the waiters list, so take us out</span>
+            <span class="s1">self._waiters.remove(wait_lock)</span>
+            <span class="s4"># We didn't get notified, but we're still holding a lock that we</span>
+            <span class="s4"># need to release.</span>
+            <span class="s1">wait_lock.release()</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s4"># We got notified, so we need to reset.</span>
+            <span class="s1">wait_lock.release()</span>
+        <span class="s2">return </span><span class="s1">notified</span>
+
+    <span class="s2">def </span><span class="s1">notify_one(self):</span>
+        <span class="s4"># The lock SHOULD be owned, but we don't check that.</span>
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s1">waiter = self._waiters.pop()</span>
+        <span class="s2">except </span><span class="s1">IndexError:</span>
+            <span class="s4"># Nobody around</span>
+            <span class="s2">pass</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s4"># The owner of the ``waiter`` is blocked on</span>
+            <span class="s4"># acquiring it again, so when we ``release`` it, it</span>
+            <span class="s4"># is free to be scheduled and resume.</span>
+            <span class="s1">waiter.release()</span>
+
+<span class="s2">class </span><span class="s1">EmptyTimeout(Exception):</span>
+    <span class="s0">&quot;&quot;&quot;Raised from :meth:`Queue.get` if no item is available in the timeout.&quot;&quot;&quot;</span>
+
+
+<span class="s2">class </span><span class="s1">Queue(object):</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Create a queue object. 
+ 
+    The queue is always infinite size. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s1">__slots__ = (</span><span class="s3">'_queue'</span><span class="s2">, </span><span class="s3">'_mutex'</span><span class="s2">, </span><span class="s3">'_not_empty'</span><span class="s2">, </span><span class="s3">'unfinished_tasks'</span><span class="s1">)</span>
+
+    <span class="s2">def </span><span class="s1">__init__(self):</span>
+        <span class="s1">self._queue = deque()</span>
+        <span class="s4"># mutex must be held whenever the queue is mutating.  All methods</span>
+        <span class="s4"># that acquire mutex must release it before returning.  mutex</span>
+        <span class="s4"># is shared between the three conditions, so acquiring and</span>
+        <span class="s4"># releasing the conditions also acquires and releases mutex.</span>
+        <span class="s1">self._mutex = Lock()</span>
+        <span class="s4"># Notify not_empty whenever an item is added to the queue; a</span>
+        <span class="s4"># thread waiting to get is notified then.</span>
+        <span class="s1">self._not_empty = _Condition(self._mutex)</span>
+
+        <span class="s1">self.unfinished_tasks = </span><span class="s5">0</span>
+
+    <span class="s2">def </span><span class="s1">task_done(self):</span>
+        <span class="s0">&quot;&quot;&quot;Indicate that a formerly enqueued task is complete. 
+ 
+        Used by Queue consumer threads.  For each get() used to fetch a task, 
+        a subsequent call to task_done() tells the queue that the processing 
+        on the task is complete. 
+ 
+        If a join() is currently blocking, it will resume when all items 
+        have been processed (meaning that a task_done() call was received 
+        for every item that had been put() into the queue). 
+ 
+        Raises a ValueError if called more times than there were items 
+        placed in the queue. 
+        &quot;&quot;&quot;</span>
+        <span class="s2">with </span><span class="s1">self._mutex:</span>
+            <span class="s1">unfinished = self.unfinished_tasks - </span><span class="s5">1</span>
+            <span class="s2">if </span><span class="s1">unfinished &lt;= </span><span class="s5">0</span><span class="s1">:</span>
+                <span class="s2">if </span><span class="s1">unfinished &lt; </span><span class="s5">0</span><span class="s1">:</span>
+                    <span class="s2">raise </span><span class="s1">ValueError(</span>
+                        <span class="s3">'task_done() called too many times; %s remaining tasks' </span><span class="s1">% (</span>
+                            <span class="s1">self.unfinished_tasks</span>
+                        <span class="s1">)</span>
+                    <span class="s1">)</span>
+            <span class="s1">self.unfinished_tasks = unfinished</span>
+
+    <span class="s2">def </span><span class="s1">qsize(self</span><span class="s2">, </span><span class="s1">len=len):</span>
+        <span class="s0">&quot;&quot;&quot;Return the approximate size of the queue (not reliable!).&quot;&quot;&quot;</span>
+        <span class="s2">return </span><span class="s1">len(self._queue)</span>
+
+    <span class="s2">def </span><span class="s1">empty(self):</span>
+        <span class="s0">&quot;&quot;&quot;Return True if the queue is empty, False otherwise (not reliable!).&quot;&quot;&quot;</span>
+        <span class="s2">return not </span><span class="s1">self.qsize()</span>
+
+    <span class="s2">def </span><span class="s1">full(self):</span>
+        <span class="s0">&quot;&quot;&quot;Return True if the queue is full, False otherwise (not reliable!).&quot;&quot;&quot;</span>
+        <span class="s2">return False</span>
+
+    <span class="s2">def </span><span class="s1">put(self</span><span class="s2">, </span><span class="s1">item):</span>
+        <span class="s0">&quot;&quot;&quot;Put an item into the queue. 
+        &quot;&quot;&quot;</span>
+        <span class="s2">with </span><span class="s1">self._mutex:</span>
+            <span class="s1">self._queue.append(item)</span>
+            <span class="s1">self.unfinished_tasks += </span><span class="s5">1</span>
+            <span class="s1">self._not_empty.notify_one()</span>
+
+    <span class="s2">def </span><span class="s1">get(self</span><span class="s2">, </span><span class="s1">cookie</span><span class="s2">, </span><span class="s1">timeout=-</span><span class="s5">1</span><span class="s1">):</span>
+        <span class="s0">&quot;&quot;&quot; 
+        Remove and return an item from the queue. 
+ 
+        If *timeout* is given, and is not -1, then we will 
+        attempt to wait for only that many seconds to get an item. 
+        If those seconds elapse and no item has become available, 
+        raises :class:`EmptyTimeout`. 
+        &quot;&quot;&quot;</span>
+        <span class="s2">with </span><span class="s1">self._mutex:</span>
+            <span class="s2">while not </span><span class="s1">self._queue:</span>
+                <span class="s4"># Temporarily release our mutex and wait for someone</span>
+                <span class="s4"># to wake us up. There *should* be an item in the queue</span>
+                <span class="s4"># after that.</span>
+                <span class="s1">notified = self._not_empty.wait(cookie</span><span class="s2">, </span><span class="s1">timeout)</span>
+                <span class="s4"># Ok, we're holding the mutex again, so our state is guaranteed stable.</span>
+                <span class="s4"># It's possible that in the brief window where we didn't hold the lock,</span>
+                <span class="s4"># someone put something in the queue, and if so, we can take it.</span>
+                <span class="s2">if not </span><span class="s1">notified </span><span class="s2">and not </span><span class="s1">self._queue:</span>
+                    <span class="s2">raise </span><span class="s1">EmptyTimeout</span>
+            <span class="s1">item = self._queue.popleft()</span>
+            <span class="s2">return </span><span class="s1">item</span>
+
+    <span class="s2">def </span><span class="s1">allocate_cookie(self):</span>
+        <span class="s0">&quot;&quot;&quot; 
+        Create and return the *cookie* to pass to `get()`. 
+ 
+        Each thread that will use `get` needs a distinct cookie. 
+        &quot;&quot;&quot;</span>
+        <span class="s2">return </span><span class="s1">Lock()</span>
+
+    <span class="s2">def </span><span class="s1">kill(self):</span>
+        <span class="s0">&quot;&quot;&quot; 
+        Call to destroy this object. 
+ 
+        Use this when it's not possible to safely drain the queue, e.g., 
+        after a fork when the locks are in an uncertain state. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">self._queue = </span><span class="s2">None</span>
+        <span class="s1">self._mutex = </span><span class="s2">None</span>
+        <span class="s1">self._not_empty = </span><span class="s2">None</span>
+        <span class="s1">self.unfinished_tasks = </span><span class="s2">None</span>
+</pre>
+</body>
+</html>

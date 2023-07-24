@@ -1,0 +1,1014 @@
+<html>
+<head>
+<title>parse.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #629755; font-style: italic;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #cc7832;}
+.s3 { color: #6a8759;}
+.s4 { color: #808080;}
+.s5 { color: #6897bb;}
+.s6 { color: #a5c261;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+parse.py</font>
+</center></td></tr></table>
+<pre><span class="s0">&quot;&quot;&quot; 
+Ported using Python-Future from the Python 3.3 standard library. 
+ 
+Parse (absolute and relative) URLs. 
+ 
+urlparse module is based upon the following RFC specifications. 
+ 
+RFC 3986 (STD66): &quot;Uniform Resource Identifiers&quot; by T. Berners-Lee, R. Fielding 
+and L.  Masinter, January 2005. 
+ 
+RFC 2732 : &quot;Format for Literal IPv6 Addresses in URL's by R.Hinden, B.Carpenter 
+and L.Masinter, December 1999. 
+ 
+RFC 2396:  &quot;Uniform Resource Identifiers (URI)&quot;: Generic Syntax by T. 
+Berners-Lee, R. Fielding, and L. Masinter, August 1998. 
+ 
+RFC 2368: &quot;The mailto URL scheme&quot;, by P.Hoffman , L Masinter, J. Zawinski, July 1998. 
+ 
+RFC 1808: &quot;Relative Uniform Resource Locators&quot;, by R. Fielding, UC Irvine, June 
+1995. 
+ 
+RFC 1738: &quot;Uniform Resource Locators (URL)&quot; by T. Berners-Lee, L. Masinter, M. 
+McCahill, December 1994 
+ 
+RFC 3986 is considered the current standard and any future changes to 
+urlparse module should conform with it.  The urlparse module is 
+currently not entirely compliant with this RFC due to defacto 
+scenarios for parsing, and for backward compatibility purposes, some 
+parsing quirks from older RFCs are retained. The testcases in 
+test_urlparse.py provides a good indicator of parsing behavior. 
+&quot;&quot;&quot;</span>
+<span class="s2">from </span><span class="s1">__future__ </span><span class="s2">import </span><span class="s1">absolute_import</span><span class="s2">, </span><span class="s1">division</span><span class="s2">, </span><span class="s1">unicode_literals</span>
+<span class="s2">from </span><span class="s1">future.builtins </span><span class="s2">import </span><span class="s1">bytes</span><span class="s2">, </span><span class="s1">chr</span><span class="s2">, </span><span class="s1">dict</span><span class="s2">, </span><span class="s1">int</span><span class="s2">, </span><span class="s1">range</span><span class="s2">, </span><span class="s1">str</span>
+<span class="s2">from </span><span class="s1">future.utils </span><span class="s2">import </span><span class="s1">raise_with_traceback</span>
+
+<span class="s2">import </span><span class="s1">re</span>
+<span class="s2">import </span><span class="s1">sys</span>
+<span class="s2">import </span><span class="s1">collections</span>
+
+<span class="s1">__all__ = [</span><span class="s3">&quot;urlparse&quot;</span><span class="s2">, </span><span class="s3">&quot;urlunparse&quot;</span><span class="s2">, </span><span class="s3">&quot;urljoin&quot;</span><span class="s2">, </span><span class="s3">&quot;urldefrag&quot;</span><span class="s2">,</span>
+           <span class="s3">&quot;urlsplit&quot;</span><span class="s2">, </span><span class="s3">&quot;urlunsplit&quot;</span><span class="s2">, </span><span class="s3">&quot;urlencode&quot;</span><span class="s2">, </span><span class="s3">&quot;parse_qs&quot;</span><span class="s2">,</span>
+           <span class="s3">&quot;parse_qsl&quot;</span><span class="s2">, </span><span class="s3">&quot;quote&quot;</span><span class="s2">, </span><span class="s3">&quot;quote_plus&quot;</span><span class="s2">, </span><span class="s3">&quot;quote_from_bytes&quot;</span><span class="s2">,</span>
+           <span class="s3">&quot;unquote&quot;</span><span class="s2">, </span><span class="s3">&quot;unquote_plus&quot;</span><span class="s2">, </span><span class="s3">&quot;unquote_to_bytes&quot;</span><span class="s1">]</span>
+
+<span class="s4"># A classification of schemes ('' means apply by default)</span>
+<span class="s1">uses_relative = [</span><span class="s3">'ftp'</span><span class="s2">, </span><span class="s3">'http'</span><span class="s2">, </span><span class="s3">'gopher'</span><span class="s2">, </span><span class="s3">'nntp'</span><span class="s2">, </span><span class="s3">'imap'</span><span class="s2">,</span>
+                 <span class="s3">'wais'</span><span class="s2">, </span><span class="s3">'file'</span><span class="s2">, </span><span class="s3">'https'</span><span class="s2">, </span><span class="s3">'shttp'</span><span class="s2">, </span><span class="s3">'mms'</span><span class="s2">,</span>
+                 <span class="s3">'prospero'</span><span class="s2">, </span><span class="s3">'rtsp'</span><span class="s2">, </span><span class="s3">'rtspu'</span><span class="s2">, </span><span class="s3">''</span><span class="s2">, </span><span class="s3">'sftp'</span><span class="s2">,</span>
+                 <span class="s3">'svn'</span><span class="s2">, </span><span class="s3">'svn+ssh'</span><span class="s1">]</span>
+<span class="s1">uses_netloc = [</span><span class="s3">'ftp'</span><span class="s2">, </span><span class="s3">'http'</span><span class="s2">, </span><span class="s3">'gopher'</span><span class="s2">, </span><span class="s3">'nntp'</span><span class="s2">, </span><span class="s3">'telnet'</span><span class="s2">,</span>
+               <span class="s3">'imap'</span><span class="s2">, </span><span class="s3">'wais'</span><span class="s2">, </span><span class="s3">'file'</span><span class="s2">, </span><span class="s3">'mms'</span><span class="s2">, </span><span class="s3">'https'</span><span class="s2">, </span><span class="s3">'shttp'</span><span class="s2">,</span>
+               <span class="s3">'snews'</span><span class="s2">, </span><span class="s3">'prospero'</span><span class="s2">, </span><span class="s3">'rtsp'</span><span class="s2">, </span><span class="s3">'rtspu'</span><span class="s2">, </span><span class="s3">'rsync'</span><span class="s2">, </span><span class="s3">''</span><span class="s2">,</span>
+               <span class="s3">'svn'</span><span class="s2">, </span><span class="s3">'svn+ssh'</span><span class="s2">, </span><span class="s3">'sftp'</span><span class="s2">, </span><span class="s3">'nfs'</span><span class="s2">, </span><span class="s3">'git'</span><span class="s2">, </span><span class="s3">'git+ssh'</span><span class="s1">]</span>
+<span class="s1">uses_params = [</span><span class="s3">'ftp'</span><span class="s2">, </span><span class="s3">'hdl'</span><span class="s2">, </span><span class="s3">'prospero'</span><span class="s2">, </span><span class="s3">'http'</span><span class="s2">, </span><span class="s3">'imap'</span><span class="s2">,</span>
+               <span class="s3">'https'</span><span class="s2">, </span><span class="s3">'shttp'</span><span class="s2">, </span><span class="s3">'rtsp'</span><span class="s2">, </span><span class="s3">'rtspu'</span><span class="s2">, </span><span class="s3">'sip'</span><span class="s2">, </span><span class="s3">'sips'</span><span class="s2">,</span>
+               <span class="s3">'mms'</span><span class="s2">, </span><span class="s3">''</span><span class="s2">, </span><span class="s3">'sftp'</span><span class="s2">, </span><span class="s3">'tel'</span><span class="s1">]</span>
+
+<span class="s4"># These are not actually used anymore, but should stay for backwards</span>
+<span class="s4"># compatibility.  (They are undocumented, but have a public-looking name.)</span>
+<span class="s1">non_hierarchical = [</span><span class="s3">'gopher'</span><span class="s2">, </span><span class="s3">'hdl'</span><span class="s2">, </span><span class="s3">'mailto'</span><span class="s2">, </span><span class="s3">'news'</span><span class="s2">,</span>
+                    <span class="s3">'telnet'</span><span class="s2">, </span><span class="s3">'wais'</span><span class="s2">, </span><span class="s3">'imap'</span><span class="s2">, </span><span class="s3">'snews'</span><span class="s2">, </span><span class="s3">'sip'</span><span class="s2">, </span><span class="s3">'sips'</span><span class="s1">]</span>
+<span class="s1">uses_query = [</span><span class="s3">'http'</span><span class="s2">, </span><span class="s3">'wais'</span><span class="s2">, </span><span class="s3">'imap'</span><span class="s2">, </span><span class="s3">'https'</span><span class="s2">, </span><span class="s3">'shttp'</span><span class="s2">, </span><span class="s3">'mms'</span><span class="s2">,</span>
+              <span class="s3">'gopher'</span><span class="s2">, </span><span class="s3">'rtsp'</span><span class="s2">, </span><span class="s3">'rtspu'</span><span class="s2">, </span><span class="s3">'sip'</span><span class="s2">, </span><span class="s3">'sips'</span><span class="s2">, </span><span class="s3">''</span><span class="s1">]</span>
+<span class="s1">uses_fragment = [</span><span class="s3">'ftp'</span><span class="s2">, </span><span class="s3">'hdl'</span><span class="s2">, </span><span class="s3">'http'</span><span class="s2">, </span><span class="s3">'gopher'</span><span class="s2">, </span><span class="s3">'news'</span><span class="s2">,</span>
+                 <span class="s3">'nntp'</span><span class="s2">, </span><span class="s3">'wais'</span><span class="s2">, </span><span class="s3">'https'</span><span class="s2">, </span><span class="s3">'shttp'</span><span class="s2">, </span><span class="s3">'snews'</span><span class="s2">,</span>
+                 <span class="s3">'file'</span><span class="s2">, </span><span class="s3">'prospero'</span><span class="s2">, </span><span class="s3">''</span><span class="s1">]</span>
+
+<span class="s4"># Characters valid in scheme names</span>
+<span class="s1">scheme_chars = (</span><span class="s3">'abcdefghijklmnopqrstuvwxyz'</span>
+                <span class="s3">'ABCDEFGHIJKLMNOPQRSTUVWXYZ'</span>
+                <span class="s3">'0123456789'</span>
+                <span class="s3">'+-.'</span><span class="s1">)</span>
+
+<span class="s4"># XXX: Consider replacing with functools.lru_cache</span>
+<span class="s1">MAX_CACHE_SIZE = </span><span class="s5">20</span>
+<span class="s1">_parse_cache = {}</span>
+
+<span class="s2">def </span><span class="s1">clear_cache():</span>
+    <span class="s0">&quot;&quot;&quot;Clear the parse cache and the quoters cache.&quot;&quot;&quot;</span>
+    <span class="s1">_parse_cache.clear()</span>
+    <span class="s1">_safe_quoters.clear()</span>
+
+
+<span class="s4"># Helpers for bytes handling</span>
+<span class="s4"># For 3.2, we deliberately require applications that</span>
+<span class="s4"># handle improperly quoted URLs to do their own</span>
+<span class="s4"># decoding and encoding. If valid use cases are</span>
+<span class="s4"># presented, we may relax this by using latin-1</span>
+<span class="s4"># decoding internally for 3.3</span>
+<span class="s1">_implicit_encoding = </span><span class="s3">'ascii'</span>
+<span class="s1">_implicit_errors = </span><span class="s3">'strict'</span>
+
+<span class="s2">def </span><span class="s1">_noop(obj):</span>
+    <span class="s2">return </span><span class="s1">obj</span>
+
+<span class="s2">def </span><span class="s1">_encode_result(obj</span><span class="s2">, </span><span class="s1">encoding=_implicit_encoding</span><span class="s2">,</span>
+                        <span class="s1">errors=_implicit_errors):</span>
+    <span class="s2">return </span><span class="s1">obj.encode(encoding</span><span class="s2">, </span><span class="s1">errors)</span>
+
+<span class="s2">def </span><span class="s1">_decode_args(args</span><span class="s2">, </span><span class="s1">encoding=_implicit_encoding</span><span class="s2">,</span>
+                       <span class="s1">errors=_implicit_errors):</span>
+    <span class="s2">return </span><span class="s1">tuple(x.decode(encoding</span><span class="s2">, </span><span class="s1">errors) </span><span class="s2">if </span><span class="s1">x </span><span class="s2">else </span><span class="s3">'' </span><span class="s2">for </span><span class="s1">x </span><span class="s2">in </span><span class="s1">args)</span>
+
+<span class="s2">def </span><span class="s1">_coerce_args(*args):</span>
+    <span class="s4"># Invokes decode if necessary to create str args</span>
+    <span class="s4"># and returns the coerced inputs along with</span>
+    <span class="s4"># an appropriate result coercion function</span>
+    <span class="s4">#   - noop for str inputs</span>
+    <span class="s4">#   - encoding function otherwise</span>
+    <span class="s1">str_input = isinstance(args[</span><span class="s5">0</span><span class="s1">]</span><span class="s2">, </span><span class="s1">str)</span>
+    <span class="s2">for </span><span class="s1">arg </span><span class="s2">in </span><span class="s1">args[</span><span class="s5">1</span><span class="s1">:]:</span>
+        <span class="s4"># We special-case the empty string to support the</span>
+        <span class="s4"># &quot;scheme=''&quot; default argument to some functions</span>
+        <span class="s2">if </span><span class="s1">arg </span><span class="s2">and </span><span class="s1">isinstance(arg</span><span class="s2">, </span><span class="s1">str) != str_input:</span>
+            <span class="s2">raise </span><span class="s1">TypeError(</span><span class="s3">&quot;Cannot mix str and non-str arguments&quot;</span><span class="s1">)</span>
+    <span class="s2">if </span><span class="s1">str_input:</span>
+        <span class="s2">return </span><span class="s1">args + (_noop</span><span class="s2">,</span><span class="s1">)</span>
+    <span class="s2">return </span><span class="s1">_decode_args(args) + (_encode_result</span><span class="s2">,</span><span class="s1">)</span>
+
+<span class="s4"># Result objects are more helpful than simple tuples</span>
+<span class="s2">class </span><span class="s1">_ResultMixinStr(object):</span>
+    <span class="s0">&quot;&quot;&quot;Standard approach to encoding parsed results from str to bytes&quot;&quot;&quot;</span>
+    <span class="s1">__slots__ = ()</span>
+
+    <span class="s2">def </span><span class="s1">encode(self</span><span class="s2">, </span><span class="s1">encoding=</span><span class="s3">'ascii'</span><span class="s2">, </span><span class="s1">errors=</span><span class="s3">'strict'</span><span class="s1">):</span>
+        <span class="s2">return </span><span class="s1">self._encoded_counterpart(*(x.encode(encoding</span><span class="s2">, </span><span class="s1">errors) </span><span class="s2">for </span><span class="s1">x </span><span class="s2">in </span><span class="s1">self))</span>
+
+
+<span class="s2">class </span><span class="s1">_ResultMixinBytes(object):</span>
+    <span class="s0">&quot;&quot;&quot;Standard approach to decoding parsed results from bytes to str&quot;&quot;&quot;</span>
+    <span class="s1">__slots__ = ()</span>
+
+    <span class="s2">def </span><span class="s1">decode(self</span><span class="s2">, </span><span class="s1">encoding=</span><span class="s3">'ascii'</span><span class="s2">, </span><span class="s1">errors=</span><span class="s3">'strict'</span><span class="s1">):</span>
+        <span class="s2">return </span><span class="s1">self._decoded_counterpart(*(x.decode(encoding</span><span class="s2">, </span><span class="s1">errors) </span><span class="s2">for </span><span class="s1">x </span><span class="s2">in </span><span class="s1">self))</span>
+
+
+<span class="s2">class </span><span class="s1">_NetlocResultMixinBase(object):</span>
+    <span class="s0">&quot;&quot;&quot;Shared methods for the parsed result objects containing a netloc element&quot;&quot;&quot;</span>
+    <span class="s1">__slots__ = ()</span>
+
+    <span class="s1">@property</span>
+    <span class="s2">def </span><span class="s1">username(self):</span>
+        <span class="s2">return </span><span class="s1">self._userinfo[</span><span class="s5">0</span><span class="s1">]</span>
+
+    <span class="s1">@property</span>
+    <span class="s2">def </span><span class="s1">password(self):</span>
+        <span class="s2">return </span><span class="s1">self._userinfo[</span><span class="s5">1</span><span class="s1">]</span>
+
+    <span class="s1">@property</span>
+    <span class="s2">def </span><span class="s1">hostname(self):</span>
+        <span class="s1">hostname = self._hostinfo[</span><span class="s5">0</span><span class="s1">]</span>
+        <span class="s2">if not </span><span class="s1">hostname:</span>
+            <span class="s1">hostname = </span><span class="s2">None</span>
+        <span class="s2">elif </span><span class="s1">hostname </span><span class="s2">is not None</span><span class="s1">:</span>
+            <span class="s1">hostname = hostname.lower()</span>
+        <span class="s2">return </span><span class="s1">hostname</span>
+
+    <span class="s1">@property</span>
+    <span class="s2">def </span><span class="s1">port(self):</span>
+        <span class="s1">port = self._hostinfo[</span><span class="s5">1</span><span class="s1">]</span>
+        <span class="s2">if </span><span class="s1">port </span><span class="s2">is not None</span><span class="s1">:</span>
+            <span class="s1">port = int(port</span><span class="s2">, </span><span class="s5">10</span><span class="s1">)</span>
+            <span class="s4"># Return None on an illegal port</span>
+            <span class="s2">if not </span><span class="s1">( </span><span class="s5">0 </span><span class="s1">&lt;= port &lt;= </span><span class="s5">65535</span><span class="s1">):</span>
+                <span class="s2">return None</span>
+        <span class="s2">return </span><span class="s1">port</span>
+
+
+<span class="s2">class </span><span class="s1">_NetlocResultMixinStr(_NetlocResultMixinBase</span><span class="s2">, </span><span class="s1">_ResultMixinStr):</span>
+    <span class="s1">__slots__ = ()</span>
+
+    <span class="s1">@property</span>
+    <span class="s2">def </span><span class="s1">_userinfo(self):</span>
+        <span class="s1">netloc = self.netloc</span>
+        <span class="s1">userinfo</span><span class="s2">, </span><span class="s1">have_info</span><span class="s2">, </span><span class="s1">hostinfo = netloc.rpartition(</span><span class="s3">'@'</span><span class="s1">)</span>
+        <span class="s2">if </span><span class="s1">have_info:</span>
+            <span class="s1">username</span><span class="s2">, </span><span class="s1">have_password</span><span class="s2">, </span><span class="s1">password = userinfo.partition(</span><span class="s3">':'</span><span class="s1">)</span>
+            <span class="s2">if not </span><span class="s1">have_password:</span>
+                <span class="s1">password = </span><span class="s2">None</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">username = password = </span><span class="s2">None</span>
+        <span class="s2">return </span><span class="s1">username</span><span class="s2">, </span><span class="s1">password</span>
+
+    <span class="s1">@property</span>
+    <span class="s2">def </span><span class="s1">_hostinfo(self):</span>
+        <span class="s1">netloc = self.netloc</span>
+        <span class="s1">_</span><span class="s2">, </span><span class="s1">_</span><span class="s2">, </span><span class="s1">hostinfo = netloc.rpartition(</span><span class="s3">'@'</span><span class="s1">)</span>
+        <span class="s1">_</span><span class="s2">, </span><span class="s1">have_open_br</span><span class="s2">, </span><span class="s1">bracketed = hostinfo.partition(</span><span class="s3">'['</span><span class="s1">)</span>
+        <span class="s2">if </span><span class="s1">have_open_br:</span>
+            <span class="s1">hostname</span><span class="s2">, </span><span class="s1">_</span><span class="s2">, </span><span class="s1">port = bracketed.partition(</span><span class="s3">']'</span><span class="s1">)</span>
+            <span class="s1">_</span><span class="s2">, </span><span class="s1">have_port</span><span class="s2">, </span><span class="s1">port = port.partition(</span><span class="s3">':'</span><span class="s1">)</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">hostname</span><span class="s2">, </span><span class="s1">have_port</span><span class="s2">, </span><span class="s1">port = hostinfo.partition(</span><span class="s3">':'</span><span class="s1">)</span>
+        <span class="s2">if not </span><span class="s1">have_port:</span>
+            <span class="s1">port = </span><span class="s2">None</span>
+        <span class="s2">return </span><span class="s1">hostname</span><span class="s2">, </span><span class="s1">port</span>
+
+
+<span class="s2">class </span><span class="s1">_NetlocResultMixinBytes(_NetlocResultMixinBase</span><span class="s2">, </span><span class="s1">_ResultMixinBytes):</span>
+    <span class="s1">__slots__ = ()</span>
+
+    <span class="s1">@property</span>
+    <span class="s2">def </span><span class="s1">_userinfo(self):</span>
+        <span class="s1">netloc = self.netloc</span>
+        <span class="s1">userinfo</span><span class="s2">, </span><span class="s1">have_info</span><span class="s2">, </span><span class="s1">hostinfo = netloc.rpartition(</span><span class="s6">b'@'</span><span class="s1">)</span>
+        <span class="s2">if </span><span class="s1">have_info:</span>
+            <span class="s1">username</span><span class="s2">, </span><span class="s1">have_password</span><span class="s2">, </span><span class="s1">password = userinfo.partition(</span><span class="s6">b':'</span><span class="s1">)</span>
+            <span class="s2">if not </span><span class="s1">have_password:</span>
+                <span class="s1">password = </span><span class="s2">None</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">username = password = </span><span class="s2">None</span>
+        <span class="s2">return </span><span class="s1">username</span><span class="s2">, </span><span class="s1">password</span>
+
+    <span class="s1">@property</span>
+    <span class="s2">def </span><span class="s1">_hostinfo(self):</span>
+        <span class="s1">netloc = self.netloc</span>
+        <span class="s1">_</span><span class="s2">, </span><span class="s1">_</span><span class="s2">, </span><span class="s1">hostinfo = netloc.rpartition(</span><span class="s6">b'@'</span><span class="s1">)</span>
+        <span class="s1">_</span><span class="s2">, </span><span class="s1">have_open_br</span><span class="s2">, </span><span class="s1">bracketed = hostinfo.partition(</span><span class="s6">b'['</span><span class="s1">)</span>
+        <span class="s2">if </span><span class="s1">have_open_br:</span>
+            <span class="s1">hostname</span><span class="s2">, </span><span class="s1">_</span><span class="s2">, </span><span class="s1">port = bracketed.partition(</span><span class="s6">b']'</span><span class="s1">)</span>
+            <span class="s1">_</span><span class="s2">, </span><span class="s1">have_port</span><span class="s2">, </span><span class="s1">port = port.partition(</span><span class="s6">b':'</span><span class="s1">)</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">hostname</span><span class="s2">, </span><span class="s1">have_port</span><span class="s2">, </span><span class="s1">port = hostinfo.partition(</span><span class="s6">b':'</span><span class="s1">)</span>
+        <span class="s2">if not </span><span class="s1">have_port:</span>
+            <span class="s1">port = </span><span class="s2">None</span>
+        <span class="s2">return </span><span class="s1">hostname</span><span class="s2">, </span><span class="s1">port</span>
+
+
+<span class="s2">from </span><span class="s1">collections </span><span class="s2">import </span><span class="s1">namedtuple</span>
+
+<span class="s1">_DefragResultBase = namedtuple(</span><span class="s3">'DefragResult'</span><span class="s2">, </span><span class="s3">'url fragment'</span><span class="s1">)</span>
+<span class="s1">_SplitResultBase = namedtuple(</span><span class="s3">'SplitResult'</span><span class="s2">, </span><span class="s3">'scheme netloc path query fragment'</span><span class="s1">)</span>
+<span class="s1">_ParseResultBase = namedtuple(</span><span class="s3">'ParseResult'</span><span class="s2">, </span><span class="s3">'scheme netloc path params query fragment'</span><span class="s1">)</span>
+
+<span class="s4"># For backwards compatibility, alias _NetlocResultMixinStr</span>
+<span class="s4"># ResultBase is no longer part of the documented API, but it is</span>
+<span class="s4"># retained since deprecating it isn't worth the hassle</span>
+<span class="s1">ResultBase = _NetlocResultMixinStr</span>
+
+<span class="s4"># Structured result objects for string data</span>
+<span class="s2">class </span><span class="s1">DefragResult(_DefragResultBase</span><span class="s2">, </span><span class="s1">_ResultMixinStr):</span>
+    <span class="s1">__slots__ = ()</span>
+    <span class="s2">def </span><span class="s1">geturl(self):</span>
+        <span class="s2">if </span><span class="s1">self.fragment:</span>
+            <span class="s2">return </span><span class="s1">self.url + </span><span class="s3">'#' </span><span class="s1">+ self.fragment</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s2">return </span><span class="s1">self.url</span>
+
+<span class="s2">class </span><span class="s1">SplitResult(_SplitResultBase</span><span class="s2">, </span><span class="s1">_NetlocResultMixinStr):</span>
+    <span class="s1">__slots__ = ()</span>
+    <span class="s2">def </span><span class="s1">geturl(self):</span>
+        <span class="s2">return </span><span class="s1">urlunsplit(self)</span>
+
+<span class="s2">class </span><span class="s1">ParseResult(_ParseResultBase</span><span class="s2">, </span><span class="s1">_NetlocResultMixinStr):</span>
+    <span class="s1">__slots__ = ()</span>
+    <span class="s2">def </span><span class="s1">geturl(self):</span>
+        <span class="s2">return </span><span class="s1">urlunparse(self)</span>
+
+<span class="s4"># Structured result objects for bytes data</span>
+<span class="s2">class </span><span class="s1">DefragResultBytes(_DefragResultBase</span><span class="s2">, </span><span class="s1">_ResultMixinBytes):</span>
+    <span class="s1">__slots__ = ()</span>
+    <span class="s2">def </span><span class="s1">geturl(self):</span>
+        <span class="s2">if </span><span class="s1">self.fragment:</span>
+            <span class="s2">return </span><span class="s1">self.url + </span><span class="s6">b'#' </span><span class="s1">+ self.fragment</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s2">return </span><span class="s1">self.url</span>
+
+<span class="s2">class </span><span class="s1">SplitResultBytes(_SplitResultBase</span><span class="s2">, </span><span class="s1">_NetlocResultMixinBytes):</span>
+    <span class="s1">__slots__ = ()</span>
+    <span class="s2">def </span><span class="s1">geturl(self):</span>
+        <span class="s2">return </span><span class="s1">urlunsplit(self)</span>
+
+<span class="s2">class </span><span class="s1">ParseResultBytes(_ParseResultBase</span><span class="s2">, </span><span class="s1">_NetlocResultMixinBytes):</span>
+    <span class="s1">__slots__ = ()</span>
+    <span class="s2">def </span><span class="s1">geturl(self):</span>
+        <span class="s2">return </span><span class="s1">urlunparse(self)</span>
+
+<span class="s4"># Set up the encode/decode result pairs</span>
+<span class="s2">def </span><span class="s1">_fix_result_transcoding():</span>
+    <span class="s1">_result_pairs = (</span>
+        <span class="s1">(DefragResult</span><span class="s2">, </span><span class="s1">DefragResultBytes)</span><span class="s2">,</span>
+        <span class="s1">(SplitResult</span><span class="s2">, </span><span class="s1">SplitResultBytes)</span><span class="s2">,</span>
+        <span class="s1">(ParseResult</span><span class="s2">, </span><span class="s1">ParseResultBytes)</span><span class="s2">,</span>
+    <span class="s1">)</span>
+    <span class="s2">for </span><span class="s1">_decoded</span><span class="s2">, </span><span class="s1">_encoded </span><span class="s2">in </span><span class="s1">_result_pairs:</span>
+        <span class="s1">_decoded._encoded_counterpart = _encoded</span>
+        <span class="s1">_encoded._decoded_counterpart = _decoded</span>
+
+<span class="s1">_fix_result_transcoding()</span>
+<span class="s2">del </span><span class="s1">_fix_result_transcoding</span>
+
+<span class="s2">def </span><span class="s1">urlparse(url</span><span class="s2">, </span><span class="s1">scheme=</span><span class="s3">''</span><span class="s2">, </span><span class="s1">allow_fragments=</span><span class="s2">True</span><span class="s1">):</span>
+    <span class="s0">&quot;&quot;&quot;Parse a URL into 6 components: 
+    &lt;scheme&gt;://&lt;netloc&gt;/&lt;path&gt;;&lt;params&gt;?&lt;query&gt;#&lt;fragment&gt; 
+    Return a 6-tuple: (scheme, netloc, path, params, query, fragment). 
+    Note that we don't break the components up in smaller bits 
+    (e.g. netloc is a single string) and we don't expand % escapes.&quot;&quot;&quot;</span>
+    <span class="s1">url</span><span class="s2">, </span><span class="s1">scheme</span><span class="s2">, </span><span class="s1">_coerce_result = _coerce_args(url</span><span class="s2">, </span><span class="s1">scheme)</span>
+    <span class="s1">splitresult = urlsplit(url</span><span class="s2">, </span><span class="s1">scheme</span><span class="s2">, </span><span class="s1">allow_fragments)</span>
+    <span class="s1">scheme</span><span class="s2">, </span><span class="s1">netloc</span><span class="s2">, </span><span class="s1">url</span><span class="s2">, </span><span class="s1">query</span><span class="s2">, </span><span class="s1">fragment = splitresult</span>
+    <span class="s2">if </span><span class="s1">scheme </span><span class="s2">in </span><span class="s1">uses_params </span><span class="s2">and </span><span class="s3">';' </span><span class="s2">in </span><span class="s1">url:</span>
+        <span class="s1">url</span><span class="s2">, </span><span class="s1">params = _splitparams(url)</span>
+    <span class="s2">else</span><span class="s1">:</span>
+        <span class="s1">params = </span><span class="s3">''</span>
+    <span class="s1">result = ParseResult(scheme</span><span class="s2">, </span><span class="s1">netloc</span><span class="s2">, </span><span class="s1">url</span><span class="s2">, </span><span class="s1">params</span><span class="s2">, </span><span class="s1">query</span><span class="s2">, </span><span class="s1">fragment)</span>
+    <span class="s2">return </span><span class="s1">_coerce_result(result)</span>
+
+<span class="s2">def </span><span class="s1">_splitparams(url):</span>
+    <span class="s2">if </span><span class="s3">'/'  </span><span class="s2">in </span><span class="s1">url:</span>
+        <span class="s1">i = url.find(</span><span class="s3">';'</span><span class="s2">, </span><span class="s1">url.rfind(</span><span class="s3">'/'</span><span class="s1">))</span>
+        <span class="s2">if </span><span class="s1">i &lt; </span><span class="s5">0</span><span class="s1">:</span>
+            <span class="s2">return </span><span class="s1">url</span><span class="s2">, </span><span class="s3">''</span>
+    <span class="s2">else</span><span class="s1">:</span>
+        <span class="s1">i = url.find(</span><span class="s3">';'</span><span class="s1">)</span>
+    <span class="s2">return </span><span class="s1">url[:i]</span><span class="s2">, </span><span class="s1">url[i+</span><span class="s5">1</span><span class="s1">:]</span>
+
+<span class="s2">def </span><span class="s1">_splitnetloc(url</span><span class="s2">, </span><span class="s1">start=</span><span class="s5">0</span><span class="s1">):</span>
+    <span class="s1">delim = len(url)   </span><span class="s4"># position of end of domain part of url, default is end</span>
+    <span class="s2">for </span><span class="s1">c </span><span class="s2">in </span><span class="s3">'/?#'</span><span class="s1">:    </span><span class="s4"># look for delimiters; the order is NOT important</span>
+        <span class="s1">wdelim = url.find(c</span><span class="s2">, </span><span class="s1">start)        </span><span class="s4"># find first of this delim</span>
+        <span class="s2">if </span><span class="s1">wdelim &gt;= </span><span class="s5">0</span><span class="s1">:                    </span><span class="s4"># if found</span>
+            <span class="s1">delim = min(delim</span><span class="s2">, </span><span class="s1">wdelim)     </span><span class="s4"># use earliest delim position</span>
+    <span class="s2">return </span><span class="s1">url[start:delim]</span><span class="s2">, </span><span class="s1">url[delim:]   </span><span class="s4"># return (domain, rest)</span>
+
+<span class="s2">def </span><span class="s1">urlsplit(url</span><span class="s2">, </span><span class="s1">scheme=</span><span class="s3">''</span><span class="s2">, </span><span class="s1">allow_fragments=</span><span class="s2">True</span><span class="s1">):</span>
+    <span class="s0">&quot;&quot;&quot;Parse a URL into 5 components: 
+    &lt;scheme&gt;://&lt;netloc&gt;/&lt;path&gt;?&lt;query&gt;#&lt;fragment&gt; 
+    Return a 5-tuple: (scheme, netloc, path, query, fragment). 
+    Note that we don't break the components up in smaller bits 
+    (e.g. netloc is a single string) and we don't expand % escapes.&quot;&quot;&quot;</span>
+    <span class="s1">url</span><span class="s2">, </span><span class="s1">scheme</span><span class="s2">, </span><span class="s1">_coerce_result = _coerce_args(url</span><span class="s2">, </span><span class="s1">scheme)</span>
+    <span class="s1">allow_fragments = bool(allow_fragments)</span>
+    <span class="s1">key = url</span><span class="s2">, </span><span class="s1">scheme</span><span class="s2">, </span><span class="s1">allow_fragments</span><span class="s2">, </span><span class="s1">type(url)</span><span class="s2">, </span><span class="s1">type(scheme)</span>
+    <span class="s1">cached = _parse_cache.get(key</span><span class="s2">, None</span><span class="s1">)</span>
+    <span class="s2">if </span><span class="s1">cached:</span>
+        <span class="s2">return </span><span class="s1">_coerce_result(cached)</span>
+    <span class="s2">if </span><span class="s1">len(_parse_cache) &gt;= MAX_CACHE_SIZE: </span><span class="s4"># avoid runaway growth</span>
+        <span class="s1">clear_cache()</span>
+    <span class="s1">netloc = query = fragment = </span><span class="s3">''</span>
+    <span class="s1">i = url.find(</span><span class="s3">':'</span><span class="s1">)</span>
+    <span class="s2">if </span><span class="s1">i &gt; </span><span class="s5">0</span><span class="s1">:</span>
+        <span class="s2">if </span><span class="s1">url[:i] == </span><span class="s3">'http'</span><span class="s1">: </span><span class="s4"># optimize the common case</span>
+            <span class="s1">scheme = url[:i].lower()</span>
+            <span class="s1">url = url[i+</span><span class="s5">1</span><span class="s1">:]</span>
+            <span class="s2">if </span><span class="s1">url[:</span><span class="s5">2</span><span class="s1">] == </span><span class="s3">'//'</span><span class="s1">:</span>
+                <span class="s1">netloc</span><span class="s2">, </span><span class="s1">url = _splitnetloc(url</span><span class="s2">, </span><span class="s5">2</span><span class="s1">)</span>
+                <span class="s2">if </span><span class="s1">((</span><span class="s3">'[' </span><span class="s2">in </span><span class="s1">netloc </span><span class="s2">and </span><span class="s3">']' </span><span class="s2">not in </span><span class="s1">netloc) </span><span class="s2">or</span>
+                        <span class="s1">(</span><span class="s3">']' </span><span class="s2">in </span><span class="s1">netloc </span><span class="s2">and </span><span class="s3">'[' </span><span class="s2">not in </span><span class="s1">netloc)):</span>
+                    <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s3">&quot;Invalid IPv6 URL&quot;</span><span class="s1">)</span>
+            <span class="s2">if </span><span class="s1">allow_fragments </span><span class="s2">and </span><span class="s3">'#' </span><span class="s2">in </span><span class="s1">url:</span>
+                <span class="s1">url</span><span class="s2">, </span><span class="s1">fragment = url.split(</span><span class="s3">'#'</span><span class="s2">, </span><span class="s5">1</span><span class="s1">)</span>
+            <span class="s2">if </span><span class="s3">'?' </span><span class="s2">in </span><span class="s1">url:</span>
+                <span class="s1">url</span><span class="s2">, </span><span class="s1">query = url.split(</span><span class="s3">'?'</span><span class="s2">, </span><span class="s5">1</span><span class="s1">)</span>
+            <span class="s1">v = SplitResult(scheme</span><span class="s2">, </span><span class="s1">netloc</span><span class="s2">, </span><span class="s1">url</span><span class="s2">, </span><span class="s1">query</span><span class="s2">, </span><span class="s1">fragment)</span>
+            <span class="s1">_parse_cache[key] = v</span>
+            <span class="s2">return </span><span class="s1">_coerce_result(v)</span>
+        <span class="s2">for </span><span class="s1">c </span><span class="s2">in </span><span class="s1">url[:i]:</span>
+            <span class="s2">if </span><span class="s1">c </span><span class="s2">not in </span><span class="s1">scheme_chars:</span>
+                <span class="s2">break</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s4"># make sure &quot;url&quot; is not actually a port number (in which case</span>
+            <span class="s4"># &quot;scheme&quot; is really part of the path)</span>
+            <span class="s1">rest = url[i+</span><span class="s5">1</span><span class="s1">:]</span>
+            <span class="s2">if not </span><span class="s1">rest </span><span class="s2">or </span><span class="s1">any(c </span><span class="s2">not in </span><span class="s3">'0123456789' </span><span class="s2">for </span><span class="s1">c </span><span class="s2">in </span><span class="s1">rest):</span>
+                <span class="s4"># not a port number</span>
+                <span class="s1">scheme</span><span class="s2">, </span><span class="s1">url = url[:i].lower()</span><span class="s2">, </span><span class="s1">rest</span>
+
+    <span class="s2">if </span><span class="s1">url[:</span><span class="s5">2</span><span class="s1">] == </span><span class="s3">'//'</span><span class="s1">:</span>
+        <span class="s1">netloc</span><span class="s2">, </span><span class="s1">url = _splitnetloc(url</span><span class="s2">, </span><span class="s5">2</span><span class="s1">)</span>
+        <span class="s2">if </span><span class="s1">((</span><span class="s3">'[' </span><span class="s2">in </span><span class="s1">netloc </span><span class="s2">and </span><span class="s3">']' </span><span class="s2">not in </span><span class="s1">netloc) </span><span class="s2">or</span>
+                <span class="s1">(</span><span class="s3">']' </span><span class="s2">in </span><span class="s1">netloc </span><span class="s2">and </span><span class="s3">'[' </span><span class="s2">not in </span><span class="s1">netloc)):</span>
+            <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s3">&quot;Invalid IPv6 URL&quot;</span><span class="s1">)</span>
+    <span class="s2">if </span><span class="s1">allow_fragments </span><span class="s2">and </span><span class="s3">'#' </span><span class="s2">in </span><span class="s1">url:</span>
+        <span class="s1">url</span><span class="s2">, </span><span class="s1">fragment = url.split(</span><span class="s3">'#'</span><span class="s2">, </span><span class="s5">1</span><span class="s1">)</span>
+    <span class="s2">if </span><span class="s3">'?' </span><span class="s2">in </span><span class="s1">url:</span>
+        <span class="s1">url</span><span class="s2">, </span><span class="s1">query = url.split(</span><span class="s3">'?'</span><span class="s2">, </span><span class="s5">1</span><span class="s1">)</span>
+    <span class="s1">v = SplitResult(scheme</span><span class="s2">, </span><span class="s1">netloc</span><span class="s2">, </span><span class="s1">url</span><span class="s2">, </span><span class="s1">query</span><span class="s2">, </span><span class="s1">fragment)</span>
+    <span class="s1">_parse_cache[key] = v</span>
+    <span class="s2">return </span><span class="s1">_coerce_result(v)</span>
+
+<span class="s2">def </span><span class="s1">urlunparse(components):</span>
+    <span class="s0">&quot;&quot;&quot;Put a parsed URL back together again.  This may result in a 
+    slightly different, but equivalent URL, if the URL that was parsed 
+    originally had redundant delimiters, e.g. a ? with an empty query 
+    (the draft states that these are equivalent).&quot;&quot;&quot;</span>
+    <span class="s1">scheme</span><span class="s2">, </span><span class="s1">netloc</span><span class="s2">, </span><span class="s1">url</span><span class="s2">, </span><span class="s1">params</span><span class="s2">, </span><span class="s1">query</span><span class="s2">, </span><span class="s1">fragment</span><span class="s2">, </span><span class="s1">_coerce_result = (</span>
+                                                  <span class="s1">_coerce_args(*components))</span>
+    <span class="s2">if </span><span class="s1">params:</span>
+        <span class="s1">url = </span><span class="s3">&quot;%s;%s&quot; </span><span class="s1">% (url</span><span class="s2">, </span><span class="s1">params)</span>
+    <span class="s2">return </span><span class="s1">_coerce_result(urlunsplit((scheme</span><span class="s2">, </span><span class="s1">netloc</span><span class="s2">, </span><span class="s1">url</span><span class="s2">, </span><span class="s1">query</span><span class="s2">, </span><span class="s1">fragment)))</span>
+
+<span class="s2">def </span><span class="s1">urlunsplit(components):</span>
+    <span class="s0">&quot;&quot;&quot;Combine the elements of a tuple as returned by urlsplit() into a 
+    complete URL as a string. The data argument can be any five-item iterable. 
+    This may result in a slightly different, but equivalent URL, if the URL that 
+    was parsed originally had unnecessary delimiters (for example, a ? with an 
+    empty query; the RFC states that these are equivalent).&quot;&quot;&quot;</span>
+    <span class="s1">scheme</span><span class="s2">, </span><span class="s1">netloc</span><span class="s2">, </span><span class="s1">url</span><span class="s2">, </span><span class="s1">query</span><span class="s2">, </span><span class="s1">fragment</span><span class="s2">, </span><span class="s1">_coerce_result = (</span>
+                                          <span class="s1">_coerce_args(*components))</span>
+    <span class="s2">if </span><span class="s1">netloc </span><span class="s2">or </span><span class="s1">(scheme </span><span class="s2">and </span><span class="s1">scheme </span><span class="s2">in </span><span class="s1">uses_netloc </span><span class="s2">and </span><span class="s1">url[:</span><span class="s5">2</span><span class="s1">] != </span><span class="s3">'//'</span><span class="s1">):</span>
+        <span class="s2">if </span><span class="s1">url </span><span class="s2">and </span><span class="s1">url[:</span><span class="s5">1</span><span class="s1">] != </span><span class="s3">'/'</span><span class="s1">: url = </span><span class="s3">'/' </span><span class="s1">+ url</span>
+        <span class="s1">url = </span><span class="s3">'//' </span><span class="s1">+ (netloc </span><span class="s2">or </span><span class="s3">''</span><span class="s1">) + url</span>
+    <span class="s2">if </span><span class="s1">scheme:</span>
+        <span class="s1">url = scheme + </span><span class="s3">':' </span><span class="s1">+ url</span>
+    <span class="s2">if </span><span class="s1">query:</span>
+        <span class="s1">url = url + </span><span class="s3">'?' </span><span class="s1">+ query</span>
+    <span class="s2">if </span><span class="s1">fragment:</span>
+        <span class="s1">url = url + </span><span class="s3">'#' </span><span class="s1">+ fragment</span>
+    <span class="s2">return </span><span class="s1">_coerce_result(url)</span>
+
+<span class="s2">def </span><span class="s1">urljoin(base</span><span class="s2">, </span><span class="s1">url</span><span class="s2">, </span><span class="s1">allow_fragments=</span><span class="s2">True</span><span class="s1">):</span>
+    <span class="s0">&quot;&quot;&quot;Join a base URL and a possibly relative URL to form an absolute 
+    interpretation of the latter.&quot;&quot;&quot;</span>
+    <span class="s2">if not </span><span class="s1">base:</span>
+        <span class="s2">return </span><span class="s1">url</span>
+    <span class="s2">if not </span><span class="s1">url:</span>
+        <span class="s2">return </span><span class="s1">base</span>
+    <span class="s1">base</span><span class="s2">, </span><span class="s1">url</span><span class="s2">, </span><span class="s1">_coerce_result = _coerce_args(base</span><span class="s2">, </span><span class="s1">url)</span>
+    <span class="s1">bscheme</span><span class="s2">, </span><span class="s1">bnetloc</span><span class="s2">, </span><span class="s1">bpath</span><span class="s2">, </span><span class="s1">bparams</span><span class="s2">, </span><span class="s1">bquery</span><span class="s2">, </span><span class="s1">bfragment = \</span>
+            <span class="s1">urlparse(base</span><span class="s2">, </span><span class="s3">''</span><span class="s2">, </span><span class="s1">allow_fragments)</span>
+    <span class="s1">scheme</span><span class="s2">, </span><span class="s1">netloc</span><span class="s2">, </span><span class="s1">path</span><span class="s2">, </span><span class="s1">params</span><span class="s2">, </span><span class="s1">query</span><span class="s2">, </span><span class="s1">fragment = \</span>
+            <span class="s1">urlparse(url</span><span class="s2">, </span><span class="s1">bscheme</span><span class="s2">, </span><span class="s1">allow_fragments)</span>
+    <span class="s2">if </span><span class="s1">scheme != bscheme </span><span class="s2">or </span><span class="s1">scheme </span><span class="s2">not in </span><span class="s1">uses_relative:</span>
+        <span class="s2">return </span><span class="s1">_coerce_result(url)</span>
+    <span class="s2">if </span><span class="s1">scheme </span><span class="s2">in </span><span class="s1">uses_netloc:</span>
+        <span class="s2">if </span><span class="s1">netloc:</span>
+            <span class="s2">return </span><span class="s1">_coerce_result(urlunparse((scheme</span><span class="s2">, </span><span class="s1">netloc</span><span class="s2">, </span><span class="s1">path</span><span class="s2">,</span>
+                                              <span class="s1">params</span><span class="s2">, </span><span class="s1">query</span><span class="s2">, </span><span class="s1">fragment)))</span>
+        <span class="s1">netloc = bnetloc</span>
+    <span class="s2">if </span><span class="s1">path[:</span><span class="s5">1</span><span class="s1">] == </span><span class="s3">'/'</span><span class="s1">:</span>
+        <span class="s2">return </span><span class="s1">_coerce_result(urlunparse((scheme</span><span class="s2">, </span><span class="s1">netloc</span><span class="s2">, </span><span class="s1">path</span><span class="s2">,</span>
+                                          <span class="s1">params</span><span class="s2">, </span><span class="s1">query</span><span class="s2">, </span><span class="s1">fragment)))</span>
+    <span class="s2">if not </span><span class="s1">path </span><span class="s2">and not </span><span class="s1">params:</span>
+        <span class="s1">path = bpath</span>
+        <span class="s1">params = bparams</span>
+        <span class="s2">if not </span><span class="s1">query:</span>
+            <span class="s1">query = bquery</span>
+        <span class="s2">return </span><span class="s1">_coerce_result(urlunparse((scheme</span><span class="s2">, </span><span class="s1">netloc</span><span class="s2">, </span><span class="s1">path</span><span class="s2">,</span>
+                                          <span class="s1">params</span><span class="s2">, </span><span class="s1">query</span><span class="s2">, </span><span class="s1">fragment)))</span>
+    <span class="s1">segments = bpath.split(</span><span class="s3">'/'</span><span class="s1">)[:-</span><span class="s5">1</span><span class="s1">] + path.split(</span><span class="s3">'/'</span><span class="s1">)</span>
+    <span class="s4"># XXX The stuff below is bogus in various ways...</span>
+    <span class="s2">if </span><span class="s1">segments[-</span><span class="s5">1</span><span class="s1">] == </span><span class="s3">'.'</span><span class="s1">:</span>
+        <span class="s1">segments[-</span><span class="s5">1</span><span class="s1">] = </span><span class="s3">''</span>
+    <span class="s2">while </span><span class="s3">'.' </span><span class="s2">in </span><span class="s1">segments:</span>
+        <span class="s1">segments.remove(</span><span class="s3">'.'</span><span class="s1">)</span>
+    <span class="s2">while </span><span class="s5">1</span><span class="s1">:</span>
+        <span class="s1">i = </span><span class="s5">1</span>
+        <span class="s1">n = len(segments) - </span><span class="s5">1</span>
+        <span class="s2">while </span><span class="s1">i &lt; n:</span>
+            <span class="s2">if </span><span class="s1">(segments[i] == </span><span class="s3">'..'</span>
+                <span class="s2">and </span><span class="s1">segments[i-</span><span class="s5">1</span><span class="s1">] </span><span class="s2">not in </span><span class="s1">(</span><span class="s3">''</span><span class="s2">, </span><span class="s3">'..'</span><span class="s1">)):</span>
+                <span class="s2">del </span><span class="s1">segments[i-</span><span class="s5">1</span><span class="s1">:i+</span><span class="s5">1</span><span class="s1">]</span>
+                <span class="s2">break</span>
+            <span class="s1">i = i+</span><span class="s5">1</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s2">break</span>
+    <span class="s2">if </span><span class="s1">segments == [</span><span class="s3">''</span><span class="s2">, </span><span class="s3">'..'</span><span class="s1">]:</span>
+        <span class="s1">segments[-</span><span class="s5">1</span><span class="s1">] = </span><span class="s3">''</span>
+    <span class="s2">elif </span><span class="s1">len(segments) &gt;= </span><span class="s5">2 </span><span class="s2">and </span><span class="s1">segments[-</span><span class="s5">1</span><span class="s1">] == </span><span class="s3">'..'</span><span class="s1">:</span>
+        <span class="s1">segments[-</span><span class="s5">2</span><span class="s1">:] = [</span><span class="s3">''</span><span class="s1">]</span>
+    <span class="s2">return </span><span class="s1">_coerce_result(urlunparse((scheme</span><span class="s2">, </span><span class="s1">netloc</span><span class="s2">, </span><span class="s3">'/'</span><span class="s1">.join(segments)</span><span class="s2">,</span>
+                                      <span class="s1">params</span><span class="s2">, </span><span class="s1">query</span><span class="s2">, </span><span class="s1">fragment)))</span>
+
+<span class="s2">def </span><span class="s1">urldefrag(url):</span>
+    <span class="s0">&quot;&quot;&quot;Removes any existing fragment from URL. 
+ 
+    Returns a tuple of the defragmented URL and the fragment.  If 
+    the URL contained no fragments, the second element is the 
+    empty string. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">url</span><span class="s2">, </span><span class="s1">_coerce_result = _coerce_args(url)</span>
+    <span class="s2">if </span><span class="s3">'#' </span><span class="s2">in </span><span class="s1">url:</span>
+        <span class="s1">s</span><span class="s2">, </span><span class="s1">n</span><span class="s2">, </span><span class="s1">p</span><span class="s2">, </span><span class="s1">a</span><span class="s2">, </span><span class="s1">q</span><span class="s2">, </span><span class="s1">frag = urlparse(url)</span>
+        <span class="s1">defrag = urlunparse((s</span><span class="s2">, </span><span class="s1">n</span><span class="s2">, </span><span class="s1">p</span><span class="s2">, </span><span class="s1">a</span><span class="s2">, </span><span class="s1">q</span><span class="s2">, </span><span class="s3">''</span><span class="s1">))</span>
+    <span class="s2">else</span><span class="s1">:</span>
+        <span class="s1">frag = </span><span class="s3">''</span>
+        <span class="s1">defrag = url</span>
+    <span class="s2">return </span><span class="s1">_coerce_result(DefragResult(defrag</span><span class="s2">, </span><span class="s1">frag))</span>
+
+<span class="s1">_hexdig = </span><span class="s3">'0123456789ABCDEFabcdef'</span>
+<span class="s1">_hextobyte = dict(((a + b).encode()</span><span class="s2">, </span><span class="s1">bytes([int(a + b</span><span class="s2">, </span><span class="s5">16</span><span class="s1">)]))</span>
+                  <span class="s2">for </span><span class="s1">a </span><span class="s2">in </span><span class="s1">_hexdig </span><span class="s2">for </span><span class="s1">b </span><span class="s2">in </span><span class="s1">_hexdig)</span>
+
+<span class="s2">def </span><span class="s1">unquote_to_bytes(string):</span>
+    <span class="s0">&quot;&quot;&quot;unquote_to_bytes('abc%20def') -&gt; b'abc def'.&quot;&quot;&quot;</span>
+    <span class="s4"># Note: strings are encoded as UTF-8. This is only an issue if it contains</span>
+    <span class="s4"># unescaped non-ASCII characters, which URIs should not.</span>
+    <span class="s2">if not </span><span class="s1">string:</span>
+        <span class="s4"># Is it a string-like object?</span>
+        <span class="s1">string.split</span>
+        <span class="s2">return </span><span class="s1">bytes(</span><span class="s6">b''</span><span class="s1">)</span>
+    <span class="s2">if </span><span class="s1">isinstance(string</span><span class="s2">, </span><span class="s1">str):</span>
+        <span class="s1">string = string.encode(</span><span class="s3">'utf-8'</span><span class="s1">)</span>
+    <span class="s4">### For Python-Future:</span>
+    <span class="s4"># It is already a byte-string object, but force it to be newbytes here on</span>
+    <span class="s4"># Py2:</span>
+    <span class="s1">string = bytes(string)</span>
+    <span class="s4">###</span>
+    <span class="s1">bits = string.split(</span><span class="s6">b'%'</span><span class="s1">)</span>
+    <span class="s2">if </span><span class="s1">len(bits) == </span><span class="s5">1</span><span class="s1">:</span>
+        <span class="s2">return </span><span class="s1">string</span>
+    <span class="s1">res = [bits[</span><span class="s5">0</span><span class="s1">]]</span>
+    <span class="s1">append = res.append</span>
+    <span class="s2">for </span><span class="s1">item </span><span class="s2">in </span><span class="s1">bits[</span><span class="s5">1</span><span class="s1">:]:</span>
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s1">append(_hextobyte[item[:</span><span class="s5">2</span><span class="s1">]])</span>
+            <span class="s1">append(item[</span><span class="s5">2</span><span class="s1">:])</span>
+        <span class="s2">except </span><span class="s1">KeyError:</span>
+            <span class="s1">append(</span><span class="s6">b'%'</span><span class="s1">)</span>
+            <span class="s1">append(item)</span>
+    <span class="s2">return </span><span class="s1">bytes(</span><span class="s6">b''</span><span class="s1">).join(res)</span>
+
+<span class="s1">_asciire = re.compile(</span><span class="s3">'([</span><span class="s2">\x00</span><span class="s3">-</span><span class="s2">\x7f</span><span class="s3">]+)'</span><span class="s1">)</span>
+
+<span class="s2">def </span><span class="s1">unquote(string</span><span class="s2">, </span><span class="s1">encoding=</span><span class="s3">'utf-8'</span><span class="s2">, </span><span class="s1">errors=</span><span class="s3">'replace'</span><span class="s1">):</span>
+    <span class="s0">&quot;&quot;&quot;Replace %xx escapes by their single-character equivalent. The optional 
+    encoding and errors parameters specify how to decode percent-encoded 
+    sequences into Unicode characters, as accepted by the bytes.decode() 
+    method. 
+    By default, percent-encoded sequences are decoded with UTF-8, and invalid 
+    sequences are replaced by a placeholder character. 
+ 
+    unquote('abc%20def') -&gt; 'abc def'. 
+    &quot;&quot;&quot;</span>
+    <span class="s2">if </span><span class="s3">'%' </span><span class="s2">not in </span><span class="s1">string:</span>
+        <span class="s1">string.split</span>
+        <span class="s2">return </span><span class="s1">string</span>
+    <span class="s2">if </span><span class="s1">encoding </span><span class="s2">is None</span><span class="s1">:</span>
+        <span class="s1">encoding = </span><span class="s3">'utf-8'</span>
+    <span class="s2">if </span><span class="s1">errors </span><span class="s2">is None</span><span class="s1">:</span>
+        <span class="s1">errors = </span><span class="s3">'replace'</span>
+    <span class="s1">bits = _asciire.split(string)</span>
+    <span class="s1">res = [bits[</span><span class="s5">0</span><span class="s1">]]</span>
+    <span class="s1">append = res.append</span>
+    <span class="s2">for </span><span class="s1">i </span><span class="s2">in </span><span class="s1">range(</span><span class="s5">1</span><span class="s2">, </span><span class="s1">len(bits)</span><span class="s2">, </span><span class="s5">2</span><span class="s1">):</span>
+        <span class="s1">append(unquote_to_bytes(bits[i]).decode(encoding</span><span class="s2">, </span><span class="s1">errors))</span>
+        <span class="s1">append(bits[i + </span><span class="s5">1</span><span class="s1">])</span>
+    <span class="s2">return </span><span class="s3">''</span><span class="s1">.join(res)</span>
+
+<span class="s2">def </span><span class="s1">parse_qs(qs</span><span class="s2">, </span><span class="s1">keep_blank_values=</span><span class="s2">False, </span><span class="s1">strict_parsing=</span><span class="s2">False,</span>
+             <span class="s1">encoding=</span><span class="s3">'utf-8'</span><span class="s2">, </span><span class="s1">errors=</span><span class="s3">'replace'</span><span class="s1">):</span>
+    <span class="s0">&quot;&quot;&quot;Parse a query given as a string argument. 
+ 
+        Arguments: 
+ 
+        qs: percent-encoded query string to be parsed 
+ 
+        keep_blank_values: flag indicating whether blank values in 
+            percent-encoded queries should be treated as blank strings. 
+            A true value indicates that blanks should be retained as 
+            blank strings.  The default false value indicates that 
+            blank values are to be ignored and treated as if they were 
+            not included. 
+ 
+        strict_parsing: flag indicating what to do with parsing errors. 
+            If false (the default), errors are silently ignored. 
+            If true, errors raise a ValueError exception. 
+ 
+        encoding and errors: specify how to decode percent-encoded sequences 
+            into Unicode characters, as accepted by the bytes.decode() method. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">parsed_result = {}</span>
+    <span class="s1">pairs = parse_qsl(qs</span><span class="s2">, </span><span class="s1">keep_blank_values</span><span class="s2">, </span><span class="s1">strict_parsing</span><span class="s2">,</span>
+                      <span class="s1">encoding=encoding</span><span class="s2">, </span><span class="s1">errors=errors)</span>
+    <span class="s2">for </span><span class="s1">name</span><span class="s2">, </span><span class="s1">value </span><span class="s2">in </span><span class="s1">pairs:</span>
+        <span class="s2">if </span><span class="s1">name </span><span class="s2">in </span><span class="s1">parsed_result:</span>
+            <span class="s1">parsed_result[name].append(value)</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">parsed_result[name] = [value]</span>
+    <span class="s2">return </span><span class="s1">parsed_result</span>
+
+<span class="s2">def </span><span class="s1">parse_qsl(qs</span><span class="s2">, </span><span class="s1">keep_blank_values=</span><span class="s2">False, </span><span class="s1">strict_parsing=</span><span class="s2">False,</span>
+              <span class="s1">encoding=</span><span class="s3">'utf-8'</span><span class="s2">, </span><span class="s1">errors=</span><span class="s3">'replace'</span><span class="s1">):</span>
+    <span class="s0">&quot;&quot;&quot;Parse a query given as a string argument. 
+ 
+    Arguments: 
+ 
+    qs: percent-encoded query string to be parsed 
+ 
+    keep_blank_values: flag indicating whether blank values in 
+        percent-encoded queries should be treated as blank strings.  A 
+        true value indicates that blanks should be retained as blank 
+        strings.  The default false value indicates that blank values 
+        are to be ignored and treated as if they were  not included. 
+ 
+    strict_parsing: flag indicating what to do with parsing errors. If 
+        false (the default), errors are silently ignored. If true, 
+        errors raise a ValueError exception. 
+ 
+    encoding and errors: specify how to decode percent-encoded sequences 
+        into Unicode characters, as accepted by the bytes.decode() method. 
+ 
+    Returns a list, as G-d intended. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">qs</span><span class="s2">, </span><span class="s1">_coerce_result = _coerce_args(qs)</span>
+    <span class="s1">pairs = [s2 </span><span class="s2">for </span><span class="s1">s1 </span><span class="s2">in </span><span class="s1">qs.split(</span><span class="s3">'&amp;'</span><span class="s1">) </span><span class="s2">for </span><span class="s1">s2 </span><span class="s2">in </span><span class="s1">s1.split(</span><span class="s3">';'</span><span class="s1">)]</span>
+    <span class="s1">r = []</span>
+    <span class="s2">for </span><span class="s1">name_value </span><span class="s2">in </span><span class="s1">pairs:</span>
+        <span class="s2">if not </span><span class="s1">name_value </span><span class="s2">and not </span><span class="s1">strict_parsing:</span>
+            <span class="s2">continue</span>
+        <span class="s1">nv = name_value.split(</span><span class="s3">'='</span><span class="s2">, </span><span class="s5">1</span><span class="s1">)</span>
+        <span class="s2">if </span><span class="s1">len(nv) != </span><span class="s5">2</span><span class="s1">:</span>
+            <span class="s2">if </span><span class="s1">strict_parsing:</span>
+                <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s3">&quot;bad query field: %r&quot; </span><span class="s1">% (name_value</span><span class="s2">,</span><span class="s1">))</span>
+            <span class="s4"># Handle case of a control-name with no equal sign</span>
+            <span class="s2">if </span><span class="s1">keep_blank_values:</span>
+                <span class="s1">nv.append(</span><span class="s3">''</span><span class="s1">)</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s2">continue</span>
+        <span class="s2">if </span><span class="s1">len(nv[</span><span class="s5">1</span><span class="s1">]) </span><span class="s2">or </span><span class="s1">keep_blank_values:</span>
+            <span class="s1">name = nv[</span><span class="s5">0</span><span class="s1">].replace(</span><span class="s3">'+'</span><span class="s2">, </span><span class="s3">' '</span><span class="s1">)</span>
+            <span class="s1">name = unquote(name</span><span class="s2">, </span><span class="s1">encoding=encoding</span><span class="s2">, </span><span class="s1">errors=errors)</span>
+            <span class="s1">name = _coerce_result(name)</span>
+            <span class="s1">value = nv[</span><span class="s5">1</span><span class="s1">].replace(</span><span class="s3">'+'</span><span class="s2">, </span><span class="s3">' '</span><span class="s1">)</span>
+            <span class="s1">value = unquote(value</span><span class="s2">, </span><span class="s1">encoding=encoding</span><span class="s2">, </span><span class="s1">errors=errors)</span>
+            <span class="s1">value = _coerce_result(value)</span>
+            <span class="s1">r.append((name</span><span class="s2">, </span><span class="s1">value))</span>
+    <span class="s2">return </span><span class="s1">r</span>
+
+<span class="s2">def </span><span class="s1">unquote_plus(string</span><span class="s2">, </span><span class="s1">encoding=</span><span class="s3">'utf-8'</span><span class="s2">, </span><span class="s1">errors=</span><span class="s3">'replace'</span><span class="s1">):</span>
+    <span class="s0">&quot;&quot;&quot;Like unquote(), but also replace plus signs by spaces, as required for 
+    unquoting HTML form values. 
+ 
+    unquote_plus('%7e/abc+def') -&gt; '~/abc def' 
+    &quot;&quot;&quot;</span>
+    <span class="s1">string = string.replace(</span><span class="s3">'+'</span><span class="s2">, </span><span class="s3">' '</span><span class="s1">)</span>
+    <span class="s2">return </span><span class="s1">unquote(string</span><span class="s2">, </span><span class="s1">encoding</span><span class="s2">, </span><span class="s1">errors)</span>
+
+<span class="s1">_ALWAYS_SAFE = frozenset(bytes(</span><span class="s6">b'ABCDEFGHIJKLMNOPQRSTUVWXYZ'</span>
+                               <span class="s6">b'abcdefghijklmnopqrstuvwxyz'</span>
+                               <span class="s6">b'0123456789'</span>
+                               <span class="s6">b'_.-'</span><span class="s1">))</span>
+<span class="s1">_ALWAYS_SAFE_BYTES = bytes(_ALWAYS_SAFE)</span>
+<span class="s1">_safe_quoters = {}</span>
+
+<span class="s2">class </span><span class="s1">Quoter(collections.defaultdict):</span>
+    <span class="s0">&quot;&quot;&quot;A mapping from bytes (in range(0,256)) to strings. 
+ 
+    String values are percent-encoded byte values, unless the key &lt; 128, and 
+    in the &quot;safe&quot; set (either the specified safe set, or default set). 
+    &quot;&quot;&quot;</span>
+    <span class="s4"># Keeps a cache internally, using defaultdict, for efficiency (lookups</span>
+    <span class="s4"># of cached keys don't call Python code at all).</span>
+    <span class="s2">def </span><span class="s1">__init__(self</span><span class="s2">, </span><span class="s1">safe):</span>
+        <span class="s0">&quot;&quot;&quot;safe: bytes object.&quot;&quot;&quot;</span>
+        <span class="s1">self.safe = _ALWAYS_SAFE.union(bytes(safe))</span>
+
+    <span class="s2">def </span><span class="s1">__repr__(self):</span>
+        <span class="s4"># Without this, will just display as a defaultdict</span>
+        <span class="s2">return </span><span class="s3">&quot;&lt;Quoter %r&gt;&quot; </span><span class="s1">% dict(self)</span>
+
+    <span class="s2">def </span><span class="s1">__missing__(self</span><span class="s2">, </span><span class="s1">b):</span>
+        <span class="s4"># Handle a cache miss. Store quoted string in cache and return.</span>
+        <span class="s1">res = chr(b) </span><span class="s2">if </span><span class="s1">b </span><span class="s2">in </span><span class="s1">self.safe </span><span class="s2">else </span><span class="s3">'%{0:02X}'</span><span class="s1">.format(b)</span>
+        <span class="s1">self[b] = res</span>
+        <span class="s2">return </span><span class="s1">res</span>
+
+<span class="s2">def </span><span class="s1">quote(string</span><span class="s2">, </span><span class="s1">safe=</span><span class="s3">'/'</span><span class="s2">, </span><span class="s1">encoding=</span><span class="s2">None, </span><span class="s1">errors=</span><span class="s2">None</span><span class="s1">):</span>
+    <span class="s0">&quot;&quot;&quot;quote('abc def') -&gt; 'abc%20def' 
+ 
+    Each part of a URL, e.g. the path info, the query, etc., has a 
+    different set of reserved characters that must be quoted. 
+ 
+    RFC 2396 Uniform Resource Identifiers (URI): Generic Syntax lists 
+    the following reserved characters. 
+ 
+    reserved    = &quot;;&quot; | &quot;/&quot; | &quot;?&quot; | &quot;:&quot; | &quot;@&quot; | &quot;&amp;&quot; | &quot;=&quot; | &quot;+&quot; | 
+                  &quot;$&quot; | &quot;,&quot; 
+ 
+    Each of these characters is reserved in some component of a URL, 
+    but not necessarily in all of them. 
+ 
+    By default, the quote function is intended for quoting the path 
+    section of a URL.  Thus, it will not encode '/'.  This character 
+    is reserved, but in typical usage the quote function is being 
+    called on a path where the existing slash characters are used as 
+    reserved characters. 
+ 
+    string and safe may be either str or bytes objects. encoding must 
+    not be specified if string is a str. 
+ 
+    The optional encoding and errors parameters specify how to deal with 
+    non-ASCII characters, as accepted by the str.encode method. 
+    By default, encoding='utf-8' (characters are encoded with UTF-8), and 
+    errors='strict' (unsupported characters raise a UnicodeEncodeError). 
+    &quot;&quot;&quot;</span>
+    <span class="s2">if </span><span class="s1">isinstance(string</span><span class="s2">, </span><span class="s1">str):</span>
+        <span class="s2">if not </span><span class="s1">string:</span>
+            <span class="s2">return </span><span class="s1">string</span>
+        <span class="s2">if </span><span class="s1">encoding </span><span class="s2">is None</span><span class="s1">:</span>
+            <span class="s1">encoding = </span><span class="s3">'utf-8'</span>
+        <span class="s2">if </span><span class="s1">errors </span><span class="s2">is None</span><span class="s1">:</span>
+            <span class="s1">errors = </span><span class="s3">'strict'</span>
+        <span class="s1">string = string.encode(encoding</span><span class="s2">, </span><span class="s1">errors)</span>
+    <span class="s2">else</span><span class="s1">:</span>
+        <span class="s2">if </span><span class="s1">encoding </span><span class="s2">is not None</span><span class="s1">:</span>
+            <span class="s2">raise </span><span class="s1">TypeError(</span><span class="s3">&quot;quote() doesn't support 'encoding' for bytes&quot;</span><span class="s1">)</span>
+        <span class="s2">if </span><span class="s1">errors </span><span class="s2">is not None</span><span class="s1">:</span>
+            <span class="s2">raise </span><span class="s1">TypeError(</span><span class="s3">&quot;quote() doesn't support 'errors' for bytes&quot;</span><span class="s1">)</span>
+    <span class="s2">return </span><span class="s1">quote_from_bytes(string</span><span class="s2">, </span><span class="s1">safe)</span>
+
+<span class="s2">def </span><span class="s1">quote_plus(string</span><span class="s2">, </span><span class="s1">safe=</span><span class="s3">''</span><span class="s2">, </span><span class="s1">encoding=</span><span class="s2">None, </span><span class="s1">errors=</span><span class="s2">None</span><span class="s1">):</span>
+    <span class="s0">&quot;&quot;&quot;Like quote(), but also replace ' ' with '+', as required for quoting 
+    HTML form values. Plus signs in the original string are escaped unless 
+    they are included in safe. It also does not have safe default to '/'. 
+    &quot;&quot;&quot;</span>
+    <span class="s4"># Check if ' ' in string, where string may either be a str or bytes.  If</span>
+    <span class="s4"># there are no spaces, the regular quote will produce the right answer.</span>
+    <span class="s2">if </span><span class="s1">((isinstance(string</span><span class="s2">, </span><span class="s1">str) </span><span class="s2">and </span><span class="s3">' ' </span><span class="s2">not in </span><span class="s1">string) </span><span class="s2">or</span>
+        <span class="s1">(isinstance(string</span><span class="s2">, </span><span class="s1">bytes) </span><span class="s2">and </span><span class="s6">b' ' </span><span class="s2">not in </span><span class="s1">string)):</span>
+        <span class="s2">return </span><span class="s1">quote(string</span><span class="s2">, </span><span class="s1">safe</span><span class="s2">, </span><span class="s1">encoding</span><span class="s2">, </span><span class="s1">errors)</span>
+    <span class="s2">if </span><span class="s1">isinstance(safe</span><span class="s2">, </span><span class="s1">str):</span>
+        <span class="s1">space = str(</span><span class="s3">' '</span><span class="s1">)</span>
+    <span class="s2">else</span><span class="s1">:</span>
+        <span class="s1">space = bytes(</span><span class="s6">b' '</span><span class="s1">)</span>
+    <span class="s1">string = quote(string</span><span class="s2">, </span><span class="s1">safe + space</span><span class="s2">, </span><span class="s1">encoding</span><span class="s2">, </span><span class="s1">errors)</span>
+    <span class="s2">return </span><span class="s1">string.replace(</span><span class="s3">' '</span><span class="s2">, </span><span class="s3">'+'</span><span class="s1">)</span>
+
+<span class="s2">def </span><span class="s1">quote_from_bytes(bs</span><span class="s2">, </span><span class="s1">safe=</span><span class="s3">'/'</span><span class="s1">):</span>
+    <span class="s0">&quot;&quot;&quot;Like quote(), but accepts a bytes object rather than a str, and does 
+    not perform string-to-bytes encoding.  It always returns an ASCII string. 
+    quote_from_bytes(b'abc def\x3f') -&gt; 'abc%20def%3f' 
+    &quot;&quot;&quot;</span>
+    <span class="s2">if not </span><span class="s1">isinstance(bs</span><span class="s2">, </span><span class="s1">(bytes</span><span class="s2">, </span><span class="s1">bytearray)):</span>
+        <span class="s2">raise </span><span class="s1">TypeError(</span><span class="s3">&quot;quote_from_bytes() expected bytes&quot;</span><span class="s1">)</span>
+    <span class="s2">if not </span><span class="s1">bs:</span>
+        <span class="s2">return </span><span class="s1">str(</span><span class="s3">''</span><span class="s1">)</span>
+    <span class="s4">### For Python-Future:</span>
+    <span class="s1">bs = bytes(bs)</span>
+    <span class="s4">###</span>
+    <span class="s2">if </span><span class="s1">isinstance(safe</span><span class="s2">, </span><span class="s1">str):</span>
+        <span class="s4"># Normalize 'safe' by converting to bytes and removing non-ASCII chars</span>
+        <span class="s1">safe = str(safe).encode(</span><span class="s3">'ascii'</span><span class="s2">, </span><span class="s3">'ignore'</span><span class="s1">)</span>
+    <span class="s2">else</span><span class="s1">:</span>
+        <span class="s4">### For Python-Future:</span>
+        <span class="s1">safe = bytes(safe)</span>
+        <span class="s4">###</span>
+        <span class="s1">safe = bytes([c </span><span class="s2">for </span><span class="s1">c </span><span class="s2">in </span><span class="s1">safe </span><span class="s2">if </span><span class="s1">c &lt; </span><span class="s5">128</span><span class="s1">])</span>
+    <span class="s2">if not </span><span class="s1">bs.rstrip(_ALWAYS_SAFE_BYTES + safe):</span>
+        <span class="s2">return </span><span class="s1">bs.decode()</span>
+    <span class="s2">try</span><span class="s1">:</span>
+        <span class="s1">quoter = _safe_quoters[safe]</span>
+    <span class="s2">except </span><span class="s1">KeyError:</span>
+        <span class="s1">_safe_quoters[safe] = quoter = Quoter(safe).__getitem__</span>
+    <span class="s2">return </span><span class="s1">str(</span><span class="s3">''</span><span class="s1">).join([quoter(char) </span><span class="s2">for </span><span class="s1">char </span><span class="s2">in </span><span class="s1">bs])</span>
+
+<span class="s2">def </span><span class="s1">urlencode(query</span><span class="s2">, </span><span class="s1">doseq=</span><span class="s2">False, </span><span class="s1">safe=</span><span class="s3">''</span><span class="s2">, </span><span class="s1">encoding=</span><span class="s2">None, </span><span class="s1">errors=</span><span class="s2">None</span><span class="s1">):</span>
+    <span class="s0">&quot;&quot;&quot;Encode a sequence of two-element tuples or dictionary into a URL query string. 
+ 
+    If any values in the query arg are sequences and doseq is true, each 
+    sequence element is converted to a separate parameter. 
+ 
+    If the query arg is a sequence of two-element tuples, the order of the 
+    parameters in the output will match the order of parameters in the 
+    input. 
+ 
+    The query arg may be either a string or a bytes type. When query arg is a 
+    string, the safe, encoding and error parameters are sent the quote_plus for 
+    encoding. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s2">if </span><span class="s1">hasattr(query</span><span class="s2">, </span><span class="s3">&quot;items&quot;</span><span class="s1">):</span>
+        <span class="s1">query = query.items()</span>
+    <span class="s2">else</span><span class="s1">:</span>
+        <span class="s4"># It's a bother at times that strings and string-like objects are</span>
+        <span class="s4"># sequences.</span>
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s4"># non-sequence items should not work with len()</span>
+            <span class="s4"># non-empty strings will fail this</span>
+            <span class="s2">if </span><span class="s1">len(query) </span><span class="s2">and not </span><span class="s1">isinstance(query[</span><span class="s5">0</span><span class="s1">]</span><span class="s2">, </span><span class="s1">tuple):</span>
+                <span class="s2">raise </span><span class="s1">TypeError</span>
+            <span class="s4"># Zero-length sequences of all types will get here and succeed,</span>
+            <span class="s4"># but that's a minor nit.  Since the original implementation</span>
+            <span class="s4"># allowed empty dicts that type of behavior probably should be</span>
+            <span class="s4"># preserved for consistency</span>
+        <span class="s2">except </span><span class="s1">TypeError:</span>
+            <span class="s1">ty</span><span class="s2">, </span><span class="s1">va</span><span class="s2">, </span><span class="s1">tb = sys.exc_info()</span>
+            <span class="s1">raise_with_traceback(TypeError(</span><span class="s3">&quot;not a valid non-string sequence &quot;</span>
+                                           <span class="s3">&quot;or mapping object&quot;</span><span class="s1">)</span><span class="s2">, </span><span class="s1">tb)</span>
+
+    <span class="s1">l = []</span>
+    <span class="s2">if not </span><span class="s1">doseq:</span>
+        <span class="s2">for </span><span class="s1">k</span><span class="s2">, </span><span class="s1">v </span><span class="s2">in </span><span class="s1">query:</span>
+            <span class="s2">if </span><span class="s1">isinstance(k</span><span class="s2">, </span><span class="s1">bytes):</span>
+                <span class="s1">k = quote_plus(k</span><span class="s2">, </span><span class="s1">safe)</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s1">k = quote_plus(str(k)</span><span class="s2">, </span><span class="s1">safe</span><span class="s2">, </span><span class="s1">encoding</span><span class="s2">, </span><span class="s1">errors)</span>
+
+            <span class="s2">if </span><span class="s1">isinstance(v</span><span class="s2">, </span><span class="s1">bytes):</span>
+                <span class="s1">v = quote_plus(v</span><span class="s2">, </span><span class="s1">safe)</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s1">v = quote_plus(str(v)</span><span class="s2">, </span><span class="s1">safe</span><span class="s2">, </span><span class="s1">encoding</span><span class="s2">, </span><span class="s1">errors)</span>
+            <span class="s1">l.append(k + </span><span class="s3">'=' </span><span class="s1">+ v)</span>
+    <span class="s2">else</span><span class="s1">:</span>
+        <span class="s2">for </span><span class="s1">k</span><span class="s2">, </span><span class="s1">v </span><span class="s2">in </span><span class="s1">query:</span>
+            <span class="s2">if </span><span class="s1">isinstance(k</span><span class="s2">, </span><span class="s1">bytes):</span>
+                <span class="s1">k = quote_plus(k</span><span class="s2">, </span><span class="s1">safe)</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s1">k = quote_plus(str(k)</span><span class="s2">, </span><span class="s1">safe</span><span class="s2">, </span><span class="s1">encoding</span><span class="s2">, </span><span class="s1">errors)</span>
+
+            <span class="s2">if </span><span class="s1">isinstance(v</span><span class="s2">, </span><span class="s1">bytes):</span>
+                <span class="s1">v = quote_plus(v</span><span class="s2">, </span><span class="s1">safe)</span>
+                <span class="s1">l.append(k + </span><span class="s3">'=' </span><span class="s1">+ v)</span>
+            <span class="s2">elif </span><span class="s1">isinstance(v</span><span class="s2">, </span><span class="s1">str):</span>
+                <span class="s1">v = quote_plus(v</span><span class="s2">, </span><span class="s1">safe</span><span class="s2">, </span><span class="s1">encoding</span><span class="s2">, </span><span class="s1">errors)</span>
+                <span class="s1">l.append(k + </span><span class="s3">'=' </span><span class="s1">+ v)</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s2">try</span><span class="s1">:</span>
+                    <span class="s4"># Is this a sufficient test for sequence-ness?</span>
+                    <span class="s1">x = len(v)</span>
+                <span class="s2">except </span><span class="s1">TypeError:</span>
+                    <span class="s4"># not a sequence</span>
+                    <span class="s1">v = quote_plus(str(v)</span><span class="s2">, </span><span class="s1">safe</span><span class="s2">, </span><span class="s1">encoding</span><span class="s2">, </span><span class="s1">errors)</span>
+                    <span class="s1">l.append(k + </span><span class="s3">'=' </span><span class="s1">+ v)</span>
+                <span class="s2">else</span><span class="s1">:</span>
+                    <span class="s4"># loop over the sequence</span>
+                    <span class="s2">for </span><span class="s1">elt </span><span class="s2">in </span><span class="s1">v:</span>
+                        <span class="s2">if </span><span class="s1">isinstance(elt</span><span class="s2">, </span><span class="s1">bytes):</span>
+                            <span class="s1">elt = quote_plus(elt</span><span class="s2">, </span><span class="s1">safe)</span>
+                        <span class="s2">else</span><span class="s1">:</span>
+                            <span class="s1">elt = quote_plus(str(elt)</span><span class="s2">, </span><span class="s1">safe</span><span class="s2">, </span><span class="s1">encoding</span><span class="s2">, </span><span class="s1">errors)</span>
+                        <span class="s1">l.append(k + </span><span class="s3">'=' </span><span class="s1">+ elt)</span>
+    <span class="s2">return </span><span class="s1">str(</span><span class="s3">'&amp;'</span><span class="s1">).join(l)</span>
+
+<span class="s4"># Utilities to parse URLs (most of these return None for missing parts):</span>
+<span class="s4"># unwrap('&lt;URL:type://host/path&gt;') --&gt; 'type://host/path'</span>
+<span class="s4"># splittype('type:opaquestring') --&gt; 'type', 'opaquestring'</span>
+<span class="s4"># splithost('//host[:port]/path') --&gt; 'host[:port]', '/path'</span>
+<span class="s4"># splituser('user[:passwd]@host[:port]') --&gt; 'user[:passwd]', 'host[:port]'</span>
+<span class="s4"># splitpasswd('user:passwd') -&gt; 'user', 'passwd'</span>
+<span class="s4"># splitport('host:port') --&gt; 'host', 'port'</span>
+<span class="s4"># splitquery('/path?query') --&gt; '/path', 'query'</span>
+<span class="s4"># splittag('/path#tag') --&gt; '/path', 'tag'</span>
+<span class="s4"># splitattr('/path;attr1=value1;attr2=value2;...') -&gt;</span>
+<span class="s4">#   '/path', ['attr1=value1', 'attr2=value2', ...]</span>
+<span class="s4"># splitvalue('attr=value') --&gt; 'attr', 'value'</span>
+<span class="s4"># urllib.parse.unquote('abc%20def') -&gt; 'abc def'</span>
+<span class="s4"># quote('abc def') -&gt; 'abc%20def')</span>
+
+<span class="s2">def </span><span class="s1">to_bytes(url):</span>
+    <span class="s0">&quot;&quot;&quot;to_bytes(u&quot;URL&quot;) --&gt; 'URL'.&quot;&quot;&quot;</span>
+    <span class="s4"># Most URL schemes require ASCII. If that changes, the conversion</span>
+    <span class="s4"># can be relaxed.</span>
+    <span class="s4"># XXX get rid of to_bytes()</span>
+    <span class="s2">if </span><span class="s1">isinstance(url</span><span class="s2">, </span><span class="s1">str):</span>
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s1">url = url.encode(</span><span class="s3">&quot;ASCII&quot;</span><span class="s1">).decode()</span>
+        <span class="s2">except </span><span class="s1">UnicodeError:</span>
+            <span class="s2">raise </span><span class="s1">UnicodeError(</span><span class="s3">&quot;URL &quot; </span><span class="s1">+ repr(url) +</span>
+                               <span class="s3">&quot; contains non-ASCII characters&quot;</span><span class="s1">)</span>
+    <span class="s2">return </span><span class="s1">url</span>
+
+<span class="s2">def </span><span class="s1">unwrap(url):</span>
+    <span class="s0">&quot;&quot;&quot;unwrap('&lt;URL:type://host/path&gt;') --&gt; 'type://host/path'.&quot;&quot;&quot;</span>
+    <span class="s1">url = str(url).strip()</span>
+    <span class="s2">if </span><span class="s1">url[:</span><span class="s5">1</span><span class="s1">] == </span><span class="s3">'&lt;' </span><span class="s2">and </span><span class="s1">url[-</span><span class="s5">1</span><span class="s1">:] == </span><span class="s3">'&gt;'</span><span class="s1">:</span>
+        <span class="s1">url = url[</span><span class="s5">1</span><span class="s1">:-</span><span class="s5">1</span><span class="s1">].strip()</span>
+    <span class="s2">if </span><span class="s1">url[:</span><span class="s5">4</span><span class="s1">] == </span><span class="s3">'URL:'</span><span class="s1">: url = url[</span><span class="s5">4</span><span class="s1">:].strip()</span>
+    <span class="s2">return </span><span class="s1">url</span>
+
+<span class="s1">_typeprog = </span><span class="s2">None</span>
+<span class="s2">def </span><span class="s1">splittype(url):</span>
+    <span class="s0">&quot;&quot;&quot;splittype('type:opaquestring') --&gt; 'type', 'opaquestring'.&quot;&quot;&quot;</span>
+    <span class="s2">global </span><span class="s1">_typeprog</span>
+    <span class="s2">if </span><span class="s1">_typeprog </span><span class="s2">is None</span><span class="s1">:</span>
+        <span class="s2">import </span><span class="s1">re</span>
+        <span class="s1">_typeprog = re.compile(</span><span class="s3">'^([^/:]+):'</span><span class="s1">)</span>
+
+    <span class="s1">match = _typeprog.match(url)</span>
+    <span class="s2">if </span><span class="s1">match:</span>
+        <span class="s1">scheme = match.group(</span><span class="s5">1</span><span class="s1">)</span>
+        <span class="s2">return </span><span class="s1">scheme.lower()</span><span class="s2">, </span><span class="s1">url[len(scheme) + </span><span class="s5">1</span><span class="s1">:]</span>
+    <span class="s2">return None, </span><span class="s1">url</span>
+
+<span class="s1">_hostprog = </span><span class="s2">None</span>
+<span class="s2">def </span><span class="s1">splithost(url):</span>
+    <span class="s0">&quot;&quot;&quot;splithost('//host[:port]/path') --&gt; 'host[:port]', '/path'.&quot;&quot;&quot;</span>
+    <span class="s2">global </span><span class="s1">_hostprog</span>
+    <span class="s2">if </span><span class="s1">_hostprog </span><span class="s2">is None</span><span class="s1">:</span>
+        <span class="s2">import </span><span class="s1">re</span>
+        <span class="s1">_hostprog = re.compile(</span><span class="s3">'^//([^/?]*)(.*)$'</span><span class="s1">)</span>
+
+    <span class="s1">match = _hostprog.match(url)</span>
+    <span class="s2">if </span><span class="s1">match:</span>
+        <span class="s1">host_port = match.group(</span><span class="s5">1</span><span class="s1">)</span>
+        <span class="s1">path = match.group(</span><span class="s5">2</span><span class="s1">)</span>
+        <span class="s2">if </span><span class="s1">path </span><span class="s2">and not </span><span class="s1">path.startswith(</span><span class="s3">'/'</span><span class="s1">):</span>
+            <span class="s1">path = </span><span class="s3">'/' </span><span class="s1">+ path</span>
+        <span class="s2">return </span><span class="s1">host_port</span><span class="s2">, </span><span class="s1">path</span>
+    <span class="s2">return None, </span><span class="s1">url</span>
+
+<span class="s1">_userprog = </span><span class="s2">None</span>
+<span class="s2">def </span><span class="s1">splituser(host):</span>
+    <span class="s0">&quot;&quot;&quot;splituser('user[:passwd]@host[:port]') --&gt; 'user[:passwd]', 'host[:port]'.&quot;&quot;&quot;</span>
+    <span class="s2">global </span><span class="s1">_userprog</span>
+    <span class="s2">if </span><span class="s1">_userprog </span><span class="s2">is None</span><span class="s1">:</span>
+        <span class="s2">import </span><span class="s1">re</span>
+        <span class="s1">_userprog = re.compile(</span><span class="s3">'^(.*)@(.*)$'</span><span class="s1">)</span>
+
+    <span class="s1">match = _userprog.match(host)</span>
+    <span class="s2">if </span><span class="s1">match: </span><span class="s2">return </span><span class="s1">match.group(</span><span class="s5">1</span><span class="s2">, </span><span class="s5">2</span><span class="s1">)</span>
+    <span class="s2">return None, </span><span class="s1">host</span>
+
+<span class="s1">_passwdprog = </span><span class="s2">None</span>
+<span class="s2">def </span><span class="s1">splitpasswd(user):</span>
+    <span class="s0">&quot;&quot;&quot;splitpasswd('user:passwd') -&gt; 'user', 'passwd'.&quot;&quot;&quot;</span>
+    <span class="s2">global </span><span class="s1">_passwdprog</span>
+    <span class="s2">if </span><span class="s1">_passwdprog </span><span class="s2">is None</span><span class="s1">:</span>
+        <span class="s2">import </span><span class="s1">re</span>
+        <span class="s1">_passwdprog = re.compile(</span><span class="s3">'^([^:]*):(.*)$'</span><span class="s2">,</span><span class="s1">re.S)</span>
+
+    <span class="s1">match = _passwdprog.match(user)</span>
+    <span class="s2">if </span><span class="s1">match: </span><span class="s2">return </span><span class="s1">match.group(</span><span class="s5">1</span><span class="s2">, </span><span class="s5">2</span><span class="s1">)</span>
+    <span class="s2">return </span><span class="s1">user</span><span class="s2">, None</span>
+
+<span class="s4"># splittag('/path#tag') --&gt; '/path', 'tag'</span>
+<span class="s1">_portprog = </span><span class="s2">None</span>
+<span class="s2">def </span><span class="s1">splitport(host):</span>
+    <span class="s0">&quot;&quot;&quot;splitport('host:port') --&gt; 'host', 'port'.&quot;&quot;&quot;</span>
+    <span class="s2">global </span><span class="s1">_portprog</span>
+    <span class="s2">if </span><span class="s1">_portprog </span><span class="s2">is None</span><span class="s1">:</span>
+        <span class="s2">import </span><span class="s1">re</span>
+        <span class="s1">_portprog = re.compile(</span><span class="s3">'^(.*):([0-9]+)$'</span><span class="s1">)</span>
+
+    <span class="s1">match = _portprog.match(host)</span>
+    <span class="s2">if </span><span class="s1">match: </span><span class="s2">return </span><span class="s1">match.group(</span><span class="s5">1</span><span class="s2">, </span><span class="s5">2</span><span class="s1">)</span>
+    <span class="s2">return </span><span class="s1">host</span><span class="s2">, None</span>
+
+<span class="s1">_nportprog = </span><span class="s2">None</span>
+<span class="s2">def </span><span class="s1">splitnport(host</span><span class="s2">, </span><span class="s1">defport=-</span><span class="s5">1</span><span class="s1">):</span>
+    <span class="s0">&quot;&quot;&quot;Split host and port, returning numeric port. 
+    Return given default port if no ':' found; defaults to -1. 
+    Return numerical port if a valid number are found after ':'. 
+    Return None if ':' but not a valid number.&quot;&quot;&quot;</span>
+    <span class="s2">global </span><span class="s1">_nportprog</span>
+    <span class="s2">if </span><span class="s1">_nportprog </span><span class="s2">is None</span><span class="s1">:</span>
+        <span class="s2">import </span><span class="s1">re</span>
+        <span class="s1">_nportprog = re.compile(</span><span class="s3">'^(.*):(.*)$'</span><span class="s1">)</span>
+
+    <span class="s1">match = _nportprog.match(host)</span>
+    <span class="s2">if </span><span class="s1">match:</span>
+        <span class="s1">host</span><span class="s2">, </span><span class="s1">port = match.group(</span><span class="s5">1</span><span class="s2">, </span><span class="s5">2</span><span class="s1">)</span>
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s2">if not </span><span class="s1">port: </span><span class="s2">raise </span><span class="s1">ValueError(</span><span class="s3">&quot;no digits&quot;</span><span class="s1">)</span>
+            <span class="s1">nport = int(port)</span>
+        <span class="s2">except </span><span class="s1">ValueError:</span>
+            <span class="s1">nport = </span><span class="s2">None</span>
+        <span class="s2">return </span><span class="s1">host</span><span class="s2">, </span><span class="s1">nport</span>
+    <span class="s2">return </span><span class="s1">host</span><span class="s2">, </span><span class="s1">defport</span>
+
+<span class="s1">_queryprog = </span><span class="s2">None</span>
+<span class="s2">def </span><span class="s1">splitquery(url):</span>
+    <span class="s0">&quot;&quot;&quot;splitquery('/path?query') --&gt; '/path', 'query'.&quot;&quot;&quot;</span>
+    <span class="s2">global </span><span class="s1">_queryprog</span>
+    <span class="s2">if </span><span class="s1">_queryprog </span><span class="s2">is None</span><span class="s1">:</span>
+        <span class="s2">import </span><span class="s1">re</span>
+        <span class="s1">_queryprog = re.compile(</span><span class="s3">'^(.*)\?([^?]*)$'</span><span class="s1">)</span>
+
+    <span class="s1">match = _queryprog.match(url)</span>
+    <span class="s2">if </span><span class="s1">match: </span><span class="s2">return </span><span class="s1">match.group(</span><span class="s5">1</span><span class="s2">, </span><span class="s5">2</span><span class="s1">)</span>
+    <span class="s2">return </span><span class="s1">url</span><span class="s2">, None</span>
+
+<span class="s1">_tagprog = </span><span class="s2">None</span>
+<span class="s2">def </span><span class="s1">splittag(url):</span>
+    <span class="s0">&quot;&quot;&quot;splittag('/path#tag') --&gt; '/path', 'tag'.&quot;&quot;&quot;</span>
+    <span class="s2">global </span><span class="s1">_tagprog</span>
+    <span class="s2">if </span><span class="s1">_tagprog </span><span class="s2">is None</span><span class="s1">:</span>
+        <span class="s2">import </span><span class="s1">re</span>
+        <span class="s1">_tagprog = re.compile(</span><span class="s3">'^(.*)#([^#]*)$'</span><span class="s1">)</span>
+
+    <span class="s1">match = _tagprog.match(url)</span>
+    <span class="s2">if </span><span class="s1">match: </span><span class="s2">return </span><span class="s1">match.group(</span><span class="s5">1</span><span class="s2">, </span><span class="s5">2</span><span class="s1">)</span>
+    <span class="s2">return </span><span class="s1">url</span><span class="s2">, None</span>
+
+<span class="s2">def </span><span class="s1">splitattr(url):</span>
+    <span class="s0">&quot;&quot;&quot;splitattr('/path;attr1=value1;attr2=value2;...') -&gt; 
+        '/path', ['attr1=value1', 'attr2=value2', ...].&quot;&quot;&quot;</span>
+    <span class="s1">words = url.split(</span><span class="s3">';'</span><span class="s1">)</span>
+    <span class="s2">return </span><span class="s1">words[</span><span class="s5">0</span><span class="s1">]</span><span class="s2">, </span><span class="s1">words[</span><span class="s5">1</span><span class="s1">:]</span>
+
+<span class="s1">_valueprog = </span><span class="s2">None</span>
+<span class="s2">def </span><span class="s1">splitvalue(attr):</span>
+    <span class="s0">&quot;&quot;&quot;splitvalue('attr=value') --&gt; 'attr', 'value'.&quot;&quot;&quot;</span>
+    <span class="s2">global </span><span class="s1">_valueprog</span>
+    <span class="s2">if </span><span class="s1">_valueprog </span><span class="s2">is None</span><span class="s1">:</span>
+        <span class="s2">import </span><span class="s1">re</span>
+        <span class="s1">_valueprog = re.compile(</span><span class="s3">'^([^=]*)=(.*)$'</span><span class="s1">)</span>
+
+    <span class="s1">match = _valueprog.match(attr)</span>
+    <span class="s2">if </span><span class="s1">match: </span><span class="s2">return </span><span class="s1">match.group(</span><span class="s5">1</span><span class="s2">, </span><span class="s5">2</span><span class="s1">)</span>
+    <span class="s2">return </span><span class="s1">attr</span><span class="s2">, None</span>
+</pre>
+</body>
+</html>

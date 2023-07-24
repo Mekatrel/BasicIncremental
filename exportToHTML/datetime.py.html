@@ -1,0 +1,2174 @@
+<html>
+<head>
+<title>datetime.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #629755; font-style: italic;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #cc7832;}
+.s3 { color: #6897bb;}
+.s4 { color: #808080;}
+.s5 { color: #6a8759;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+datetime.py</font>
+</center></td></tr></table>
+<pre><span class="s0">&quot;&quot;&quot;Concrete date/time and related types. 
+ 
+See http://www.iana.org/time-zones/repository/tz-link.html for 
+time zone and DST data sources. 
+&quot;&quot;&quot;</span>
+<span class="s2">from </span><span class="s1">__future__ </span><span class="s2">import </span><span class="s1">division</span>
+<span class="s2">from </span><span class="s1">__future__ </span><span class="s2">import </span><span class="s1">unicode_literals</span>
+<span class="s2">from </span><span class="s1">__future__ </span><span class="s2">import </span><span class="s1">print_function</span>
+<span class="s2">from </span><span class="s1">__future__ </span><span class="s2">import </span><span class="s1">absolute_import</span>
+<span class="s2">from </span><span class="s1">future.builtins </span><span class="s2">import </span><span class="s1">str</span>
+<span class="s2">from </span><span class="s1">future.builtins </span><span class="s2">import </span><span class="s1">bytes</span>
+<span class="s2">from </span><span class="s1">future.builtins </span><span class="s2">import </span><span class="s1">map</span>
+<span class="s2">from </span><span class="s1">future.builtins </span><span class="s2">import </span><span class="s1">round</span>
+<span class="s2">from </span><span class="s1">future.builtins </span><span class="s2">import </span><span class="s1">int</span>
+<span class="s2">from </span><span class="s1">future.builtins </span><span class="s2">import </span><span class="s1">object</span>
+<span class="s2">from </span><span class="s1">future.utils </span><span class="s2">import </span><span class="s1">native_str</span><span class="s2">, </span><span class="s1">PY2</span>
+
+<span class="s2">import </span><span class="s1">time </span><span class="s2">as </span><span class="s1">_time</span>
+<span class="s2">import </span><span class="s1">math </span><span class="s2">as </span><span class="s1">_math</span>
+
+<span class="s2">def </span><span class="s1">_cmp(x</span><span class="s2">, </span><span class="s1">y):</span>
+    <span class="s2">return </span><span class="s3">0 </span><span class="s2">if </span><span class="s1">x == y </span><span class="s2">else </span><span class="s3">1 </span><span class="s2">if </span><span class="s1">x &gt; y </span><span class="s2">else </span><span class="s1">-</span><span class="s3">1</span>
+
+<span class="s1">MINYEAR = </span><span class="s3">1</span>
+<span class="s1">MAXYEAR = </span><span class="s3">9999</span>
+<span class="s1">_MAXORDINAL = </span><span class="s3">3652059 </span><span class="s4"># date.max.toordinal()</span>
+
+<span class="s4"># Utility functions, adapted from Python's Demo/classes/Dates.py, which</span>
+<span class="s4"># also assumes the current Gregorian calendar indefinitely extended in</span>
+<span class="s4"># both directions.  Difference:  Dates.py calls January 1 of year 0 day</span>
+<span class="s4"># number 1.  The code here calls January 1 of year 1 day number 1.  This is</span>
+<span class="s4"># to match the definition of the &quot;proleptic Gregorian&quot; calendar in Dershowitz</span>
+<span class="s4"># and Reingold's &quot;Calendrical Calculations&quot;, where it's the base calendar</span>
+<span class="s4"># for all computations.  See the book for algorithms for converting between</span>
+<span class="s4"># proleptic Gregorian ordinals and many other calendar systems.</span>
+
+<span class="s1">_DAYS_IN_MONTH = [</span><span class="s2">None, </span><span class="s3">31</span><span class="s2">, </span><span class="s3">28</span><span class="s2">, </span><span class="s3">31</span><span class="s2">, </span><span class="s3">30</span><span class="s2">, </span><span class="s3">31</span><span class="s2">, </span><span class="s3">30</span><span class="s2">, </span><span class="s3">31</span><span class="s2">, </span><span class="s3">31</span><span class="s2">, </span><span class="s3">30</span><span class="s2">, </span><span class="s3">31</span><span class="s2">, </span><span class="s3">30</span><span class="s2">, </span><span class="s3">31</span><span class="s1">]</span>
+
+<span class="s1">_DAYS_BEFORE_MONTH = [</span><span class="s2">None</span><span class="s1">]</span>
+<span class="s1">dbm = </span><span class="s3">0</span>
+<span class="s2">for </span><span class="s1">dim </span><span class="s2">in </span><span class="s1">_DAYS_IN_MONTH[</span><span class="s3">1</span><span class="s1">:]:</span>
+    <span class="s1">_DAYS_BEFORE_MONTH.append(dbm)</span>
+    <span class="s1">dbm += dim</span>
+<span class="s2">del </span><span class="s1">dbm</span><span class="s2">, </span><span class="s1">dim</span>
+
+<span class="s2">def </span><span class="s1">_is_leap(year):</span>
+    <span class="s0">&quot;year -&gt; 1 if leap year, else 0.&quot;</span>
+    <span class="s2">return </span><span class="s1">year % </span><span class="s3">4 </span><span class="s1">== </span><span class="s3">0 </span><span class="s2">and </span><span class="s1">(year % </span><span class="s3">100 </span><span class="s1">!= </span><span class="s3">0 </span><span class="s2">or </span><span class="s1">year % </span><span class="s3">400 </span><span class="s1">== </span><span class="s3">0</span><span class="s1">)</span>
+
+<span class="s2">def </span><span class="s1">_days_before_year(year):</span>
+    <span class="s0">&quot;year -&gt; number of days before January 1st of year.&quot;</span>
+    <span class="s1">y = year - </span><span class="s3">1</span>
+    <span class="s2">return </span><span class="s1">y*</span><span class="s3">365 </span><span class="s1">+ y//</span><span class="s3">4 </span><span class="s1">- y//</span><span class="s3">100 </span><span class="s1">+ y//</span><span class="s3">400</span>
+
+<span class="s2">def </span><span class="s1">_days_in_month(year</span><span class="s2">, </span><span class="s1">month):</span>
+    <span class="s0">&quot;year, month -&gt; number of days in that month in that year.&quot;</span>
+    <span class="s2">assert </span><span class="s3">1 </span><span class="s1">&lt;= month &lt;= </span><span class="s3">12</span><span class="s2">, </span><span class="s1">month</span>
+    <span class="s2">if </span><span class="s1">month == </span><span class="s3">2 </span><span class="s2">and </span><span class="s1">_is_leap(year):</span>
+        <span class="s2">return </span><span class="s3">29</span>
+    <span class="s2">return </span><span class="s1">_DAYS_IN_MONTH[month]</span>
+
+<span class="s2">def </span><span class="s1">_days_before_month(year</span><span class="s2">, </span><span class="s1">month):</span>
+    <span class="s0">&quot;year, month -&gt; number of days in year preceding first day of month.&quot;</span>
+    <span class="s2">assert </span><span class="s3">1 </span><span class="s1">&lt;= month &lt;= </span><span class="s3">12</span><span class="s2">, </span><span class="s5">'month must be in 1..12'</span>
+    <span class="s2">return </span><span class="s1">_DAYS_BEFORE_MONTH[month] + (month &gt; </span><span class="s3">2 </span><span class="s2">and </span><span class="s1">_is_leap(year))</span>
+
+<span class="s2">def </span><span class="s1">_ymd2ord(year</span><span class="s2">, </span><span class="s1">month</span><span class="s2">, </span><span class="s1">day):</span>
+    <span class="s0">&quot;year, month, day -&gt; ordinal, considering 01-Jan-0001 as day 1.&quot;</span>
+    <span class="s2">assert </span><span class="s3">1 </span><span class="s1">&lt;= month &lt;= </span><span class="s3">12</span><span class="s2">, </span><span class="s5">'month must be in 1..12'</span>
+    <span class="s1">dim = _days_in_month(year</span><span class="s2">, </span><span class="s1">month)</span>
+    <span class="s2">assert </span><span class="s3">1 </span><span class="s1">&lt;= day &lt;= dim</span><span class="s2">, </span><span class="s1">(</span><span class="s5">'day must be in 1..%d' </span><span class="s1">% dim)</span>
+    <span class="s2">return </span><span class="s1">(_days_before_year(year) +</span>
+            <span class="s1">_days_before_month(year</span><span class="s2">, </span><span class="s1">month) +</span>
+            <span class="s1">day)</span>
+
+<span class="s1">_DI400Y = _days_before_year(</span><span class="s3">401</span><span class="s1">)    </span><span class="s4"># number of days in 400 years</span>
+<span class="s1">_DI100Y = _days_before_year(</span><span class="s3">101</span><span class="s1">)    </span><span class="s4">#    &quot;    &quot;   &quot;   &quot; 100   &quot;</span>
+<span class="s1">_DI4Y   = _days_before_year(</span><span class="s3">5</span><span class="s1">)      </span><span class="s4">#    &quot;    &quot;   &quot;   &quot;   4   &quot;</span>
+
+<span class="s4"># A 4-year cycle has an extra leap day over what we'd get from pasting</span>
+<span class="s4"># together 4 single years.</span>
+<span class="s2">assert </span><span class="s1">_DI4Y == </span><span class="s3">4 </span><span class="s1">* </span><span class="s3">365 </span><span class="s1">+ </span><span class="s3">1</span>
+
+<span class="s4"># Similarly, a 400-year cycle has an extra leap day over what we'd get from</span>
+<span class="s4"># pasting together 4 100-year cycles.</span>
+<span class="s2">assert </span><span class="s1">_DI400Y == </span><span class="s3">4 </span><span class="s1">* _DI100Y + </span><span class="s3">1</span>
+
+<span class="s4"># OTOH, a 100-year cycle has one fewer leap day than we'd get from</span>
+<span class="s4"># pasting together 25 4-year cycles.</span>
+<span class="s2">assert </span><span class="s1">_DI100Y == </span><span class="s3">25 </span><span class="s1">* _DI4Y - </span><span class="s3">1</span>
+
+<span class="s2">def </span><span class="s1">_ord2ymd(n):</span>
+    <span class="s0">&quot;ordinal -&gt; (year, month, day), considering 01-Jan-0001 as day 1.&quot;</span>
+
+    <span class="s4"># n is a 1-based index, starting at 1-Jan-1.  The pattern of leap years</span>
+    <span class="s4"># repeats exactly every 400 years.  The basic strategy is to find the</span>
+    <span class="s4"># closest 400-year boundary at or before n, then work with the offset</span>
+    <span class="s4"># from that boundary to n.  Life is much clearer if we subtract 1 from</span>
+    <span class="s4"># n first -- then the values of n at 400-year boundaries are exactly</span>
+    <span class="s4"># those divisible by _DI400Y:</span>
+    <span class="s4">#</span>
+    <span class="s4">#     D  M   Y            n              n-1</span>
+    <span class="s4">#     -- --- ----        ----------     ----------------</span>
+    <span class="s4">#     31 Dec -400        -_DI400Y       -_DI400Y -1</span>
+    <span class="s4">#      1 Jan -399         -_DI400Y +1   -_DI400Y      400-year boundary</span>
+    <span class="s4">#     ...</span>
+    <span class="s4">#     30 Dec  000        -1             -2</span>
+    <span class="s4">#     31 Dec  000         0             -1</span>
+    <span class="s4">#      1 Jan  001         1              0            400-year boundary</span>
+    <span class="s4">#      2 Jan  001         2              1</span>
+    <span class="s4">#      3 Jan  001         3              2</span>
+    <span class="s4">#     ...</span>
+    <span class="s4">#     31 Dec  400         _DI400Y        _DI400Y -1</span>
+    <span class="s4">#      1 Jan  401         _DI400Y +1     _DI400Y      400-year boundary</span>
+    <span class="s1">n -= </span><span class="s3">1</span>
+    <span class="s1">n400</span><span class="s2">, </span><span class="s1">n = divmod(n</span><span class="s2">, </span><span class="s1">_DI400Y)</span>
+    <span class="s1">year = n400 * </span><span class="s3">400 </span><span class="s1">+ </span><span class="s3">1   </span><span class="s4"># ..., -399, 1, 401, ...</span>
+
+    <span class="s4"># Now n is the (non-negative) offset, in days, from January 1 of year, to</span>
+    <span class="s4"># the desired date.  Now compute how many 100-year cycles precede n.</span>
+    <span class="s4"># Note that it's possible for n100 to equal 4!  In that case 4 full</span>
+    <span class="s4"># 100-year cycles precede the desired day, which implies the desired</span>
+    <span class="s4"># day is December 31 at the end of a 400-year cycle.</span>
+    <span class="s1">n100</span><span class="s2">, </span><span class="s1">n = divmod(n</span><span class="s2">, </span><span class="s1">_DI100Y)</span>
+
+    <span class="s4"># Now compute how many 4-year cycles precede it.</span>
+    <span class="s1">n4</span><span class="s2">, </span><span class="s1">n = divmod(n</span><span class="s2">, </span><span class="s1">_DI4Y)</span>
+
+    <span class="s4"># And now how many single years.  Again n1 can be 4, and again meaning</span>
+    <span class="s4"># that the desired day is December 31 at the end of the 4-year cycle.</span>
+    <span class="s1">n1</span><span class="s2">, </span><span class="s1">n = divmod(n</span><span class="s2">, </span><span class="s3">365</span><span class="s1">)</span>
+
+    <span class="s1">year += n100 * </span><span class="s3">100 </span><span class="s1">+ n4 * </span><span class="s3">4 </span><span class="s1">+ n1</span>
+    <span class="s2">if </span><span class="s1">n1 == </span><span class="s3">4 </span><span class="s2">or </span><span class="s1">n100 == </span><span class="s3">4</span><span class="s1">:</span>
+        <span class="s2">assert </span><span class="s1">n == </span><span class="s3">0</span>
+        <span class="s2">return </span><span class="s1">year-</span><span class="s3">1</span><span class="s2">, </span><span class="s3">12</span><span class="s2">, </span><span class="s3">31</span>
+
+    <span class="s4"># Now the year is correct, and n is the offset from January 1.  We find</span>
+    <span class="s4"># the month via an estimate that's either exact or one too large.</span>
+    <span class="s1">leapyear = n1 == </span><span class="s3">3 </span><span class="s2">and </span><span class="s1">(n4 != </span><span class="s3">24 </span><span class="s2">or </span><span class="s1">n100 == </span><span class="s3">3</span><span class="s1">)</span>
+    <span class="s2">assert </span><span class="s1">leapyear == _is_leap(year)</span>
+    <span class="s1">month = (n + </span><span class="s3">50</span><span class="s1">) &gt;&gt; </span><span class="s3">5</span>
+    <span class="s1">preceding = _DAYS_BEFORE_MONTH[month] + (month &gt; </span><span class="s3">2 </span><span class="s2">and </span><span class="s1">leapyear)</span>
+    <span class="s2">if </span><span class="s1">preceding &gt; n:  </span><span class="s4"># estimate is too large</span>
+        <span class="s1">month -= </span><span class="s3">1</span>
+        <span class="s1">preceding -= _DAYS_IN_MONTH[month] + (month == </span><span class="s3">2 </span><span class="s2">and </span><span class="s1">leapyear)</span>
+    <span class="s1">n -= preceding</span>
+    <span class="s2">assert </span><span class="s3">0 </span><span class="s1">&lt;= n &lt; _days_in_month(year</span><span class="s2">, </span><span class="s1">month)</span>
+
+    <span class="s4"># Now the year and month are correct, and n is the offset from the</span>
+    <span class="s4"># start of that month:  we're done!</span>
+    <span class="s2">return </span><span class="s1">year</span><span class="s2">, </span><span class="s1">month</span><span class="s2">, </span><span class="s1">n+</span><span class="s3">1</span>
+
+<span class="s4"># Month and day names.  For localized versions, see the calendar module.</span>
+<span class="s1">_MONTHNAMES = [</span><span class="s2">None, </span><span class="s5">&quot;Jan&quot;</span><span class="s2">, </span><span class="s5">&quot;Feb&quot;</span><span class="s2">, </span><span class="s5">&quot;Mar&quot;</span><span class="s2">, </span><span class="s5">&quot;Apr&quot;</span><span class="s2">, </span><span class="s5">&quot;May&quot;</span><span class="s2">, </span><span class="s5">&quot;Jun&quot;</span><span class="s2">,</span>
+                     <span class="s5">&quot;Jul&quot;</span><span class="s2">, </span><span class="s5">&quot;Aug&quot;</span><span class="s2">, </span><span class="s5">&quot;Sep&quot;</span><span class="s2">, </span><span class="s5">&quot;Oct&quot;</span><span class="s2">, </span><span class="s5">&quot;Nov&quot;</span><span class="s2">, </span><span class="s5">&quot;Dec&quot;</span><span class="s1">]</span>
+<span class="s1">_DAYNAMES = [</span><span class="s2">None, </span><span class="s5">&quot;Mon&quot;</span><span class="s2">, </span><span class="s5">&quot;Tue&quot;</span><span class="s2">, </span><span class="s5">&quot;Wed&quot;</span><span class="s2">, </span><span class="s5">&quot;Thu&quot;</span><span class="s2">, </span><span class="s5">&quot;Fri&quot;</span><span class="s2">, </span><span class="s5">&quot;Sat&quot;</span><span class="s2">, </span><span class="s5">&quot;Sun&quot;</span><span class="s1">]</span>
+
+
+<span class="s2">def </span><span class="s1">_build_struct_time(y</span><span class="s2">, </span><span class="s1">m</span><span class="s2">, </span><span class="s1">d</span><span class="s2">, </span><span class="s1">hh</span><span class="s2">, </span><span class="s1">mm</span><span class="s2">, </span><span class="s1">ss</span><span class="s2">, </span><span class="s1">dstflag):</span>
+    <span class="s1">wday = (_ymd2ord(y</span><span class="s2">, </span><span class="s1">m</span><span class="s2">, </span><span class="s1">d) + </span><span class="s3">6</span><span class="s1">) % </span><span class="s3">7</span>
+    <span class="s1">dnum = _days_before_month(y</span><span class="s2">, </span><span class="s1">m) + d</span>
+    <span class="s2">return </span><span class="s1">_time.struct_time((y</span><span class="s2">, </span><span class="s1">m</span><span class="s2">, </span><span class="s1">d</span><span class="s2">, </span><span class="s1">hh</span><span class="s2">, </span><span class="s1">mm</span><span class="s2">, </span><span class="s1">ss</span><span class="s2">, </span><span class="s1">wday</span><span class="s2">, </span><span class="s1">dnum</span><span class="s2">, </span><span class="s1">dstflag))</span>
+
+<span class="s2">def </span><span class="s1">_format_time(hh</span><span class="s2">, </span><span class="s1">mm</span><span class="s2">, </span><span class="s1">ss</span><span class="s2">, </span><span class="s1">us):</span>
+    <span class="s4"># Skip trailing microseconds when us==0.</span>
+    <span class="s1">result = </span><span class="s5">&quot;%02d:%02d:%02d&quot; </span><span class="s1">% (hh</span><span class="s2">, </span><span class="s1">mm</span><span class="s2">, </span><span class="s1">ss)</span>
+    <span class="s2">if </span><span class="s1">us:</span>
+        <span class="s1">result += </span><span class="s5">&quot;.%06d&quot; </span><span class="s1">% us</span>
+    <span class="s2">return </span><span class="s1">result</span>
+
+<span class="s4"># Correctly substitute for %z and %Z escapes in strftime formats.</span>
+<span class="s2">def </span><span class="s1">_wrap_strftime(object</span><span class="s2">, </span><span class="s1">format</span><span class="s2">, </span><span class="s1">timetuple):</span>
+    <span class="s4"># Don't call utcoffset() or tzname() unless actually needed.</span>
+    <span class="s1">freplace = </span><span class="s2">None </span><span class="s4"># the string to use for %f</span>
+    <span class="s1">zreplace = </span><span class="s2">None </span><span class="s4"># the string to use for %z</span>
+    <span class="s1">Zreplace = </span><span class="s2">None </span><span class="s4"># the string to use for %Z</span>
+
+    <span class="s4"># Scan format for %z and %Z escapes, replacing as needed.</span>
+    <span class="s1">newformat = []</span>
+    <span class="s1">push = newformat.append</span>
+    <span class="s1">i</span><span class="s2">, </span><span class="s1">n = </span><span class="s3">0</span><span class="s2">, </span><span class="s1">len(format)</span>
+    <span class="s2">while </span><span class="s1">i &lt; n:</span>
+        <span class="s1">ch = format[i]</span>
+        <span class="s1">i += </span><span class="s3">1</span>
+        <span class="s2">if </span><span class="s1">ch == </span><span class="s5">'%'</span><span class="s1">:</span>
+            <span class="s2">if </span><span class="s1">i &lt; n:</span>
+                <span class="s1">ch = format[i]</span>
+                <span class="s1">i += </span><span class="s3">1</span>
+                <span class="s2">if </span><span class="s1">ch == </span><span class="s5">'f'</span><span class="s1">:</span>
+                    <span class="s2">if </span><span class="s1">freplace </span><span class="s2">is None</span><span class="s1">:</span>
+                        <span class="s1">freplace = </span><span class="s5">'%06d' </span><span class="s1">% getattr(object</span><span class="s2">,</span>
+                                                    <span class="s5">'microsecond'</span><span class="s2">, </span><span class="s3">0</span><span class="s1">)</span>
+                    <span class="s1">newformat.append(freplace)</span>
+                <span class="s2">elif </span><span class="s1">ch == </span><span class="s5">'z'</span><span class="s1">:</span>
+                    <span class="s2">if </span><span class="s1">zreplace </span><span class="s2">is None</span><span class="s1">:</span>
+                        <span class="s1">zreplace = </span><span class="s5">&quot;&quot;</span>
+                        <span class="s2">if </span><span class="s1">hasattr(object</span><span class="s2">, </span><span class="s5">&quot;utcoffset&quot;</span><span class="s1">):</span>
+                            <span class="s1">offset = object.utcoffset()</span>
+                            <span class="s2">if </span><span class="s1">offset </span><span class="s2">is not None</span><span class="s1">:</span>
+                                <span class="s1">sign = </span><span class="s5">'+'</span>
+                                <span class="s2">if </span><span class="s1">offset.days &lt; </span><span class="s3">0</span><span class="s1">:</span>
+                                    <span class="s1">offset = -offset</span>
+                                    <span class="s1">sign = </span><span class="s5">'-'</span>
+                                <span class="s1">h</span><span class="s2">, </span><span class="s1">m = divmod(offset</span><span class="s2">, </span><span class="s1">timedelta(hours=</span><span class="s3">1</span><span class="s1">))</span>
+                                <span class="s2">assert not </span><span class="s1">m % timedelta(minutes=</span><span class="s3">1</span><span class="s1">)</span><span class="s2">, </span><span class="s5">&quot;whole minute&quot;</span>
+                                <span class="s1">m //= timedelta(minutes=</span><span class="s3">1</span><span class="s1">)</span>
+                                <span class="s1">zreplace = </span><span class="s5">'%c%02d%02d' </span><span class="s1">% (sign</span><span class="s2">, </span><span class="s1">h</span><span class="s2">, </span><span class="s1">m)</span>
+                    <span class="s2">assert </span><span class="s5">'%' </span><span class="s2">not in </span><span class="s1">zreplace</span>
+                    <span class="s1">newformat.append(zreplace)</span>
+                <span class="s2">elif </span><span class="s1">ch == </span><span class="s5">'Z'</span><span class="s1">:</span>
+                    <span class="s2">if </span><span class="s1">Zreplace </span><span class="s2">is None</span><span class="s1">:</span>
+                        <span class="s1">Zreplace = </span><span class="s5">&quot;&quot;</span>
+                        <span class="s2">if </span><span class="s1">hasattr(object</span><span class="s2">, </span><span class="s5">&quot;tzname&quot;</span><span class="s1">):</span>
+                            <span class="s1">s = object.tzname()</span>
+                            <span class="s2">if </span><span class="s1">s </span><span class="s2">is not None</span><span class="s1">:</span>
+                                <span class="s4"># strftime is going to have at this: escape %</span>
+                                <span class="s1">Zreplace = s.replace(</span><span class="s5">'%'</span><span class="s2">, </span><span class="s5">'%%'</span><span class="s1">)</span>
+                    <span class="s1">newformat.append(Zreplace)</span>
+                <span class="s2">else</span><span class="s1">:</span>
+                    <span class="s1">push(</span><span class="s5">'%'</span><span class="s1">)</span>
+                    <span class="s1">push(ch)</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s1">push(</span><span class="s5">'%'</span><span class="s1">)</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">push(ch)</span>
+    <span class="s1">newformat = </span><span class="s5">&quot;&quot;</span><span class="s1">.join(newformat)</span>
+    <span class="s2">return </span><span class="s1">_time.strftime(newformat</span><span class="s2">, </span><span class="s1">timetuple)</span>
+
+<span class="s2">def </span><span class="s1">_call_tzinfo_method(tzinfo</span><span class="s2">, </span><span class="s1">methname</span><span class="s2">, </span><span class="s1">tzinfoarg):</span>
+    <span class="s2">if </span><span class="s1">tzinfo </span><span class="s2">is None</span><span class="s1">:</span>
+        <span class="s2">return None</span>
+    <span class="s2">return </span><span class="s1">getattr(tzinfo</span><span class="s2">, </span><span class="s1">methname)(tzinfoarg)</span>
+
+<span class="s4"># Just raise TypeError if the arg isn't None or a string.</span>
+<span class="s2">def </span><span class="s1">_check_tzname(name):</span>
+    <span class="s2">if </span><span class="s1">name </span><span class="s2">is not None and not </span><span class="s1">isinstance(name</span><span class="s2">, </span><span class="s1">str):</span>
+        <span class="s2">raise </span><span class="s1">TypeError(</span><span class="s5">&quot;tzinfo.tzname() must return None or string, &quot;</span>
+                        <span class="s5">&quot;not '%s'&quot; </span><span class="s1">% type(name))</span>
+
+<span class="s4"># name is the offset-producing method, &quot;utcoffset&quot; or &quot;dst&quot;.</span>
+<span class="s4"># offset is what it returned.</span>
+<span class="s4"># If offset isn't None or timedelta, raises TypeError.</span>
+<span class="s4"># If offset is None, returns None.</span>
+<span class="s4"># Else offset is checked for being in range, and a whole # of minutes.</span>
+<span class="s4"># If it is, its integer value is returned.  Else ValueError is raised.</span>
+<span class="s2">def </span><span class="s1">_check_utc_offset(name</span><span class="s2">, </span><span class="s1">offset):</span>
+    <span class="s2">assert </span><span class="s1">name </span><span class="s2">in </span><span class="s1">(</span><span class="s5">&quot;utcoffset&quot;</span><span class="s2">, </span><span class="s5">&quot;dst&quot;</span><span class="s1">)</span>
+    <span class="s2">if </span><span class="s1">offset </span><span class="s2">is None</span><span class="s1">:</span>
+        <span class="s2">return</span>
+    <span class="s2">if not </span><span class="s1">isinstance(offset</span><span class="s2">, </span><span class="s1">timedelta):</span>
+        <span class="s2">raise </span><span class="s1">TypeError(</span><span class="s5">&quot;tzinfo.%s() must return None &quot;</span>
+                        <span class="s5">&quot;or timedelta, not '%s'&quot; </span><span class="s1">% (name</span><span class="s2">, </span><span class="s1">type(offset)))</span>
+    <span class="s2">if </span><span class="s1">offset % timedelta(minutes=</span><span class="s3">1</span><span class="s1">) </span><span class="s2">or </span><span class="s1">offset.microseconds:</span>
+        <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s5">&quot;tzinfo.%s() must return a whole number &quot;</span>
+                         <span class="s5">&quot;of minutes, got %s&quot; </span><span class="s1">% (name</span><span class="s2">, </span><span class="s1">offset))</span>
+    <span class="s2">if not </span><span class="s1">-timedelta(</span><span class="s3">1</span><span class="s1">) &lt; offset &lt; timedelta(</span><span class="s3">1</span><span class="s1">):</span>
+        <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s5">&quot;%s()=%s, must be must be strictly between&quot;</span>
+                         <span class="s5">&quot; -timedelta(hours=24) and timedelta(hours=24)&quot;</span>
+                         <span class="s1">% (name</span><span class="s2">, </span><span class="s1">offset))</span>
+
+<span class="s2">def </span><span class="s1">_check_date_fields(year</span><span class="s2">, </span><span class="s1">month</span><span class="s2">, </span><span class="s1">day):</span>
+    <span class="s2">if not </span><span class="s1">isinstance(year</span><span class="s2">, </span><span class="s1">int):</span>
+        <span class="s2">raise </span><span class="s1">TypeError(</span><span class="s5">'int expected'</span><span class="s1">)</span>
+    <span class="s2">if not </span><span class="s1">MINYEAR &lt;= year &lt;= MAXYEAR:</span>
+        <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s5">'year must be in %d..%d' </span><span class="s1">% (MINYEAR</span><span class="s2">, </span><span class="s1">MAXYEAR)</span><span class="s2">, </span><span class="s1">year)</span>
+    <span class="s2">if not </span><span class="s3">1 </span><span class="s1">&lt;= month &lt;= </span><span class="s3">12</span><span class="s1">:</span>
+        <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s5">'month must be in 1..12'</span><span class="s2">, </span><span class="s1">month)</span>
+    <span class="s1">dim = _days_in_month(year</span><span class="s2">, </span><span class="s1">month)</span>
+    <span class="s2">if not </span><span class="s3">1 </span><span class="s1">&lt;= day &lt;= dim:</span>
+        <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s5">'day must be in 1..%d' </span><span class="s1">% dim</span><span class="s2">, </span><span class="s1">day)</span>
+
+<span class="s2">def </span><span class="s1">_check_time_fields(hour</span><span class="s2">, </span><span class="s1">minute</span><span class="s2">, </span><span class="s1">second</span><span class="s2">, </span><span class="s1">microsecond):</span>
+    <span class="s2">if not </span><span class="s1">isinstance(hour</span><span class="s2">, </span><span class="s1">int):</span>
+        <span class="s2">raise </span><span class="s1">TypeError(</span><span class="s5">'int expected'</span><span class="s1">)</span>
+    <span class="s2">if not </span><span class="s3">0 </span><span class="s1">&lt;= hour &lt;= </span><span class="s3">23</span><span class="s1">:</span>
+        <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s5">'hour must be in 0..23'</span><span class="s2">, </span><span class="s1">hour)</span>
+    <span class="s2">if not </span><span class="s3">0 </span><span class="s1">&lt;= minute &lt;= </span><span class="s3">59</span><span class="s1">:</span>
+        <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s5">'minute must be in 0..59'</span><span class="s2">, </span><span class="s1">minute)</span>
+    <span class="s2">if not </span><span class="s3">0 </span><span class="s1">&lt;= second &lt;= </span><span class="s3">59</span><span class="s1">:</span>
+        <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s5">'second must be in 0..59'</span><span class="s2">, </span><span class="s1">second)</span>
+    <span class="s2">if not </span><span class="s3">0 </span><span class="s1">&lt;= microsecond &lt;= </span><span class="s3">999999</span><span class="s1">:</span>
+        <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s5">'microsecond must be in 0..999999'</span><span class="s2">, </span><span class="s1">microsecond)</span>
+
+<span class="s2">def </span><span class="s1">_check_tzinfo_arg(tz):</span>
+    <span class="s2">if </span><span class="s1">tz </span><span class="s2">is not None and not </span><span class="s1">isinstance(tz</span><span class="s2">, </span><span class="s1">tzinfo):</span>
+        <span class="s2">raise </span><span class="s1">TypeError(</span><span class="s5">&quot;tzinfo argument must be None or of a tzinfo subclass&quot;</span><span class="s1">)</span>
+
+<span class="s2">def </span><span class="s1">_cmperror(x</span><span class="s2">, </span><span class="s1">y):</span>
+    <span class="s2">raise </span><span class="s1">TypeError(</span><span class="s5">&quot;can't compare '%s' to '%s'&quot; </span><span class="s1">% (</span>
+                    <span class="s1">type(x).__name__</span><span class="s2">, </span><span class="s1">type(y).__name__))</span>
+
+<span class="s2">class </span><span class="s1">timedelta(object):</span>
+    <span class="s0">&quot;&quot;&quot;Represent the difference between two datetime objects. 
+ 
+    Supported operators: 
+ 
+    - add, subtract timedelta 
+    - unary plus, minus, abs 
+    - compare to timedelta 
+    - multiply, divide by int 
+ 
+    In addition, datetime supports subtraction of two datetime objects 
+    returning a timedelta, and addition or subtraction of a datetime 
+    and a timedelta giving a datetime. 
+ 
+    Representation: (days, seconds, microseconds).  Why?  Because I 
+    felt like it. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">__slots__ = </span><span class="s5">'_days'</span><span class="s2">, </span><span class="s5">'_seconds'</span><span class="s2">, </span><span class="s5">'_microseconds'</span>
+
+    <span class="s2">def </span><span class="s1">__new__(cls</span><span class="s2">, </span><span class="s1">days=</span><span class="s3">0</span><span class="s2">, </span><span class="s1">seconds=</span><span class="s3">0</span><span class="s2">, </span><span class="s1">microseconds=</span><span class="s3">0</span><span class="s2">,</span>
+                <span class="s1">milliseconds=</span><span class="s3">0</span><span class="s2">, </span><span class="s1">minutes=</span><span class="s3">0</span><span class="s2">, </span><span class="s1">hours=</span><span class="s3">0</span><span class="s2">, </span><span class="s1">weeks=</span><span class="s3">0</span><span class="s1">):</span>
+        <span class="s4"># Doing this efficiently and accurately in C is going to be difficult</span>
+        <span class="s4"># and error-prone, due to ubiquitous overflow possibilities, and that</span>
+        <span class="s4"># C double doesn't have enough bits of precision to represent</span>
+        <span class="s4"># microseconds over 10K years faithfully.  The code here tries to make</span>
+        <span class="s4"># explicit where go-fast assumptions can be relied on, in order to</span>
+        <span class="s4"># guide the C implementation; it's way more convoluted than speed-</span>
+        <span class="s4"># ignoring auto-overflow-to-long idiomatic Python could be.</span>
+
+        <span class="s4"># XXX Check that all inputs are ints or floats.</span>
+
+        <span class="s4"># Final values, all integer.</span>
+        <span class="s4"># s and us fit in 32-bit signed ints; d isn't bounded.</span>
+        <span class="s1">d = s = us = </span><span class="s3">0</span>
+
+        <span class="s4"># Normalize everything to days, seconds, microseconds.</span>
+        <span class="s1">days += weeks*</span><span class="s3">7</span>
+        <span class="s1">seconds += minutes*</span><span class="s3">60 </span><span class="s1">+ hours*</span><span class="s3">3600</span>
+        <span class="s1">microseconds += milliseconds*</span><span class="s3">1000</span>
+
+        <span class="s4"># Get rid of all fractions, and normalize s and us.</span>
+        <span class="s4"># Take a deep breath &lt;wink&gt;.</span>
+        <span class="s2">if </span><span class="s1">isinstance(days</span><span class="s2">, </span><span class="s1">float):</span>
+            <span class="s1">dayfrac</span><span class="s2">, </span><span class="s1">days = _math.modf(days)</span>
+            <span class="s1">daysecondsfrac</span><span class="s2">, </span><span class="s1">daysecondswhole = _math.modf(dayfrac * (</span><span class="s3">24.</span><span class="s1">*</span><span class="s3">3600.</span><span class="s1">))</span>
+            <span class="s2">assert </span><span class="s1">daysecondswhole == int(daysecondswhole)  </span><span class="s4"># can't overflow</span>
+            <span class="s1">s = int(daysecondswhole)</span>
+            <span class="s2">assert </span><span class="s1">days == int(days)</span>
+            <span class="s1">d = int(days)</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">daysecondsfrac = </span><span class="s3">0.0</span>
+            <span class="s1">d = days</span>
+        <span class="s2">assert </span><span class="s1">isinstance(daysecondsfrac</span><span class="s2">, </span><span class="s1">float)</span>
+        <span class="s2">assert </span><span class="s1">abs(daysecondsfrac) &lt;= </span><span class="s3">1.0</span>
+        <span class="s2">assert </span><span class="s1">isinstance(d</span><span class="s2">, </span><span class="s1">int)</span>
+        <span class="s2">assert </span><span class="s1">abs(s) &lt;= </span><span class="s3">24 </span><span class="s1">* </span><span class="s3">3600</span>
+        <span class="s4"># days isn't referenced again before redefinition</span>
+
+        <span class="s2">if </span><span class="s1">isinstance(seconds</span><span class="s2">, </span><span class="s1">float):</span>
+            <span class="s1">secondsfrac</span><span class="s2">, </span><span class="s1">seconds = _math.modf(seconds)</span>
+            <span class="s2">assert </span><span class="s1">seconds == int(seconds)</span>
+            <span class="s1">seconds = int(seconds)</span>
+            <span class="s1">secondsfrac += daysecondsfrac</span>
+            <span class="s2">assert </span><span class="s1">abs(secondsfrac) &lt;= </span><span class="s3">2.0</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">secondsfrac = daysecondsfrac</span>
+        <span class="s4"># daysecondsfrac isn't referenced again</span>
+        <span class="s2">assert </span><span class="s1">isinstance(secondsfrac</span><span class="s2">, </span><span class="s1">float)</span>
+        <span class="s2">assert </span><span class="s1">abs(secondsfrac) &lt;= </span><span class="s3">2.0</span>
+
+        <span class="s2">assert </span><span class="s1">isinstance(seconds</span><span class="s2">, </span><span class="s1">int)</span>
+        <span class="s1">days</span><span class="s2">, </span><span class="s1">seconds = divmod(seconds</span><span class="s2">, </span><span class="s3">24</span><span class="s1">*</span><span class="s3">3600</span><span class="s1">)</span>
+        <span class="s1">d += days</span>
+        <span class="s1">s += int(seconds)    </span><span class="s4"># can't overflow</span>
+        <span class="s2">assert </span><span class="s1">isinstance(s</span><span class="s2">, </span><span class="s1">int)</span>
+        <span class="s2">assert </span><span class="s1">abs(s) &lt;= </span><span class="s3">2 </span><span class="s1">* </span><span class="s3">24 </span><span class="s1">* </span><span class="s3">3600</span>
+        <span class="s4"># seconds isn't referenced again before redefinition</span>
+
+        <span class="s1">usdouble = secondsfrac * </span><span class="s3">1e6</span>
+        <span class="s2">assert </span><span class="s1">abs(usdouble) &lt; </span><span class="s3">2.1e6    </span><span class="s4"># exact value not critical</span>
+        <span class="s4"># secondsfrac isn't referenced again</span>
+
+        <span class="s2">if </span><span class="s1">isinstance(microseconds</span><span class="s2">, </span><span class="s1">float):</span>
+            <span class="s1">microseconds += usdouble</span>
+            <span class="s1">microseconds = round(microseconds</span><span class="s2">, </span><span class="s3">0</span><span class="s1">)</span>
+            <span class="s1">seconds</span><span class="s2">, </span><span class="s1">microseconds = divmod(microseconds</span><span class="s2">, </span><span class="s3">1e6</span><span class="s1">)</span>
+            <span class="s2">assert </span><span class="s1">microseconds == int(microseconds)</span>
+            <span class="s2">assert </span><span class="s1">seconds == int(seconds)</span>
+            <span class="s1">days</span><span class="s2">, </span><span class="s1">seconds = divmod(seconds</span><span class="s2">, </span><span class="s3">24.</span><span class="s1">*</span><span class="s3">3600.</span><span class="s1">)</span>
+            <span class="s2">assert </span><span class="s1">days == int(days)</span>
+            <span class="s2">assert </span><span class="s1">seconds == int(seconds)</span>
+            <span class="s1">d += int(days)</span>
+            <span class="s1">s += int(seconds)   </span><span class="s4"># can't overflow</span>
+            <span class="s2">assert </span><span class="s1">isinstance(s</span><span class="s2">, </span><span class="s1">int)</span>
+            <span class="s2">assert </span><span class="s1">abs(s) &lt;= </span><span class="s3">3 </span><span class="s1">* </span><span class="s3">24 </span><span class="s1">* </span><span class="s3">3600</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">seconds</span><span class="s2">, </span><span class="s1">microseconds = divmod(microseconds</span><span class="s2">, </span><span class="s3">1000000</span><span class="s1">)</span>
+            <span class="s1">days</span><span class="s2">, </span><span class="s1">seconds = divmod(seconds</span><span class="s2">, </span><span class="s3">24</span><span class="s1">*</span><span class="s3">3600</span><span class="s1">)</span>
+            <span class="s1">d += days</span>
+            <span class="s1">s += int(seconds)    </span><span class="s4"># can't overflow</span>
+            <span class="s2">assert </span><span class="s1">isinstance(s</span><span class="s2">, </span><span class="s1">int)</span>
+            <span class="s2">assert </span><span class="s1">abs(s) &lt;= </span><span class="s3">3 </span><span class="s1">* </span><span class="s3">24 </span><span class="s1">* </span><span class="s3">3600</span>
+            <span class="s1">microseconds = float(microseconds)</span>
+            <span class="s1">microseconds += usdouble</span>
+            <span class="s1">microseconds = round(microseconds</span><span class="s2">, </span><span class="s3">0</span><span class="s1">)</span>
+        <span class="s2">assert </span><span class="s1">abs(s) &lt;= </span><span class="s3">3 </span><span class="s1">* </span><span class="s3">24 </span><span class="s1">* </span><span class="s3">3600</span>
+        <span class="s2">assert </span><span class="s1">abs(microseconds) &lt; </span><span class="s3">3.1e6</span>
+
+        <span class="s4"># Just a little bit of carrying possible for microseconds and seconds.</span>
+        <span class="s2">assert </span><span class="s1">isinstance(microseconds</span><span class="s2">, </span><span class="s1">float)</span>
+        <span class="s2">assert </span><span class="s1">int(microseconds) == microseconds</span>
+        <span class="s1">us = int(microseconds)</span>
+        <span class="s1">seconds</span><span class="s2">, </span><span class="s1">us = divmod(us</span><span class="s2">, </span><span class="s3">1000000</span><span class="s1">)</span>
+        <span class="s1">s += seconds    </span><span class="s4"># cant't overflow</span>
+        <span class="s2">assert </span><span class="s1">isinstance(s</span><span class="s2">, </span><span class="s1">int)</span>
+        <span class="s1">days</span><span class="s2">, </span><span class="s1">s = divmod(s</span><span class="s2">, </span><span class="s3">24</span><span class="s1">*</span><span class="s3">3600</span><span class="s1">)</span>
+        <span class="s1">d += days</span>
+
+        <span class="s2">assert </span><span class="s1">isinstance(d</span><span class="s2">, </span><span class="s1">int)</span>
+        <span class="s2">assert </span><span class="s1">isinstance(s</span><span class="s2">, </span><span class="s1">int) </span><span class="s2">and </span><span class="s3">0 </span><span class="s1">&lt;= s &lt; </span><span class="s3">24</span><span class="s1">*</span><span class="s3">3600</span>
+        <span class="s2">assert </span><span class="s1">isinstance(us</span><span class="s2">, </span><span class="s1">int) </span><span class="s2">and </span><span class="s3">0 </span><span class="s1">&lt;= us &lt; </span><span class="s3">1000000</span>
+
+        <span class="s1">self = object.__new__(cls)</span>
+
+        <span class="s1">self._days = d</span>
+        <span class="s1">self._seconds = s</span>
+        <span class="s1">self._microseconds = us</span>
+        <span class="s2">if </span><span class="s1">abs(d) &gt; </span><span class="s3">999999999</span><span class="s1">:</span>
+            <span class="s2">raise </span><span class="s1">OverflowError(</span><span class="s5">&quot;timedelta # of days is too large: %d&quot; </span><span class="s1">% d)</span>
+
+        <span class="s2">return </span><span class="s1">self</span>
+
+    <span class="s2">def </span><span class="s1">__repr__(self):</span>
+        <span class="s2">if </span><span class="s1">self._microseconds:</span>
+            <span class="s2">return </span><span class="s5">&quot;%s(%d, %d, %d)&quot; </span><span class="s1">% (</span><span class="s5">'datetime.' </span><span class="s1">+ self.__class__.__name__</span><span class="s2">,</span>
+                                       <span class="s1">self._days</span><span class="s2">,</span>
+                                       <span class="s1">self._seconds</span><span class="s2">,</span>
+                                       <span class="s1">self._microseconds)</span>
+        <span class="s2">if </span><span class="s1">self._seconds:</span>
+            <span class="s2">return </span><span class="s5">&quot;%s(%d, %d)&quot; </span><span class="s1">% (</span><span class="s5">'datetime.' </span><span class="s1">+ self.__class__.__name__</span><span class="s2">,</span>
+                                   <span class="s1">self._days</span><span class="s2">,</span>
+                                   <span class="s1">self._seconds)</span>
+        <span class="s2">return </span><span class="s5">&quot;%s(%d)&quot; </span><span class="s1">% (</span><span class="s5">'datetime.' </span><span class="s1">+ self.__class__.__name__</span><span class="s2">, </span><span class="s1">self._days)</span>
+
+    <span class="s2">def </span><span class="s1">__str__(self):</span>
+        <span class="s1">mm</span><span class="s2">, </span><span class="s1">ss = divmod(self._seconds</span><span class="s2">, </span><span class="s3">60</span><span class="s1">)</span>
+        <span class="s1">hh</span><span class="s2">, </span><span class="s1">mm = divmod(mm</span><span class="s2">, </span><span class="s3">60</span><span class="s1">)</span>
+        <span class="s1">s = </span><span class="s5">&quot;%d:%02d:%02d&quot; </span><span class="s1">% (hh</span><span class="s2">, </span><span class="s1">mm</span><span class="s2">, </span><span class="s1">ss)</span>
+        <span class="s2">if </span><span class="s1">self._days:</span>
+            <span class="s2">def </span><span class="s1">plural(n):</span>
+                <span class="s2">return </span><span class="s1">n</span><span class="s2">, </span><span class="s1">abs(n) != </span><span class="s3">1 </span><span class="s2">and </span><span class="s5">&quot;s&quot; </span><span class="s2">or </span><span class="s5">&quot;&quot;</span>
+            <span class="s1">s = (</span><span class="s5">&quot;%d day%s, &quot; </span><span class="s1">% plural(self._days)) + s</span>
+        <span class="s2">if </span><span class="s1">self._microseconds:</span>
+            <span class="s1">s = s + </span><span class="s5">&quot;.%06d&quot; </span><span class="s1">% self._microseconds</span>
+        <span class="s2">return </span><span class="s1">s</span>
+
+    <span class="s2">def </span><span class="s1">total_seconds(self):</span>
+        <span class="s0">&quot;&quot;&quot;Total seconds in the duration.&quot;&quot;&quot;</span>
+        <span class="s2">return </span><span class="s1">((self.days * </span><span class="s3">86400 </span><span class="s1">+ self.seconds)*</span><span class="s3">10</span><span class="s1">**</span><span class="s3">6 </span><span class="s1">+</span>
+                <span class="s1">self.microseconds) / </span><span class="s3">10</span><span class="s1">**</span><span class="s3">6</span>
+
+    <span class="s4"># Read-only field accessors</span>
+    <span class="s1">@property</span>
+    <span class="s2">def </span><span class="s1">days(self):</span>
+        <span class="s0">&quot;&quot;&quot;days&quot;&quot;&quot;</span>
+        <span class="s2">return </span><span class="s1">self._days</span>
+
+    <span class="s1">@property</span>
+    <span class="s2">def </span><span class="s1">seconds(self):</span>
+        <span class="s0">&quot;&quot;&quot;seconds&quot;&quot;&quot;</span>
+        <span class="s2">return </span><span class="s1">self._seconds</span>
+
+    <span class="s1">@property</span>
+    <span class="s2">def </span><span class="s1">microseconds(self):</span>
+        <span class="s0">&quot;&quot;&quot;microseconds&quot;&quot;&quot;</span>
+        <span class="s2">return </span><span class="s1">self._microseconds</span>
+
+    <span class="s2">def </span><span class="s1">__add__(self</span><span class="s2">, </span><span class="s1">other):</span>
+        <span class="s2">if </span><span class="s1">isinstance(other</span><span class="s2">, </span><span class="s1">timedelta):</span>
+            <span class="s4"># for CPython compatibility, we cannot use</span>
+            <span class="s4"># our __class__ here, but need a real timedelta</span>
+            <span class="s2">return </span><span class="s1">timedelta(self._days + other._days</span><span class="s2">,</span>
+                             <span class="s1">self._seconds + other._seconds</span><span class="s2">,</span>
+                             <span class="s1">self._microseconds + other._microseconds)</span>
+        <span class="s2">return </span><span class="s1">NotImplemented</span>
+
+    <span class="s1">__radd__ = __add__</span>
+
+    <span class="s2">def </span><span class="s1">__sub__(self</span><span class="s2">, </span><span class="s1">other):</span>
+        <span class="s2">if </span><span class="s1">isinstance(other</span><span class="s2">, </span><span class="s1">timedelta):</span>
+            <span class="s4"># for CPython compatibility, we cannot use</span>
+            <span class="s4"># our __class__ here, but need a real timedelta</span>
+            <span class="s2">return </span><span class="s1">timedelta(self._days - other._days</span><span class="s2">,</span>
+                             <span class="s1">self._seconds - other._seconds</span><span class="s2">,</span>
+                             <span class="s1">self._microseconds - other._microseconds)</span>
+        <span class="s2">return </span><span class="s1">NotImplemented</span>
+
+    <span class="s2">def </span><span class="s1">__rsub__(self</span><span class="s2">, </span><span class="s1">other):</span>
+        <span class="s2">if </span><span class="s1">isinstance(other</span><span class="s2">, </span><span class="s1">timedelta):</span>
+            <span class="s2">return </span><span class="s1">-self + other</span>
+        <span class="s2">return </span><span class="s1">NotImplemented</span>
+
+    <span class="s2">def </span><span class="s1">__neg__(self):</span>
+        <span class="s4"># for CPython compatibility, we cannot use</span>
+        <span class="s4"># our __class__ here, but need a real timedelta</span>
+        <span class="s2">return </span><span class="s1">timedelta(-self._days</span><span class="s2">,</span>
+                         <span class="s1">-self._seconds</span><span class="s2">,</span>
+                         <span class="s1">-self._microseconds)</span>
+
+    <span class="s2">def </span><span class="s1">__pos__(self):</span>
+        <span class="s2">return </span><span class="s1">self</span>
+
+    <span class="s2">def </span><span class="s1">__abs__(self):</span>
+        <span class="s2">if </span><span class="s1">self._days &lt; </span><span class="s3">0</span><span class="s1">:</span>
+            <span class="s2">return </span><span class="s1">-self</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s2">return </span><span class="s1">self</span>
+
+    <span class="s2">def </span><span class="s1">__mul__(self</span><span class="s2">, </span><span class="s1">other):</span>
+        <span class="s2">if </span><span class="s1">isinstance(other</span><span class="s2">, </span><span class="s1">int):</span>
+            <span class="s4"># for CPython compatibility, we cannot use</span>
+            <span class="s4"># our __class__ here, but need a real timedelta</span>
+            <span class="s2">return </span><span class="s1">timedelta(self._days * other</span><span class="s2">,</span>
+                             <span class="s1">self._seconds * other</span><span class="s2">,</span>
+                             <span class="s1">self._microseconds * other)</span>
+        <span class="s2">if </span><span class="s1">isinstance(other</span><span class="s2">, </span><span class="s1">float):</span>
+            <span class="s1">a</span><span class="s2">, </span><span class="s1">b = other.as_integer_ratio()</span>
+            <span class="s2">return </span><span class="s1">self * a / b</span>
+        <span class="s2">return </span><span class="s1">NotImplemented</span>
+
+    <span class="s1">__rmul__ = __mul__</span>
+
+    <span class="s2">def </span><span class="s1">_to_microseconds(self):</span>
+        <span class="s2">return </span><span class="s1">((self._days * (</span><span class="s3">24</span><span class="s1">*</span><span class="s3">3600</span><span class="s1">) + self._seconds) * </span><span class="s3">1000000 </span><span class="s1">+</span>
+                <span class="s1">self._microseconds)</span>
+
+    <span class="s2">def </span><span class="s1">__floordiv__(self</span><span class="s2">, </span><span class="s1">other):</span>
+        <span class="s2">if not </span><span class="s1">isinstance(other</span><span class="s2">, </span><span class="s1">(int</span><span class="s2">, </span><span class="s1">timedelta)):</span>
+            <span class="s2">return </span><span class="s1">NotImplemented</span>
+        <span class="s1">usec = self._to_microseconds()</span>
+        <span class="s2">if </span><span class="s1">isinstance(other</span><span class="s2">, </span><span class="s1">timedelta):</span>
+            <span class="s2">return </span><span class="s1">usec // other._to_microseconds()</span>
+        <span class="s2">if </span><span class="s1">isinstance(other</span><span class="s2">, </span><span class="s1">int):</span>
+            <span class="s2">return </span><span class="s1">timedelta(</span><span class="s3">0</span><span class="s2">, </span><span class="s3">0</span><span class="s2">, </span><span class="s1">usec // other)</span>
+
+    <span class="s2">def </span><span class="s1">__truediv__(self</span><span class="s2">, </span><span class="s1">other):</span>
+        <span class="s2">if not </span><span class="s1">isinstance(other</span><span class="s2">, </span><span class="s1">(int</span><span class="s2">, </span><span class="s1">float</span><span class="s2">, </span><span class="s1">timedelta)):</span>
+            <span class="s2">return </span><span class="s1">NotImplemented</span>
+        <span class="s1">usec = self._to_microseconds()</span>
+        <span class="s2">if </span><span class="s1">isinstance(other</span><span class="s2">, </span><span class="s1">timedelta):</span>
+            <span class="s2">return </span><span class="s1">usec / other._to_microseconds()</span>
+        <span class="s2">if </span><span class="s1">isinstance(other</span><span class="s2">, </span><span class="s1">int):</span>
+            <span class="s2">return </span><span class="s1">timedelta(</span><span class="s3">0</span><span class="s2">, </span><span class="s3">0</span><span class="s2">, </span><span class="s1">usec / other)</span>
+        <span class="s2">if </span><span class="s1">isinstance(other</span><span class="s2">, </span><span class="s1">float):</span>
+            <span class="s1">a</span><span class="s2">, </span><span class="s1">b = other.as_integer_ratio()</span>
+            <span class="s2">return </span><span class="s1">timedelta(</span><span class="s3">0</span><span class="s2">, </span><span class="s3">0</span><span class="s2">, </span><span class="s1">b * usec / a)</span>
+
+    <span class="s2">def </span><span class="s1">__mod__(self</span><span class="s2">, </span><span class="s1">other):</span>
+        <span class="s2">if </span><span class="s1">isinstance(other</span><span class="s2">, </span><span class="s1">timedelta):</span>
+            <span class="s1">r = self._to_microseconds() % other._to_microseconds()</span>
+            <span class="s2">return </span><span class="s1">timedelta(</span><span class="s3">0</span><span class="s2">, </span><span class="s3">0</span><span class="s2">, </span><span class="s1">r)</span>
+        <span class="s2">return </span><span class="s1">NotImplemented</span>
+
+    <span class="s2">def </span><span class="s1">__divmod__(self</span><span class="s2">, </span><span class="s1">other):</span>
+        <span class="s2">if </span><span class="s1">isinstance(other</span><span class="s2">, </span><span class="s1">timedelta):</span>
+            <span class="s1">q</span><span class="s2">, </span><span class="s1">r = divmod(self._to_microseconds()</span><span class="s2">,</span>
+                          <span class="s1">other._to_microseconds())</span>
+            <span class="s2">return </span><span class="s1">q</span><span class="s2">, </span><span class="s1">timedelta(</span><span class="s3">0</span><span class="s2">, </span><span class="s3">0</span><span class="s2">, </span><span class="s1">r)</span>
+        <span class="s2">return </span><span class="s1">NotImplemented</span>
+
+    <span class="s4"># Comparisons of timedelta objects with other.</span>
+
+    <span class="s2">def </span><span class="s1">__eq__(self</span><span class="s2">, </span><span class="s1">other):</span>
+        <span class="s2">if </span><span class="s1">isinstance(other</span><span class="s2">, </span><span class="s1">timedelta):</span>
+            <span class="s2">return </span><span class="s1">self._cmp(other) == </span><span class="s3">0</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s2">return False</span>
+
+    <span class="s2">def </span><span class="s1">__ne__(self</span><span class="s2">, </span><span class="s1">other):</span>
+        <span class="s2">if </span><span class="s1">isinstance(other</span><span class="s2">, </span><span class="s1">timedelta):</span>
+            <span class="s2">return </span><span class="s1">self._cmp(other) != </span><span class="s3">0</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s2">return True</span>
+
+    <span class="s2">def </span><span class="s1">__le__(self</span><span class="s2">, </span><span class="s1">other):</span>
+        <span class="s2">if </span><span class="s1">isinstance(other</span><span class="s2">, </span><span class="s1">timedelta):</span>
+            <span class="s2">return </span><span class="s1">self._cmp(other) &lt;= </span><span class="s3">0</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">_cmperror(self</span><span class="s2">, </span><span class="s1">other)</span>
+
+    <span class="s2">def </span><span class="s1">__lt__(self</span><span class="s2">, </span><span class="s1">other):</span>
+        <span class="s2">if </span><span class="s1">isinstance(other</span><span class="s2">, </span><span class="s1">timedelta):</span>
+            <span class="s2">return </span><span class="s1">self._cmp(other) &lt; </span><span class="s3">0</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">_cmperror(self</span><span class="s2">, </span><span class="s1">other)</span>
+
+    <span class="s2">def </span><span class="s1">__ge__(self</span><span class="s2">, </span><span class="s1">other):</span>
+        <span class="s2">if </span><span class="s1">isinstance(other</span><span class="s2">, </span><span class="s1">timedelta):</span>
+            <span class="s2">return </span><span class="s1">self._cmp(other) &gt;= </span><span class="s3">0</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">_cmperror(self</span><span class="s2">, </span><span class="s1">other)</span>
+
+    <span class="s2">def </span><span class="s1">__gt__(self</span><span class="s2">, </span><span class="s1">other):</span>
+        <span class="s2">if </span><span class="s1">isinstance(other</span><span class="s2">, </span><span class="s1">timedelta):</span>
+            <span class="s2">return </span><span class="s1">self._cmp(other) &gt; </span><span class="s3">0</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">_cmperror(self</span><span class="s2">, </span><span class="s1">other)</span>
+
+    <span class="s2">def </span><span class="s1">_cmp(self</span><span class="s2">, </span><span class="s1">other):</span>
+        <span class="s2">assert </span><span class="s1">isinstance(other</span><span class="s2">, </span><span class="s1">timedelta)</span>
+        <span class="s2">return </span><span class="s1">_cmp(self._getstate()</span><span class="s2">, </span><span class="s1">other._getstate())</span>
+
+    <span class="s2">def </span><span class="s1">__hash__(self):</span>
+        <span class="s2">return </span><span class="s1">hash(self._getstate())</span>
+
+    <span class="s2">def </span><span class="s1">__bool__(self):</span>
+        <span class="s2">return </span><span class="s1">(self._days != </span><span class="s3">0 </span><span class="s2">or</span>
+                <span class="s1">self._seconds != </span><span class="s3">0 </span><span class="s2">or</span>
+                <span class="s1">self._microseconds != </span><span class="s3">0</span><span class="s1">)</span>
+
+    <span class="s4"># Pickle support.</span>
+
+    <span class="s2">def </span><span class="s1">_getstate(self):</span>
+        <span class="s2">return </span><span class="s1">(self._days</span><span class="s2">, </span><span class="s1">self._seconds</span><span class="s2">, </span><span class="s1">self._microseconds)</span>
+
+    <span class="s2">def </span><span class="s1">__reduce__(self):</span>
+        <span class="s2">return </span><span class="s1">(self.__class__</span><span class="s2">, </span><span class="s1">self._getstate())</span>
+
+<span class="s1">timedelta.min = timedelta(-</span><span class="s3">999999999</span><span class="s1">)</span>
+<span class="s1">timedelta.max = timedelta(days=</span><span class="s3">999999999</span><span class="s2">, </span><span class="s1">hours=</span><span class="s3">23</span><span class="s2">, </span><span class="s1">minutes=</span><span class="s3">59</span><span class="s2">, </span><span class="s1">seconds=</span><span class="s3">59</span><span class="s2">,</span>
+                          <span class="s1">microseconds=</span><span class="s3">999999</span><span class="s1">)</span>
+<span class="s1">timedelta.resolution = timedelta(microseconds=</span><span class="s3">1</span><span class="s1">)</span>
+
+<span class="s2">class </span><span class="s1">date(object):</span>
+    <span class="s0">&quot;&quot;&quot;Concrete date type. 
+ 
+    Constructors: 
+ 
+    __new__() 
+    fromtimestamp() 
+    today() 
+    fromordinal() 
+ 
+    Operators: 
+ 
+    __repr__, __str__ 
+    __cmp__, __hash__ 
+    __add__, __radd__, __sub__ (add/radd only with timedelta arg) 
+ 
+    Methods: 
+ 
+    timetuple() 
+    toordinal() 
+    weekday() 
+    isoweekday(), isocalendar(), isoformat() 
+    ctime() 
+    strftime() 
+ 
+    Properties (readonly): 
+    year, month, day 
+    &quot;&quot;&quot;</span>
+    <span class="s1">__slots__ = </span><span class="s5">'_year'</span><span class="s2">, </span><span class="s5">'_month'</span><span class="s2">, </span><span class="s5">'_day'</span>
+
+    <span class="s2">def </span><span class="s1">__new__(cls</span><span class="s2">, </span><span class="s1">year</span><span class="s2">, </span><span class="s1">month=</span><span class="s2">None, </span><span class="s1">day=</span><span class="s2">None</span><span class="s1">):</span>
+        <span class="s0">&quot;&quot;&quot;Constructor. 
+ 
+        Arguments: 
+ 
+        year, month, day (required, base 1) 
+        &quot;&quot;&quot;</span>
+        <span class="s2">if </span><span class="s1">(isinstance(year</span><span class="s2">, </span><span class="s1">bytes) </span><span class="s2">and </span><span class="s1">len(year) == </span><span class="s3">4 </span><span class="s2">and</span>
+            <span class="s3">1 </span><span class="s1">&lt;= year[</span><span class="s3">2</span><span class="s1">] &lt;= </span><span class="s3">12 </span><span class="s2">and </span><span class="s1">month </span><span class="s2">is None</span><span class="s1">):  </span><span class="s4"># Month is sane</span>
+            <span class="s4"># Pickle support</span>
+            <span class="s1">self = object.__new__(cls)</span>
+            <span class="s1">self.__setstate(year)</span>
+            <span class="s2">return </span><span class="s1">self</span>
+        <span class="s1">_check_date_fields(year</span><span class="s2">, </span><span class="s1">month</span><span class="s2">, </span><span class="s1">day)</span>
+        <span class="s1">self = object.__new__(cls)</span>
+        <span class="s1">self._year = year</span>
+        <span class="s1">self._month = month</span>
+        <span class="s1">self._day = day</span>
+        <span class="s2">return </span><span class="s1">self</span>
+
+    <span class="s4"># Additional constructors</span>
+
+    <span class="s1">@classmethod</span>
+    <span class="s2">def </span><span class="s1">fromtimestamp(cls</span><span class="s2">, </span><span class="s1">t):</span>
+        <span class="s0">&quot;Construct a date from a POSIX timestamp (like time.time()).&quot;</span>
+        <span class="s1">y</span><span class="s2">, </span><span class="s1">m</span><span class="s2">, </span><span class="s1">d</span><span class="s2">, </span><span class="s1">hh</span><span class="s2">, </span><span class="s1">mm</span><span class="s2">, </span><span class="s1">ss</span><span class="s2">, </span><span class="s1">weekday</span><span class="s2">, </span><span class="s1">jday</span><span class="s2">, </span><span class="s1">dst = _time.localtime(t)</span>
+        <span class="s2">return </span><span class="s1">cls(y</span><span class="s2">, </span><span class="s1">m</span><span class="s2">, </span><span class="s1">d)</span>
+
+    <span class="s1">@classmethod</span>
+    <span class="s2">def </span><span class="s1">today(cls):</span>
+        <span class="s0">&quot;Construct a date from time.time().&quot;</span>
+        <span class="s1">t = _time.time()</span>
+        <span class="s2">return </span><span class="s1">cls.fromtimestamp(t)</span>
+
+    <span class="s1">@classmethod</span>
+    <span class="s2">def </span><span class="s1">fromordinal(cls</span><span class="s2">, </span><span class="s1">n):</span>
+        <span class="s0">&quot;&quot;&quot;Contruct a date from a proleptic Gregorian ordinal. 
+ 
+        January 1 of year 1 is day 1.  Only the year, month and day are 
+        non-zero in the result. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">y</span><span class="s2">, </span><span class="s1">m</span><span class="s2">, </span><span class="s1">d = _ord2ymd(n)</span>
+        <span class="s2">return </span><span class="s1">cls(y</span><span class="s2">, </span><span class="s1">m</span><span class="s2">, </span><span class="s1">d)</span>
+
+    <span class="s4"># Conversions to string</span>
+
+    <span class="s2">def </span><span class="s1">__repr__(self):</span>
+        <span class="s0">&quot;&quot;&quot;Convert to formal string, for repr(). 
+ 
+        &gt;&gt;&gt; dt = datetime(2010, 1, 1) 
+        &gt;&gt;&gt; repr(dt) 
+        'datetime.datetime(2010, 1, 1, 0, 0)' 
+ 
+        &gt;&gt;&gt; dt = datetime(2010, 1, 1, tzinfo=timezone.utc) 
+        &gt;&gt;&gt; repr(dt) 
+        'datetime.datetime(2010, 1, 1, 0, 0, tzinfo=datetime.timezone.utc)' 
+        &quot;&quot;&quot;</span>
+        <span class="s2">return </span><span class="s5">&quot;%s(%d, %d, %d)&quot; </span><span class="s1">% (</span><span class="s5">'datetime.' </span><span class="s1">+ self.__class__.__name__</span><span class="s2">,</span>
+                                   <span class="s1">self._year</span><span class="s2">,</span>
+                                   <span class="s1">self._month</span><span class="s2">,</span>
+                                   <span class="s1">self._day)</span>
+    <span class="s4"># XXX These shouldn't depend on time.localtime(), because that</span>
+    <span class="s4"># clips the usable dates to [1970 .. 2038).  At least ctime() is</span>
+    <span class="s4"># easily done without using strftime() -- that's better too because</span>
+    <span class="s4"># strftime(&quot;%c&quot;, ...) is locale specific.</span>
+
+
+    <span class="s2">def </span><span class="s1">ctime(self):</span>
+        <span class="s0">&quot;Return ctime() style string.&quot;</span>
+        <span class="s1">weekday = self.toordinal() % </span><span class="s3">7 </span><span class="s2">or </span><span class="s3">7</span>
+        <span class="s2">return </span><span class="s5">&quot;%s %s %2d 00:00:00 %04d&quot; </span><span class="s1">% (</span>
+            <span class="s1">_DAYNAMES[weekday]</span><span class="s2">,</span>
+            <span class="s1">_MONTHNAMES[self._month]</span><span class="s2">,</span>
+            <span class="s1">self._day</span><span class="s2">, </span><span class="s1">self._year)</span>
+
+    <span class="s2">def </span><span class="s1">strftime(self</span><span class="s2">, </span><span class="s1">fmt):</span>
+        <span class="s0">&quot;Format using strftime().&quot;</span>
+        <span class="s2">return </span><span class="s1">_wrap_strftime(self</span><span class="s2">, </span><span class="s1">fmt</span><span class="s2">, </span><span class="s1">self.timetuple())</span>
+
+    <span class="s2">def </span><span class="s1">__format__(self</span><span class="s2">, </span><span class="s1">fmt):</span>
+        <span class="s2">if </span><span class="s1">len(fmt) != </span><span class="s3">0</span><span class="s1">:</span>
+            <span class="s2">return </span><span class="s1">self.strftime(fmt)</span>
+        <span class="s2">return </span><span class="s1">str(self)</span>
+
+    <span class="s2">def </span><span class="s1">isoformat(self):</span>
+        <span class="s0">&quot;&quot;&quot;Return the date formatted according to ISO. 
+ 
+        This is 'YYYY-MM-DD'. 
+ 
+        References: 
+        - http://www.w3.org/TR/NOTE-datetime 
+        - http://www.cl.cam.ac.uk/~mgk25/iso-time.html 
+        &quot;&quot;&quot;</span>
+        <span class="s2">return </span><span class="s5">&quot;%04d-%02d-%02d&quot; </span><span class="s1">% (self._year</span><span class="s2">, </span><span class="s1">self._month</span><span class="s2">, </span><span class="s1">self._day)</span>
+
+    <span class="s1">__str__ = isoformat</span>
+
+    <span class="s4"># Read-only field accessors</span>
+    <span class="s1">@property</span>
+    <span class="s2">def </span><span class="s1">year(self):</span>
+        <span class="s0">&quot;&quot;&quot;year (1-9999)&quot;&quot;&quot;</span>
+        <span class="s2">return </span><span class="s1">self._year</span>
+
+    <span class="s1">@property</span>
+    <span class="s2">def </span><span class="s1">month(self):</span>
+        <span class="s0">&quot;&quot;&quot;month (1-12)&quot;&quot;&quot;</span>
+        <span class="s2">return </span><span class="s1">self._month</span>
+
+    <span class="s1">@property</span>
+    <span class="s2">def </span><span class="s1">day(self):</span>
+        <span class="s0">&quot;&quot;&quot;day (1-31)&quot;&quot;&quot;</span>
+        <span class="s2">return </span><span class="s1">self._day</span>
+
+    <span class="s4"># Standard conversions, __cmp__, __hash__ (and helpers)</span>
+
+    <span class="s2">def </span><span class="s1">timetuple(self):</span>
+        <span class="s0">&quot;Return local time tuple compatible with time.localtime().&quot;</span>
+        <span class="s2">return </span><span class="s1">_build_struct_time(self._year</span><span class="s2">, </span><span class="s1">self._month</span><span class="s2">, </span><span class="s1">self._day</span><span class="s2">,</span>
+                                  <span class="s3">0</span><span class="s2">, </span><span class="s3">0</span><span class="s2">, </span><span class="s3">0</span><span class="s2">, </span><span class="s1">-</span><span class="s3">1</span><span class="s1">)</span>
+
+    <span class="s2">def </span><span class="s1">toordinal(self):</span>
+        <span class="s0">&quot;&quot;&quot;Return proleptic Gregorian ordinal for the year, month and day. 
+ 
+        January 1 of year 1 is day 1.  Only the year, month and day values 
+        contribute to the result. 
+        &quot;&quot;&quot;</span>
+        <span class="s2">return </span><span class="s1">_ymd2ord(self._year</span><span class="s2">, </span><span class="s1">self._month</span><span class="s2">, </span><span class="s1">self._day)</span>
+
+    <span class="s2">def </span><span class="s1">replace(self</span><span class="s2">, </span><span class="s1">year=</span><span class="s2">None, </span><span class="s1">month=</span><span class="s2">None, </span><span class="s1">day=</span><span class="s2">None</span><span class="s1">):</span>
+        <span class="s0">&quot;&quot;&quot;Return a new date with new values for the specified fields.&quot;&quot;&quot;</span>
+        <span class="s2">if </span><span class="s1">year </span><span class="s2">is None</span><span class="s1">:</span>
+            <span class="s1">year = self._year</span>
+        <span class="s2">if </span><span class="s1">month </span><span class="s2">is None</span><span class="s1">:</span>
+            <span class="s1">month = self._month</span>
+        <span class="s2">if </span><span class="s1">day </span><span class="s2">is None</span><span class="s1">:</span>
+            <span class="s1">day = self._day</span>
+        <span class="s1">_check_date_fields(year</span><span class="s2">, </span><span class="s1">month</span><span class="s2">, </span><span class="s1">day)</span>
+        <span class="s2">return </span><span class="s1">date(year</span><span class="s2">, </span><span class="s1">month</span><span class="s2">, </span><span class="s1">day)</span>
+
+    <span class="s4"># Comparisons of date objects with other.</span>
+
+    <span class="s2">def </span><span class="s1">__eq__(self</span><span class="s2">, </span><span class="s1">other):</span>
+        <span class="s2">if </span><span class="s1">isinstance(other</span><span class="s2">, </span><span class="s1">date):</span>
+            <span class="s2">return </span><span class="s1">self._cmp(other) == </span><span class="s3">0</span>
+        <span class="s2">return </span><span class="s1">NotImplemented</span>
+
+    <span class="s2">def </span><span class="s1">__ne__(self</span><span class="s2">, </span><span class="s1">other):</span>
+        <span class="s2">if </span><span class="s1">isinstance(other</span><span class="s2">, </span><span class="s1">date):</span>
+            <span class="s2">return </span><span class="s1">self._cmp(other) != </span><span class="s3">0</span>
+        <span class="s2">return </span><span class="s1">NotImplemented</span>
+
+    <span class="s2">def </span><span class="s1">__le__(self</span><span class="s2">, </span><span class="s1">other):</span>
+        <span class="s2">if </span><span class="s1">isinstance(other</span><span class="s2">, </span><span class="s1">date):</span>
+            <span class="s2">return </span><span class="s1">self._cmp(other) &lt;= </span><span class="s3">0</span>
+        <span class="s2">return </span><span class="s1">NotImplemented</span>
+
+    <span class="s2">def </span><span class="s1">__lt__(self</span><span class="s2">, </span><span class="s1">other):</span>
+        <span class="s2">if </span><span class="s1">isinstance(other</span><span class="s2">, </span><span class="s1">date):</span>
+            <span class="s2">return </span><span class="s1">self._cmp(other) &lt; </span><span class="s3">0</span>
+        <span class="s2">return </span><span class="s1">NotImplemented</span>
+
+    <span class="s2">def </span><span class="s1">__ge__(self</span><span class="s2">, </span><span class="s1">other):</span>
+        <span class="s2">if </span><span class="s1">isinstance(other</span><span class="s2">, </span><span class="s1">date):</span>
+            <span class="s2">return </span><span class="s1">self._cmp(other) &gt;= </span><span class="s3">0</span>
+        <span class="s2">return </span><span class="s1">NotImplemented</span>
+
+    <span class="s2">def </span><span class="s1">__gt__(self</span><span class="s2">, </span><span class="s1">other):</span>
+        <span class="s2">if </span><span class="s1">isinstance(other</span><span class="s2">, </span><span class="s1">date):</span>
+            <span class="s2">return </span><span class="s1">self._cmp(other) &gt; </span><span class="s3">0</span>
+        <span class="s2">return </span><span class="s1">NotImplemented</span>
+
+    <span class="s2">def </span><span class="s1">_cmp(self</span><span class="s2">, </span><span class="s1">other):</span>
+        <span class="s2">assert </span><span class="s1">isinstance(other</span><span class="s2">, </span><span class="s1">date)</span>
+        <span class="s1">y</span><span class="s2">, </span><span class="s1">m</span><span class="s2">, </span><span class="s1">d = self._year</span><span class="s2">, </span><span class="s1">self._month</span><span class="s2">, </span><span class="s1">self._day</span>
+        <span class="s1">y2</span><span class="s2">, </span><span class="s1">m2</span><span class="s2">, </span><span class="s1">d2 = other._year</span><span class="s2">, </span><span class="s1">other._month</span><span class="s2">, </span><span class="s1">other._day</span>
+        <span class="s2">return </span><span class="s1">_cmp((y</span><span class="s2">, </span><span class="s1">m</span><span class="s2">, </span><span class="s1">d)</span><span class="s2">, </span><span class="s1">(y2</span><span class="s2">, </span><span class="s1">m2</span><span class="s2">, </span><span class="s1">d2))</span>
+
+    <span class="s2">def </span><span class="s1">__hash__(self):</span>
+        <span class="s0">&quot;Hash.&quot;</span>
+        <span class="s2">return </span><span class="s1">hash(self._getstate())</span>
+
+    <span class="s4"># Computations</span>
+
+    <span class="s2">def </span><span class="s1">__add__(self</span><span class="s2">, </span><span class="s1">other):</span>
+        <span class="s0">&quot;Add a date to a timedelta.&quot;</span>
+        <span class="s2">if </span><span class="s1">isinstance(other</span><span class="s2">, </span><span class="s1">timedelta):</span>
+            <span class="s1">o = self.toordinal() + other.days</span>
+            <span class="s2">if </span><span class="s3">0 </span><span class="s1">&lt; o &lt;= _MAXORDINAL:</span>
+                <span class="s2">return </span><span class="s1">date.fromordinal(o)</span>
+            <span class="s2">raise </span><span class="s1">OverflowError(</span><span class="s5">&quot;result out of range&quot;</span><span class="s1">)</span>
+        <span class="s2">return </span><span class="s1">NotImplemented</span>
+
+    <span class="s1">__radd__ = __add__</span>
+
+    <span class="s2">def </span><span class="s1">__sub__(self</span><span class="s2">, </span><span class="s1">other):</span>
+        <span class="s0">&quot;&quot;&quot;Subtract two dates, or a date and a timedelta.&quot;&quot;&quot;</span>
+        <span class="s2">if </span><span class="s1">isinstance(other</span><span class="s2">, </span><span class="s1">timedelta):</span>
+            <span class="s2">return </span><span class="s1">self + timedelta(-other.days)</span>
+        <span class="s2">if </span><span class="s1">isinstance(other</span><span class="s2">, </span><span class="s1">date):</span>
+            <span class="s1">days1 = self.toordinal()</span>
+            <span class="s1">days2 = other.toordinal()</span>
+            <span class="s2">return </span><span class="s1">timedelta(days1 - days2)</span>
+        <span class="s2">return </span><span class="s1">NotImplemented</span>
+
+    <span class="s2">def </span><span class="s1">weekday(self):</span>
+        <span class="s0">&quot;Return day of the week, where Monday == 0 ... Sunday == 6.&quot;</span>
+        <span class="s2">return </span><span class="s1">(self.toordinal() + </span><span class="s3">6</span><span class="s1">) % </span><span class="s3">7</span>
+
+    <span class="s4"># Day-of-the-week and week-of-the-year, according to ISO</span>
+
+    <span class="s2">def </span><span class="s1">isoweekday(self):</span>
+        <span class="s0">&quot;Return day of the week, where Monday == 1 ... Sunday == 7.&quot;</span>
+        <span class="s4"># 1-Jan-0001 is a Monday</span>
+        <span class="s2">return </span><span class="s1">self.toordinal() % </span><span class="s3">7 </span><span class="s2">or </span><span class="s3">7</span>
+
+    <span class="s2">def </span><span class="s1">isocalendar(self):</span>
+        <span class="s0">&quot;&quot;&quot;Return a 3-tuple containing ISO year, week number, and weekday. 
+ 
+        The first ISO week of the year is the (Mon-Sun) week 
+        containing the year's first Thursday; everything else derives 
+        from that. 
+ 
+        The first week is 1; Monday is 1 ... Sunday is 7. 
+ 
+        ISO calendar algorithm taken from 
+        http://www.phys.uu.nl/~vgent/calendar/isocalendar.htm 
+        &quot;&quot;&quot;</span>
+        <span class="s1">year = self._year</span>
+        <span class="s1">week1monday = _isoweek1monday(year)</span>
+        <span class="s1">today = _ymd2ord(self._year</span><span class="s2">, </span><span class="s1">self._month</span><span class="s2">, </span><span class="s1">self._day)</span>
+        <span class="s4"># Internally, week and day have origin 0</span>
+        <span class="s1">week</span><span class="s2">, </span><span class="s1">day = divmod(today - week1monday</span><span class="s2">, </span><span class="s3">7</span><span class="s1">)</span>
+        <span class="s2">if </span><span class="s1">week &lt; </span><span class="s3">0</span><span class="s1">:</span>
+            <span class="s1">year -= </span><span class="s3">1</span>
+            <span class="s1">week1monday = _isoweek1monday(year)</span>
+            <span class="s1">week</span><span class="s2">, </span><span class="s1">day = divmod(today - week1monday</span><span class="s2">, </span><span class="s3">7</span><span class="s1">)</span>
+        <span class="s2">elif </span><span class="s1">week &gt;= </span><span class="s3">52</span><span class="s1">:</span>
+            <span class="s2">if </span><span class="s1">today &gt;= _isoweek1monday(year+</span><span class="s3">1</span><span class="s1">):</span>
+                <span class="s1">year += </span><span class="s3">1</span>
+                <span class="s1">week = </span><span class="s3">0</span>
+        <span class="s2">return </span><span class="s1">year</span><span class="s2">, </span><span class="s1">week+</span><span class="s3">1</span><span class="s2">, </span><span class="s1">day+</span><span class="s3">1</span>
+
+    <span class="s4"># Pickle support.</span>
+
+    <span class="s2">def </span><span class="s1">_getstate(self):</span>
+        <span class="s1">yhi</span><span class="s2">, </span><span class="s1">ylo = divmod(self._year</span><span class="s2">, </span><span class="s3">256</span><span class="s1">)</span>
+        <span class="s2">return </span><span class="s1">bytes([yhi</span><span class="s2">, </span><span class="s1">ylo</span><span class="s2">, </span><span class="s1">self._month</span><span class="s2">, </span><span class="s1">self._day])</span><span class="s2">,</span>
+
+    <span class="s2">def </span><span class="s1">__setstate(self</span><span class="s2">, </span><span class="s1">string):</span>
+        <span class="s2">if </span><span class="s1">len(string) != </span><span class="s3">4 </span><span class="s2">or not </span><span class="s1">(</span><span class="s3">1 </span><span class="s1">&lt;= string[</span><span class="s3">2</span><span class="s1">] &lt;= </span><span class="s3">12</span><span class="s1">):</span>
+            <span class="s2">raise </span><span class="s1">TypeError(</span><span class="s5">&quot;not enough arguments&quot;</span><span class="s1">)</span>
+        <span class="s1">yhi</span><span class="s2">, </span><span class="s1">ylo</span><span class="s2">, </span><span class="s1">self._month</span><span class="s2">, </span><span class="s1">self._day = string</span>
+        <span class="s1">self._year = yhi * </span><span class="s3">256 </span><span class="s1">+ ylo</span>
+
+    <span class="s2">def </span><span class="s1">__reduce__(self):</span>
+        <span class="s2">return </span><span class="s1">(self.__class__</span><span class="s2">, </span><span class="s1">self._getstate())</span>
+
+<span class="s1">_date_class = date  </span><span class="s4"># so functions w/ args named &quot;date&quot; can get at the class</span>
+
+<span class="s1">date.min = date(</span><span class="s3">1</span><span class="s2">, </span><span class="s3">1</span><span class="s2">, </span><span class="s3">1</span><span class="s1">)</span>
+<span class="s1">date.max = date(</span><span class="s3">9999</span><span class="s2">, </span><span class="s3">12</span><span class="s2">, </span><span class="s3">31</span><span class="s1">)</span>
+<span class="s1">date.resolution = timedelta(days=</span><span class="s3">1</span><span class="s1">)</span>
+
+<span class="s2">class </span><span class="s1">tzinfo(object):</span>
+    <span class="s0">&quot;&quot;&quot;Abstract base class for time zone info classes. 
+ 
+    Subclasses must override the name(), utcoffset() and dst() methods. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">__slots__ = ()</span>
+    <span class="s2">def </span><span class="s1">tzname(self</span><span class="s2">, </span><span class="s1">dt):</span>
+        <span class="s0">&quot;datetime -&gt; string name of time zone.&quot;</span>
+        <span class="s2">raise </span><span class="s1">NotImplementedError(</span><span class="s5">&quot;tzinfo subclass must override tzname()&quot;</span><span class="s1">)</span>
+
+    <span class="s2">def </span><span class="s1">utcoffset(self</span><span class="s2">, </span><span class="s1">dt):</span>
+        <span class="s0">&quot;datetime -&gt; minutes east of UTC (negative for west of UTC)&quot;</span>
+        <span class="s2">raise </span><span class="s1">NotImplementedError(</span><span class="s5">&quot;tzinfo subclass must override utcoffset()&quot;</span><span class="s1">)</span>
+
+    <span class="s2">def </span><span class="s1">dst(self</span><span class="s2">, </span><span class="s1">dt):</span>
+        <span class="s0">&quot;&quot;&quot;datetime -&gt; DST offset in minutes east of UTC. 
+ 
+        Return 0 if DST not in effect.  utcoffset() must include the DST 
+        offset. 
+        &quot;&quot;&quot;</span>
+        <span class="s2">raise </span><span class="s1">NotImplementedError(</span><span class="s5">&quot;tzinfo subclass must override dst()&quot;</span><span class="s1">)</span>
+
+    <span class="s2">def </span><span class="s1">fromutc(self</span><span class="s2">, </span><span class="s1">dt):</span>
+        <span class="s0">&quot;datetime in UTC -&gt; datetime in local time.&quot;</span>
+
+        <span class="s2">if not </span><span class="s1">isinstance(dt</span><span class="s2">, </span><span class="s1">datetime):</span>
+            <span class="s2">raise </span><span class="s1">TypeError(</span><span class="s5">&quot;fromutc() requires a datetime argument&quot;</span><span class="s1">)</span>
+        <span class="s2">if </span><span class="s1">dt.tzinfo </span><span class="s2">is not </span><span class="s1">self:</span>
+            <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s5">&quot;dt.tzinfo is not self&quot;</span><span class="s1">)</span>
+
+        <span class="s1">dtoff = dt.utcoffset()</span>
+        <span class="s2">if </span><span class="s1">dtoff </span><span class="s2">is None</span><span class="s1">:</span>
+            <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s5">&quot;fromutc() requires a non-None utcoffset() &quot;</span>
+                             <span class="s5">&quot;result&quot;</span><span class="s1">)</span>
+
+        <span class="s4"># See the long comment block at the end of this file for an</span>
+        <span class="s4"># explanation of this algorithm.</span>
+        <span class="s1">dtdst = dt.dst()</span>
+        <span class="s2">if </span><span class="s1">dtdst </span><span class="s2">is None</span><span class="s1">:</span>
+            <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s5">&quot;fromutc() requires a non-None dst() result&quot;</span><span class="s1">)</span>
+        <span class="s1">delta = dtoff - dtdst</span>
+        <span class="s2">if </span><span class="s1">delta:</span>
+            <span class="s1">dt += delta</span>
+            <span class="s1">dtdst = dt.dst()</span>
+            <span class="s2">if </span><span class="s1">dtdst </span><span class="s2">is None</span><span class="s1">:</span>
+                <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s5">&quot;fromutc(): dt.dst gave inconsistent &quot;</span>
+                                 <span class="s5">&quot;results; cannot convert&quot;</span><span class="s1">)</span>
+        <span class="s2">return </span><span class="s1">dt + dtdst</span>
+
+    <span class="s4"># Pickle support.</span>
+
+    <span class="s2">def </span><span class="s1">__reduce__(self):</span>
+        <span class="s1">getinitargs = getattr(self</span><span class="s2">, </span><span class="s5">&quot;__getinitargs__&quot;</span><span class="s2">, None</span><span class="s1">)</span>
+        <span class="s2">if </span><span class="s1">getinitargs:</span>
+            <span class="s1">args = getinitargs()</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">args = ()</span>
+        <span class="s1">getstate = getattr(self</span><span class="s2">, </span><span class="s5">&quot;__getstate__&quot;</span><span class="s2">, None</span><span class="s1">)</span>
+        <span class="s2">if </span><span class="s1">getstate:</span>
+            <span class="s1">state = getstate()</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">state = getattr(self</span><span class="s2">, </span><span class="s5">&quot;__dict__&quot;</span><span class="s2">, None</span><span class="s1">) </span><span class="s2">or None</span>
+        <span class="s2">if </span><span class="s1">state </span><span class="s2">is None</span><span class="s1">:</span>
+            <span class="s2">return </span><span class="s1">(self.__class__</span><span class="s2">, </span><span class="s1">args)</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s2">return </span><span class="s1">(self.__class__</span><span class="s2">, </span><span class="s1">args</span><span class="s2">, </span><span class="s1">state)</span>
+
+<span class="s1">_tzinfo_class = tzinfo</span>
+
+<span class="s2">class </span><span class="s1">time(object):</span>
+    <span class="s0">&quot;&quot;&quot;Time with time zone. 
+ 
+    Constructors: 
+ 
+    __new__() 
+ 
+    Operators: 
+ 
+    __repr__, __str__ 
+    __cmp__, __hash__ 
+ 
+    Methods: 
+ 
+    strftime() 
+    isoformat() 
+    utcoffset() 
+    tzname() 
+    dst() 
+ 
+    Properties (readonly): 
+    hour, minute, second, microsecond, tzinfo 
+    &quot;&quot;&quot;</span>
+
+    <span class="s2">def </span><span class="s1">__new__(cls</span><span class="s2">, </span><span class="s1">hour=</span><span class="s3">0</span><span class="s2">, </span><span class="s1">minute=</span><span class="s3">0</span><span class="s2">, </span><span class="s1">second=</span><span class="s3">0</span><span class="s2">, </span><span class="s1">microsecond=</span><span class="s3">0</span><span class="s2">, </span><span class="s1">tzinfo=</span><span class="s2">None</span><span class="s1">):</span>
+        <span class="s0">&quot;&quot;&quot;Constructor. 
+ 
+        Arguments: 
+ 
+        hour, minute (required) 
+        second, microsecond (default to zero) 
+        tzinfo (default to None) 
+        &quot;&quot;&quot;</span>
+        <span class="s1">self = object.__new__(cls)</span>
+        <span class="s2">if </span><span class="s1">isinstance(hour</span><span class="s2">, </span><span class="s1">bytes) </span><span class="s2">and </span><span class="s1">len(hour) == </span><span class="s3">6</span><span class="s1">:</span>
+            <span class="s4"># Pickle support</span>
+            <span class="s1">self.__setstate(hour</span><span class="s2">, </span><span class="s1">minute </span><span class="s2">or None</span><span class="s1">)</span>
+            <span class="s2">return </span><span class="s1">self</span>
+        <span class="s1">_check_tzinfo_arg(tzinfo)</span>
+        <span class="s1">_check_time_fields(hour</span><span class="s2">, </span><span class="s1">minute</span><span class="s2">, </span><span class="s1">second</span><span class="s2">, </span><span class="s1">microsecond)</span>
+        <span class="s1">self._hour = hour</span>
+        <span class="s1">self._minute = minute</span>
+        <span class="s1">self._second = second</span>
+        <span class="s1">self._microsecond = microsecond</span>
+        <span class="s1">self._tzinfo = tzinfo</span>
+        <span class="s2">return </span><span class="s1">self</span>
+
+    <span class="s4"># Read-only field accessors</span>
+    <span class="s1">@property</span>
+    <span class="s2">def </span><span class="s1">hour(self):</span>
+        <span class="s0">&quot;&quot;&quot;hour (0-23)&quot;&quot;&quot;</span>
+        <span class="s2">return </span><span class="s1">self._hour</span>
+
+    <span class="s1">@property</span>
+    <span class="s2">def </span><span class="s1">minute(self):</span>
+        <span class="s0">&quot;&quot;&quot;minute (0-59)&quot;&quot;&quot;</span>
+        <span class="s2">return </span><span class="s1">self._minute</span>
+
+    <span class="s1">@property</span>
+    <span class="s2">def </span><span class="s1">second(self):</span>
+        <span class="s0">&quot;&quot;&quot;second (0-59)&quot;&quot;&quot;</span>
+        <span class="s2">return </span><span class="s1">self._second</span>
+
+    <span class="s1">@property</span>
+    <span class="s2">def </span><span class="s1">microsecond(self):</span>
+        <span class="s0">&quot;&quot;&quot;microsecond (0-999999)&quot;&quot;&quot;</span>
+        <span class="s2">return </span><span class="s1">self._microsecond</span>
+
+    <span class="s1">@property</span>
+    <span class="s2">def </span><span class="s1">tzinfo(self):</span>
+        <span class="s0">&quot;&quot;&quot;timezone info object&quot;&quot;&quot;</span>
+        <span class="s2">return </span><span class="s1">self._tzinfo</span>
+
+    <span class="s4"># Standard conversions, __hash__ (and helpers)</span>
+
+    <span class="s4"># Comparisons of time objects with other.</span>
+
+    <span class="s2">def </span><span class="s1">__eq__(self</span><span class="s2">, </span><span class="s1">other):</span>
+        <span class="s2">if </span><span class="s1">isinstance(other</span><span class="s2">, </span><span class="s1">time):</span>
+            <span class="s2">return </span><span class="s1">self._cmp(other</span><span class="s2">, </span><span class="s1">allow_mixed=</span><span class="s2">True</span><span class="s1">) == </span><span class="s3">0</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s2">return False</span>
+
+    <span class="s2">def </span><span class="s1">__ne__(self</span><span class="s2">, </span><span class="s1">other):</span>
+        <span class="s2">if </span><span class="s1">isinstance(other</span><span class="s2">, </span><span class="s1">time):</span>
+            <span class="s2">return </span><span class="s1">self._cmp(other</span><span class="s2">, </span><span class="s1">allow_mixed=</span><span class="s2">True</span><span class="s1">) != </span><span class="s3">0</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s2">return True</span>
+
+    <span class="s2">def </span><span class="s1">__le__(self</span><span class="s2">, </span><span class="s1">other):</span>
+        <span class="s2">if </span><span class="s1">isinstance(other</span><span class="s2">, </span><span class="s1">time):</span>
+            <span class="s2">return </span><span class="s1">self._cmp(other) &lt;= </span><span class="s3">0</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">_cmperror(self</span><span class="s2">, </span><span class="s1">other)</span>
+
+    <span class="s2">def </span><span class="s1">__lt__(self</span><span class="s2">, </span><span class="s1">other):</span>
+        <span class="s2">if </span><span class="s1">isinstance(other</span><span class="s2">, </span><span class="s1">time):</span>
+            <span class="s2">return </span><span class="s1">self._cmp(other) &lt; </span><span class="s3">0</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">_cmperror(self</span><span class="s2">, </span><span class="s1">other)</span>
+
+    <span class="s2">def </span><span class="s1">__ge__(self</span><span class="s2">, </span><span class="s1">other):</span>
+        <span class="s2">if </span><span class="s1">isinstance(other</span><span class="s2">, </span><span class="s1">time):</span>
+            <span class="s2">return </span><span class="s1">self._cmp(other) &gt;= </span><span class="s3">0</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">_cmperror(self</span><span class="s2">, </span><span class="s1">other)</span>
+
+    <span class="s2">def </span><span class="s1">__gt__(self</span><span class="s2">, </span><span class="s1">other):</span>
+        <span class="s2">if </span><span class="s1">isinstance(other</span><span class="s2">, </span><span class="s1">time):</span>
+            <span class="s2">return </span><span class="s1">self._cmp(other) &gt; </span><span class="s3">0</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">_cmperror(self</span><span class="s2">, </span><span class="s1">other)</span>
+
+    <span class="s2">def </span><span class="s1">_cmp(self</span><span class="s2">, </span><span class="s1">other</span><span class="s2">, </span><span class="s1">allow_mixed=</span><span class="s2">False</span><span class="s1">):</span>
+        <span class="s2">assert </span><span class="s1">isinstance(other</span><span class="s2">, </span><span class="s1">time)</span>
+        <span class="s1">mytz = self._tzinfo</span>
+        <span class="s1">ottz = other._tzinfo</span>
+        <span class="s1">myoff = otoff = </span><span class="s2">None</span>
+
+        <span class="s2">if </span><span class="s1">mytz </span><span class="s2">is </span><span class="s1">ottz:</span>
+            <span class="s1">base_compare = </span><span class="s2">True</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">myoff = self.utcoffset()</span>
+            <span class="s1">otoff = other.utcoffset()</span>
+            <span class="s1">base_compare = myoff == otoff</span>
+
+        <span class="s2">if </span><span class="s1">base_compare:</span>
+            <span class="s2">return </span><span class="s1">_cmp((self._hour</span><span class="s2">, </span><span class="s1">self._minute</span><span class="s2">, </span><span class="s1">self._second</span><span class="s2">,</span>
+                         <span class="s1">self._microsecond)</span><span class="s2">,</span>
+                       <span class="s1">(other._hour</span><span class="s2">, </span><span class="s1">other._minute</span><span class="s2">, </span><span class="s1">other._second</span><span class="s2">,</span>
+                        <span class="s1">other._microsecond))</span>
+        <span class="s2">if </span><span class="s1">myoff </span><span class="s2">is None or </span><span class="s1">otoff </span><span class="s2">is None</span><span class="s1">:</span>
+            <span class="s2">if </span><span class="s1">allow_mixed:</span>
+                <span class="s2">return </span><span class="s3">2 </span><span class="s4"># arbitrary non-zero value</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s2">raise </span><span class="s1">TypeError(</span><span class="s5">&quot;cannot compare naive and aware times&quot;</span><span class="s1">)</span>
+        <span class="s1">myhhmm = self._hour * </span><span class="s3">60 </span><span class="s1">+ self._minute - myoff//timedelta(minutes=</span><span class="s3">1</span><span class="s1">)</span>
+        <span class="s1">othhmm = other._hour * </span><span class="s3">60 </span><span class="s1">+ other._minute - otoff//timedelta(minutes=</span><span class="s3">1</span><span class="s1">)</span>
+        <span class="s2">return </span><span class="s1">_cmp((myhhmm</span><span class="s2">, </span><span class="s1">self._second</span><span class="s2">, </span><span class="s1">self._microsecond)</span><span class="s2">,</span>
+                    <span class="s1">(othhmm</span><span class="s2">, </span><span class="s1">other._second</span><span class="s2">, </span><span class="s1">other._microsecond))</span>
+
+    <span class="s2">def </span><span class="s1">__hash__(self):</span>
+        <span class="s0">&quot;&quot;&quot;Hash.&quot;&quot;&quot;</span>
+        <span class="s1">tzoff = self.utcoffset()</span>
+        <span class="s2">if not </span><span class="s1">tzoff: </span><span class="s4"># zero or None</span>
+            <span class="s2">return </span><span class="s1">hash(self._getstate()[</span><span class="s3">0</span><span class="s1">])</span>
+        <span class="s1">h</span><span class="s2">, </span><span class="s1">m = divmod(timedelta(hours=self.hour</span><span class="s2">, </span><span class="s1">minutes=self.minute) - tzoff</span><span class="s2">,</span>
+                      <span class="s1">timedelta(hours=</span><span class="s3">1</span><span class="s1">))</span>
+        <span class="s2">assert not </span><span class="s1">m % timedelta(minutes=</span><span class="s3">1</span><span class="s1">)</span><span class="s2">, </span><span class="s5">&quot;whole minute&quot;</span>
+        <span class="s1">m //= timedelta(minutes=</span><span class="s3">1</span><span class="s1">)</span>
+        <span class="s2">if </span><span class="s3">0 </span><span class="s1">&lt;= h &lt; </span><span class="s3">24</span><span class="s1">:</span>
+            <span class="s2">return </span><span class="s1">hash(time(h</span><span class="s2">, </span><span class="s1">m</span><span class="s2">, </span><span class="s1">self.second</span><span class="s2">, </span><span class="s1">self.microsecond))</span>
+        <span class="s2">return </span><span class="s1">hash((h</span><span class="s2">, </span><span class="s1">m</span><span class="s2">, </span><span class="s1">self.second</span><span class="s2">, </span><span class="s1">self.microsecond))</span>
+
+    <span class="s4"># Conversion to string</span>
+
+    <span class="s2">def </span><span class="s1">_tzstr(self</span><span class="s2">, </span><span class="s1">sep=</span><span class="s5">&quot;:&quot;</span><span class="s1">):</span>
+        <span class="s0">&quot;&quot;&quot;Return formatted timezone offset (+xx:xx) or None.&quot;&quot;&quot;</span>
+        <span class="s1">off = self.utcoffset()</span>
+        <span class="s2">if </span><span class="s1">off </span><span class="s2">is not None</span><span class="s1">:</span>
+            <span class="s2">if </span><span class="s1">off.days &lt; </span><span class="s3">0</span><span class="s1">:</span>
+                <span class="s1">sign = </span><span class="s5">&quot;-&quot;</span>
+                <span class="s1">off = -off</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s1">sign = </span><span class="s5">&quot;+&quot;</span>
+            <span class="s1">hh</span><span class="s2">, </span><span class="s1">mm = divmod(off</span><span class="s2">, </span><span class="s1">timedelta(hours=</span><span class="s3">1</span><span class="s1">))</span>
+            <span class="s2">assert not </span><span class="s1">mm % timedelta(minutes=</span><span class="s3">1</span><span class="s1">)</span><span class="s2">, </span><span class="s5">&quot;whole minute&quot;</span>
+            <span class="s1">mm //= timedelta(minutes=</span><span class="s3">1</span><span class="s1">)</span>
+            <span class="s2">assert </span><span class="s3">0 </span><span class="s1">&lt;= hh &lt; </span><span class="s3">24</span>
+            <span class="s1">off = </span><span class="s5">&quot;%s%02d%s%02d&quot; </span><span class="s1">% (sign</span><span class="s2">, </span><span class="s1">hh</span><span class="s2">, </span><span class="s1">sep</span><span class="s2">, </span><span class="s1">mm)</span>
+        <span class="s2">return </span><span class="s1">off</span>
+
+    <span class="s2">def </span><span class="s1">__repr__(self):</span>
+        <span class="s0">&quot;&quot;&quot;Convert to formal string, for repr().&quot;&quot;&quot;</span>
+        <span class="s2">if </span><span class="s1">self._microsecond != </span><span class="s3">0</span><span class="s1">:</span>
+            <span class="s1">s = </span><span class="s5">&quot;, %d, %d&quot; </span><span class="s1">% (self._second</span><span class="s2">, </span><span class="s1">self._microsecond)</span>
+        <span class="s2">elif </span><span class="s1">self._second != </span><span class="s3">0</span><span class="s1">:</span>
+            <span class="s1">s = </span><span class="s5">&quot;, %d&quot; </span><span class="s1">% self._second</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">s = </span><span class="s5">&quot;&quot;</span>
+        <span class="s1">s= </span><span class="s5">&quot;%s(%d, %d%s)&quot; </span><span class="s1">% (</span><span class="s5">'datetime.' </span><span class="s1">+ self.__class__.__name__</span><span class="s2">,</span>
+                             <span class="s1">self._hour</span><span class="s2">, </span><span class="s1">self._minute</span><span class="s2">, </span><span class="s1">s)</span>
+        <span class="s2">if </span><span class="s1">self._tzinfo </span><span class="s2">is not None</span><span class="s1">:</span>
+            <span class="s2">assert </span><span class="s1">s[-</span><span class="s3">1</span><span class="s1">:] == </span><span class="s5">&quot;)&quot;</span>
+            <span class="s1">s = s[:-</span><span class="s3">1</span><span class="s1">] + </span><span class="s5">&quot;, tzinfo=%r&quot; </span><span class="s1">% self._tzinfo + </span><span class="s5">&quot;)&quot;</span>
+        <span class="s2">return </span><span class="s1">s</span>
+
+    <span class="s2">def </span><span class="s1">isoformat(self):</span>
+        <span class="s0">&quot;&quot;&quot;Return the time formatted according to ISO. 
+ 
+        This is 'HH:MM:SS.mmmmmm+zz:zz', or 'HH:MM:SS+zz:zz' if 
+        self.microsecond == 0. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">s = _format_time(self._hour</span><span class="s2">, </span><span class="s1">self._minute</span><span class="s2">, </span><span class="s1">self._second</span><span class="s2">,</span>
+                         <span class="s1">self._microsecond)</span>
+        <span class="s1">tz = self._tzstr()</span>
+        <span class="s2">if </span><span class="s1">tz:</span>
+            <span class="s1">s += tz</span>
+        <span class="s2">return </span><span class="s1">s</span>
+
+    <span class="s1">__str__ = isoformat</span>
+
+    <span class="s2">def </span><span class="s1">strftime(self</span><span class="s2">, </span><span class="s1">fmt):</span>
+        <span class="s0">&quot;&quot;&quot;Format using strftime().  The date part of the timestamp passed 
+        to underlying strftime should not be used. 
+        &quot;&quot;&quot;</span>
+        <span class="s4"># The year must be &gt;= 1000 else Python's strftime implementation</span>
+        <span class="s4"># can raise a bogus exception.</span>
+        <span class="s1">timetuple = (</span><span class="s3">1900</span><span class="s2">, </span><span class="s3">1</span><span class="s2">, </span><span class="s3">1</span><span class="s2">,</span>
+                     <span class="s1">self._hour</span><span class="s2">, </span><span class="s1">self._minute</span><span class="s2">, </span><span class="s1">self._second</span><span class="s2">,</span>
+                     <span class="s3">0</span><span class="s2">, </span><span class="s3">1</span><span class="s2">, </span><span class="s1">-</span><span class="s3">1</span><span class="s1">)</span>
+        <span class="s2">return </span><span class="s1">_wrap_strftime(self</span><span class="s2">, </span><span class="s1">fmt</span><span class="s2">, </span><span class="s1">timetuple)</span>
+
+    <span class="s2">def </span><span class="s1">__format__(self</span><span class="s2">, </span><span class="s1">fmt):</span>
+        <span class="s2">if </span><span class="s1">len(fmt) != </span><span class="s3">0</span><span class="s1">:</span>
+            <span class="s2">return </span><span class="s1">self.strftime(fmt)</span>
+        <span class="s2">return </span><span class="s1">str(self)</span>
+
+    <span class="s4"># Timezone functions</span>
+
+    <span class="s2">def </span><span class="s1">utcoffset(self):</span>
+        <span class="s0">&quot;&quot;&quot;Return the timezone offset in minutes east of UTC (negative west of 
+        UTC).&quot;&quot;&quot;</span>
+        <span class="s2">if </span><span class="s1">self._tzinfo </span><span class="s2">is None</span><span class="s1">:</span>
+            <span class="s2">return None</span>
+        <span class="s1">offset = self._tzinfo.utcoffset(</span><span class="s2">None</span><span class="s1">)</span>
+        <span class="s1">_check_utc_offset(</span><span class="s5">&quot;utcoffset&quot;</span><span class="s2">, </span><span class="s1">offset)</span>
+        <span class="s2">return </span><span class="s1">offset</span>
+
+    <span class="s2">def </span><span class="s1">tzname(self):</span>
+        <span class="s0">&quot;&quot;&quot;Return the timezone name. 
+ 
+        Note that the name is 100% informational -- there's no requirement that 
+        it mean anything in particular. For example, &quot;GMT&quot;, &quot;UTC&quot;, &quot;-500&quot;, 
+        &quot;-5:00&quot;, &quot;EDT&quot;, &quot;US/Eastern&quot;, &quot;America/New York&quot; are all valid replies. 
+        &quot;&quot;&quot;</span>
+        <span class="s2">if </span><span class="s1">self._tzinfo </span><span class="s2">is None</span><span class="s1">:</span>
+            <span class="s2">return None</span>
+        <span class="s1">name = self._tzinfo.tzname(</span><span class="s2">None</span><span class="s1">)</span>
+        <span class="s1">_check_tzname(name)</span>
+        <span class="s2">return </span><span class="s1">name</span>
+
+    <span class="s2">def </span><span class="s1">dst(self):</span>
+        <span class="s0">&quot;&quot;&quot;Return 0 if DST is not in effect, or the DST offset (in minutes 
+        eastward) if DST is in effect. 
+ 
+        This is purely informational; the DST offset has already been added to 
+        the UTC offset returned by utcoffset() if applicable, so there's no 
+        need to consult dst() unless you're interested in displaying the DST 
+        info. 
+        &quot;&quot;&quot;</span>
+        <span class="s2">if </span><span class="s1">self._tzinfo </span><span class="s2">is None</span><span class="s1">:</span>
+            <span class="s2">return None</span>
+        <span class="s1">offset = self._tzinfo.dst(</span><span class="s2">None</span><span class="s1">)</span>
+        <span class="s1">_check_utc_offset(</span><span class="s5">&quot;dst&quot;</span><span class="s2">, </span><span class="s1">offset)</span>
+        <span class="s2">return </span><span class="s1">offset</span>
+
+    <span class="s2">def </span><span class="s1">replace(self</span><span class="s2">, </span><span class="s1">hour=</span><span class="s2">None, </span><span class="s1">minute=</span><span class="s2">None, </span><span class="s1">second=</span><span class="s2">None, </span><span class="s1">microsecond=</span><span class="s2">None,</span>
+                <span class="s1">tzinfo=</span><span class="s2">True</span><span class="s1">):</span>
+        <span class="s0">&quot;&quot;&quot;Return a new time with new values for the specified fields.&quot;&quot;&quot;</span>
+        <span class="s2">if </span><span class="s1">hour </span><span class="s2">is None</span><span class="s1">:</span>
+            <span class="s1">hour = self.hour</span>
+        <span class="s2">if </span><span class="s1">minute </span><span class="s2">is None</span><span class="s1">:</span>
+            <span class="s1">minute = self.minute</span>
+        <span class="s2">if </span><span class="s1">second </span><span class="s2">is None</span><span class="s1">:</span>
+            <span class="s1">second = self.second</span>
+        <span class="s2">if </span><span class="s1">microsecond </span><span class="s2">is None</span><span class="s1">:</span>
+            <span class="s1">microsecond = self.microsecond</span>
+        <span class="s2">if </span><span class="s1">tzinfo </span><span class="s2">is True</span><span class="s1">:</span>
+            <span class="s1">tzinfo = self.tzinfo</span>
+        <span class="s1">_check_time_fields(hour</span><span class="s2">, </span><span class="s1">minute</span><span class="s2">, </span><span class="s1">second</span><span class="s2">, </span><span class="s1">microsecond)</span>
+        <span class="s1">_check_tzinfo_arg(tzinfo)</span>
+        <span class="s2">return </span><span class="s1">time(hour</span><span class="s2">, </span><span class="s1">minute</span><span class="s2">, </span><span class="s1">second</span><span class="s2">, </span><span class="s1">microsecond</span><span class="s2">, </span><span class="s1">tzinfo)</span>
+
+    <span class="s2">def </span><span class="s1">__bool__(self):</span>
+        <span class="s2">if </span><span class="s1">self.second </span><span class="s2">or </span><span class="s1">self.microsecond:</span>
+            <span class="s2">return True</span>
+        <span class="s1">offset = self.utcoffset() </span><span class="s2">or </span><span class="s1">timedelta(</span><span class="s3">0</span><span class="s1">)</span>
+        <span class="s2">return </span><span class="s1">timedelta(hours=self.hour</span><span class="s2">, </span><span class="s1">minutes=self.minute) != offset</span>
+
+    <span class="s4"># Pickle support.</span>
+
+    <span class="s2">def </span><span class="s1">_getstate(self):</span>
+        <span class="s1">us2</span><span class="s2">, </span><span class="s1">us3 = divmod(self._microsecond</span><span class="s2">, </span><span class="s3">256</span><span class="s1">)</span>
+        <span class="s1">us1</span><span class="s2">, </span><span class="s1">us2 = divmod(us2</span><span class="s2">, </span><span class="s3">256</span><span class="s1">)</span>
+        <span class="s1">basestate = bytes([self._hour</span><span class="s2">, </span><span class="s1">self._minute</span><span class="s2">, </span><span class="s1">self._second</span><span class="s2">,</span>
+                           <span class="s1">us1</span><span class="s2">, </span><span class="s1">us2</span><span class="s2">, </span><span class="s1">us3])</span>
+        <span class="s2">if </span><span class="s1">self._tzinfo </span><span class="s2">is None</span><span class="s1">:</span>
+            <span class="s2">return </span><span class="s1">(basestate</span><span class="s2">,</span><span class="s1">)</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s2">return </span><span class="s1">(basestate</span><span class="s2">, </span><span class="s1">self._tzinfo)</span>
+
+    <span class="s2">def </span><span class="s1">__setstate(self</span><span class="s2">, </span><span class="s1">string</span><span class="s2">, </span><span class="s1">tzinfo):</span>
+        <span class="s2">if </span><span class="s1">len(string) != </span><span class="s3">6 </span><span class="s2">or </span><span class="s1">string[</span><span class="s3">0</span><span class="s1">] &gt;= </span><span class="s3">24</span><span class="s1">:</span>
+            <span class="s2">raise </span><span class="s1">TypeError(</span><span class="s5">&quot;an integer is required&quot;</span><span class="s1">)</span>
+        <span class="s1">(self._hour</span><span class="s2">, </span><span class="s1">self._minute</span><span class="s2">, </span><span class="s1">self._second</span><span class="s2">,</span>
+         <span class="s1">us1</span><span class="s2">, </span><span class="s1">us2</span><span class="s2">, </span><span class="s1">us3) = string</span>
+        <span class="s1">self._microsecond = (((us1 &lt;&lt; </span><span class="s3">8</span><span class="s1">) | us2) &lt;&lt; </span><span class="s3">8</span><span class="s1">) | us3</span>
+        <span class="s2">if </span><span class="s1">tzinfo </span><span class="s2">is None or </span><span class="s1">isinstance(tzinfo</span><span class="s2">, </span><span class="s1">_tzinfo_class):</span>
+            <span class="s1">self._tzinfo = tzinfo</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s2">raise </span><span class="s1">TypeError(</span><span class="s5">&quot;bad tzinfo state arg %r&quot; </span><span class="s1">% tzinfo)</span>
+
+    <span class="s2">def </span><span class="s1">__reduce__(self):</span>
+        <span class="s2">return </span><span class="s1">(time</span><span class="s2">, </span><span class="s1">self._getstate())</span>
+
+<span class="s1">_time_class = time  </span><span class="s4"># so functions w/ args named &quot;time&quot; can get at the class</span>
+
+<span class="s1">time.min = time(</span><span class="s3">0</span><span class="s2">, </span><span class="s3">0</span><span class="s2">, </span><span class="s3">0</span><span class="s1">)</span>
+<span class="s1">time.max = time(</span><span class="s3">23</span><span class="s2">, </span><span class="s3">59</span><span class="s2">, </span><span class="s3">59</span><span class="s2">, </span><span class="s3">999999</span><span class="s1">)</span>
+<span class="s1">time.resolution = timedelta(microseconds=</span><span class="s3">1</span><span class="s1">)</span>
+
+<span class="s2">class </span><span class="s1">datetime(date):</span>
+    <span class="s0">&quot;&quot;&quot;datetime(year, month, day[, hour[, minute[, second[, microsecond[,tzinfo]]]]]) 
+ 
+    The year, month and day arguments are required. tzinfo may be None, or an 
+    instance of a tzinfo subclass. The remaining arguments may be ints. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s1">__slots__ = date.__slots__ + (</span>
+        <span class="s5">'_hour'</span><span class="s2">, </span><span class="s5">'_minute'</span><span class="s2">, </span><span class="s5">'_second'</span><span class="s2">,</span>
+        <span class="s5">'_microsecond'</span><span class="s2">, </span><span class="s5">'_tzinfo'</span><span class="s1">)</span>
+    <span class="s2">def </span><span class="s1">__new__(cls</span><span class="s2">, </span><span class="s1">year</span><span class="s2">, </span><span class="s1">month=</span><span class="s2">None, </span><span class="s1">day=</span><span class="s2">None, </span><span class="s1">hour=</span><span class="s3">0</span><span class="s2">, </span><span class="s1">minute=</span><span class="s3">0</span><span class="s2">, </span><span class="s1">second=</span><span class="s3">0</span><span class="s2">,</span>
+                <span class="s1">microsecond=</span><span class="s3">0</span><span class="s2">, </span><span class="s1">tzinfo=</span><span class="s2">None</span><span class="s1">):</span>
+        <span class="s2">if </span><span class="s1">isinstance(year</span><span class="s2">, </span><span class="s1">bytes) </span><span class="s2">and </span><span class="s1">len(year) == </span><span class="s3">10</span><span class="s1">:</span>
+            <span class="s4"># Pickle support</span>
+            <span class="s1">self = date.__new__(cls</span><span class="s2">, </span><span class="s1">year[:</span><span class="s3">4</span><span class="s1">])</span>
+            <span class="s1">self.__setstate(year</span><span class="s2">, </span><span class="s1">month)</span>
+            <span class="s2">return </span><span class="s1">self</span>
+        <span class="s1">_check_tzinfo_arg(tzinfo)</span>
+        <span class="s1">_check_time_fields(hour</span><span class="s2">, </span><span class="s1">minute</span><span class="s2">, </span><span class="s1">second</span><span class="s2">, </span><span class="s1">microsecond)</span>
+        <span class="s1">self = date.__new__(cls</span><span class="s2">, </span><span class="s1">year</span><span class="s2">, </span><span class="s1">month</span><span class="s2">, </span><span class="s1">day)</span>
+        <span class="s1">self._hour = hour</span>
+        <span class="s1">self._minute = minute</span>
+        <span class="s1">self._second = second</span>
+        <span class="s1">self._microsecond = microsecond</span>
+        <span class="s1">self._tzinfo = tzinfo</span>
+        <span class="s2">return </span><span class="s1">self</span>
+
+    <span class="s4"># Read-only field accessors</span>
+    <span class="s1">@property</span>
+    <span class="s2">def </span><span class="s1">hour(self):</span>
+        <span class="s0">&quot;&quot;&quot;hour (0-23)&quot;&quot;&quot;</span>
+        <span class="s2">return </span><span class="s1">self._hour</span>
+
+    <span class="s1">@property</span>
+    <span class="s2">def </span><span class="s1">minute(self):</span>
+        <span class="s0">&quot;&quot;&quot;minute (0-59)&quot;&quot;&quot;</span>
+        <span class="s2">return </span><span class="s1">self._minute</span>
+
+    <span class="s1">@property</span>
+    <span class="s2">def </span><span class="s1">second(self):</span>
+        <span class="s0">&quot;&quot;&quot;second (0-59)&quot;&quot;&quot;</span>
+        <span class="s2">return </span><span class="s1">self._second</span>
+
+    <span class="s1">@property</span>
+    <span class="s2">def </span><span class="s1">microsecond(self):</span>
+        <span class="s0">&quot;&quot;&quot;microsecond (0-999999)&quot;&quot;&quot;</span>
+        <span class="s2">return </span><span class="s1">self._microsecond</span>
+
+    <span class="s1">@property</span>
+    <span class="s2">def </span><span class="s1">tzinfo(self):</span>
+        <span class="s0">&quot;&quot;&quot;timezone info object&quot;&quot;&quot;</span>
+        <span class="s2">return </span><span class="s1">self._tzinfo</span>
+
+    <span class="s1">@classmethod</span>
+    <span class="s2">def </span><span class="s1">fromtimestamp(cls</span><span class="s2">, </span><span class="s1">t</span><span class="s2">, </span><span class="s1">tz=</span><span class="s2">None</span><span class="s1">):</span>
+        <span class="s0">&quot;&quot;&quot;Construct a datetime from a POSIX timestamp (like time.time()). 
+ 
+        A timezone info object may be passed in as well. 
+        &quot;&quot;&quot;</span>
+
+        <span class="s1">_check_tzinfo_arg(tz)</span>
+
+        <span class="s1">converter = _time.localtime </span><span class="s2">if </span><span class="s1">tz </span><span class="s2">is None else </span><span class="s1">_time.gmtime</span>
+
+        <span class="s1">t</span><span class="s2">, </span><span class="s1">frac = divmod(t</span><span class="s2">, </span><span class="s3">1.0</span><span class="s1">)</span>
+        <span class="s1">us = int(frac * </span><span class="s3">1e6</span><span class="s1">)</span>
+
+        <span class="s4"># If timestamp is less than one microsecond smaller than a</span>
+        <span class="s4"># full second, us can be rounded up to 1000000.  In this case,</span>
+        <span class="s4"># roll over to seconds, otherwise, ValueError is raised</span>
+        <span class="s4"># by the constructor.</span>
+        <span class="s2">if </span><span class="s1">us == </span><span class="s3">1000000</span><span class="s1">:</span>
+            <span class="s1">t += </span><span class="s3">1</span>
+            <span class="s1">us = </span><span class="s3">0</span>
+        <span class="s1">y</span><span class="s2">, </span><span class="s1">m</span><span class="s2">, </span><span class="s1">d</span><span class="s2">, </span><span class="s1">hh</span><span class="s2">, </span><span class="s1">mm</span><span class="s2">, </span><span class="s1">ss</span><span class="s2">, </span><span class="s1">weekday</span><span class="s2">, </span><span class="s1">jday</span><span class="s2">, </span><span class="s1">dst = converter(t)</span>
+        <span class="s1">ss = min(ss</span><span class="s2">, </span><span class="s3">59</span><span class="s1">)    </span><span class="s4"># clamp out leap seconds if the platform has them</span>
+        <span class="s1">result = cls(y</span><span class="s2">, </span><span class="s1">m</span><span class="s2">, </span><span class="s1">d</span><span class="s2">, </span><span class="s1">hh</span><span class="s2">, </span><span class="s1">mm</span><span class="s2">, </span><span class="s1">ss</span><span class="s2">, </span><span class="s1">us</span><span class="s2">, </span><span class="s1">tz)</span>
+        <span class="s2">if </span><span class="s1">tz </span><span class="s2">is not None</span><span class="s1">:</span>
+            <span class="s1">result = tz.fromutc(result)</span>
+        <span class="s2">return </span><span class="s1">result</span>
+
+    <span class="s1">@classmethod</span>
+    <span class="s2">def </span><span class="s1">utcfromtimestamp(cls</span><span class="s2">, </span><span class="s1">t):</span>
+        <span class="s0">&quot;Construct a UTC datetime from a POSIX timestamp (like time.time()).&quot;</span>
+        <span class="s1">t</span><span class="s2">, </span><span class="s1">frac = divmod(t</span><span class="s2">, </span><span class="s3">1.0</span><span class="s1">)</span>
+        <span class="s1">us = int(frac * </span><span class="s3">1e6</span><span class="s1">)</span>
+
+        <span class="s4"># If timestamp is less than one microsecond smaller than a</span>
+        <span class="s4"># full second, us can be rounded up to 1000000.  In this case,</span>
+        <span class="s4"># roll over to seconds, otherwise, ValueError is raised</span>
+        <span class="s4"># by the constructor.</span>
+        <span class="s2">if </span><span class="s1">us == </span><span class="s3">1000000</span><span class="s1">:</span>
+            <span class="s1">t += </span><span class="s3">1</span>
+            <span class="s1">us = </span><span class="s3">0</span>
+        <span class="s1">y</span><span class="s2">, </span><span class="s1">m</span><span class="s2">, </span><span class="s1">d</span><span class="s2">, </span><span class="s1">hh</span><span class="s2">, </span><span class="s1">mm</span><span class="s2">, </span><span class="s1">ss</span><span class="s2">, </span><span class="s1">weekday</span><span class="s2">, </span><span class="s1">jday</span><span class="s2">, </span><span class="s1">dst = _time.gmtime(t)</span>
+        <span class="s1">ss = min(ss</span><span class="s2">, </span><span class="s3">59</span><span class="s1">)    </span><span class="s4"># clamp out leap seconds if the platform has them</span>
+        <span class="s2">return </span><span class="s1">cls(y</span><span class="s2">, </span><span class="s1">m</span><span class="s2">, </span><span class="s1">d</span><span class="s2">, </span><span class="s1">hh</span><span class="s2">, </span><span class="s1">mm</span><span class="s2">, </span><span class="s1">ss</span><span class="s2">, </span><span class="s1">us)</span>
+
+    <span class="s4"># XXX This is supposed to do better than we *can* do by using time.time(),</span>
+    <span class="s4"># XXX if the platform supports a more accurate way.  The C implementation</span>
+    <span class="s4"># XXX uses gettimeofday on platforms that have it, but that isn't</span>
+    <span class="s4"># XXX available from Python.  So now() may return different results</span>
+    <span class="s4"># XXX across the implementations.</span>
+    <span class="s1">@classmethod</span>
+    <span class="s2">def </span><span class="s1">now(cls</span><span class="s2">, </span><span class="s1">tz=</span><span class="s2">None</span><span class="s1">):</span>
+        <span class="s0">&quot;Construct a datetime from time.time() and optional time zone info.&quot;</span>
+        <span class="s1">t = _time.time()</span>
+        <span class="s2">return </span><span class="s1">cls.fromtimestamp(t</span><span class="s2">, </span><span class="s1">tz)</span>
+
+    <span class="s1">@classmethod</span>
+    <span class="s2">def </span><span class="s1">utcnow(cls):</span>
+        <span class="s0">&quot;Construct a UTC datetime from time.time().&quot;</span>
+        <span class="s1">t = _time.time()</span>
+        <span class="s2">return </span><span class="s1">cls.utcfromtimestamp(t)</span>
+
+    <span class="s1">@classmethod</span>
+    <span class="s2">def </span><span class="s1">combine(cls</span><span class="s2">, </span><span class="s1">date</span><span class="s2">, </span><span class="s1">time):</span>
+        <span class="s0">&quot;Construct a datetime from a given date and a given time.&quot;</span>
+        <span class="s2">if not </span><span class="s1">isinstance(date</span><span class="s2">, </span><span class="s1">_date_class):</span>
+            <span class="s2">raise </span><span class="s1">TypeError(</span><span class="s5">&quot;date argument must be a date instance&quot;</span><span class="s1">)</span>
+        <span class="s2">if not </span><span class="s1">isinstance(time</span><span class="s2">, </span><span class="s1">_time_class):</span>
+            <span class="s2">raise </span><span class="s1">TypeError(</span><span class="s5">&quot;time argument must be a time instance&quot;</span><span class="s1">)</span>
+        <span class="s2">return </span><span class="s1">cls(date.year</span><span class="s2">, </span><span class="s1">date.month</span><span class="s2">, </span><span class="s1">date.day</span><span class="s2">,</span>
+                   <span class="s1">time.hour</span><span class="s2">, </span><span class="s1">time.minute</span><span class="s2">, </span><span class="s1">time.second</span><span class="s2">, </span><span class="s1">time.microsecond</span><span class="s2">,</span>
+                   <span class="s1">time.tzinfo)</span>
+
+    <span class="s2">def </span><span class="s1">timetuple(self):</span>
+        <span class="s0">&quot;Return local time tuple compatible with time.localtime().&quot;</span>
+        <span class="s1">dst = self.dst()</span>
+        <span class="s2">if </span><span class="s1">dst </span><span class="s2">is None</span><span class="s1">:</span>
+            <span class="s1">dst = -</span><span class="s3">1</span>
+        <span class="s2">elif </span><span class="s1">dst:</span>
+            <span class="s1">dst = </span><span class="s3">1</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">dst = </span><span class="s3">0</span>
+        <span class="s2">return </span><span class="s1">_build_struct_time(self.year</span><span class="s2">, </span><span class="s1">self.month</span><span class="s2">, </span><span class="s1">self.day</span><span class="s2">,</span>
+                                  <span class="s1">self.hour</span><span class="s2">, </span><span class="s1">self.minute</span><span class="s2">, </span><span class="s1">self.second</span><span class="s2">,</span>
+                                  <span class="s1">dst)</span>
+
+    <span class="s2">def </span><span class="s1">timestamp(self):</span>
+        <span class="s0">&quot;Return POSIX timestamp as float&quot;</span>
+        <span class="s2">if </span><span class="s1">self._tzinfo </span><span class="s2">is None</span><span class="s1">:</span>
+            <span class="s2">return </span><span class="s1">_time.mktime((self.year</span><span class="s2">, </span><span class="s1">self.month</span><span class="s2">, </span><span class="s1">self.day</span><span class="s2">,</span>
+                                 <span class="s1">self.hour</span><span class="s2">, </span><span class="s1">self.minute</span><span class="s2">, </span><span class="s1">self.second</span><span class="s2">,</span>
+                                 <span class="s1">-</span><span class="s3">1</span><span class="s2">, </span><span class="s1">-</span><span class="s3">1</span><span class="s2">, </span><span class="s1">-</span><span class="s3">1</span><span class="s1">)) + self.microsecond / </span><span class="s3">1e6</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s2">return </span><span class="s1">(self - _EPOCH).total_seconds()</span>
+
+    <span class="s2">def </span><span class="s1">utctimetuple(self):</span>
+        <span class="s0">&quot;Return UTC time tuple compatible with time.gmtime().&quot;</span>
+        <span class="s1">offset = self.utcoffset()</span>
+        <span class="s2">if </span><span class="s1">offset:</span>
+            <span class="s1">self -= offset</span>
+        <span class="s1">y</span><span class="s2">, </span><span class="s1">m</span><span class="s2">, </span><span class="s1">d = self.year</span><span class="s2">, </span><span class="s1">self.month</span><span class="s2">, </span><span class="s1">self.day</span>
+        <span class="s1">hh</span><span class="s2">, </span><span class="s1">mm</span><span class="s2">, </span><span class="s1">ss = self.hour</span><span class="s2">, </span><span class="s1">self.minute</span><span class="s2">, </span><span class="s1">self.second</span>
+        <span class="s2">return </span><span class="s1">_build_struct_time(y</span><span class="s2">, </span><span class="s1">m</span><span class="s2">, </span><span class="s1">d</span><span class="s2">, </span><span class="s1">hh</span><span class="s2">, </span><span class="s1">mm</span><span class="s2">, </span><span class="s1">ss</span><span class="s2">, </span><span class="s3">0</span><span class="s1">)</span>
+
+    <span class="s2">def </span><span class="s1">date(self):</span>
+        <span class="s0">&quot;Return the date part.&quot;</span>
+        <span class="s2">return </span><span class="s1">date(self._year</span><span class="s2">, </span><span class="s1">self._month</span><span class="s2">, </span><span class="s1">self._day)</span>
+
+    <span class="s2">def </span><span class="s1">time(self):</span>
+        <span class="s0">&quot;Return the time part, with tzinfo None.&quot;</span>
+        <span class="s2">return </span><span class="s1">time(self.hour</span><span class="s2">, </span><span class="s1">self.minute</span><span class="s2">, </span><span class="s1">self.second</span><span class="s2">, </span><span class="s1">self.microsecond)</span>
+
+    <span class="s2">def </span><span class="s1">timetz(self):</span>
+        <span class="s0">&quot;Return the time part, with same tzinfo.&quot;</span>
+        <span class="s2">return </span><span class="s1">time(self.hour</span><span class="s2">, </span><span class="s1">self.minute</span><span class="s2">, </span><span class="s1">self.second</span><span class="s2">, </span><span class="s1">self.microsecond</span><span class="s2">,</span>
+                    <span class="s1">self._tzinfo)</span>
+
+    <span class="s2">def </span><span class="s1">replace(self</span><span class="s2">, </span><span class="s1">year=</span><span class="s2">None, </span><span class="s1">month=</span><span class="s2">None, </span><span class="s1">day=</span><span class="s2">None, </span><span class="s1">hour=</span><span class="s2">None,</span>
+                <span class="s1">minute=</span><span class="s2">None, </span><span class="s1">second=</span><span class="s2">None, </span><span class="s1">microsecond=</span><span class="s2">None, </span><span class="s1">tzinfo=</span><span class="s2">True</span><span class="s1">):</span>
+        <span class="s0">&quot;&quot;&quot;Return a new datetime with new values for the specified fields.&quot;&quot;&quot;</span>
+        <span class="s2">if </span><span class="s1">year </span><span class="s2">is None</span><span class="s1">:</span>
+            <span class="s1">year = self.year</span>
+        <span class="s2">if </span><span class="s1">month </span><span class="s2">is None</span><span class="s1">:</span>
+            <span class="s1">month = self.month</span>
+        <span class="s2">if </span><span class="s1">day </span><span class="s2">is None</span><span class="s1">:</span>
+            <span class="s1">day = self.day</span>
+        <span class="s2">if </span><span class="s1">hour </span><span class="s2">is None</span><span class="s1">:</span>
+            <span class="s1">hour = self.hour</span>
+        <span class="s2">if </span><span class="s1">minute </span><span class="s2">is None</span><span class="s1">:</span>
+            <span class="s1">minute = self.minute</span>
+        <span class="s2">if </span><span class="s1">second </span><span class="s2">is None</span><span class="s1">:</span>
+            <span class="s1">second = self.second</span>
+        <span class="s2">if </span><span class="s1">microsecond </span><span class="s2">is None</span><span class="s1">:</span>
+            <span class="s1">microsecond = self.microsecond</span>
+        <span class="s2">if </span><span class="s1">tzinfo </span><span class="s2">is True</span><span class="s1">:</span>
+            <span class="s1">tzinfo = self.tzinfo</span>
+        <span class="s1">_check_date_fields(year</span><span class="s2">, </span><span class="s1">month</span><span class="s2">, </span><span class="s1">day)</span>
+        <span class="s1">_check_time_fields(hour</span><span class="s2">, </span><span class="s1">minute</span><span class="s2">, </span><span class="s1">second</span><span class="s2">, </span><span class="s1">microsecond)</span>
+        <span class="s1">_check_tzinfo_arg(tzinfo)</span>
+        <span class="s2">return </span><span class="s1">datetime(year</span><span class="s2">, </span><span class="s1">month</span><span class="s2">, </span><span class="s1">day</span><span class="s2">, </span><span class="s1">hour</span><span class="s2">, </span><span class="s1">minute</span><span class="s2">, </span><span class="s1">second</span><span class="s2">,</span>
+                          <span class="s1">microsecond</span><span class="s2">, </span><span class="s1">tzinfo)</span>
+
+    <span class="s2">def </span><span class="s1">astimezone(self</span><span class="s2">, </span><span class="s1">tz=</span><span class="s2">None</span><span class="s1">):</span>
+        <span class="s2">if </span><span class="s1">tz </span><span class="s2">is None</span><span class="s1">:</span>
+            <span class="s2">if </span><span class="s1">self.tzinfo </span><span class="s2">is None</span><span class="s1">:</span>
+                <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s5">&quot;astimezone() requires an aware datetime&quot;</span><span class="s1">)</span>
+            <span class="s1">ts = (self - _EPOCH) // timedelta(seconds=</span><span class="s3">1</span><span class="s1">)</span>
+            <span class="s1">localtm = _time.localtime(ts)</span>
+            <span class="s1">local = datetime(*localtm[:</span><span class="s3">6</span><span class="s1">])</span>
+            <span class="s2">try</span><span class="s1">:</span>
+                <span class="s4"># Extract TZ data if available</span>
+                <span class="s1">gmtoff = localtm.tm_gmtoff</span>
+                <span class="s1">zone = localtm.tm_zone</span>
+            <span class="s2">except </span><span class="s1">AttributeError:</span>
+                <span class="s4"># Compute UTC offset and compare with the value implied</span>
+                <span class="s4"># by tm_isdst.  If the values match, use the zone name</span>
+                <span class="s4"># implied by tm_isdst.</span>
+                <span class="s1">delta = local - datetime(*_time.gmtime(ts)[:</span><span class="s3">6</span><span class="s1">])</span>
+                <span class="s1">dst = _time.daylight </span><span class="s2">and </span><span class="s1">localtm.tm_isdst &gt; </span><span class="s3">0</span>
+                <span class="s1">gmtoff = -(_time.altzone </span><span class="s2">if </span><span class="s1">dst </span><span class="s2">else </span><span class="s1">_time.timezone)</span>
+                <span class="s2">if </span><span class="s1">delta == timedelta(seconds=gmtoff):</span>
+                    <span class="s1">tz = timezone(delta</span><span class="s2">, </span><span class="s1">_time.tzname[dst])</span>
+                <span class="s2">else</span><span class="s1">:</span>
+                    <span class="s1">tz = timezone(delta)</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s1">tz = timezone(timedelta(seconds=gmtoff)</span><span class="s2">, </span><span class="s1">zone)</span>
+
+        <span class="s2">elif not </span><span class="s1">isinstance(tz</span><span class="s2">, </span><span class="s1">tzinfo):</span>
+            <span class="s2">raise </span><span class="s1">TypeError(</span><span class="s5">&quot;tz argument must be an instance of tzinfo&quot;</span><span class="s1">)</span>
+
+        <span class="s1">mytz = self.tzinfo</span>
+        <span class="s2">if </span><span class="s1">mytz </span><span class="s2">is None</span><span class="s1">:</span>
+            <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s5">&quot;astimezone() requires an aware datetime&quot;</span><span class="s1">)</span>
+
+        <span class="s2">if </span><span class="s1">tz </span><span class="s2">is </span><span class="s1">mytz:</span>
+            <span class="s2">return </span><span class="s1">self</span>
+
+        <span class="s4"># Convert self to UTC, and attach the new time zone object.</span>
+        <span class="s1">myoffset = self.utcoffset()</span>
+        <span class="s2">if </span><span class="s1">myoffset </span><span class="s2">is None</span><span class="s1">:</span>
+            <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s5">&quot;astimezone() requires an aware datetime&quot;</span><span class="s1">)</span>
+        <span class="s1">utc = (self - myoffset).replace(tzinfo=tz)</span>
+
+        <span class="s4"># Convert from UTC to tz's local time.</span>
+        <span class="s2">return </span><span class="s1">tz.fromutc(utc)</span>
+
+    <span class="s4"># Ways to produce a string.</span>
+
+    <span class="s2">def </span><span class="s1">ctime(self):</span>
+        <span class="s0">&quot;Return ctime() style string.&quot;</span>
+        <span class="s1">weekday = self.toordinal() % </span><span class="s3">7 </span><span class="s2">or </span><span class="s3">7</span>
+        <span class="s2">return </span><span class="s5">&quot;%s %s %2d %02d:%02d:%02d %04d&quot; </span><span class="s1">% (</span>
+            <span class="s1">_DAYNAMES[weekday]</span><span class="s2">,</span>
+            <span class="s1">_MONTHNAMES[self._month]</span><span class="s2">,</span>
+            <span class="s1">self._day</span><span class="s2">,</span>
+            <span class="s1">self._hour</span><span class="s2">, </span><span class="s1">self._minute</span><span class="s2">, </span><span class="s1">self._second</span><span class="s2">,</span>
+            <span class="s1">self._year)</span>
+
+    <span class="s2">def </span><span class="s1">isoformat(self</span><span class="s2">, </span><span class="s1">sep=</span><span class="s5">'T'</span><span class="s1">):</span>
+        <span class="s0">&quot;&quot;&quot;Return the time formatted according to ISO. 
+ 
+        This is 'YYYY-MM-DD HH:MM:SS.mmmmmm', or 'YYYY-MM-DD HH:MM:SS' if 
+        self.microsecond == 0. 
+ 
+        If self.tzinfo is not None, the UTC offset is also attached, giving 
+        'YYYY-MM-DD HH:MM:SS.mmmmmm+HH:MM' or 'YYYY-MM-DD HH:MM:SS+HH:MM'. 
+ 
+        Optional argument sep specifies the separator between date and 
+        time, default 'T'. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">s = (</span><span class="s5">&quot;%04d-%02d-%02d%c&quot; </span><span class="s1">% (self._year</span><span class="s2">, </span><span class="s1">self._month</span><span class="s2">, </span><span class="s1">self._day</span><span class="s2">,</span>
+                                  <span class="s1">sep) +</span>
+                <span class="s1">_format_time(self._hour</span><span class="s2">, </span><span class="s1">self._minute</span><span class="s2">, </span><span class="s1">self._second</span><span class="s2">,</span>
+                             <span class="s1">self._microsecond))</span>
+        <span class="s1">off = self.utcoffset()</span>
+        <span class="s2">if </span><span class="s1">off </span><span class="s2">is not None</span><span class="s1">:</span>
+            <span class="s2">if </span><span class="s1">off.days &lt; </span><span class="s3">0</span><span class="s1">:</span>
+                <span class="s1">sign = </span><span class="s5">&quot;-&quot;</span>
+                <span class="s1">off = -off</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s1">sign = </span><span class="s5">&quot;+&quot;</span>
+            <span class="s1">hh</span><span class="s2">, </span><span class="s1">mm = divmod(off</span><span class="s2">, </span><span class="s1">timedelta(hours=</span><span class="s3">1</span><span class="s1">))</span>
+            <span class="s2">assert not </span><span class="s1">mm % timedelta(minutes=</span><span class="s3">1</span><span class="s1">)</span><span class="s2">, </span><span class="s5">&quot;whole minute&quot;</span>
+            <span class="s1">mm //= timedelta(minutes=</span><span class="s3">1</span><span class="s1">)</span>
+            <span class="s1">s += </span><span class="s5">&quot;%s%02d:%02d&quot; </span><span class="s1">% (sign</span><span class="s2">, </span><span class="s1">hh</span><span class="s2">, </span><span class="s1">mm)</span>
+        <span class="s2">return </span><span class="s1">s</span>
+
+    <span class="s2">def </span><span class="s1">__repr__(self):</span>
+        <span class="s0">&quot;&quot;&quot;Convert to formal string, for repr().&quot;&quot;&quot;</span>
+        <span class="s1">L = [self._year</span><span class="s2">, </span><span class="s1">self._month</span><span class="s2">, </span><span class="s1">self._day</span><span class="s2">, </span><span class="s4"># These are never zero</span>
+             <span class="s1">self._hour</span><span class="s2">, </span><span class="s1">self._minute</span><span class="s2">, </span><span class="s1">self._second</span><span class="s2">, </span><span class="s1">self._microsecond]</span>
+        <span class="s2">if </span><span class="s1">L[-</span><span class="s3">1</span><span class="s1">] == </span><span class="s3">0</span><span class="s1">:</span>
+            <span class="s2">del </span><span class="s1">L[-</span><span class="s3">1</span><span class="s1">]</span>
+        <span class="s2">if </span><span class="s1">L[-</span><span class="s3">1</span><span class="s1">] == </span><span class="s3">0</span><span class="s1">:</span>
+            <span class="s2">del </span><span class="s1">L[-</span><span class="s3">1</span><span class="s1">]</span>
+        <span class="s1">s = </span><span class="s5">&quot;, &quot;</span><span class="s1">.join(map(str</span><span class="s2">, </span><span class="s1">L))</span>
+        <span class="s1">s = </span><span class="s5">&quot;%s(%s)&quot; </span><span class="s1">% (</span><span class="s5">'datetime.' </span><span class="s1">+ self.__class__.__name__</span><span class="s2">, </span><span class="s1">s)</span>
+        <span class="s2">if </span><span class="s1">self._tzinfo </span><span class="s2">is not None</span><span class="s1">:</span>
+            <span class="s2">assert </span><span class="s1">s[-</span><span class="s3">1</span><span class="s1">:] == </span><span class="s5">&quot;)&quot;</span>
+            <span class="s1">s = s[:-</span><span class="s3">1</span><span class="s1">] + </span><span class="s5">&quot;, tzinfo=%r&quot; </span><span class="s1">% self._tzinfo + </span><span class="s5">&quot;)&quot;</span>
+        <span class="s2">return </span><span class="s1">s</span>
+
+    <span class="s2">def </span><span class="s1">__str__(self):</span>
+        <span class="s0">&quot;Convert to string, for str().&quot;</span>
+        <span class="s2">return </span><span class="s1">self.isoformat(sep=</span><span class="s5">' '</span><span class="s1">)</span>
+
+    <span class="s1">@classmethod</span>
+    <span class="s2">def </span><span class="s1">strptime(cls</span><span class="s2">, </span><span class="s1">date_string</span><span class="s2">, </span><span class="s1">format):</span>
+        <span class="s0">'string, format -&gt; new datetime parsed from a string (like time.strptime()).'</span>
+        <span class="s2">import </span><span class="s1">_strptime</span>
+        <span class="s2">return </span><span class="s1">_strptime._strptime_datetime(cls</span><span class="s2">, </span><span class="s1">date_string</span><span class="s2">, </span><span class="s1">format)</span>
+
+    <span class="s2">def </span><span class="s1">utcoffset(self):</span>
+        <span class="s0">&quot;&quot;&quot;Return the timezone offset in minutes east of UTC (negative west of 
+        UTC).&quot;&quot;&quot;</span>
+        <span class="s2">if </span><span class="s1">self._tzinfo </span><span class="s2">is None</span><span class="s1">:</span>
+            <span class="s2">return None</span>
+        <span class="s1">offset = self._tzinfo.utcoffset(self)</span>
+        <span class="s1">_check_utc_offset(</span><span class="s5">&quot;utcoffset&quot;</span><span class="s2">, </span><span class="s1">offset)</span>
+        <span class="s2">return </span><span class="s1">offset</span>
+
+    <span class="s2">def </span><span class="s1">tzname(self):</span>
+        <span class="s0">&quot;&quot;&quot;Return the timezone name. 
+ 
+        Note that the name is 100% informational -- there's no requirement that 
+        it mean anything in particular. For example, &quot;GMT&quot;, &quot;UTC&quot;, &quot;-500&quot;, 
+        &quot;-5:00&quot;, &quot;EDT&quot;, &quot;US/Eastern&quot;, &quot;America/New York&quot; are all valid replies. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">name = _call_tzinfo_method(self._tzinfo</span><span class="s2">, </span><span class="s5">&quot;tzname&quot;</span><span class="s2">, </span><span class="s1">self)</span>
+        <span class="s1">_check_tzname(name)</span>
+        <span class="s2">return </span><span class="s1">name</span>
+
+    <span class="s2">def </span><span class="s1">dst(self):</span>
+        <span class="s0">&quot;&quot;&quot;Return 0 if DST is not in effect, or the DST offset (in minutes 
+        eastward) if DST is in effect. 
+ 
+        This is purely informational; the DST offset has already been added to 
+        the UTC offset returned by utcoffset() if applicable, so there's no 
+        need to consult dst() unless you're interested in displaying the DST 
+        info. 
+        &quot;&quot;&quot;</span>
+        <span class="s2">if </span><span class="s1">self._tzinfo </span><span class="s2">is None</span><span class="s1">:</span>
+            <span class="s2">return None</span>
+        <span class="s1">offset = self._tzinfo.dst(self)</span>
+        <span class="s1">_check_utc_offset(</span><span class="s5">&quot;dst&quot;</span><span class="s2">, </span><span class="s1">offset)</span>
+        <span class="s2">return </span><span class="s1">offset</span>
+
+    <span class="s4"># Comparisons of datetime objects with other.</span>
+
+    <span class="s2">def </span><span class="s1">__eq__(self</span><span class="s2">, </span><span class="s1">other):</span>
+        <span class="s2">if </span><span class="s1">isinstance(other</span><span class="s2">, </span><span class="s1">datetime):</span>
+            <span class="s2">return </span><span class="s1">self._cmp(other</span><span class="s2">, </span><span class="s1">allow_mixed=</span><span class="s2">True</span><span class="s1">) == </span><span class="s3">0</span>
+        <span class="s2">elif not </span><span class="s1">isinstance(other</span><span class="s2">, </span><span class="s1">date):</span>
+            <span class="s2">return </span><span class="s1">NotImplemented</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s2">return False</span>
+
+    <span class="s2">def </span><span class="s1">__ne__(self</span><span class="s2">, </span><span class="s1">other):</span>
+        <span class="s2">if </span><span class="s1">isinstance(other</span><span class="s2">, </span><span class="s1">datetime):</span>
+            <span class="s2">return </span><span class="s1">self._cmp(other</span><span class="s2">, </span><span class="s1">allow_mixed=</span><span class="s2">True</span><span class="s1">) != </span><span class="s3">0</span>
+        <span class="s2">elif not </span><span class="s1">isinstance(other</span><span class="s2">, </span><span class="s1">date):</span>
+            <span class="s2">return </span><span class="s1">NotImplemented</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s2">return True</span>
+
+    <span class="s2">def </span><span class="s1">__le__(self</span><span class="s2">, </span><span class="s1">other):</span>
+        <span class="s2">if </span><span class="s1">isinstance(other</span><span class="s2">, </span><span class="s1">datetime):</span>
+            <span class="s2">return </span><span class="s1">self._cmp(other) &lt;= </span><span class="s3">0</span>
+        <span class="s2">elif not </span><span class="s1">isinstance(other</span><span class="s2">, </span><span class="s1">date):</span>
+            <span class="s2">return </span><span class="s1">NotImplemented</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">_cmperror(self</span><span class="s2">, </span><span class="s1">other)</span>
+
+    <span class="s2">def </span><span class="s1">__lt__(self</span><span class="s2">, </span><span class="s1">other):</span>
+        <span class="s2">if </span><span class="s1">isinstance(other</span><span class="s2">, </span><span class="s1">datetime):</span>
+            <span class="s2">return </span><span class="s1">self._cmp(other) &lt; </span><span class="s3">0</span>
+        <span class="s2">elif not </span><span class="s1">isinstance(other</span><span class="s2">, </span><span class="s1">date):</span>
+            <span class="s2">return </span><span class="s1">NotImplemented</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">_cmperror(self</span><span class="s2">, </span><span class="s1">other)</span>
+
+    <span class="s2">def </span><span class="s1">__ge__(self</span><span class="s2">, </span><span class="s1">other):</span>
+        <span class="s2">if </span><span class="s1">isinstance(other</span><span class="s2">, </span><span class="s1">datetime):</span>
+            <span class="s2">return </span><span class="s1">self._cmp(other) &gt;= </span><span class="s3">0</span>
+        <span class="s2">elif not </span><span class="s1">isinstance(other</span><span class="s2">, </span><span class="s1">date):</span>
+            <span class="s2">return </span><span class="s1">NotImplemented</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">_cmperror(self</span><span class="s2">, </span><span class="s1">other)</span>
+
+    <span class="s2">def </span><span class="s1">__gt__(self</span><span class="s2">, </span><span class="s1">other):</span>
+        <span class="s2">if </span><span class="s1">isinstance(other</span><span class="s2">, </span><span class="s1">datetime):</span>
+            <span class="s2">return </span><span class="s1">self._cmp(other) &gt; </span><span class="s3">0</span>
+        <span class="s2">elif not </span><span class="s1">isinstance(other</span><span class="s2">, </span><span class="s1">date):</span>
+            <span class="s2">return </span><span class="s1">NotImplemented</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">_cmperror(self</span><span class="s2">, </span><span class="s1">other)</span>
+
+    <span class="s2">def </span><span class="s1">_cmp(self</span><span class="s2">, </span><span class="s1">other</span><span class="s2">, </span><span class="s1">allow_mixed=</span><span class="s2">False</span><span class="s1">):</span>
+        <span class="s2">assert </span><span class="s1">isinstance(other</span><span class="s2">, </span><span class="s1">datetime)</span>
+        <span class="s1">mytz = self._tzinfo</span>
+        <span class="s1">ottz = other._tzinfo</span>
+        <span class="s1">myoff = otoff = </span><span class="s2">None</span>
+
+        <span class="s2">if </span><span class="s1">mytz </span><span class="s2">is </span><span class="s1">ottz:</span>
+            <span class="s1">base_compare = </span><span class="s2">True</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">myoff = self.utcoffset()</span>
+            <span class="s1">otoff = other.utcoffset()</span>
+            <span class="s1">base_compare = myoff == otoff</span>
+
+        <span class="s2">if </span><span class="s1">base_compare:</span>
+            <span class="s2">return </span><span class="s1">_cmp((self._year</span><span class="s2">, </span><span class="s1">self._month</span><span class="s2">, </span><span class="s1">self._day</span><span class="s2">,</span>
+                         <span class="s1">self._hour</span><span class="s2">, </span><span class="s1">self._minute</span><span class="s2">, </span><span class="s1">self._second</span><span class="s2">,</span>
+                         <span class="s1">self._microsecond)</span><span class="s2">,</span>
+                       <span class="s1">(other._year</span><span class="s2">, </span><span class="s1">other._month</span><span class="s2">, </span><span class="s1">other._day</span><span class="s2">,</span>
+                        <span class="s1">other._hour</span><span class="s2">, </span><span class="s1">other._minute</span><span class="s2">, </span><span class="s1">other._second</span><span class="s2">,</span>
+                        <span class="s1">other._microsecond))</span>
+        <span class="s2">if </span><span class="s1">myoff </span><span class="s2">is None or </span><span class="s1">otoff </span><span class="s2">is None</span><span class="s1">:</span>
+            <span class="s2">if </span><span class="s1">allow_mixed:</span>
+                <span class="s2">return </span><span class="s3">2 </span><span class="s4"># arbitrary non-zero value</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s2">raise </span><span class="s1">TypeError(</span><span class="s5">&quot;cannot compare naive and aware datetimes&quot;</span><span class="s1">)</span>
+        <span class="s4"># XXX What follows could be done more efficiently...</span>
+        <span class="s1">diff = self - other     </span><span class="s4"># this will take offsets into account</span>
+        <span class="s2">if </span><span class="s1">diff.days &lt; </span><span class="s3">0</span><span class="s1">:</span>
+            <span class="s2">return </span><span class="s1">-</span><span class="s3">1</span>
+        <span class="s2">return </span><span class="s1">diff </span><span class="s2">and </span><span class="s3">1 </span><span class="s2">or </span><span class="s3">0</span>
+
+    <span class="s2">def </span><span class="s1">__add__(self</span><span class="s2">, </span><span class="s1">other):</span>
+        <span class="s0">&quot;Add a datetime and a timedelta.&quot;</span>
+        <span class="s2">if not </span><span class="s1">isinstance(other</span><span class="s2">, </span><span class="s1">timedelta):</span>
+            <span class="s2">return </span><span class="s1">NotImplemented</span>
+        <span class="s1">delta = timedelta(self.toordinal()</span><span class="s2">,</span>
+                          <span class="s1">hours=self._hour</span><span class="s2">,</span>
+                          <span class="s1">minutes=self._minute</span><span class="s2">,</span>
+                          <span class="s1">seconds=self._second</span><span class="s2">,</span>
+                          <span class="s1">microseconds=self._microsecond)</span>
+        <span class="s1">delta += other</span>
+        <span class="s1">hour</span><span class="s2">, </span><span class="s1">rem = divmod(delta.seconds</span><span class="s2">, </span><span class="s3">3600</span><span class="s1">)</span>
+        <span class="s1">minute</span><span class="s2">, </span><span class="s1">second = divmod(rem</span><span class="s2">, </span><span class="s3">60</span><span class="s1">)</span>
+        <span class="s2">if </span><span class="s3">0 </span><span class="s1">&lt; delta.days &lt;= _MAXORDINAL:</span>
+            <span class="s2">return </span><span class="s1">datetime.combine(date.fromordinal(delta.days)</span><span class="s2">,</span>
+                                    <span class="s1">time(hour</span><span class="s2">, </span><span class="s1">minute</span><span class="s2">, </span><span class="s1">second</span><span class="s2">,</span>
+                                         <span class="s1">delta.microseconds</span><span class="s2">,</span>
+                                         <span class="s1">tzinfo=self._tzinfo))</span>
+        <span class="s2">raise </span><span class="s1">OverflowError(</span><span class="s5">&quot;result out of range&quot;</span><span class="s1">)</span>
+
+    <span class="s1">__radd__ = __add__</span>
+
+    <span class="s2">def </span><span class="s1">__sub__(self</span><span class="s2">, </span><span class="s1">other):</span>
+        <span class="s0">&quot;Subtract two datetimes, or a datetime and a timedelta.&quot;</span>
+        <span class="s2">if not </span><span class="s1">isinstance(other</span><span class="s2">, </span><span class="s1">datetime):</span>
+            <span class="s2">if </span><span class="s1">isinstance(other</span><span class="s2">, </span><span class="s1">timedelta):</span>
+                <span class="s2">return </span><span class="s1">self + -other</span>
+            <span class="s2">return </span><span class="s1">NotImplemented</span>
+
+        <span class="s1">days1 = self.toordinal()</span>
+        <span class="s1">days2 = other.toordinal()</span>
+        <span class="s1">secs1 = self._second + self._minute * </span><span class="s3">60 </span><span class="s1">+ self._hour * </span><span class="s3">3600</span>
+        <span class="s1">secs2 = other._second + other._minute * </span><span class="s3">60 </span><span class="s1">+ other._hour * </span><span class="s3">3600</span>
+        <span class="s1">base = timedelta(days1 - days2</span><span class="s2">,</span>
+                         <span class="s1">secs1 - secs2</span><span class="s2">,</span>
+                         <span class="s1">self._microsecond - other._microsecond)</span>
+        <span class="s2">if </span><span class="s1">self._tzinfo </span><span class="s2">is </span><span class="s1">other._tzinfo:</span>
+            <span class="s2">return </span><span class="s1">base</span>
+        <span class="s1">myoff = self.utcoffset()</span>
+        <span class="s1">otoff = other.utcoffset()</span>
+        <span class="s2">if </span><span class="s1">myoff == otoff:</span>
+            <span class="s2">return </span><span class="s1">base</span>
+        <span class="s2">if </span><span class="s1">myoff </span><span class="s2">is None or </span><span class="s1">otoff </span><span class="s2">is None</span><span class="s1">:</span>
+            <span class="s2">raise </span><span class="s1">TypeError(</span><span class="s5">&quot;cannot mix naive and timezone-aware time&quot;</span><span class="s1">)</span>
+        <span class="s2">return </span><span class="s1">base + otoff - myoff</span>
+
+    <span class="s2">def </span><span class="s1">__hash__(self):</span>
+        <span class="s1">tzoff = self.utcoffset()</span>
+        <span class="s2">if </span><span class="s1">tzoff </span><span class="s2">is None</span><span class="s1">:</span>
+            <span class="s2">return </span><span class="s1">hash(self._getstate()[</span><span class="s3">0</span><span class="s1">])</span>
+        <span class="s1">days = _ymd2ord(self.year</span><span class="s2">, </span><span class="s1">self.month</span><span class="s2">, </span><span class="s1">self.day)</span>
+        <span class="s1">seconds = self.hour * </span><span class="s3">3600 </span><span class="s1">+ self.minute * </span><span class="s3">60 </span><span class="s1">+ self.second</span>
+        <span class="s2">return </span><span class="s1">hash(timedelta(days</span><span class="s2">, </span><span class="s1">seconds</span><span class="s2">, </span><span class="s1">self.microsecond) - tzoff)</span>
+
+    <span class="s4"># Pickle support.</span>
+
+    <span class="s2">def </span><span class="s1">_getstate(self):</span>
+        <span class="s1">yhi</span><span class="s2">, </span><span class="s1">ylo = divmod(self._year</span><span class="s2">, </span><span class="s3">256</span><span class="s1">)</span>
+        <span class="s1">us2</span><span class="s2">, </span><span class="s1">us3 = divmod(self._microsecond</span><span class="s2">, </span><span class="s3">256</span><span class="s1">)</span>
+        <span class="s1">us1</span><span class="s2">, </span><span class="s1">us2 = divmod(us2</span><span class="s2">, </span><span class="s3">256</span><span class="s1">)</span>
+        <span class="s1">basestate = bytes([yhi</span><span class="s2">, </span><span class="s1">ylo</span><span class="s2">, </span><span class="s1">self._month</span><span class="s2">, </span><span class="s1">self._day</span><span class="s2">,</span>
+                           <span class="s1">self._hour</span><span class="s2">, </span><span class="s1">self._minute</span><span class="s2">, </span><span class="s1">self._second</span><span class="s2">,</span>
+                           <span class="s1">us1</span><span class="s2">, </span><span class="s1">us2</span><span class="s2">, </span><span class="s1">us3])</span>
+        <span class="s2">if </span><span class="s1">self._tzinfo </span><span class="s2">is None</span><span class="s1">:</span>
+            <span class="s2">return </span><span class="s1">(basestate</span><span class="s2">,</span><span class="s1">)</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s2">return </span><span class="s1">(basestate</span><span class="s2">, </span><span class="s1">self._tzinfo)</span>
+
+    <span class="s2">def </span><span class="s1">__setstate(self</span><span class="s2">, </span><span class="s1">string</span><span class="s2">, </span><span class="s1">tzinfo):</span>
+        <span class="s1">(yhi</span><span class="s2">, </span><span class="s1">ylo</span><span class="s2">, </span><span class="s1">self._month</span><span class="s2">, </span><span class="s1">self._day</span><span class="s2">, </span><span class="s1">self._hour</span><span class="s2">,</span>
+         <span class="s1">self._minute</span><span class="s2">, </span><span class="s1">self._second</span><span class="s2">, </span><span class="s1">us1</span><span class="s2">, </span><span class="s1">us2</span><span class="s2">, </span><span class="s1">us3) = string</span>
+        <span class="s1">self._year = yhi * </span><span class="s3">256 </span><span class="s1">+ ylo</span>
+        <span class="s1">self._microsecond = (((us1 &lt;&lt; </span><span class="s3">8</span><span class="s1">) | us2) &lt;&lt; </span><span class="s3">8</span><span class="s1">) | us3</span>
+        <span class="s2">if </span><span class="s1">tzinfo </span><span class="s2">is None or </span><span class="s1">isinstance(tzinfo</span><span class="s2">, </span><span class="s1">_tzinfo_class):</span>
+            <span class="s1">self._tzinfo = tzinfo</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s2">raise </span><span class="s1">TypeError(</span><span class="s5">&quot;bad tzinfo state arg %r&quot; </span><span class="s1">% tzinfo)</span>
+
+    <span class="s2">def </span><span class="s1">__reduce__(self):</span>
+        <span class="s2">return </span><span class="s1">(self.__class__</span><span class="s2">, </span><span class="s1">self._getstate())</span>
+
+
+<span class="s1">datetime.min = datetime(</span><span class="s3">1</span><span class="s2">, </span><span class="s3">1</span><span class="s2">, </span><span class="s3">1</span><span class="s1">)</span>
+<span class="s1">datetime.max = datetime(</span><span class="s3">9999</span><span class="s2">, </span><span class="s3">12</span><span class="s2">, </span><span class="s3">31</span><span class="s2">, </span><span class="s3">23</span><span class="s2">, </span><span class="s3">59</span><span class="s2">, </span><span class="s3">59</span><span class="s2">, </span><span class="s3">999999</span><span class="s1">)</span>
+<span class="s1">datetime.resolution = timedelta(microseconds=</span><span class="s3">1</span><span class="s1">)</span>
+
+
+<span class="s2">def </span><span class="s1">_isoweek1monday(year):</span>
+    <span class="s4"># Helper to calculate the day number of the Monday starting week 1</span>
+    <span class="s4"># XXX This could be done more efficiently</span>
+    <span class="s1">THURSDAY = </span><span class="s3">3</span>
+    <span class="s1">firstday = _ymd2ord(year</span><span class="s2">, </span><span class="s3">1</span><span class="s2">, </span><span class="s3">1</span><span class="s1">)</span>
+    <span class="s1">firstweekday = (firstday + </span><span class="s3">6</span><span class="s1">) % </span><span class="s3">7 </span><span class="s4"># See weekday() above</span>
+    <span class="s1">week1monday = firstday - firstweekday</span>
+    <span class="s2">if </span><span class="s1">firstweekday &gt; THURSDAY:</span>
+        <span class="s1">week1monday += </span><span class="s3">7</span>
+    <span class="s2">return </span><span class="s1">week1monday</span>
+
+<span class="s2">class </span><span class="s1">timezone(tzinfo):</span>
+    <span class="s1">__slots__ = </span><span class="s5">'_offset'</span><span class="s2">, </span><span class="s5">'_name'</span>
+
+    <span class="s4"># Sentinel value to disallow None</span>
+    <span class="s1">_Omitted = object()</span>
+    <span class="s2">def </span><span class="s1">__new__(cls</span><span class="s2">, </span><span class="s1">offset</span><span class="s2">, </span><span class="s1">name=_Omitted):</span>
+        <span class="s2">if not </span><span class="s1">isinstance(offset</span><span class="s2">, </span><span class="s1">timedelta):</span>
+            <span class="s2">raise </span><span class="s1">TypeError(</span><span class="s5">&quot;offset must be a timedelta&quot;</span><span class="s1">)</span>
+        <span class="s2">if </span><span class="s1">name </span><span class="s2">is </span><span class="s1">cls._Omitted:</span>
+            <span class="s2">if not </span><span class="s1">offset:</span>
+                <span class="s2">return </span><span class="s1">cls.utc</span>
+            <span class="s1">name = </span><span class="s2">None</span>
+        <span class="s2">elif not </span><span class="s1">isinstance(name</span><span class="s2">, </span><span class="s1">str):</span>
+            <span class="s4">###</span>
+            <span class="s4"># For Python-Future:</span>
+            <span class="s2">if </span><span class="s1">PY2 </span><span class="s2">and </span><span class="s1">isinstance(name</span><span class="s2">, </span><span class="s1">native_str):</span>
+                <span class="s1">name = name.decode()</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s2">raise </span><span class="s1">TypeError(</span><span class="s5">&quot;name must be a string&quot;</span><span class="s1">)</span>
+            <span class="s4">###</span>
+        <span class="s2">if not </span><span class="s1">cls._minoffset &lt;= offset &lt;= cls._maxoffset:</span>
+            <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s5">&quot;offset must be a timedelta&quot;</span>
+                             <span class="s5">&quot; strictly between -timedelta(hours=24) and&quot;</span>
+                             <span class="s5">&quot; timedelta(hours=24).&quot;</span><span class="s1">)</span>
+        <span class="s2">if </span><span class="s1">(offset.microseconds != </span><span class="s3">0 </span><span class="s2">or</span>
+            <span class="s1">offset.seconds % </span><span class="s3">60 </span><span class="s1">!= </span><span class="s3">0</span><span class="s1">):</span>
+            <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s5">&quot;offset must be a timedelta&quot;</span>
+                             <span class="s5">&quot; representing a whole number of minutes&quot;</span><span class="s1">)</span>
+        <span class="s2">return </span><span class="s1">cls._create(offset</span><span class="s2">, </span><span class="s1">name)</span>
+
+    <span class="s1">@classmethod</span>
+    <span class="s2">def </span><span class="s1">_create(cls</span><span class="s2">, </span><span class="s1">offset</span><span class="s2">, </span><span class="s1">name=</span><span class="s2">None</span><span class="s1">):</span>
+        <span class="s1">self = tzinfo.__new__(cls)</span>
+        <span class="s1">self._offset = offset</span>
+        <span class="s1">self._name = name</span>
+        <span class="s2">return </span><span class="s1">self</span>
+
+    <span class="s2">def </span><span class="s1">__getinitargs__(self):</span>
+        <span class="s0">&quot;&quot;&quot;pickle support&quot;&quot;&quot;</span>
+        <span class="s2">if </span><span class="s1">self._name </span><span class="s2">is None</span><span class="s1">:</span>
+            <span class="s2">return </span><span class="s1">(self._offset</span><span class="s2">,</span><span class="s1">)</span>
+        <span class="s2">return </span><span class="s1">(self._offset</span><span class="s2">, </span><span class="s1">self._name)</span>
+
+    <span class="s2">def </span><span class="s1">__eq__(self</span><span class="s2">, </span><span class="s1">other):</span>
+        <span class="s2">if </span><span class="s1">type(other) != timezone:</span>
+            <span class="s2">return False</span>
+        <span class="s2">return </span><span class="s1">self._offset == other._offset</span>
+
+    <span class="s2">def </span><span class="s1">__hash__(self):</span>
+        <span class="s2">return </span><span class="s1">hash(self._offset)</span>
+
+    <span class="s2">def </span><span class="s1">__repr__(self):</span>
+        <span class="s0">&quot;&quot;&quot;Convert to formal string, for repr(). 
+ 
+        &gt;&gt;&gt; tz = timezone.utc 
+        &gt;&gt;&gt; repr(tz) 
+        'datetime.timezone.utc' 
+        &gt;&gt;&gt; tz = timezone(timedelta(hours=-5), 'EST') 
+        &gt;&gt;&gt; repr(tz) 
+        &quot;datetime.timezone(datetime.timedelta(-1, 68400), 'EST')&quot; 
+        &quot;&quot;&quot;</span>
+        <span class="s2">if </span><span class="s1">self </span><span class="s2">is </span><span class="s1">self.utc:</span>
+            <span class="s2">return </span><span class="s5">'datetime.timezone.utc'</span>
+        <span class="s2">if </span><span class="s1">self._name </span><span class="s2">is None</span><span class="s1">:</span>
+            <span class="s2">return </span><span class="s5">&quot;%s(%r)&quot; </span><span class="s1">% (</span><span class="s5">'datetime.' </span><span class="s1">+ self.__class__.__name__</span><span class="s2">,</span>
+                               <span class="s1">self._offset)</span>
+        <span class="s2">return </span><span class="s5">&quot;%s(%r, %r)&quot; </span><span class="s1">% (</span><span class="s5">'datetime.' </span><span class="s1">+ self.__class__.__name__</span><span class="s2">,</span>
+                               <span class="s1">self._offset</span><span class="s2">, </span><span class="s1">self._name)</span>
+
+    <span class="s2">def </span><span class="s1">__str__(self):</span>
+        <span class="s2">return </span><span class="s1">self.tzname(</span><span class="s2">None</span><span class="s1">)</span>
+
+    <span class="s2">def </span><span class="s1">utcoffset(self</span><span class="s2">, </span><span class="s1">dt):</span>
+        <span class="s2">if </span><span class="s1">isinstance(dt</span><span class="s2">, </span><span class="s1">datetime) </span><span class="s2">or </span><span class="s1">dt </span><span class="s2">is None</span><span class="s1">:</span>
+            <span class="s2">return </span><span class="s1">self._offset</span>
+        <span class="s2">raise </span><span class="s1">TypeError(</span><span class="s5">&quot;utcoffset() argument must be a datetime instance&quot;</span>
+                        <span class="s5">&quot; or None&quot;</span><span class="s1">)</span>
+
+    <span class="s2">def </span><span class="s1">tzname(self</span><span class="s2">, </span><span class="s1">dt):</span>
+        <span class="s2">if </span><span class="s1">isinstance(dt</span><span class="s2">, </span><span class="s1">datetime) </span><span class="s2">or </span><span class="s1">dt </span><span class="s2">is None</span><span class="s1">:</span>
+            <span class="s2">if </span><span class="s1">self._name </span><span class="s2">is None</span><span class="s1">:</span>
+                <span class="s2">return </span><span class="s1">self._name_from_offset(self._offset)</span>
+            <span class="s2">return </span><span class="s1">self._name</span>
+        <span class="s2">raise </span><span class="s1">TypeError(</span><span class="s5">&quot;tzname() argument must be a datetime instance&quot;</span>
+                        <span class="s5">&quot; or None&quot;</span><span class="s1">)</span>
+
+    <span class="s2">def </span><span class="s1">dst(self</span><span class="s2">, </span><span class="s1">dt):</span>
+        <span class="s2">if </span><span class="s1">isinstance(dt</span><span class="s2">, </span><span class="s1">datetime) </span><span class="s2">or </span><span class="s1">dt </span><span class="s2">is None</span><span class="s1">:</span>
+            <span class="s2">return None</span>
+        <span class="s2">raise </span><span class="s1">TypeError(</span><span class="s5">&quot;dst() argument must be a datetime instance&quot;</span>
+                        <span class="s5">&quot; or None&quot;</span><span class="s1">)</span>
+
+    <span class="s2">def </span><span class="s1">fromutc(self</span><span class="s2">, </span><span class="s1">dt):</span>
+        <span class="s2">if </span><span class="s1">isinstance(dt</span><span class="s2">, </span><span class="s1">datetime):</span>
+            <span class="s2">if </span><span class="s1">dt.tzinfo </span><span class="s2">is not </span><span class="s1">self:</span>
+                <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s5">&quot;fromutc: dt.tzinfo &quot;</span>
+                                 <span class="s5">&quot;is not self&quot;</span><span class="s1">)</span>
+            <span class="s2">return </span><span class="s1">dt + self._offset</span>
+        <span class="s2">raise </span><span class="s1">TypeError(</span><span class="s5">&quot;fromutc() argument must be a datetime instance&quot;</span>
+                        <span class="s5">&quot; or None&quot;</span><span class="s1">)</span>
+
+    <span class="s1">_maxoffset = timedelta(hours=</span><span class="s3">23</span><span class="s2">, </span><span class="s1">minutes=</span><span class="s3">59</span><span class="s1">)</span>
+    <span class="s1">_minoffset = -_maxoffset</span>
+
+    <span class="s1">@staticmethod</span>
+    <span class="s2">def </span><span class="s1">_name_from_offset(delta):</span>
+        <span class="s2">if </span><span class="s1">delta &lt; timedelta(</span><span class="s3">0</span><span class="s1">):</span>
+            <span class="s1">sign = </span><span class="s5">'-'</span>
+            <span class="s1">delta = -delta</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">sign = </span><span class="s5">'+'</span>
+        <span class="s1">hours</span><span class="s2">, </span><span class="s1">rest = divmod(delta</span><span class="s2">, </span><span class="s1">timedelta(hours=</span><span class="s3">1</span><span class="s1">))</span>
+        <span class="s1">minutes = rest // timedelta(minutes=</span><span class="s3">1</span><span class="s1">)</span>
+        <span class="s2">return </span><span class="s5">'UTC{}{:02d}:{:02d}'</span><span class="s1">.format(sign</span><span class="s2">, </span><span class="s1">hours</span><span class="s2">, </span><span class="s1">minutes)</span>
+
+<span class="s1">timezone.utc = timezone._create(timedelta(</span><span class="s3">0</span><span class="s1">))</span>
+<span class="s1">timezone.min = timezone._create(timezone._minoffset)</span>
+<span class="s1">timezone.max = timezone._create(timezone._maxoffset)</span>
+<span class="s1">_EPOCH = datetime(</span><span class="s3">1970</span><span class="s2">, </span><span class="s3">1</span><span class="s2">, </span><span class="s3">1</span><span class="s2">, </span><span class="s1">tzinfo=timezone.utc)</span>
+<span class="s5">&quot;&quot;&quot; 
+Some time zone algebra.  For a datetime x, let 
+    x.n = x stripped of its timezone -- its naive time. 
+    x.o = x.utcoffset(), and assuming that doesn't raise an exception or 
+          return None 
+    x.d = x.dst(), and assuming that doesn't raise an exception or 
+          return None 
+    x.s = x's standard offset, x.o - x.d 
+ 
+Now some derived rules, where k is a duration (timedelta). 
+ 
+1. x.o = x.s + x.d 
+   This follows from the definition of x.s. 
+ 
+2. If x and y have the same tzinfo member, x.s = y.s. 
+   This is actually a requirement, an assumption we need to make about 
+   sane tzinfo classes. 
+ 
+3. The naive UTC time corresponding to x is x.n - x.o. 
+   This is again a requirement for a sane tzinfo class. 
+ 
+4. (x+k).s = x.s 
+   This follows from #2, and that datimetimetz+timedelta preserves tzinfo. 
+ 
+5. (x+k).n = x.n + k 
+   Again follows from how arithmetic is defined. 
+ 
+Now we can explain tz.fromutc(x).  Let's assume it's an interesting case 
+(meaning that the various tzinfo methods exist, and don't blow up or return 
+None when called). 
+ 
+The function wants to return a datetime y with timezone tz, equivalent to x. 
+x is already in UTC. 
+ 
+By #3, we want 
+ 
+    y.n - y.o = x.n                             [1] 
+ 
+The algorithm starts by attaching tz to x.n, and calling that y.  So 
+x.n = y.n at the start.  Then it wants to add a duration k to y, so that [1] 
+becomes true; in effect, we want to solve [2] for k: 
+ 
+   (y+k).n - (y+k).o = x.n                      [2] 
+ 
+By #1, this is the same as 
+ 
+   (y+k).n - ((y+k).s + (y+k).d) = x.n          [3] 
+ 
+By #5, (y+k).n = y.n + k, which equals x.n + k because x.n=y.n at the start. 
+Substituting that into [3], 
+ 
+   x.n + k - (y+k).s - (y+k).d = x.n; the x.n terms cancel, leaving 
+   k - (y+k).s - (y+k).d = 0; rearranging, 
+   k = (y+k).s - (y+k).d; by #4, (y+k).s == y.s, so 
+   k = y.s - (y+k).d 
+ 
+On the RHS, (y+k).d can't be computed directly, but y.s can be, and we 
+approximate k by ignoring the (y+k).d term at first.  Note that k can't be 
+very large, since all offset-returning methods return a duration of magnitude 
+less than 24 hours.  For that reason, if y is firmly in std time, (y+k).d must 
+be 0, so ignoring it has no consequence then. 
+ 
+In any case, the new value is 
+ 
+    z = y + y.s                                 [4] 
+ 
+It's helpful to step back at look at [4] from a higher level:  it's simply 
+mapping from UTC to tz's standard time. 
+ 
+At this point, if 
+ 
+    z.n - z.o = x.n                             [5] 
+ 
+we have an equivalent time, and are almost done.  The insecurity here is 
+at the start of daylight time.  Picture US Eastern for concreteness.  The wall 
+time jumps from 1:59 to 3:00, and wall hours of the form 2:MM don't make good 
+sense then.  The docs ask that an Eastern tzinfo class consider such a time to 
+be EDT (because it's &quot;after 2&quot;), which is a redundant spelling of 1:MM EST 
+on the day DST starts.  We want to return the 1:MM EST spelling because that's 
+the only spelling that makes sense on the local wall clock. 
+ 
+In fact, if [5] holds at this point, we do have the standard-time spelling, 
+but that takes a bit of proof.  We first prove a stronger result.  What's the 
+difference between the LHS and RHS of [5]?  Let 
+ 
+    diff = x.n - (z.n - z.o)                    [6] 
+ 
+Now 
+    z.n =                       by [4] 
+    (y + y.s).n =               by #5 
+    y.n + y.s =                 since y.n = x.n 
+    x.n + y.s =                 since z and y are have the same tzinfo member, 
+                                    y.s = z.s by #2 
+    x.n + z.s 
+ 
+Plugging that back into [6] gives 
+ 
+    diff = 
+    x.n - ((x.n + z.s) - z.o) =     expanding 
+    x.n - x.n - z.s + z.o =         cancelling 
+    - z.s + z.o =                   by #2 
+    z.d 
+ 
+So diff = z.d. 
+ 
+If [5] is true now, diff = 0, so z.d = 0 too, and we have the standard-time 
+spelling we wanted in the endcase described above.  We're done.  Contrarily, 
+if z.d = 0, then we have a UTC equivalent, and are also done. 
+ 
+If [5] is not true now, diff = z.d != 0, and z.d is the offset we need to 
+add to z (in effect, z is in tz's standard time, and we need to shift the 
+local clock into tz's daylight time). 
+ 
+Let 
+ 
+    z' = z + z.d = z + diff                     [7] 
+ 
+and we can again ask whether 
+ 
+    z'.n - z'.o = x.n                           [8] 
+ 
+If so, we're done.  If not, the tzinfo class is insane, according to the 
+assumptions we've made.  This also requires a bit of proof.  As before, let's 
+compute the difference between the LHS and RHS of [8] (and skipping some of 
+the justifications for the kinds of substitutions we've done several times 
+already): 
+ 
+    diff' = x.n - (z'.n - z'.o) =           replacing z'.n via [7] 
+            x.n  - (z.n + diff - z'.o) =    replacing diff via [6] 
+            x.n - (z.n + x.n - (z.n - z.o) - z'.o) = 
+            x.n - z.n - x.n + z.n - z.o + z'.o =    cancel x.n 
+            - z.n + z.n - z.o + z'.o =              cancel z.n 
+            - z.o + z'.o =                      #1 twice 
+            -z.s - z.d + z'.s + z'.d =          z and z' have same tzinfo 
+            z'.d - z.d 
+ 
+So z' is UTC-equivalent to x iff z'.d = z.d at this point.  If they are equal, 
+we've found the UTC-equivalent so are done.  In fact, we stop with [7] and 
+return z', not bothering to compute z'.d. 
+ 
+How could z.d and z'd differ?  z' = z + z.d [7], so merely moving z' by 
+a dst() offset, and starting *from* a time already in DST (we know z.d != 0), 
+would have to change the result dst() returns:  we start in DST, and moving 
+a little further into it takes us out of DST. 
+ 
+There isn't a sane case where this can happen.  The closest it gets is at 
+the end of DST, where there's an hour in UTC with no spelling in a hybrid 
+tzinfo class.  In US Eastern, that's 5:MM UTC = 0:MM EST = 1:MM EDT.  During 
+that hour, on an Eastern clock 1:MM is taken as being in standard time (6:MM 
+UTC) because the docs insist on that, but 0:MM is taken as being in daylight 
+time (4:MM UTC).  There is no local time mapping to 5:MM UTC.  The local 
+clock jumps from 1:59 back to 1:00 again, and repeats the 1:MM hour in 
+standard time.  Since that's what the local clock *does*, we want to map both 
+UTC hours 5:MM and 6:MM to 1:MM Eastern.  The result is ambiguous 
+in local time, but so it goes -- it's the way the local clock works. 
+ 
+When x = 5:MM UTC is the input to this algorithm, x.o=0, y.o=-5 and y.d=0, 
+so z=0:MM.  z.d=60 (minutes) then, so [5] doesn't hold and we keep going. 
+z' = z + z.d = 1:MM then, and z'.d=0, and z'.d - z.d = -60 != 0 so [8] 
+(correctly) concludes that z' is not UTC-equivalent to x. 
+ 
+Because we know z.d said z was in daylight time (else [5] would have held and 
+we would have stopped then), and we know z.d != z'.d (else [8] would have held 
+and we have stopped then), and there are only 2 possible values dst() can 
+return in Eastern, it follows that z'.d must be 0 (which it is in the example, 
+but the reasoning doesn't depend on the example -- it depends on there being 
+two possible dst() outcomes, one zero and the other non-zero).  Therefore 
+z' must be in standard time, and is the spelling we want in this case. 
+ 
+Note again that z' is not UTC-equivalent as far as the hybrid tzinfo class is 
+concerned (because it takes z' as being in standard time rather than the 
+daylight time we intend here), but returning it gives the real-life &quot;local 
+clock repeats an hour&quot; behavior when mapping the &quot;unspellable&quot; UTC hour into 
+tz. 
+ 
+When the input is 6:MM, z=1:MM and z.d=0, and we stop at once, again with 
+the 1:MM standard time spelling we want. 
+ 
+So how can this break?  One of the assumptions must be violated.  Two 
+possibilities: 
+ 
+1) [2] effectively says that y.s is invariant across all y belong to a given 
+   time zone.  This isn't true if, for political reasons or continental drift, 
+   a region decides to change its base offset from UTC. 
+ 
+2) There may be versions of &quot;double daylight&quot; time where the tail end of 
+   the analysis gives up a step too early.  I haven't thought about that 
+   enough to say. 
+ 
+In any case, it's clear that the default fromutc() is strong enough to handle 
+&quot;almost all&quot; time zones:  so long as the standard offset is invariant, it 
+doesn't matter if daylight time transition points change from year to year, or 
+if daylight time is skipped in some years; it doesn't matter how large or 
+small dst() may get within its bounds; and it doesn't even matter if some 
+perverse time zone returns a negative dst()).  So a breaking case must be 
+pretty bizarre, and a tzinfo subclass can override fromutc() if it is. 
+&quot;&quot;&quot;</span>
+<span class="s2">try</span><span class="s1">:</span>
+    <span class="s2">from </span><span class="s1">_datetime </span><span class="s2">import </span><span class="s1">*</span>
+<span class="s2">except </span><span class="s1">ImportError:</span>
+    <span class="s2">pass</span>
+<span class="s2">else</span><span class="s1">:</span>
+    <span class="s4"># Clean up unused names</span>
+    <span class="s2">del </span><span class="s1">(_DAYNAMES</span><span class="s2">, </span><span class="s1">_DAYS_BEFORE_MONTH</span><span class="s2">, </span><span class="s1">_DAYS_IN_MONTH</span><span class="s2">,</span>
+         <span class="s1">_DI100Y</span><span class="s2">, </span><span class="s1">_DI400Y</span><span class="s2">, </span><span class="s1">_DI4Y</span><span class="s2">, </span><span class="s1">_MAXORDINAL</span><span class="s2">, </span><span class="s1">_MONTHNAMES</span><span class="s2">,</span>
+         <span class="s1">_build_struct_time</span><span class="s2">, </span><span class="s1">_call_tzinfo_method</span><span class="s2">, </span><span class="s1">_check_date_fields</span><span class="s2">,</span>
+         <span class="s1">_check_time_fields</span><span class="s2">, </span><span class="s1">_check_tzinfo_arg</span><span class="s2">, </span><span class="s1">_check_tzname</span><span class="s2">,</span>
+         <span class="s1">_check_utc_offset</span><span class="s2">, </span><span class="s1">_cmp</span><span class="s2">, </span><span class="s1">_cmperror</span><span class="s2">, </span><span class="s1">_date_class</span><span class="s2">, </span><span class="s1">_days_before_month</span><span class="s2">,</span>
+         <span class="s1">_days_before_year</span><span class="s2">, </span><span class="s1">_days_in_month</span><span class="s2">, </span><span class="s1">_format_time</span><span class="s2">, </span><span class="s1">_is_leap</span><span class="s2">,</span>
+         <span class="s1">_isoweek1monday</span><span class="s2">, </span><span class="s1">_math</span><span class="s2">, </span><span class="s1">_ord2ymd</span><span class="s2">, </span><span class="s1">_time</span><span class="s2">, </span><span class="s1">_time_class</span><span class="s2">, </span><span class="s1">_tzinfo_class</span><span class="s2">,</span>
+         <span class="s1">_wrap_strftime</span><span class="s2">, </span><span class="s1">_ymd2ord)</span>
+    <span class="s4"># XXX Since import * above excludes names that start with _,</span>
+    <span class="s4"># docstring does not get overwritten. In the future, it may be</span>
+    <span class="s4"># appropriate to maintain a single module level docstring and</span>
+    <span class="s4"># remove the following line.</span>
+    <span class="s2">from </span><span class="s1">_datetime </span><span class="s2">import </span><span class="s1">__doc__</span>
+</pre>
+</body>
+</html>

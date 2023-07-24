@@ -1,0 +1,249 @@
+<html>
+<head>
+<title>openfiles.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #cc7832;}
+.s3 { color: #6a8759;}
+.s4 { color: #6897bb;}
+.s5 { color: #629755; font-style: italic;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+openfiles.py</font>
+</center></td></tr></table>
+<pre><span class="s0"># Copyright (c) 2018 gevent community</span>
+<span class="s0">#</span>
+<span class="s0"># Permission is hereby granted, free of charge, to any person obtaining a copy</span>
+<span class="s0"># of this software and associated documentation files (the &quot;Software&quot;), to deal</span>
+<span class="s0"># in the Software without restriction, including without limitation the rights</span>
+<span class="s0"># to use, copy, modify, merge, publish, distribute, sublicense, and/or sell</span>
+<span class="s0"># copies of the Software, and to permit persons to whom the Software is</span>
+<span class="s0"># furnished to do so, subject to the following conditions:</span>
+<span class="s0">#</span>
+<span class="s0"># The above copyright notice and this permission notice shall be included in</span>
+<span class="s0"># all copies or substantial portions of the Software.</span>
+<span class="s0">#</span>
+<span class="s0"># THE SOFTWARE IS PROVIDED &quot;AS IS&quot;, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR</span>
+<span class="s0"># IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,</span>
+<span class="s0"># FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE</span>
+<span class="s0"># AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER</span>
+<span class="s0"># LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,</span>
+<span class="s0"># OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN</span>
+<span class="s0"># THE SOFTWARE.</span>
+<span class="s2">from </span><span class="s1">__future__ </span><span class="s2">import </span><span class="s1">absolute_import</span><span class="s2">, </span><span class="s1">print_function</span><span class="s2">, </span><span class="s1">division</span>
+
+<span class="s2">import </span><span class="s1">os</span>
+<span class="s2">import </span><span class="s1">unittest</span>
+<span class="s2">import </span><span class="s1">re</span>
+<span class="s2">import </span><span class="s1">gc</span>
+<span class="s2">import </span><span class="s1">functools</span>
+
+<span class="s2">from </span><span class="s1">. </span><span class="s2">import </span><span class="s1">sysinfo</span>
+
+<span class="s0"># Linux/OS X/BSD platforms /can/ implement this by calling out to lsof.</span>
+<span class="s0"># However, if psutil is available (it is cross-platform) use that.</span>
+<span class="s0"># It is *much* faster than shelling out to lsof each time</span>
+<span class="s0"># (Running 14 tests takes 3.964s with lsof and 0.046 with psutil)</span>
+<span class="s0"># However, it still doesn't completely solve the issue on Windows: fds are reported</span>
+<span class="s0"># as -1 there, so we can't fully check those.</span>
+
+<span class="s2">def </span><span class="s1">_collects(func):</span>
+    <span class="s0"># We've seen OSError: No such file or directory /proc/PID/fd/NUM.</span>
+    <span class="s0"># This occurs in the loop that checks open files. It first does</span>
+    <span class="s0"># listdir() and then tries readlink() on each file. But the file</span>
+    <span class="s0"># went away. This must be because of async GC in PyPy running</span>
+    <span class="s0"># destructors at arbitrary times. This became an issue in PyPy 7.2</span>
+    <span class="s0"># but could theoretically be an issue with any objects caught in a</span>
+    <span class="s0"># cycle. This is one reason we GC before we begin. (The other is</span>
+    <span class="s0"># to clean up outstanding objects that will close files in</span>
+    <span class="s0"># __del__.)</span>
+    <span class="s0">#</span>
+    <span class="s0"># Note that this can hide errors, though, by causing greenlets to get</span>
+    <span class="s0"># collected and drop references and thus close files. We should be deterministic</span>
+    <span class="s0"># and careful about closing things.</span>
+    <span class="s1">@functools.wraps(func)</span>
+    <span class="s2">def </span><span class="s1">f(**kw):</span>
+        <span class="s1">gc.collect()</span>
+        <span class="s1">gc.collect()</span>
+        <span class="s1">enabled = gc.isenabled()</span>
+        <span class="s1">gc.disable()</span>
+
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s2">return </span><span class="s1">func(**kw)</span>
+        <span class="s2">finally</span><span class="s1">:</span>
+            <span class="s2">if </span><span class="s1">enabled:</span>
+                <span class="s1">gc.enable()</span>
+    <span class="s2">return </span><span class="s1">f</span>
+
+
+<span class="s2">if </span><span class="s1">sysinfo.WIN:</span>
+    <span class="s2">def </span><span class="s1">_run_lsof():</span>
+        <span class="s2">raise </span><span class="s1">unittest.SkipTest(</span><span class="s3">&quot;lsof not expected on Windows&quot;</span><span class="s1">)</span>
+<span class="s2">else</span><span class="s1">:</span>
+    <span class="s1">@_collects</span>
+    <span class="s2">def </span><span class="s1">_run_lsof():</span>
+        <span class="s2">import </span><span class="s1">tempfile</span>
+        <span class="s1">pid = os.getpid()</span>
+        <span class="s1">fd</span><span class="s2">, </span><span class="s1">tmpname = tempfile.mkstemp(</span><span class="s3">'get_open_files'</span><span class="s1">)</span>
+        <span class="s1">os.close(fd)</span>
+        <span class="s1">lsof_command = </span><span class="s3">'lsof -p %s &gt; %s' </span><span class="s1">% (pid</span><span class="s2">, </span><span class="s1">tmpname)</span>
+        <span class="s2">if </span><span class="s1">os.system(lsof_command):</span>
+            <span class="s0"># XXX: This prints to the console an annoying message: 'lsof is not recognized'</span>
+            <span class="s2">raise </span><span class="s1">unittest.SkipTest(</span><span class="s3">&quot;lsof failed&quot;</span><span class="s1">)</span>
+
+        <span class="s2">with </span><span class="s1">open(tmpname) </span><span class="s2">as </span><span class="s1">fobj: </span><span class="s0"># pylint:disable=unspecified-encoding</span>
+            <span class="s1">data = fobj.read().strip()</span>
+        <span class="s1">os.remove(tmpname)</span>
+        <span class="s2">return </span><span class="s1">data</span>
+
+<span class="s2">def </span><span class="s1">default_get_open_files(pipes=</span><span class="s2">False, </span><span class="s1">**_kwargs):</span>
+    <span class="s1">data = _run_lsof()</span>
+    <span class="s1">results = {}</span>
+    <span class="s2">for </span><span class="s1">line </span><span class="s2">in </span><span class="s1">data.split(</span><span class="s3">'</span><span class="s2">\n</span><span class="s3">'</span><span class="s1">):</span>
+        <span class="s1">line = line.strip()</span>
+        <span class="s2">if not </span><span class="s1">line </span><span class="s2">or </span><span class="s1">line.startswith(</span><span class="s3">&quot;COMMAND&quot;</span><span class="s1">):</span>
+            <span class="s0"># Skip header and blank lines</span>
+            <span class="s2">continue</span>
+        <span class="s1">split = re.split(</span><span class="s3">r'\s+'</span><span class="s2">, </span><span class="s1">line)</span>
+        <span class="s0"># Note that this needs the real lsof; it won't work with</span>
+        <span class="s0"># the lsof that comes from BusyBox. You'll get parsing errors</span>
+        <span class="s0"># here.</span>
+        <span class="s1">_command</span><span class="s2">, </span><span class="s1">_pid</span><span class="s2">, </span><span class="s1">_user</span><span class="s2">, </span><span class="s1">fd = split[:</span><span class="s4">4</span><span class="s1">]</span>
+        <span class="s0"># Pipes (on OS X, at least) get an fd like &quot;3&quot; while normal files get an fd like &quot;1u&quot;</span>
+        <span class="s2">if </span><span class="s1">fd[:-</span><span class="s4">1</span><span class="s1">].isdigit() </span><span class="s2">or </span><span class="s1">fd.isdigit():</span>
+            <span class="s2">if not </span><span class="s1">pipes </span><span class="s2">and </span><span class="s1">fd[-</span><span class="s4">1</span><span class="s1">].isdigit():</span>
+                <span class="s2">continue</span>
+            <span class="s1">fd = int(fd[:-</span><span class="s4">1</span><span class="s1">]) </span><span class="s2">if not </span><span class="s1">fd[-</span><span class="s4">1</span><span class="s1">].isdigit() </span><span class="s2">else </span><span class="s1">int(fd)</span>
+            <span class="s2">if </span><span class="s1">fd </span><span class="s2">in </span><span class="s1">results:</span>
+                <span class="s1">params = (fd</span><span class="s2">, </span><span class="s1">line</span><span class="s2">, </span><span class="s1">split</span><span class="s2">, </span><span class="s1">results.get(fd)</span><span class="s2">, </span><span class="s1">data)</span>
+                <span class="s2">raise </span><span class="s1">AssertionError(</span><span class="s3">'error when parsing lsof output: duplicate fd=%r</span><span class="s2">\n</span><span class="s3">line=%r</span><span class="s2">\n</span><span class="s3">split=%r</span><span class="s2">\n</span><span class="s3">previous=%r</span><span class="s2">\n</span><span class="s3">data:</span><span class="s2">\n</span><span class="s3">%s' </span><span class="s1">% params)</span>
+            <span class="s1">results[fd] = line</span>
+    <span class="s2">if not </span><span class="s1">results:</span>
+        <span class="s2">raise </span><span class="s1">AssertionError(</span><span class="s3">'failed to parse lsof:</span><span class="s2">\n</span><span class="s3">%s' </span><span class="s1">% (data</span><span class="s2">, </span><span class="s1">))</span>
+    <span class="s1">results[</span><span class="s3">'data'</span><span class="s1">] = data</span>
+    <span class="s2">return </span><span class="s1">results</span>
+
+<span class="s1">@_collects</span>
+<span class="s2">def </span><span class="s1">default_get_number_open_files():</span>
+    <span class="s2">if </span><span class="s1">os.path.exists(</span><span class="s3">'/proc/'</span><span class="s1">):</span>
+        <span class="s0"># Linux only</span>
+        <span class="s1">fd_directory = </span><span class="s3">'/proc/%d/fd' </span><span class="s1">% os.getpid()</span>
+        <span class="s2">return </span><span class="s1">len(os.listdir(fd_directory))</span>
+
+    <span class="s2">try</span><span class="s1">:</span>
+        <span class="s2">return </span><span class="s1">len(get_open_files(pipes=</span><span class="s2">True</span><span class="s1">)) - </span><span class="s4">1</span>
+    <span class="s2">except </span><span class="s1">(OSError</span><span class="s2">, </span><span class="s1">AssertionError</span><span class="s2">, </span><span class="s1">unittest.SkipTest):</span>
+        <span class="s2">return </span><span class="s4">0</span>
+
+<span class="s1">lsof_get_open_files = default_get_open_files</span>
+
+<span class="s2">try</span><span class="s1">:</span>
+    <span class="s0"># psutil import subprocess which on Python 3 imports selectors.</span>
+    <span class="s0"># This can expose issues with monkey-patching.</span>
+    <span class="s2">import </span><span class="s1">psutil</span>
+<span class="s2">except </span><span class="s1">ImportError:</span>
+    <span class="s1">get_open_files = default_get_open_files</span>
+    <span class="s1">get_number_open_files = default_get_number_open_files</span>
+<span class="s2">else</span><span class="s1">:</span>
+    <span class="s2">class </span><span class="s1">_TrivialOpenFile(object):</span>
+        <span class="s1">__slots__ = (</span><span class="s3">'fd'</span><span class="s2">,</span><span class="s1">)</span>
+        <span class="s2">def </span><span class="s1">__init__(self</span><span class="s2">, </span><span class="s1">fd):</span>
+            <span class="s1">self.fd = fd</span>
+
+    <span class="s1">@_collects</span>
+    <span class="s2">def </span><span class="s1">get_open_files(count_closing_as_open=</span><span class="s2">True, </span><span class="s1">**_kw):</span>
+        <span class="s5">&quot;&quot;&quot; 
+        Return a list of popenfile and pconn objects. 
+ 
+        Note that other than `fd`, they have different attributes. 
+ 
+        .. important:: If you want to find open sockets, on Windows 
+           and linux, it is important that the socket at least be listening 
+           (socket.listen(1)). Unlike the lsof implementation, this will only 
+           return sockets in a state like that. 
+        &quot;&quot;&quot;</span>
+
+        <span class="s1">results = {}</span>
+
+        <span class="s2">for </span><span class="s1">_ </span><span class="s2">in </span><span class="s1">range(</span><span class="s4">3</span><span class="s1">):</span>
+            <span class="s2">try</span><span class="s1">:</span>
+                <span class="s2">if </span><span class="s1">count_closing_as_open </span><span class="s2">and </span><span class="s1">os.path.exists(</span><span class="s3">'/proc/'</span><span class="s1">):</span>
+                    <span class="s0"># Linux only.</span>
+                    <span class="s0"># psutil doesn't always see all connections, even though</span>
+                    <span class="s0"># they exist in the filesystem. It's not entirely clear why.</span>
+                    <span class="s0"># It sees them on Travis (prior to Ubuntu Bionic, at least)</span>
+                    <span class="s0"># but doesn't in the manylinux image or Fedora 33 Rawhide image.</span>
+                    <span class="s0"># This happens in test__makefile_ref TestSSL.*; in particular, if a</span>
+                    <span class="s0"># ``sslsock.makefile()`` is opened and used to read all data, and the sending</span>
+                    <span class="s0"># side shuts down, psutil no longer finds the open file. So we add them</span>
+                    <span class="s0"># back in.</span>
+                    <span class="s0">#</span>
+                    <span class="s0"># Of course, the flip side of this is that we sometimes find connections</span>
+                    <span class="s0"># we're not expecting.</span>
+                    <span class="s0"># I *think* this has to do with CLOSE_WAIT handling?</span>
+                    <span class="s1">fd_directory = </span><span class="s3">'/proc/%d/fd' </span><span class="s1">% os.getpid()</span>
+                    <span class="s1">fd_files = os.listdir(fd_directory)</span>
+                <span class="s2">else</span><span class="s1">:</span>
+                    <span class="s1">fd_files = []</span>
+                <span class="s1">process = psutil.Process()</span>
+                <span class="s1">results[</span><span class="s3">'data'</span><span class="s1">] = process.open_files()</span>
+                <span class="s1">results[</span><span class="s3">'data'</span><span class="s1">] += process.connections(</span><span class="s3">'all'</span><span class="s1">)</span>
+                <span class="s2">break</span>
+            <span class="s2">except </span><span class="s1">OSError:</span>
+                <span class="s2">pass</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s0"># No break executed</span>
+            <span class="s2">raise </span><span class="s1">unittest.SkipTest(</span><span class="s3">&quot;Unable to read open files&quot;</span><span class="s1">)</span>
+
+        <span class="s2">for </span><span class="s1">x </span><span class="s2">in </span><span class="s1">results[</span><span class="s3">'data'</span><span class="s1">]:</span>
+            <span class="s1">results[x.fd] = x</span>
+        <span class="s2">for </span><span class="s1">fd_str </span><span class="s2">in </span><span class="s1">fd_files:</span>
+            <span class="s2">if </span><span class="s1">fd_str </span><span class="s2">not in </span><span class="s1">results:</span>
+                <span class="s1">fd = int(fd_str)</span>
+                <span class="s1">results[fd] = _TrivialOpenFile(fd)</span>
+        <span class="s1">results[</span><span class="s3">'data'</span><span class="s1">] += [(</span><span class="s3">'From psutil'</span><span class="s2">, </span><span class="s1">process)]</span>
+        <span class="s1">results[</span><span class="s3">'data'</span><span class="s1">] += [(</span><span class="s3">'fd files'</span><span class="s2">, </span><span class="s1">fd_files)]</span>
+        <span class="s2">return </span><span class="s1">results</span>
+
+    <span class="s1">@_collects</span>
+    <span class="s2">def </span><span class="s1">get_number_open_files():</span>
+        <span class="s1">process = psutil.Process()</span>
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s2">return </span><span class="s1">process.num_fds()</span>
+        <span class="s2">except </span><span class="s1">AttributeError:</span>
+            <span class="s0"># num_fds is unix only. Is num_handles close enough on Windows?</span>
+            <span class="s2">return </span><span class="s4">0</span>
+
+
+
+<span class="s2">class </span><span class="s1">DoesNotLeakFilesMixin(object): </span><span class="s0"># pragma: no cover</span>
+    <span class="s5">&quot;&quot;&quot; 
+    A test case mixin that helps find a method that's leaking an 
+    open file. 
+ 
+    Only mix this in when needed to debug, it slows tests down. 
+    &quot;&quot;&quot;</span>
+    <span class="s2">def </span><span class="s1">setUp(self):</span>
+        <span class="s1">self.__open_files_count = get_number_open_files()</span>
+        <span class="s1">super(DoesNotLeakFilesMixin</span><span class="s2">, </span><span class="s1">self).setUp()</span>
+
+    <span class="s2">def </span><span class="s1">tearDown(self):</span>
+        <span class="s1">super(DoesNotLeakFilesMixin</span><span class="s2">, </span><span class="s1">self).tearDown()</span>
+        <span class="s1">after = get_number_open_files()</span>
+        <span class="s2">if </span><span class="s1">after &gt; self.__open_files_count:</span>
+            <span class="s2">raise </span><span class="s1">AssertionError(</span>
+                <span class="s3">&quot;Too many open files. Before: %s &lt; After: %s.</span><span class="s2">\n</span><span class="s3">%s&quot; </span><span class="s1">% (</span>
+                    <span class="s1">self.__open_files_count</span><span class="s2">,</span>
+                    <span class="s1">after</span><span class="s2">,</span>
+                    <span class="s1">get_open_files()</span>
+                <span class="s1">)</span>
+            <span class="s1">)</span>
+</pre>
+</body>
+</html>

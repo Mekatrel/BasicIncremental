@@ -1,0 +1,232 @@
+<html>
+<head>
+<title>test__api_timeout.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #cc7832;}
+.s3 { color: #6897bb;}
+.s4 { color: #6a8759;}
+.s5 { color: #629755; font-style: italic;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+test__api_timeout.py</font>
+</center></td></tr></table>
+<pre><span class="s0"># Copyright (c) 2008 AG Projects</span>
+<span class="s0"># Author: Denis Bilenko</span>
+<span class="s0">#</span>
+<span class="s0"># Permission is hereby granted, free of charge, to any person obtaining a copy</span>
+<span class="s0"># of this software and associated documentation files (the &quot;Software&quot;), to deal</span>
+<span class="s0"># in the Software without restriction, including without limitation the rights</span>
+<span class="s0"># to use, copy, modify, merge, publish, distribute, sublicense, and/or sell</span>
+<span class="s0"># copies of the Software, and to permit persons to whom the Software is</span>
+<span class="s0"># furnished to do so, subject to the following conditions:</span>
+<span class="s0">#</span>
+<span class="s0"># The above copyright notice and this permission notice shall be included in</span>
+<span class="s0"># all copies or substantial portions of the Software.</span>
+<span class="s0">#</span>
+<span class="s0"># THE SOFTWARE IS PROVIDED &quot;AS IS&quot;, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR</span>
+<span class="s0"># IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,</span>
+<span class="s0"># FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE</span>
+<span class="s0"># AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER</span>
+<span class="s0"># LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,</span>
+<span class="s0"># OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN</span>
+<span class="s0"># THE SOFTWARE.</span>
+
+<span class="s2">import </span><span class="s1">sys</span>
+<span class="s2">import </span><span class="s1">gevent.testing </span><span class="s2">as </span><span class="s1">greentest</span>
+<span class="s2">import </span><span class="s1">weakref</span>
+<span class="s2">import </span><span class="s1">time</span>
+<span class="s2">import </span><span class="s1">gc</span>
+
+<span class="s2">from </span><span class="s1">gevent </span><span class="s2">import </span><span class="s1">sleep</span>
+<span class="s2">from </span><span class="s1">gevent </span><span class="s2">import </span><span class="s1">Timeout</span>
+<span class="s2">from </span><span class="s1">gevent </span><span class="s2">import </span><span class="s1">get_hub</span>
+
+
+<span class="s2">from </span><span class="s1">gevent.testing.timing </span><span class="s2">import </span><span class="s1">SMALL_TICK </span><span class="s2">as </span><span class="s1">DELAY</span>
+<span class="s2">from </span><span class="s1">gevent.testing </span><span class="s2">import </span><span class="s1">flaky</span>
+
+
+<span class="s2">class </span><span class="s1">Error(Exception):</span>
+    <span class="s2">pass</span>
+
+
+<span class="s2">class </span><span class="s1">_UpdateNowProxy(object):</span>
+
+    <span class="s1">update_now_calls = </span><span class="s3">0</span>
+
+    <span class="s2">def </span><span class="s1">__init__(self</span><span class="s2">, </span><span class="s1">loop):</span>
+        <span class="s1">self.loop = loop</span>
+
+    <span class="s2">def </span><span class="s1">__getattr__(self</span><span class="s2">, </span><span class="s1">name):</span>
+        <span class="s2">return </span><span class="s1">getattr(self.loop</span><span class="s2">, </span><span class="s1">name)</span>
+
+    <span class="s2">def </span><span class="s1">update_now(self):</span>
+        <span class="s1">self.update_now_calls += </span><span class="s3">1</span>
+        <span class="s1">self.loop.update_now()</span>
+
+<span class="s2">class </span><span class="s1">_UpdateNowWithTimerProxy(_UpdateNowProxy):</span>
+
+    <span class="s2">def </span><span class="s1">timer(self</span><span class="s2">, </span><span class="s1">*_args</span><span class="s2">, </span><span class="s1">**_kwargs):</span>
+        <span class="s2">return </span><span class="s1">_Timer(self)</span>
+
+<span class="s2">class </span><span class="s1">_Timer(object):</span>
+
+    <span class="s1">pending = </span><span class="s2">False</span>
+    <span class="s1">active = </span><span class="s2">False</span>
+
+    <span class="s2">def </span><span class="s1">__init__(self</span><span class="s2">, </span><span class="s1">loop):</span>
+        <span class="s1">self.loop = loop</span>
+
+    <span class="s2">def </span><span class="s1">start(self</span><span class="s2">, </span><span class="s1">*_args</span><span class="s2">, </span><span class="s1">**kwargs):</span>
+        <span class="s2">if </span><span class="s1">kwargs.get(</span><span class="s4">&quot;update&quot;</span><span class="s1">):</span>
+            <span class="s1">self.loop.update_now()</span>
+        <span class="s1">self.pending = self.active = </span><span class="s2">True</span>
+
+    <span class="s2">def </span><span class="s1">stop(self):</span>
+        <span class="s1">self.active = self.pending = </span><span class="s2">False</span>
+
+    <span class="s2">def </span><span class="s1">close(self):</span>
+        <span class="s5">&quot;Does nothing&quot;</span>
+
+
+<span class="s2">class </span><span class="s1">Test(greentest.TestCase):</span>
+
+    <span class="s2">def </span><span class="s1">test_timeout_calls_update_now(self):</span>
+        <span class="s1">hub = get_hub()</span>
+        <span class="s1">loop = hub.loop</span>
+        <span class="s1">proxy = _UpdateNowWithTimerProxy(loop)</span>
+        <span class="s1">hub.loop = proxy</span>
+
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s2">with </span><span class="s1">Timeout(DELAY * </span><span class="s3">2</span><span class="s1">) </span><span class="s2">as </span><span class="s1">t:</span>
+                <span class="s1">self.assertTrue(t.pending)</span>
+        <span class="s2">finally</span><span class="s1">:</span>
+            <span class="s1">hub.loop = loop</span>
+
+        <span class="s1">self.assertEqual(</span><span class="s3">1</span><span class="s2">, </span><span class="s1">proxy.update_now_calls)</span>
+
+    <span class="s2">def </span><span class="s1">test_sleep_calls_update_now(self):</span>
+        <span class="s1">hub = get_hub()</span>
+        <span class="s1">loop = hub.loop</span>
+        <span class="s1">proxy = _UpdateNowProxy(loop)</span>
+        <span class="s1">hub.loop = proxy</span>
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s1">sleep(</span><span class="s3">0.01</span><span class="s1">)</span>
+        <span class="s2">finally</span><span class="s1">:</span>
+            <span class="s1">hub.loop = loop</span>
+
+        <span class="s1">self.assertEqual(</span><span class="s3">1</span><span class="s2">, </span><span class="s1">proxy.update_now_calls)</span>
+
+
+    <span class="s1">@greentest.skipOnAppVeyor(</span><span class="s4">&quot;Timing is flaky, especially under Py 3.4/64-bit&quot;</span><span class="s1">)</span>
+    <span class="s1">@greentest.skipOnPyPy3OnCI(</span><span class="s4">&quot;Timing is flaky, especially under Py 3.4/64-bit&quot;</span><span class="s1">)</span>
+    <span class="s1">@greentest.reraises_flaky_timeout((Timeout</span><span class="s2">, </span><span class="s1">AssertionError))</span>
+    <span class="s2">def </span><span class="s1">test_api(self):</span>
+        <span class="s0"># Nothing happens if with-block finishes before the timeout expires</span>
+        <span class="s1">t = Timeout(DELAY * </span><span class="s3">2</span><span class="s1">)</span>
+        <span class="s1">self.assertFalse(t.pending</span><span class="s2">, </span><span class="s1">t)</span>
+        <span class="s2">with </span><span class="s1">t:</span>
+            <span class="s1">self.assertTrue(t.pending</span><span class="s2">, </span><span class="s1">t)</span>
+            <span class="s1">sleep(DELAY)</span>
+        <span class="s0"># check if timer was actually cancelled</span>
+        <span class="s1">self.assertFalse(t.pending</span><span class="s2">, </span><span class="s1">t)</span>
+        <span class="s1">sleep(DELAY * </span><span class="s3">2</span><span class="s1">)</span>
+
+        <span class="s0"># An exception will be raised if it's not</span>
+        <span class="s2">with </span><span class="s1">self.assertRaises(Timeout) </span><span class="s2">as </span><span class="s1">exc:</span>
+            <span class="s2">with </span><span class="s1">Timeout(DELAY) </span><span class="s2">as </span><span class="s1">t:</span>
+                <span class="s1">sleep(DELAY * </span><span class="s3">10</span><span class="s1">)</span>
+
+        <span class="s1">self.assertIs(exc.exception</span><span class="s2">, </span><span class="s1">t)</span>
+
+        <span class="s0"># You can customize the exception raised:</span>
+        <span class="s2">with </span><span class="s1">self.assertRaises(IOError):</span>
+            <span class="s2">with </span><span class="s1">Timeout(DELAY</span><span class="s2">, </span><span class="s1">IOError(</span><span class="s4">&quot;Operation takes way too long&quot;</span><span class="s1">)):</span>
+                <span class="s1">sleep(DELAY * </span><span class="s3">10</span><span class="s1">)</span>
+
+        <span class="s0"># Providing classes instead of values should be possible too:</span>
+        <span class="s2">with </span><span class="s1">self.assertRaises(ValueError):</span>
+            <span class="s2">with </span><span class="s1">Timeout(DELAY</span><span class="s2">, </span><span class="s1">ValueError):</span>
+                <span class="s1">sleep(DELAY * </span><span class="s3">10</span><span class="s1">)</span>
+
+
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s3">1 </span><span class="s1">/ </span><span class="s3">0</span>
+        <span class="s2">except </span><span class="s1">ZeroDivisionError:</span>
+            <span class="s2">with </span><span class="s1">self.assertRaises(ZeroDivisionError):</span>
+                <span class="s2">with </span><span class="s1">Timeout(DELAY</span><span class="s2">, </span><span class="s1">sys.exc_info()[</span><span class="s3">0</span><span class="s1">]):</span>
+                    <span class="s1">sleep(DELAY * </span><span class="s3">10</span><span class="s1">)</span>
+                    <span class="s2">raise </span><span class="s1">AssertionError(</span><span class="s4">'should not get there'</span><span class="s1">)</span>
+                <span class="s2">raise </span><span class="s1">AssertionError(</span><span class="s4">'should not get there'</span><span class="s1">)</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s2">raise </span><span class="s1">AssertionError(</span><span class="s4">'should not get there'</span><span class="s1">)</span>
+
+        <span class="s0"># It's possible to cancel the timer inside the block:</span>
+        <span class="s2">with </span><span class="s1">Timeout(DELAY) </span><span class="s2">as </span><span class="s1">timer:</span>
+            <span class="s1">timer.cancel()</span>
+            <span class="s1">sleep(DELAY * </span><span class="s3">2</span><span class="s1">)</span>
+
+        <span class="s0"># To silent the exception before exiting the block, pass False as second parameter.</span>
+        <span class="s1">XDELAY = </span><span class="s3">0.1</span>
+        <span class="s1">start = time.time()</span>
+        <span class="s2">with </span><span class="s1">Timeout(XDELAY</span><span class="s2">, False</span><span class="s1">):</span>
+            <span class="s1">sleep(XDELAY * </span><span class="s3">2</span><span class="s1">)</span>
+        <span class="s1">delta = (time.time() - start)</span>
+        <span class="s1">self.assertTimeWithinRange(delta</span><span class="s2">, </span><span class="s3">0</span><span class="s2">, </span><span class="s1">XDELAY * </span><span class="s3">2</span><span class="s1">)</span>
+
+        <span class="s0"># passing None as seconds disables the timer</span>
+        <span class="s2">with </span><span class="s1">Timeout(</span><span class="s2">None</span><span class="s1">):</span>
+            <span class="s1">sleep(DELAY)</span>
+        <span class="s1">sleep(DELAY)</span>
+
+    <span class="s2">def </span><span class="s1">test_ref(self):</span>
+        <span class="s1">err = Error()</span>
+        <span class="s1">err_ref = weakref.ref(err)</span>
+        <span class="s2">with </span><span class="s1">Timeout(DELAY * </span><span class="s3">2</span><span class="s2">, </span><span class="s1">err):</span>
+            <span class="s1">sleep(DELAY)</span>
+        <span class="s2">del </span><span class="s1">err</span>
+        <span class="s1">gc.collect()</span>
+        <span class="s1">self.assertFalse(err_ref()</span><span class="s2">, </span><span class="s1">err_ref)</span>
+
+    <span class="s1">@flaky.reraises_flaky_race_condition()</span>
+    <span class="s2">def </span><span class="s1">test_nested_timeout(self):</span>
+        <span class="s2">with </span><span class="s1">Timeout(DELAY</span><span class="s2">, False</span><span class="s1">):</span>
+            <span class="s2">with </span><span class="s1">Timeout(DELAY * </span><span class="s3">10</span><span class="s2">, False</span><span class="s1">):</span>
+                <span class="s1">sleep(DELAY * </span><span class="s3">3 </span><span class="s1">* </span><span class="s3">20</span><span class="s1">)</span>
+            <span class="s2">raise </span><span class="s1">AssertionError(</span><span class="s4">'should not get there'</span><span class="s1">)</span>
+
+        <span class="s2">with </span><span class="s1">Timeout(DELAY) </span><span class="s2">as </span><span class="s1">t1:</span>
+            <span class="s2">with </span><span class="s1">Timeout(DELAY * </span><span class="s3">20</span><span class="s1">) </span><span class="s2">as </span><span class="s1">t2:</span>
+                <span class="s2">with </span><span class="s1">self.assertRaises(Timeout) </span><span class="s2">as </span><span class="s1">exc:</span>
+                    <span class="s1">sleep(DELAY * </span><span class="s3">30</span><span class="s1">)</span>
+                <span class="s1">self.assertIs(exc.exception</span><span class="s2">, </span><span class="s1">t1)</span>
+
+                <span class="s1">self.assertFalse(t1.pending</span><span class="s2">, </span><span class="s1">t1)</span>
+                <span class="s1">self.assertTrue(t2.pending</span><span class="s2">, </span><span class="s1">t2)</span>
+
+            <span class="s1">self.assertFalse(t2.pending)</span>
+
+        <span class="s2">with </span><span class="s1">Timeout(DELAY * </span><span class="s3">20</span><span class="s1">) </span><span class="s2">as </span><span class="s1">t1:</span>
+            <span class="s2">with </span><span class="s1">Timeout(DELAY) </span><span class="s2">as </span><span class="s1">t2:</span>
+                <span class="s2">with </span><span class="s1">self.assertRaises(Timeout) </span><span class="s2">as </span><span class="s1">exc:</span>
+                    <span class="s1">sleep(DELAY * </span><span class="s3">30</span><span class="s1">)</span>
+                <span class="s1">self.assertIs(exc.exception</span><span class="s2">, </span><span class="s1">t2)</span>
+
+                <span class="s1">self.assertTrue(t1.pending</span><span class="s2">, </span><span class="s1">t1)</span>
+                <span class="s1">self.assertFalse(t2.pending</span><span class="s2">, </span><span class="s1">t2)</span>
+
+        <span class="s1">self.assertFalse(t1.pending)</span>
+
+
+<span class="s2">if </span><span class="s1">__name__ == </span><span class="s4">'__main__'</span><span class="s1">:</span>
+    <span class="s1">greentest.main()</span>
+</pre>
+</body>
+</html>

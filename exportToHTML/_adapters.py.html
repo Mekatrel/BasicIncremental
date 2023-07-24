@@ -1,0 +1,90 @@
+<html>
+<head>
+<title>_adapters.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #cc7832;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #6a8759;}
+.s3 { color: #808080;}
+.s4 { color: #629755; font-style: italic;}
+.s5 { color: #6897bb;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+_adapters.py</font>
+</center></td></tr></table>
+<pre><span class="s0">import </span><span class="s1">re</span>
+<span class="s0">import </span><span class="s1">textwrap</span>
+<span class="s0">import </span><span class="s1">email.message</span>
+
+<span class="s0">from </span><span class="s1">._text </span><span class="s0">import </span><span class="s1">FoldedCase</span>
+
+
+<span class="s0">class </span><span class="s1">Message(email.message.Message):</span>
+    <span class="s1">multiple_use_keys = set(</span>
+        <span class="s1">map(</span>
+            <span class="s1">FoldedCase</span><span class="s0">,</span>
+            <span class="s1">[</span>
+                <span class="s2">'Classifier'</span><span class="s0">,</span>
+                <span class="s2">'Obsoletes-Dist'</span><span class="s0">,</span>
+                <span class="s2">'Platform'</span><span class="s0">,</span>
+                <span class="s2">'Project-URL'</span><span class="s0">,</span>
+                <span class="s2">'Provides-Dist'</span><span class="s0">,</span>
+                <span class="s2">'Provides-Extra'</span><span class="s0">,</span>
+                <span class="s2">'Requires-Dist'</span><span class="s0">,</span>
+                <span class="s2">'Requires-External'</span><span class="s0">,</span>
+                <span class="s2">'Supported-Platform'</span><span class="s0">,</span>
+                <span class="s2">'Dynamic'</span><span class="s0">,</span>
+            <span class="s1">]</span><span class="s0">,</span>
+        <span class="s1">)</span>
+    <span class="s1">)</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Keys that may be indicated multiple times per PEP 566. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s0">def </span><span class="s1">__new__(cls</span><span class="s0">, </span><span class="s1">orig: email.message.Message):</span>
+        <span class="s1">res = super().__new__(cls)</span>
+        <span class="s1">vars(res).update(vars(orig))</span>
+        <span class="s0">return </span><span class="s1">res</span>
+
+    <span class="s0">def </span><span class="s1">__init__(self</span><span class="s0">, </span><span class="s1">*args</span><span class="s0">, </span><span class="s1">**kwargs):</span>
+        <span class="s1">self._headers = self._repair_headers()</span>
+
+    <span class="s3"># suppress spurious error from mypy</span>
+    <span class="s0">def </span><span class="s1">__iter__(self):</span>
+        <span class="s0">return </span><span class="s1">super().__iter__()</span>
+
+    <span class="s0">def </span><span class="s1">_repair_headers(self):</span>
+        <span class="s0">def </span><span class="s1">redent(value):</span>
+            <span class="s4">&quot;Correct for RFC822 indentation&quot;</span>
+            <span class="s0">if not </span><span class="s1">value </span><span class="s0">or </span><span class="s2">'</span><span class="s0">\n</span><span class="s2">' </span><span class="s0">not in </span><span class="s1">value:</span>
+                <span class="s0">return </span><span class="s1">value</span>
+            <span class="s0">return </span><span class="s1">textwrap.dedent(</span><span class="s2">' ' </span><span class="s1">* </span><span class="s5">8 </span><span class="s1">+ value)</span>
+
+        <span class="s1">headers = [(key</span><span class="s0">, </span><span class="s1">redent(value)) </span><span class="s0">for </span><span class="s1">key</span><span class="s0">, </span><span class="s1">value </span><span class="s0">in </span><span class="s1">vars(self)[</span><span class="s2">'_headers'</span><span class="s1">]]</span>
+        <span class="s0">if </span><span class="s1">self._payload:</span>
+            <span class="s1">headers.append((</span><span class="s2">'Description'</span><span class="s0">, </span><span class="s1">self.get_payload()))</span>
+        <span class="s0">return </span><span class="s1">headers</span>
+
+    <span class="s1">@property</span>
+    <span class="s0">def </span><span class="s1">json(self):</span>
+        <span class="s4">&quot;&quot;&quot; 
+        Convert PackageMetadata to a JSON-compatible format 
+        per PEP 0566. 
+        &quot;&quot;&quot;</span>
+
+        <span class="s0">def </span><span class="s1">transform(key):</span>
+            <span class="s1">value = self.get_all(key) </span><span class="s0">if </span><span class="s1">key </span><span class="s0">in </span><span class="s1">self.multiple_use_keys </span><span class="s0">else </span><span class="s1">self[key]</span>
+            <span class="s0">if </span><span class="s1">key == </span><span class="s2">'Keywords'</span><span class="s1">:</span>
+                <span class="s1">value = re.split(</span><span class="s2">r'\s+'</span><span class="s0">, </span><span class="s1">value)</span>
+            <span class="s1">tk = key.lower().replace(</span><span class="s2">'-'</span><span class="s0">, </span><span class="s2">'_'</span><span class="s1">)</span>
+            <span class="s0">return </span><span class="s1">tk</span><span class="s0">, </span><span class="s1">value</span>
+
+        <span class="s0">return </span><span class="s1">dict(map(transform</span><span class="s0">, </span><span class="s1">map(FoldedCase</span><span class="s0">, </span><span class="s1">self)))</span>
+</pre>
+</body>
+</html>

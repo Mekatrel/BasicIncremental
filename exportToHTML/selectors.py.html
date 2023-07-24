@@ -1,0 +1,329 @@
+<html>
+<head>
+<title>selectors.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #629755; font-style: italic;}
+.s3 { color: #cc7832;}
+.s4 { color: #6a8759;}
+.s5 { color: #6897bb;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+selectors.py</font>
+</center></td></tr></table>
+<pre><span class="s0"># Copyright (c) 2020 gevent contributors.</span>
+<span class="s2">&quot;&quot;&quot; 
+This module provides :class:`GeventSelector`, a high-level IO 
+multiplexing mechanism. This is aliased to :class:`DefaultSelector`. 
+ 
+This module provides the same API as the selectors defined in :mod:`selectors`. 
+ 
+On Python 2, this module is only available if the `selectors2 
+&lt;https://pypi.org/project/selectors2/&gt;`_ backport is installed. 
+ 
+.. versionadded:: 20.6.0 
+&quot;&quot;&quot;</span>
+<span class="s3">from </span><span class="s1">__future__ </span><span class="s3">import </span><span class="s1">absolute_import</span>
+<span class="s3">from </span><span class="s1">__future__ </span><span class="s3">import </span><span class="s1">division</span>
+<span class="s3">from </span><span class="s1">__future__ </span><span class="s3">import </span><span class="s1">print_function</span>
+
+<span class="s3">from </span><span class="s1">collections </span><span class="s3">import </span><span class="s1">defaultdict</span>
+
+<span class="s3">try</span><span class="s1">:</span>
+    <span class="s3">import </span><span class="s1">selectors </span><span class="s3">as </span><span class="s1">__selectors__</span>
+<span class="s3">except </span><span class="s1">ImportError:</span>
+    <span class="s0"># Probably on Python 2. Do we have the backport?</span>
+    <span class="s3">import </span><span class="s1">selectors2 </span><span class="s3">as </span><span class="s1">__selectors__</span>
+    <span class="s1">__target__ = </span><span class="s4">'selectors2'</span>
+
+<span class="s3">from </span><span class="s1">gevent.hub </span><span class="s3">import </span><span class="s1">_get_hub_noargs </span><span class="s3">as </span><span class="s1">get_hub</span>
+<span class="s3">from </span><span class="s1">gevent </span><span class="s3">import </span><span class="s1">sleep</span>
+<span class="s3">from </span><span class="s1">gevent._compat </span><span class="s3">import </span><span class="s1">iteritems</span>
+<span class="s3">from </span><span class="s1">gevent._compat </span><span class="s3">import </span><span class="s1">itervalues</span>
+<span class="s3">from </span><span class="s1">gevent._util </span><span class="s3">import </span><span class="s1">copy_globals</span>
+<span class="s3">from </span><span class="s1">gevent._util </span><span class="s3">import </span><span class="s1">Lazy</span>
+
+<span class="s3">from </span><span class="s1">gevent.event </span><span class="s3">import </span><span class="s1">Event</span>
+<span class="s3">from </span><span class="s1">gevent.select </span><span class="s3">import </span><span class="s1">_EV_READ</span>
+<span class="s3">from </span><span class="s1">gevent.select </span><span class="s3">import </span><span class="s1">_EV_WRITE</span>
+
+<span class="s1">__implements__ = [</span>
+    <span class="s4">'DefaultSelector'</span><span class="s3">,</span>
+<span class="s1">]</span>
+<span class="s1">__extra__ = [</span>
+    <span class="s4">'GeventSelector'</span><span class="s3">,</span>
+<span class="s1">]</span>
+<span class="s1">__all__ = __implements__ + __extra__</span>
+
+<span class="s1">__imports__ = copy_globals(</span>
+    <span class="s1">__selectors__</span><span class="s3">, </span><span class="s1">globals()</span><span class="s3">,</span>
+    <span class="s1">names_to_ignore=__all__</span><span class="s3">,</span>
+    <span class="s0"># Copy __all__; __all__ is defined by selectors2 but not Python 3.</span>
+    <span class="s1">dunder_names_to_keep=(</span><span class="s4">'__all__'</span><span class="s3">,</span><span class="s1">)</span>
+<span class="s1">)</span>
+
+<span class="s1">_POLL_ALL = _EV_READ | _EV_WRITE</span>
+
+<span class="s1">EVENT_READ = __selectors__.EVENT_READ</span>
+<span class="s1">EVENT_WRITE = __selectors__.EVENT_WRITE</span>
+<span class="s1">_ALL_EVENTS = EVENT_READ | EVENT_WRITE</span>
+<span class="s1">SelectorKey = __selectors__.SelectorKey</span>
+
+<span class="s0"># In 3.4 and selectors2, BaseSelector is a concrete</span>
+<span class="s0"># class that can be called. In 3.5 and later, it's an</span>
+<span class="s0"># ABC, with the real implementation being</span>
+<span class="s0"># passed to _BaseSelectorImpl.</span>
+<span class="s1">_BaseSelectorImpl = getattr(</span>
+    <span class="s1">__selectors__</span><span class="s3">,</span>
+    <span class="s4">'_BaseSelectorImpl'</span><span class="s3">,</span>
+    <span class="s1">__selectors__.BaseSelector</span>
+<span class="s1">)</span>
+
+<span class="s3">class </span><span class="s1">GeventSelector(_BaseSelectorImpl):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    A selector implementation using gevent primitives. 
+ 
+    This is a type of :class:`selectors.BaseSelector`, so the documentation 
+    for that class applies here. 
+ 
+    .. caution:: 
+       As the base class indicates, it is critically important to 
+       unregister file objects before closing them. (Or close the selector 
+       they are registered with before closing them.) Failure to do so 
+       may crash the process or have other unintended results. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s0"># Notes on the approach:</span>
+    <span class="s0">#</span>
+    <span class="s0"># It's easy to wrap a selector implementation around</span>
+    <span class="s0"># ``gevent.select.poll``; in fact that's what happens by default</span>
+    <span class="s0"># when monkey-patching in Python 3. But the problem with that is</span>
+    <span class="s0"># each call to ``selector.select()`` will result in creating and</span>
+    <span class="s0"># then destroying new kernel-level polling resources, as nothing</span>
+    <span class="s0"># in ``gevent.select`` can keep watchers around (because the underlying</span>
+    <span class="s0"># file could be closed at any time). This ends up producing a large</span>
+    <span class="s0"># number of syscalls that are unnecessary.</span>
+    <span class="s0">#</span>
+    <span class="s0"># So here, we take advantage of the fact that it is documented and</span>
+    <span class="s0"># required that files not be closed while they are registered.</span>
+    <span class="s0"># This lets us persist watchers. Indeed, it lets us continually</span>
+    <span class="s0"># accrue events in the background before a call to ``select()`` is even</span>
+    <span class="s0"># made. We can take advantage of this to return results immediately, without</span>
+    <span class="s0"># a syscall, if we have them.</span>
+    <span class="s0">#</span>
+    <span class="s0"># We create watchers in ``register()`` and destroy them in</span>
+    <span class="s0"># ``unregister()``. They do not get started until the first call</span>
+    <span class="s0"># to ``select()``, though. Once they are started, they don't get</span>
+    <span class="s0"># stopped until they deliver an event.</span>
+    <span class="s0"># Lifecycle:</span>
+    <span class="s0"># register() -&gt; inactive_watchers</span>
+    <span class="s0"># select() -&gt; inactive_watchers -&gt; active_watchers;</span>
+    <span class="s0">#             active_watchers   -&gt; inactive_watchers</span>
+
+    <span class="s3">def </span><span class="s1">__init__(self</span><span class="s3">, </span><span class="s1">hub=</span><span class="s3">None</span><span class="s1">):</span>
+        <span class="s3">if </span><span class="s1">hub </span><span class="s3">is not None</span><span class="s1">:</span>
+            <span class="s1">self.hub = hub</span>
+        <span class="s0"># {fd: watcher}</span>
+        <span class="s1">self._active_watchers = {}</span>
+        <span class="s1">self._inactive_watchers = {}</span>
+        <span class="s0"># {fd: EVENT_READ|EVENT_WRITE}</span>
+        <span class="s1">self._accumulated_events = defaultdict(int)</span>
+        <span class="s1">self._ready = Event()</span>
+        <span class="s1">super(GeventSelector</span><span class="s3">, </span><span class="s1">self).__init__()</span>
+
+    <span class="s3">def </span><span class="s1">__callback(self</span><span class="s3">, </span><span class="s1">events</span><span class="s3">, </span><span class="s1">fd):</span>
+        <span class="s3">if </span><span class="s1">events &gt; </span><span class="s5">0</span><span class="s1">:</span>
+            <span class="s1">cur_event_for_fd = self._accumulated_events[fd]</span>
+            <span class="s3">if </span><span class="s1">events &amp; _EV_READ:</span>
+                <span class="s1">cur_event_for_fd |= EVENT_READ</span>
+            <span class="s3">if </span><span class="s1">events &amp; _EV_WRITE:</span>
+                <span class="s1">cur_event_for_fd |= EVENT_WRITE</span>
+            <span class="s1">self._accumulated_events[fd] = cur_event_for_fd</span>
+
+        <span class="s1">self._ready.set()</span>
+
+    <span class="s1">@Lazy</span>
+    <span class="s3">def </span><span class="s1">hub(self): </span><span class="s0"># pylint:disable=method-hidden</span>
+        <span class="s3">return </span><span class="s1">get_hub()</span>
+
+    <span class="s3">def </span><span class="s1">register(self</span><span class="s3">, </span><span class="s1">fileobj</span><span class="s3">, </span><span class="s1">events</span><span class="s3">, </span><span class="s1">data=</span><span class="s3">None</span><span class="s1">):</span>
+        <span class="s1">key = _BaseSelectorImpl.register(self</span><span class="s3">, </span><span class="s1">fileobj</span><span class="s3">, </span><span class="s1">events</span><span class="s3">, </span><span class="s1">data)</span>
+
+        <span class="s3">if </span><span class="s1">events == _ALL_EVENTS:</span>
+            <span class="s1">flags = _POLL_ALL</span>
+        <span class="s3">elif </span><span class="s1">events == EVENT_READ:</span>
+            <span class="s1">flags = _EV_READ</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s1">flags = _EV_WRITE</span>
+
+
+        <span class="s1">loop = self.hub.loop</span>
+        <span class="s1">io = loop.io</span>
+        <span class="s1">MAXPRI = loop.MAXPRI</span>
+
+        <span class="s1">self._inactive_watchers[key.fd] = watcher = io(key.fd</span><span class="s3">, </span><span class="s1">flags)</span>
+        <span class="s1">watcher.priority = MAXPRI</span>
+        <span class="s3">return </span><span class="s1">key</span>
+
+    <span class="s3">def </span><span class="s1">unregister(self</span><span class="s3">, </span><span class="s1">fileobj):</span>
+        <span class="s1">key = _BaseSelectorImpl.unregister(self</span><span class="s3">, </span><span class="s1">fileobj)</span>
+        <span class="s3">if </span><span class="s1">key.fd </span><span class="s3">in </span><span class="s1">self._active_watchers:</span>
+            <span class="s1">watcher = self._active_watchers.pop(key.fd)</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s1">watcher = self._inactive_watchers.pop(key.fd)</span>
+        <span class="s1">watcher.stop()</span>
+        <span class="s1">watcher.close()</span>
+        <span class="s1">self._accumulated_events.pop(key.fd</span><span class="s3">, None</span><span class="s1">)</span>
+        <span class="s3">return </span><span class="s1">key</span>
+
+    <span class="s0"># XXX: Can we implement ``modify`` more efficiently than</span>
+    <span class="s0"># ``unregister()``+``register()``? We could detect the no-change</span>
+    <span class="s0"># case and do nothing; recent versions of the standard library</span>
+    <span class="s0"># do that.</span>
+
+    <span class="s3">def </span><span class="s1">select(self</span><span class="s3">, </span><span class="s1">timeout=</span><span class="s3">None</span><span class="s1">):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Poll for I/O. 
+ 
+        Note that, like the built-in selectors, this will block 
+        indefinitely if no timeout is given and no files have been 
+        registered. 
+        &quot;&quot;&quot;</span>
+        <span class="s0"># timeout &gt; 0 : block seconds</span>
+        <span class="s0"># timeout &lt;= 0 : No blocking.</span>
+        <span class="s0"># timeout = None: Block forever</span>
+
+        <span class="s0"># Event.wait doesn't deal with negative values</span>
+        <span class="s3">if </span><span class="s1">timeout </span><span class="s3">is not None and </span><span class="s1">timeout &lt; </span><span class="s5">0</span><span class="s1">:</span>
+            <span class="s1">timeout = </span><span class="s5">0</span>
+
+        <span class="s0"># Start any watchers that need started. Note that they may</span>
+        <span class="s0"># not actually get a chance to do anything yet if we already had</span>
+        <span class="s0"># events set.</span>
+        <span class="s3">for </span><span class="s1">fd</span><span class="s3">, </span><span class="s1">watcher </span><span class="s3">in </span><span class="s1">iteritems(self._inactive_watchers):</span>
+            <span class="s1">watcher.start(self.__callback</span><span class="s3">, </span><span class="s1">fd</span><span class="s3">, </span><span class="s1">pass_events=</span><span class="s3">True</span><span class="s1">)</span>
+        <span class="s1">self._active_watchers.update(self._inactive_watchers)</span>
+        <span class="s1">self._inactive_watchers.clear()</span>
+
+        <span class="s0"># The _ready event is either already set (in which case</span>
+        <span class="s0"># there are some results waiting in _accumulated_events) or</span>
+        <span class="s0"># not set, in which case we have to block. But to make the two cases</span>
+        <span class="s0"># behave the same, we will always yield to the event loop.</span>
+        <span class="s3">if </span><span class="s1">self._ready.is_set():</span>
+            <span class="s1">sleep()</span>
+        <span class="s1">self._ready.wait(timeout)</span>
+        <span class="s1">self._ready.clear()</span>
+        <span class="s0"># TODO: If we have nothing ready, but they ask us not to block,</span>
+        <span class="s0"># should we make an effort to actually spin the event loop and let</span>
+        <span class="s0"># it check for events?</span>
+
+        <span class="s1">result = []</span>
+        <span class="s3">for </span><span class="s1">fd</span><span class="s3">, </span><span class="s1">event </span><span class="s3">in </span><span class="s1">iteritems(self._accumulated_events):</span>
+            <span class="s1">key = self._key_from_fd(fd)</span>
+            <span class="s1">watcher = self._active_watchers.pop(fd)</span>
+
+            <span class="s0">## The below is taken without comment from</span>
+            <span class="s0">## https://github.com/gevent/gevent/pull/1523/files and</span>
+            <span class="s0">## hasn't been checked:</span>
+            <span class="s0">#</span>
+            <span class="s0"># Since we are emulating an epoll object within another epoll object,</span>
+            <span class="s0"># once a watcher has fired, we must deactivate it until poll is called</span>
+            <span class="s0"># next. If we did not, someone else could call, e.g., gevent.time.sleep</span>
+            <span class="s0"># and any unconsumed bytes on our watched fd would prevent the process</span>
+            <span class="s0"># from sleeping correctly.</span>
+            <span class="s1">watcher.stop()</span>
+            <span class="s3">if </span><span class="s1">key:</span>
+                <span class="s1">result.append((key</span><span class="s3">, </span><span class="s1">event &amp; key.events))</span>
+                <span class="s1">self._inactive_watchers[fd] = watcher</span>
+            <span class="s3">else</span><span class="s1">: </span><span class="s0"># pragma: no cover</span>
+                <span class="s0"># If the key was gone, then somehow we've been unregistered.</span>
+                <span class="s0"># Don't put it back in inactive, close it.</span>
+                <span class="s1">watcher.close()</span>
+
+        <span class="s1">self._accumulated_events.clear()</span>
+        <span class="s3">return </span><span class="s1">result</span>
+
+    <span class="s3">def </span><span class="s1">close(self):</span>
+        <span class="s3">for </span><span class="s1">d </span><span class="s3">in </span><span class="s1">self._active_watchers</span><span class="s3">, </span><span class="s1">self._inactive_watchers:</span>
+            <span class="s3">if </span><span class="s1">d </span><span class="s3">is None</span><span class="s1">:</span>
+                <span class="s3">continue </span><span class="s0"># already closed</span>
+            <span class="s3">for </span><span class="s1">watcher </span><span class="s3">in </span><span class="s1">itervalues(d):</span>
+                <span class="s1">watcher.stop()</span>
+                <span class="s1">watcher.close()</span>
+        <span class="s1">self._active_watchers = self._inactive_watchers = </span><span class="s3">None</span>
+        <span class="s1">self._accumulated_events = </span><span class="s3">None</span>
+        <span class="s1">self.hub = </span><span class="s3">None</span>
+        <span class="s1">_BaseSelectorImpl.close(self)</span>
+
+
+<span class="s1">DefaultSelector = GeventSelector</span>
+
+<span class="s3">def </span><span class="s1">_gevent_do_monkey_patch(patch_request):</span>
+    <span class="s1">aggressive = patch_request.patch_kwargs[</span><span class="s4">'aggressive'</span><span class="s1">]</span>
+    <span class="s1">target_mod = patch_request.target_module</span>
+
+    <span class="s1">patch_request.default_patch_items()</span>
+
+    <span class="s3">import </span><span class="s1">sys</span>
+    <span class="s3">if </span><span class="s4">'selectors' </span><span class="s3">not in </span><span class="s1">sys.modules:</span>
+        <span class="s0"># Py2: Make 'import selectors' work</span>
+        <span class="s1">sys.modules[</span><span class="s4">'selectors'</span><span class="s1">] = sys.modules[__name__]</span>
+
+    <span class="s0"># Python 3 wants to use `select.select` as a member function,</span>
+    <span class="s0"># leading to this error in selectors.py (because</span>
+    <span class="s0"># gevent.select.select is not a builtin and doesn't get the</span>
+    <span class="s0"># magic auto-static that they do):</span>
+    <span class="s0">#</span>
+    <span class="s0">#    r, w, _ = self._select(self._readers, self._writers, [], timeout)</span>
+    <span class="s0">#    TypeError: select() takes from 3 to 4 positional arguments but 5 were given</span>
+    <span class="s0">#</span>
+    <span class="s0"># Note that this obviously only happens if selectors was</span>
+    <span class="s0"># imported after we had patched select; but there is a code</span>
+    <span class="s0"># path that leads to it being imported first (but now we've</span>
+    <span class="s0"># patched select---so we can't compare them identically). It also doesn't</span>
+    <span class="s0"># happen on Windows, because they define a normal method for _select, to work around</span>
+    <span class="s0"># some weirdness in the handling of the third argument.</span>
+    <span class="s0">#</span>
+    <span class="s0"># The backport doesn't have that.</span>
+    <span class="s1">orig_select_select = patch_request.get_original(</span><span class="s4">'select'</span><span class="s3">, </span><span class="s4">'select'</span><span class="s1">)</span>
+    <span class="s3">assert </span><span class="s1">target_mod.select </span><span class="s3">is not </span><span class="s1">orig_select_select</span>
+    <span class="s1">selectors = __selectors__</span>
+    <span class="s1">SelectSelector = selectors.SelectSelector</span>
+    <span class="s3">if </span><span class="s1">hasattr(SelectSelector</span><span class="s3">, </span><span class="s4">'_select'</span><span class="s1">) </span><span class="s3">and </span><span class="s1">SelectSelector._select </span><span class="s3">in </span><span class="s1">(</span>
+            <span class="s1">target_mod.select</span><span class="s3">, </span><span class="s1">orig_select_select</span>
+    <span class="s1">):</span>
+        <span class="s3">from </span><span class="s1">gevent.select </span><span class="s3">import </span><span class="s1">select</span>
+        <span class="s3">def </span><span class="s1">_select(self</span><span class="s3">, </span><span class="s1">*args</span><span class="s3">, </span><span class="s1">**kwargs): </span><span class="s0"># pylint:disable=unused-argument</span>
+            <span class="s3">return </span><span class="s1">select(*args</span><span class="s3">, </span><span class="s1">**kwargs)</span>
+        <span class="s1">selectors.SelectSelector._select = _select</span>
+        <span class="s1">_select._gevent_monkey = </span><span class="s3">True </span><span class="s0"># prove for test cases</span>
+
+    <span class="s3">if </span><span class="s1">aggressive:</span>
+        <span class="s0"># If `selectors` had already been imported before we removed</span>
+        <span class="s0"># select.epoll|kqueue|devpoll, these may have been defined in terms</span>
+        <span class="s0"># of those functions. They'll fail at runtime.</span>
+        <span class="s1">patch_request.remove_item(</span>
+            <span class="s1">selectors</span><span class="s3">,</span>
+            <span class="s4">'EpollSelector'</span><span class="s3">,</span>
+            <span class="s4">'KqueueSelector'</span><span class="s3">,</span>
+            <span class="s4">'DevpollSelector'</span><span class="s3">,</span>
+        <span class="s1">)</span>
+        <span class="s1">selectors.DefaultSelector = DefaultSelector</span>
+
+    <span class="s0"># Python 3.7 refactors the poll-like selectors to use a common</span>
+    <span class="s0"># base class and capture a reference to select.poll, etc, at</span>
+    <span class="s0"># import time. selectors tends to get imported early</span>
+    <span class="s0"># (importing 'platform' does it: platform -&gt; subprocess -&gt; selectors),</span>
+    <span class="s0"># so we need to clean that up.</span>
+    <span class="s3">if </span><span class="s1">hasattr(selectors</span><span class="s3">, </span><span class="s4">'PollSelector'</span><span class="s1">) </span><span class="s3">and </span><span class="s1">hasattr(selectors.PollSelector</span><span class="s3">, </span><span class="s4">'_selector_cls'</span><span class="s1">):</span>
+        <span class="s3">from </span><span class="s1">gevent.select </span><span class="s3">import </span><span class="s1">poll</span>
+        <span class="s1">selectors.PollSelector._selector_cls = poll</span>
+</pre>
+</body>
+</html>

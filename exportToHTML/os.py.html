@@ -1,0 +1,565 @@
+<html>
+<head>
+<title>os.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #629755; font-style: italic;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #cc7832;}
+.s3 { color: #6a8759;}
+.s4 { color: #6897bb;}
+.s5 { color: #808080;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+os.py</font>
+</center></td></tr></table>
+<pre><span class="s0">&quot;&quot;&quot; 
+Low-level operating system functions from :mod:`os`. 
+ 
+Cooperative I/O 
+=============== 
+ 
+This module provides cooperative versions of :func:`os.read` and 
+:func:`os.write`. These functions are *not* monkey-patched; you 
+must explicitly call them or monkey patch them yourself. 
+ 
+POSIX functions 
+--------------- 
+ 
+On POSIX, non-blocking IO is available. 
+ 
+- :func:`nb_read` 
+- :func:`nb_write` 
+- :func:`make_nonblocking` 
+ 
+All Platforms 
+------------- 
+ 
+On non-POSIX platforms (e.g., Windows), non-blocking IO is not 
+available. On those platforms (and on POSIX), cooperative IO can 
+be done with the threadpool. 
+ 
+- :func:`tp_read` 
+- :func:`tp_write` 
+ 
+Child Processes 
+=============== 
+ 
+The functions :func:`fork` and (on POSIX) :func:`forkpty` and :func:`waitpid` can be used 
+to manage child processes. 
+ 
+.. warning:: 
+ 
+   Forking a process that uses greenlets does not eliminate all non-running 
+   greenlets. Any that were scheduled in the hub of the forking thread in the parent 
+   remain scheduled in the child; compare this to how normal threads operate. (This behaviour 
+   may change is a subsequent major release.) 
+&quot;&quot;&quot;</span>
+
+<span class="s2">from </span><span class="s1">__future__ </span><span class="s2">import </span><span class="s1">absolute_import</span>
+
+<span class="s2">import </span><span class="s1">os</span>
+<span class="s2">import </span><span class="s1">sys</span>
+<span class="s2">from </span><span class="s1">gevent.hub </span><span class="s2">import </span><span class="s1">_get_hub_noargs </span><span class="s2">as </span><span class="s1">get_hub</span>
+<span class="s2">from </span><span class="s1">gevent.hub </span><span class="s2">import </span><span class="s1">reinit</span>
+<span class="s2">from </span><span class="s1">gevent._config </span><span class="s2">import </span><span class="s1">config</span>
+<span class="s2">from </span><span class="s1">gevent._compat </span><span class="s2">import </span><span class="s1">PY3</span>
+<span class="s2">from </span><span class="s1">gevent._util </span><span class="s2">import </span><span class="s1">copy_globals</span>
+<span class="s2">import </span><span class="s1">errno</span>
+
+<span class="s1">EAGAIN = getattr(errno</span><span class="s2">, </span><span class="s3">'EAGAIN'</span><span class="s2">, </span><span class="s4">11</span><span class="s1">)</span>
+
+<span class="s2">try</span><span class="s1">:</span>
+    <span class="s2">import </span><span class="s1">fcntl</span>
+<span class="s2">except </span><span class="s1">ImportError:</span>
+    <span class="s1">fcntl = </span><span class="s2">None</span>
+
+<span class="s1">__implements__ = [</span><span class="s3">'fork'</span><span class="s1">]</span>
+<span class="s1">__extensions__ = [</span><span class="s3">'tp_read'</span><span class="s2">, </span><span class="s3">'tp_write'</span><span class="s1">]</span>
+
+<span class="s1">_read = os.read</span>
+<span class="s1">_write = os.write</span>
+
+
+<span class="s1">ignored_errors = [EAGAIN</span><span class="s2">, </span><span class="s1">errno.EINTR]</span>
+
+
+<span class="s2">if </span><span class="s1">fcntl:</span>
+
+    <span class="s1">__extensions__ += [</span><span class="s3">'make_nonblocking'</span><span class="s2">, </span><span class="s3">'nb_read'</span><span class="s2">, </span><span class="s3">'nb_write'</span><span class="s1">]</span>
+
+    <span class="s2">def </span><span class="s1">make_nonblocking(fd):</span>
+        <span class="s0">&quot;&quot;&quot;Put the file descriptor *fd* into non-blocking mode if 
+        possible. 
+ 
+        :return: A boolean value that evaluates to True if successful. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">flags = fcntl.fcntl(fd</span><span class="s2">, </span><span class="s1">fcntl.F_GETFL</span><span class="s2">, </span><span class="s4">0</span><span class="s1">)</span>
+        <span class="s2">if not </span><span class="s1">bool(flags &amp; os.O_NONBLOCK):</span>
+            <span class="s1">fcntl.fcntl(fd</span><span class="s2">, </span><span class="s1">fcntl.F_SETFL</span><span class="s2">, </span><span class="s1">flags | os.O_NONBLOCK)</span>
+            <span class="s2">return True</span>
+
+    <span class="s2">def </span><span class="s1">nb_read(fd</span><span class="s2">, </span><span class="s1">n):</span>
+        <span class="s0">&quot;&quot;&quot; 
+        Read up to *n* bytes from file descriptor *fd*. Return a 
+        byte string containing the bytes read, which may be shorter than 
+        *n*. If end-of-file is reached, an empty string is returned. 
+ 
+        The descriptor must be in non-blocking mode. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">hub = </span><span class="s2">None</span>
+        <span class="s1">event = </span><span class="s2">None</span>
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s2">while </span><span class="s4">1</span><span class="s1">:</span>
+                <span class="s2">try</span><span class="s1">:</span>
+                    <span class="s1">result = _read(fd</span><span class="s2">, </span><span class="s1">n)</span>
+                    <span class="s2">return </span><span class="s1">result</span>
+                <span class="s2">except </span><span class="s1">OSError </span><span class="s2">as </span><span class="s1">e:</span>
+                    <span class="s2">if </span><span class="s1">e.errno </span><span class="s2">not in </span><span class="s1">ignored_errors:</span>
+                        <span class="s2">raise</span>
+                    <span class="s2">if not </span><span class="s1">PY3:</span>
+                        <span class="s1">sys.exc_clear()</span>
+                <span class="s2">if </span><span class="s1">hub </span><span class="s2">is None</span><span class="s1">:</span>
+                    <span class="s1">hub = get_hub()</span>
+                    <span class="s1">event = hub.loop.io(fd</span><span class="s2">, </span><span class="s4">1</span><span class="s1">)</span>
+                <span class="s1">hub.wait(event)</span>
+        <span class="s2">finally</span><span class="s1">:</span>
+            <span class="s2">if </span><span class="s1">event </span><span class="s2">is not None</span><span class="s1">:</span>
+                <span class="s1">event.close()</span>
+                <span class="s1">event = </span><span class="s2">None</span>
+                <span class="s1">hub = </span><span class="s2">None</span>
+
+
+    <span class="s2">def </span><span class="s1">nb_write(fd</span><span class="s2">, </span><span class="s1">buf):</span>
+        <span class="s0">&quot;&quot;&quot; 
+        Write some number of bytes from buffer *buf* to file 
+        descriptor *fd*. Return the number of bytes written, which may 
+        be less than the length of *buf*. 
+ 
+        The file descriptor must be in non-blocking mode. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">hub = </span><span class="s2">None</span>
+        <span class="s1">event = </span><span class="s2">None</span>
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s2">while </span><span class="s4">1</span><span class="s1">:</span>
+                <span class="s2">try</span><span class="s1">:</span>
+                    <span class="s1">result = _write(fd</span><span class="s2">, </span><span class="s1">buf)</span>
+                    <span class="s2">return </span><span class="s1">result</span>
+                <span class="s2">except </span><span class="s1">OSError </span><span class="s2">as </span><span class="s1">e:</span>
+                    <span class="s2">if </span><span class="s1">e.errno </span><span class="s2">not in </span><span class="s1">ignored_errors:</span>
+                        <span class="s2">raise</span>
+                    <span class="s2">if not </span><span class="s1">PY3:</span>
+                        <span class="s1">sys.exc_clear()</span>
+                <span class="s2">if </span><span class="s1">hub </span><span class="s2">is None</span><span class="s1">:</span>
+                    <span class="s1">hub = get_hub()</span>
+                    <span class="s1">event = hub.loop.io(fd</span><span class="s2">, </span><span class="s4">2</span><span class="s1">)</span>
+                <span class="s1">hub.wait(event)</span>
+        <span class="s2">finally</span><span class="s1">:</span>
+            <span class="s2">if </span><span class="s1">event </span><span class="s2">is not None</span><span class="s1">:</span>
+                <span class="s1">event.close()</span>
+                <span class="s1">event = </span><span class="s2">None</span>
+                <span class="s1">hub = </span><span class="s2">None</span>
+
+
+<span class="s2">def </span><span class="s1">tp_read(fd</span><span class="s2">, </span><span class="s1">n):</span>
+    <span class="s0">&quot;&quot;&quot;Read up to *n* bytes from file descriptor *fd*. Return a string 
+    containing the bytes read. If end-of-file is reached, an empty string 
+    is returned. 
+ 
+    Reading is done using the threadpool. 
+    &quot;&quot;&quot;</span>
+    <span class="s2">return </span><span class="s1">get_hub().threadpool.apply(_read</span><span class="s2">, </span><span class="s1">(fd</span><span class="s2">, </span><span class="s1">n))</span>
+
+
+<span class="s2">def </span><span class="s1">tp_write(fd</span><span class="s2">, </span><span class="s1">buf):</span>
+    <span class="s0">&quot;&quot;&quot;Write bytes from buffer *buf* to file descriptor *fd*. Return the 
+    number of bytes written. 
+ 
+    Writing is done using the threadpool. 
+    &quot;&quot;&quot;</span>
+    <span class="s2">return </span><span class="s1">get_hub().threadpool.apply(_write</span><span class="s2">, </span><span class="s1">(fd</span><span class="s2">, </span><span class="s1">buf))</span>
+
+
+<span class="s2">if </span><span class="s1">hasattr(os</span><span class="s2">, </span><span class="s3">'fork'</span><span class="s1">):</span>
+    <span class="s5"># pylint:disable=function-redefined,redefined-outer-name</span>
+
+    <span class="s1">_raw_fork = os.fork</span>
+
+    <span class="s2">def </span><span class="s1">fork_gevent():</span>
+        <span class="s0">&quot;&quot;&quot; 
+        Forks the process using :func:`os.fork` and prepares the 
+        child process to continue using gevent before returning. 
+ 
+        .. note:: 
+ 
+            The PID returned by this function may not be waitable with 
+            either the original :func:`os.waitpid` or this module's 
+            :func:`waitpid` and it may not generate SIGCHLD signals if 
+            libev child watchers are or ever have been in use. For 
+            example, the :mod:`gevent.subprocess` module uses libev 
+            child watchers (which parts of gevent use libev child 
+            watchers is subject to change at any time). Most 
+            applications should use :func:`fork_and_watch`, which is 
+            monkey-patched as the default replacement for 
+            :func:`os.fork` and implements the ``fork`` function of 
+            this module by default, unless the environment variable 
+            ``GEVENT_NOWAITPID`` is defined before this module is 
+            imported. 
+ 
+        .. versionadded:: 1.1b2 
+        &quot;&quot;&quot;</span>
+        <span class="s1">result = _raw_fork()</span>
+        <span class="s2">if not </span><span class="s1">result:</span>
+            <span class="s1">reinit()</span>
+        <span class="s2">return </span><span class="s1">result</span>
+
+    <span class="s2">def </span><span class="s1">fork():</span>
+        <span class="s0">&quot;&quot;&quot; 
+        A wrapper for :func:`fork_gevent` for non-POSIX platforms. 
+        &quot;&quot;&quot;</span>
+        <span class="s2">return </span><span class="s1">fork_gevent()</span>
+
+    <span class="s2">if </span><span class="s1">hasattr(os</span><span class="s2">, </span><span class="s3">'forkpty'</span><span class="s1">):</span>
+        <span class="s1">_raw_forkpty = os.forkpty</span>
+
+        <span class="s2">def </span><span class="s1">forkpty_gevent():</span>
+            <span class="s0">&quot;&quot;&quot; 
+            Forks the process using :func:`os.forkpty` and prepares the 
+            child process to continue using gevent before returning. 
+ 
+            Returns a tuple (pid, master_fd). The `master_fd` is *not* put into 
+            non-blocking mode. 
+ 
+            Availability: Some Unix systems. 
+ 
+            .. seealso:: This function has the same limitations as :func:`fork_gevent`. 
+ 
+            .. versionadded:: 1.1b5 
+            &quot;&quot;&quot;</span>
+            <span class="s1">pid</span><span class="s2">, </span><span class="s1">master_fd = _raw_forkpty()</span>
+            <span class="s2">if not </span><span class="s1">pid:</span>
+                <span class="s1">reinit()</span>
+            <span class="s2">return </span><span class="s1">pid</span><span class="s2">, </span><span class="s1">master_fd</span>
+
+        <span class="s1">forkpty = forkpty_gevent</span>
+
+        <span class="s1">__implements__.append(</span><span class="s3">'forkpty'</span><span class="s1">)</span>
+        <span class="s1">__extensions__.append(</span><span class="s3">&quot;forkpty_gevent&quot;</span><span class="s1">)</span>
+
+    <span class="s2">if </span><span class="s1">hasattr(os</span><span class="s2">, </span><span class="s3">'WNOWAIT'</span><span class="s1">) </span><span class="s2">or </span><span class="s1">hasattr(os</span><span class="s2">, </span><span class="s3">'WNOHANG'</span><span class="s1">):</span>
+        <span class="s5"># We can only do this on POSIX</span>
+        <span class="s2">import </span><span class="s1">time</span>
+
+        <span class="s1">_waitpid = os.waitpid</span>
+        <span class="s1">_WNOHANG = os.WNOHANG</span>
+
+        <span class="s5"># replaced by the signal module.</span>
+        <span class="s1">_on_child_hook = </span><span class="s2">lambda</span><span class="s1">: </span><span class="s2">None</span>
+
+        <span class="s5"># {pid -&gt; watcher or tuple(pid, rstatus, timestamp)}</span>
+        <span class="s1">_watched_children = {}</span>
+
+        <span class="s2">def </span><span class="s1">_on_child(watcher</span><span class="s2">, </span><span class="s1">callback):</span>
+            <span class="s5"># XXX: Could handle tracing here by not stopping</span>
+            <span class="s5"># until the pid is terminated</span>
+            <span class="s1">watcher.stop()</span>
+            <span class="s2">try</span><span class="s1">:</span>
+                <span class="s1">_watched_children[watcher.pid] = (watcher.pid</span><span class="s2">, </span><span class="s1">watcher.rstatus</span><span class="s2">, </span><span class="s1">time.time())</span>
+                <span class="s2">if </span><span class="s1">callback:</span>
+                    <span class="s1">callback(watcher)</span>
+                <span class="s5"># dispatch an &quot;event&quot;; used by gevent.signal.signal</span>
+                <span class="s1">_on_child_hook()</span>
+                <span class="s5"># now is as good a time as any to reap children</span>
+                <span class="s1">_reap_children()</span>
+            <span class="s2">finally</span><span class="s1">:</span>
+                <span class="s1">watcher.close()</span>
+
+        <span class="s2">def </span><span class="s1">_reap_children(timeout=</span><span class="s4">60</span><span class="s1">):</span>
+            <span class="s5"># Remove all the dead children that haven't been waited on</span>
+            <span class="s5"># for the *timeout* seconds.</span>
+            <span class="s5"># Some platforms queue delivery of SIGCHLD for all children that die;</span>
+            <span class="s5"># in that case, a well-behaved application should call waitpid() for each</span>
+            <span class="s5"># signal.</span>
+            <span class="s5"># Some platforms (linux) only guarantee one delivery if multiple children</span>
+            <span class="s5"># die. On that platform, the well-behave application calls waitpid() in a loop</span>
+            <span class="s5"># until it gets back -1, indicating no more dead children need to be waited for.</span>
+            <span class="s5"># In either case, waitpid should be called the same number of times as dead children,</span>
+            <span class="s5"># thus removing all the watchers when a SIGCHLD arrives. The (generous) timeout</span>
+            <span class="s5"># is to work with applications that neglect to call waitpid and prevent &quot;unlimited&quot;</span>
+            <span class="s5"># growth.</span>
+            <span class="s5"># Note that we don't watch for the case of pid wraparound. That is, we fork a new</span>
+            <span class="s5"># child with the same pid as an existing watcher, but the child is already dead,</span>
+            <span class="s5"># just not waited on yet.</span>
+            <span class="s1">now = time.time()</span>
+            <span class="s1">oldest_allowed = now - timeout</span>
+            <span class="s1">dead = [</span>
+                <span class="s1">pid </span><span class="s2">for </span><span class="s1">pid</span><span class="s2">, </span><span class="s1">val</span>
+                <span class="s2">in </span><span class="s1">_watched_children.items()</span>
+                <span class="s2">if </span><span class="s1">isinstance(val</span><span class="s2">, </span><span class="s1">tuple) </span><span class="s2">and </span><span class="s1">val[</span><span class="s4">2</span><span class="s1">] &lt; oldest_allowed</span>
+            <span class="s1">]</span>
+            <span class="s2">for </span><span class="s1">pid </span><span class="s2">in </span><span class="s1">dead:</span>
+                <span class="s2">del </span><span class="s1">_watched_children[pid]</span>
+
+        <span class="s2">def </span><span class="s1">waitpid(pid</span><span class="s2">, </span><span class="s1">options):</span>
+            <span class="s0">&quot;&quot;&quot; 
+            Wait for a child process to finish. 
+ 
+            If the child process was spawned using 
+            :func:`fork_and_watch`, then this function behaves 
+            cooperatively. If not, it *may* have race conditions; see 
+            :func:`fork_gevent` for more information. 
+ 
+            The arguments are as for the underlying 
+            :func:`os.waitpid`. Some combinations of *options* may not 
+            be supported cooperatively (as of 1.1 that includes 
+            WUNTRACED). Using a *pid* of 0 to request waiting on only processes 
+            from the current process group is not cooperative. A *pid* of -1 
+            to wait for any child is non-blocking, but may or may not 
+            require a trip around the event loop, depending on whether any children 
+            have already terminated but not been waited on. 
+ 
+            Availability: POSIX. 
+ 
+            .. versionadded:: 1.1b1 
+            .. versionchanged:: 1.2a1 
+               More cases are handled in a cooperative manner. 
+            &quot;&quot;&quot;</span>
+            <span class="s5"># pylint: disable=too-many-return-statements</span>
+            <span class="s5"># XXX Does not handle tracing children</span>
+
+            <span class="s5"># So long as libev's loop doesn't run, it's OK to add</span>
+            <span class="s5"># child watchers. The SIGCHLD handler only feeds events</span>
+            <span class="s5"># for the next iteration of the loop to handle. (And the</span>
+            <span class="s5"># signal handler itself is only called from the next loop</span>
+            <span class="s5"># iteration.)</span>
+
+            <span class="s2">if </span><span class="s1">pid &lt;= </span><span class="s4">0</span><span class="s1">:</span>
+                <span class="s5"># magic functions for multiple children.</span>
+                <span class="s2">if </span><span class="s1">pid == -</span><span class="s4">1</span><span class="s1">:</span>
+                    <span class="s5"># Any child. If we have one that we're watching</span>
+                    <span class="s5"># and that finished, we will use that one,</span>
+                    <span class="s5"># preferring the oldest. Otherwise, let the OS</span>
+                    <span class="s5"># take care of it.</span>
+                    <span class="s1">finished_at = </span><span class="s2">None</span>
+                    <span class="s2">for </span><span class="s1">k</span><span class="s2">, </span><span class="s1">v </span><span class="s2">in </span><span class="s1">_watched_children.items():</span>
+                        <span class="s2">if </span><span class="s1">(</span>
+                                <span class="s1">isinstance(v</span><span class="s2">, </span><span class="s1">tuple)</span>
+                                <span class="s2">and </span><span class="s1">(finished_at </span><span class="s2">is None or </span><span class="s1">v[</span><span class="s4">2</span><span class="s1">] &lt; finished_at)</span>
+                        <span class="s1">):</span>
+                            <span class="s1">pid = k</span>
+                            <span class="s1">finished_at = v[</span><span class="s4">2</span><span class="s1">]</span>
+
+                <span class="s2">if </span><span class="s1">pid &lt;= </span><span class="s4">0</span><span class="s1">:</span>
+                    <span class="s5"># We didn't have one that was ready. If there are</span>
+                    <span class="s5"># no funky options set, and the pid was -1</span>
+                    <span class="s5"># (meaning any process, not 0, which means process</span>
+                    <span class="s5"># group--- libev doesn't know about process</span>
+                    <span class="s5"># groups) then we can use a child watcher of pid 0; otherwise,</span>
+                    <span class="s5"># pass through to the OS.</span>
+                    <span class="s2">if </span><span class="s1">pid == -</span><span class="s4">1 </span><span class="s2">and </span><span class="s1">options == </span><span class="s4">0</span><span class="s1">:</span>
+                        <span class="s1">hub = get_hub()</span>
+                        <span class="s2">with </span><span class="s1">hub.loop.child(</span><span class="s4">0</span><span class="s2">, False</span><span class="s1">) </span><span class="s2">as </span><span class="s1">watcher:</span>
+                            <span class="s1">hub.wait(watcher)</span>
+                            <span class="s2">return </span><span class="s1">watcher.rpid</span><span class="s2">, </span><span class="s1">watcher.rstatus</span>
+                    <span class="s5"># There were funky options/pid, so we must go to the OS.</span>
+                    <span class="s2">return </span><span class="s1">_waitpid(pid</span><span class="s2">, </span><span class="s1">options)</span>
+
+            <span class="s2">if </span><span class="s1">pid </span><span class="s2">in </span><span class="s1">_watched_children:</span>
+                <span class="s5"># yes, we're watching it</span>
+
+                <span class="s5"># Note that the remainder of this code must be careful to NOT</span>
+                <span class="s5"># yield to the event loop except at well known times, or</span>
+                <span class="s5"># we have a race condition between the _on_child callback and the</span>
+                <span class="s5"># code here that could lead to a process to hang.</span>
+                <span class="s2">if </span><span class="s1">options &amp; _WNOHANG </span><span class="s2">or </span><span class="s1">isinstance(_watched_children[pid]</span><span class="s2">, </span><span class="s1">tuple):</span>
+                    <span class="s5"># We're either asked not to block, or it already finished, in which</span>
+                    <span class="s5"># case blocking doesn't matter</span>
+                    <span class="s1">result = _watched_children[pid]</span>
+                    <span class="s2">if </span><span class="s1">isinstance(result</span><span class="s2">, </span><span class="s1">tuple):</span>
+                        <span class="s5"># it finished. libev child watchers</span>
+                        <span class="s5"># are one-shot</span>
+                        <span class="s2">del </span><span class="s1">_watched_children[pid]</span>
+                        <span class="s2">return </span><span class="s1">result[:</span><span class="s4">2</span><span class="s1">]</span>
+                    <span class="s5"># it's not finished</span>
+                    <span class="s2">return </span><span class="s1">(</span><span class="s4">0</span><span class="s2">, </span><span class="s4">0</span><span class="s1">)</span>
+
+                <span class="s5"># Ok, we need to &quot;block&quot;. Do so via a watcher so that we're</span>
+                <span class="s5"># cooperative. We know it's our child, etc, so this should work.</span>
+                <span class="s1">watcher = _watched_children[pid]</span>
+                <span class="s5"># We can't start a watcher that's already started,</span>
+                <span class="s5"># so we can't reuse the existing watcher. Notice that the</span>
+                <span class="s5"># old watcher must not have fired already, or during this time, but</span>
+                <span class="s5"># only after we successfully `start()` the watcher. So this must</span>
+                <span class="s5"># not yield to the event loop.</span>
+                <span class="s2">with </span><span class="s1">watcher.loop.child(pid</span><span class="s2">, False</span><span class="s1">) </span><span class="s2">as </span><span class="s1">new_watcher:</span>
+                    <span class="s1">get_hub().wait(new_watcher)</span>
+                <span class="s5"># Ok, so now the new watcher is done. That means</span>
+                <span class="s5"># the old watcher's callback (_on_child) should</span>
+                <span class="s5"># have fired, potentially taking this child out of</span>
+                <span class="s5"># _watched_children (but that could depend on how</span>
+                <span class="s5"># many callbacks there were to run, so use the</span>
+                <span class="s5"># watcher object directly; libev sets all the</span>
+                <span class="s5"># watchers at the same time).</span>
+                <span class="s2">return </span><span class="s1">watcher.rpid</span><span class="s2">, </span><span class="s1">watcher.rstatus</span>
+
+            <span class="s5"># we're not watching it and it may not even  be our child,</span>
+            <span class="s5"># so we must go to the OS to be sure to get the right semantics (exception)</span>
+            <span class="s5"># XXX</span>
+            <span class="s5"># libuv has a race condition because the signal</span>
+            <span class="s5"># handler is a Python function, so the InterruptedError</span>
+            <span class="s5"># is raised before the signal handler runs and calls the</span>
+            <span class="s5"># child watcher</span>
+            <span class="s5"># we're not watching it</span>
+            <span class="s2">return </span><span class="s1">_waitpid(pid</span><span class="s2">, </span><span class="s1">options)</span>
+
+        <span class="s2">def </span><span class="s1">_watch_child(pid</span><span class="s2">, </span><span class="s1">callback=</span><span class="s2">None, </span><span class="s1">loop=</span><span class="s2">None, </span><span class="s1">ref=</span><span class="s2">False</span><span class="s1">):</span>
+            <span class="s1">loop = loop </span><span class="s2">or </span><span class="s1">get_hub().loop</span>
+            <span class="s1">watcher = loop.child(pid</span><span class="s2">, </span><span class="s1">ref=ref)</span>
+            <span class="s1">_watched_children[pid] = watcher</span>
+            <span class="s1">watcher.start(_on_child</span><span class="s2">, </span><span class="s1">watcher</span><span class="s2">, </span><span class="s1">callback)</span>
+
+        <span class="s2">def </span><span class="s1">fork_and_watch(callback=</span><span class="s2">None, </span><span class="s1">loop=</span><span class="s2">None, </span><span class="s1">ref=</span><span class="s2">False, </span><span class="s1">fork=fork_gevent):</span>
+            <span class="s0">&quot;&quot;&quot; 
+            Fork a child process and start a child watcher for it in the parent process. 
+ 
+            This call cooperates with :func:`waitpid` to enable cooperatively waiting 
+            for children to finish. When monkey-patching, these functions are patched in as 
+            :func:`os.fork` and :func:`os.waitpid`, respectively. 
+ 
+            In the child process, this function calls :func:`gevent.hub.reinit` before returning. 
+ 
+            Availability: POSIX. 
+ 
+            :keyword callback: If given, a callable that will be called with the child watcher 
+                when the child finishes. 
+            :keyword loop: The loop to start the watcher in. Defaults to the 
+                loop of the current hub. 
+            :keyword fork: The fork function. Defaults to :func:`the one defined in this 
+                module &lt;gevent.os.fork_gevent&gt;` (which automatically calls :func:`gevent.hub.reinit`). 
+                Pass the builtin :func:`os.fork` function if you do not need to 
+                initialize gevent in the child process. 
+ 
+            .. versionadded:: 1.1b1 
+            .. seealso:: 
+                :func:`gevent.monkey.get_original` To access the builtin :func:`os.fork`. 
+            &quot;&quot;&quot;</span>
+            <span class="s1">pid = fork()</span>
+            <span class="s2">if </span><span class="s1">pid:</span>
+                <span class="s5"># parent</span>
+                <span class="s1">_watch_child(pid</span><span class="s2">, </span><span class="s1">callback</span><span class="s2">, </span><span class="s1">loop</span><span class="s2">, </span><span class="s1">ref)</span>
+            <span class="s2">return </span><span class="s1">pid</span>
+
+        <span class="s1">__extensions__.append(</span><span class="s3">'fork_and_watch'</span><span class="s1">)</span>
+        <span class="s1">__extensions__.append(</span><span class="s3">'fork_gevent'</span><span class="s1">)</span>
+
+        <span class="s2">if </span><span class="s3">'forkpty' </span><span class="s2">in </span><span class="s1">__implements__:</span>
+            <span class="s2">def </span><span class="s1">forkpty_and_watch(callback=</span><span class="s2">None, </span><span class="s1">loop=</span><span class="s2">None, </span><span class="s1">ref=</span><span class="s2">False, </span><span class="s1">forkpty=forkpty_gevent):</span>
+                <span class="s0">&quot;&quot;&quot; 
+                Like :func:`fork_and_watch`, except using :func:`forkpty_gevent`. 
+ 
+                Availability: Some Unix systems. 
+ 
+                .. versionadded:: 1.1b5 
+                &quot;&quot;&quot;</span>
+                <span class="s1">result = []</span>
+
+                <span class="s2">def </span><span class="s1">_fork():</span>
+                    <span class="s1">pid_and_fd = forkpty()</span>
+                    <span class="s1">result.append(pid_and_fd)</span>
+                    <span class="s2">return </span><span class="s1">pid_and_fd[</span><span class="s4">0</span><span class="s1">]</span>
+                <span class="s1">fork_and_watch(callback</span><span class="s2">, </span><span class="s1">loop</span><span class="s2">, </span><span class="s1">ref</span><span class="s2">, </span><span class="s1">_fork)</span>
+                <span class="s2">return </span><span class="s1">result[</span><span class="s4">0</span><span class="s1">]</span>
+
+            <span class="s1">__extensions__.append(</span><span class="s3">'forkpty_and_watch'</span><span class="s1">)</span>
+
+        <span class="s5"># Watch children by default</span>
+        <span class="s2">if not </span><span class="s1">config.disable_watch_children:</span>
+            <span class="s5"># Broken out into separate functions instead of simple name aliases</span>
+            <span class="s5"># for documentation purposes.</span>
+            <span class="s2">def </span><span class="s1">fork(*args</span><span class="s2">, </span><span class="s1">**kwargs):</span>
+                <span class="s0">&quot;&quot;&quot; 
+                Forks a child process and starts a child watcher for it in the 
+                parent process so that ``waitpid`` and SIGCHLD work as expected. 
+ 
+                This implementation of ``fork`` is a wrapper for :func:`fork_and_watch` 
+                when the environment variable ``GEVENT_NOWAITPID`` is *not* defined. 
+                This is the default and should be used by most applications. 
+ 
+                .. versionchanged:: 1.1b2 
+                &quot;&quot;&quot;</span>
+                <span class="s5"># take any args to match fork_and_watch</span>
+                <span class="s2">return </span><span class="s1">fork_and_watch(*args</span><span class="s2">, </span><span class="s1">**kwargs)</span>
+
+            <span class="s2">if </span><span class="s3">'forkpty' </span><span class="s2">in </span><span class="s1">__implements__:</span>
+                <span class="s2">def </span><span class="s1">forkpty(*args</span><span class="s2">, </span><span class="s1">**kwargs):</span>
+                    <span class="s0">&quot;&quot;&quot; 
+                    Like :func:`fork`, but using :func:`forkpty_gevent`. 
+ 
+                    This implementation of ``forkpty`` is a wrapper for :func:`forkpty_and_watch` 
+                    when the environment variable ``GEVENT_NOWAITPID`` is *not* defined. 
+                    This is the default and should be used by most applications. 
+ 
+                    .. versionadded:: 1.1b5 
+                    &quot;&quot;&quot;</span>
+                    <span class="s5"># take any args to match fork_and_watch</span>
+                    <span class="s2">return </span><span class="s1">forkpty_and_watch(*args</span><span class="s2">, </span><span class="s1">**kwargs)</span>
+            <span class="s1">__implements__.append(</span><span class="s3">&quot;waitpid&quot;</span><span class="s1">)</span>
+
+            <span class="s2">if </span><span class="s1">hasattr(os</span><span class="s2">, </span><span class="s3">'posix_spawn'</span><span class="s1">):</span>
+                <span class="s1">_raw_posix_spawn = os.posix_spawn</span>
+                <span class="s1">_raw_posix_spawnp = os.posix_spawnp</span>
+
+                <span class="s2">def </span><span class="s1">posix_spawn(*args</span><span class="s2">, </span><span class="s1">**kwargs):</span>
+                    <span class="s1">pid = _raw_posix_spawn(*args</span><span class="s2">, </span><span class="s1">**kwargs)</span>
+                    <span class="s1">_watch_child(pid)</span>
+                    <span class="s2">return </span><span class="s1">pid</span>
+
+                <span class="s2">def </span><span class="s1">posix_spawnp(*args</span><span class="s2">, </span><span class="s1">**kwargs):</span>
+                    <span class="s1">pid = _raw_posix_spawnp(*args</span><span class="s2">, </span><span class="s1">**kwargs)</span>
+                    <span class="s1">_watch_child(pid)</span>
+                    <span class="s2">return </span><span class="s1">pid</span>
+
+                <span class="s1">__implements__.append(</span><span class="s3">&quot;posix_spawn&quot;</span><span class="s1">)</span>
+                <span class="s1">__implements__.append(</span><span class="s3">&quot;posix_spawnp&quot;</span><span class="s1">)</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s2">def </span><span class="s1">fork():</span>
+                <span class="s0">&quot;&quot;&quot; 
+                Forks a child process, initializes gevent in the child, 
+                but *does not* prepare the parent to wait for the child or receive SIGCHLD. 
+ 
+                This implementation of ``fork`` is a wrapper for :func:`fork_gevent` 
+                when the environment variable ``GEVENT_NOWAITPID`` *is* defined. 
+                This is not recommended for most applications. 
+                &quot;&quot;&quot;</span>
+                <span class="s2">return </span><span class="s1">fork_gevent()</span>
+
+            <span class="s2">if </span><span class="s3">'forkpty' </span><span class="s2">in </span><span class="s1">__implements__:</span>
+                <span class="s2">def </span><span class="s1">forkpty():</span>
+                    <span class="s0">&quot;&quot;&quot; 
+                    Like :func:`fork`, but using :func:`os.forkpty` 
+ 
+                    This implementation of ``forkpty`` is a wrapper for :func:`forkpty_gevent` 
+                    when the environment variable ``GEVENT_NOWAITPID`` *is* defined. 
+                    This is not recommended for most applications. 
+ 
+                    .. versionadded:: 1.1b5 
+                    &quot;&quot;&quot;</span>
+                    <span class="s2">return </span><span class="s1">forkpty_gevent()</span>
+            <span class="s1">__extensions__.append(</span><span class="s3">&quot;waitpid&quot;</span><span class="s1">)</span>
+
+<span class="s2">else</span><span class="s1">:</span>
+    <span class="s1">__implements__.remove(</span><span class="s3">'fork'</span><span class="s1">)</span>
+
+
+<span class="s1">__imports__ = copy_globals(os</span><span class="s2">, </span><span class="s1">globals()</span><span class="s2">,</span>
+                           <span class="s1">names_to_ignore=__implements__ + __extensions__</span><span class="s2">,</span>
+                           <span class="s1">dunder_names_to_keep=())</span>
+
+<span class="s1">__all__ = list(set(__implements__ + __extensions__))</span>
+</pre>
+</body>
+</html>

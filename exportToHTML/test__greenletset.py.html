@@ -1,0 +1,204 @@
+<html>
+<head>
+<title>test__greenletset.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #cc7832;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #6897bb;}
+.s3 { color: #808080;}
+.s4 { color: #6a8759;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+test__greenletset.py</font>
+</center></td></tr></table>
+<pre><span class="s0">from </span><span class="s1">__future__ </span><span class="s0">import </span><span class="s1">print_function</span><span class="s0">, </span><span class="s1">division</span><span class="s0">, </span><span class="s1">absolute_import</span>
+<span class="s0">import </span><span class="s1">time</span>
+<span class="s0">import </span><span class="s1">gevent.testing </span><span class="s0">as </span><span class="s1">greentest</span>
+
+<span class="s0">from </span><span class="s1">gevent.testing </span><span class="s0">import </span><span class="s1">timing</span>
+<span class="s0">import </span><span class="s1">gevent</span>
+<span class="s0">from </span><span class="s1">gevent </span><span class="s0">import </span><span class="s1">pool</span>
+<span class="s0">from </span><span class="s1">gevent.timeout </span><span class="s0">import </span><span class="s1">Timeout</span>
+
+<span class="s1">DELAY = timing.LARGE_TICK</span>
+
+
+<span class="s0">class </span><span class="s1">SpecialError(Exception):</span>
+    <span class="s0">pass</span>
+
+
+<span class="s0">class </span><span class="s1">Undead(object):</span>
+
+    <span class="s0">def </span><span class="s1">__init__(self):</span>
+        <span class="s1">self.shot_count = </span><span class="s2">0</span>
+
+    <span class="s0">def </span><span class="s1">__call__(self):</span>
+        <span class="s0">while True</span><span class="s1">:</span>
+            <span class="s0">try</span><span class="s1">:</span>
+                <span class="s1">gevent.sleep(</span><span class="s2">1</span><span class="s1">)</span>
+            <span class="s0">except </span><span class="s1">SpecialError:</span>
+                <span class="s0">break</span>
+            <span class="s0">except</span><span class="s1">: </span><span class="s3"># pylint:disable=bare-except</span>
+                <span class="s1">self.shot_count += </span><span class="s2">1</span>
+
+
+<span class="s0">class </span><span class="s1">Test(greentest.TestCase):</span>
+
+    <span class="s1">__timeout__ = greentest.LARGE_TIMEOUT</span>
+
+    <span class="s0">def </span><span class="s1">test_basic(self):</span>
+        <span class="s1">s = pool.Group()</span>
+        <span class="s1">s.spawn(gevent.sleep</span><span class="s0">, </span><span class="s1">timing.LARGE_TICK)</span>
+        <span class="s1">self.assertEqual(len(s)</span><span class="s0">, </span><span class="s2">1</span><span class="s0">, </span><span class="s1">s)</span>
+        <span class="s1">s.spawn(gevent.sleep</span><span class="s0">, </span><span class="s1">timing.LARGE_TICK * </span><span class="s2">5</span><span class="s1">)</span>
+        <span class="s1">self.assertEqual(len(s)</span><span class="s0">, </span><span class="s2">2</span><span class="s0">, </span><span class="s1">s)</span>
+        <span class="s1">gevent.sleep()</span>
+        <span class="s1">gevent.sleep(timing.LARGE_TICK * </span><span class="s2">2 </span><span class="s1">+ timing.LARGE_TICK_MIN_ADJ)</span>
+        <span class="s1">self.assertEqual(len(s)</span><span class="s0">, </span><span class="s2">1</span><span class="s0">, </span><span class="s1">s)</span>
+        <span class="s1">gevent.sleep(timing.LARGE_TICK * </span><span class="s2">5 </span><span class="s1">+ timing.LARGE_TICK_MIN_ADJ)</span>
+        <span class="s1">self.assertFalse(s)</span>
+
+    <span class="s0">def </span><span class="s1">test_waitall(self):</span>
+        <span class="s1">s = pool.Group()</span>
+        <span class="s1">s.spawn(gevent.sleep</span><span class="s0">, </span><span class="s1">DELAY)</span>
+        <span class="s1">s.spawn(gevent.sleep</span><span class="s0">, </span><span class="s1">DELAY * </span><span class="s2">2</span><span class="s1">)</span>
+        <span class="s0">assert </span><span class="s1">len(s) == </span><span class="s2">2</span><span class="s0">, </span><span class="s1">s</span>
+        <span class="s1">start = time.time()</span>
+        <span class="s1">s.join(raise_error=</span><span class="s0">True</span><span class="s1">)</span>
+        <span class="s1">delta = time.time() - start</span>
+        <span class="s1">self.assertFalse(s)</span>
+        <span class="s1">self.assertEqual(len(s)</span><span class="s0">, </span><span class="s2">0</span><span class="s1">)</span>
+        <span class="s1">self.assertTimeWithinRange(delta</span><span class="s0">, </span><span class="s1">DELAY * </span><span class="s2">1.9</span><span class="s0">, </span><span class="s1">DELAY * </span><span class="s2">2.5</span><span class="s1">)</span>
+
+    <span class="s0">def </span><span class="s1">test_kill_block(self):</span>
+        <span class="s1">s = pool.Group()</span>
+        <span class="s1">s.spawn(gevent.sleep</span><span class="s0">, </span><span class="s1">DELAY)</span>
+        <span class="s1">s.spawn(gevent.sleep</span><span class="s0">, </span><span class="s1">DELAY * </span><span class="s2">2</span><span class="s1">)</span>
+        <span class="s0">assert </span><span class="s1">len(s) == </span><span class="s2">2</span><span class="s0">, </span><span class="s1">s</span>
+        <span class="s1">start = time.time()</span>
+        <span class="s1">s.kill()</span>
+        <span class="s1">self.assertFalse(s)</span>
+        <span class="s1">self.assertEqual(len(s)</span><span class="s0">, </span><span class="s2">0</span><span class="s1">)</span>
+        <span class="s1">delta = time.time() - start</span>
+        <span class="s0">assert </span><span class="s1">delta &lt; DELAY * </span><span class="s2">0.8</span><span class="s0">, </span><span class="s1">delta</span>
+
+    <span class="s0">def </span><span class="s1">test_kill_noblock(self):</span>
+        <span class="s1">s = pool.Group()</span>
+        <span class="s1">s.spawn(gevent.sleep</span><span class="s0">, </span><span class="s1">DELAY)</span>
+        <span class="s1">s.spawn(gevent.sleep</span><span class="s0">, </span><span class="s1">DELAY * </span><span class="s2">2</span><span class="s1">)</span>
+        <span class="s0">assert </span><span class="s1">len(s) == </span><span class="s2">2</span><span class="s0">, </span><span class="s1">s</span>
+        <span class="s1">s.kill(block=</span><span class="s0">False</span><span class="s1">)</span>
+        <span class="s0">assert </span><span class="s1">len(s) == </span><span class="s2">2</span><span class="s0">, </span><span class="s1">s</span>
+        <span class="s1">gevent.sleep(</span><span class="s2">0.0001</span><span class="s1">)</span>
+        <span class="s1">self.assertFalse(s)</span>
+        <span class="s1">self.assertEqual(len(s)</span><span class="s0">, </span><span class="s2">0</span><span class="s1">)</span>
+
+    <span class="s0">def </span><span class="s1">test_kill_fires_once(self):</span>
+        <span class="s1">u1 = Undead()</span>
+        <span class="s1">u2 = Undead()</span>
+        <span class="s1">p1 = gevent.spawn(u1)</span>
+        <span class="s1">p2 = gevent.spawn(u2)</span>
+
+        <span class="s0">def </span><span class="s1">check(count1</span><span class="s0">, </span><span class="s1">count2):</span>
+            <span class="s1">self.assertTrue(p1)</span>
+            <span class="s1">self.assertTrue(p2)</span>
+            <span class="s1">self.assertFalse(p1.dead</span><span class="s0">, </span><span class="s1">p1)</span>
+            <span class="s1">self.assertFalse(p2.dead</span><span class="s0">, </span><span class="s1">p2)</span>
+            <span class="s1">self.assertEqual(u1.shot_count</span><span class="s0">, </span><span class="s1">count1)</span>
+            <span class="s1">self.assertEqual(u2.shot_count</span><span class="s0">, </span><span class="s1">count2)</span>
+
+        <span class="s1">gevent.sleep(</span><span class="s2">0.01</span><span class="s1">)</span>
+        <span class="s1">s = pool.Group([p1</span><span class="s0">, </span><span class="s1">p2])</span>
+        <span class="s1">self.assertEqual(len(s)</span><span class="s0">, </span><span class="s2">2</span><span class="s0">, </span><span class="s1">s)</span>
+        <span class="s1">check(</span><span class="s2">0</span><span class="s0">, </span><span class="s2">0</span><span class="s1">)</span>
+        <span class="s1">s.killone(p1</span><span class="s0">, </span><span class="s1">block=</span><span class="s0">False</span><span class="s1">)</span>
+        <span class="s1">check(</span><span class="s2">0</span><span class="s0">, </span><span class="s2">0</span><span class="s1">)</span>
+        <span class="s1">gevent.sleep(</span><span class="s2">0</span><span class="s1">)</span>
+        <span class="s1">check(</span><span class="s2">1</span><span class="s0">, </span><span class="s2">0</span><span class="s1">)</span>
+        <span class="s1">s.killone(p1)</span>
+        <span class="s1">check(</span><span class="s2">1</span><span class="s0">, </span><span class="s2">0</span><span class="s1">)</span>
+        <span class="s1">s.killone(p1)</span>
+        <span class="s1">check(</span><span class="s2">1</span><span class="s0">, </span><span class="s2">0</span><span class="s1">)</span>
+        <span class="s1">s.kill(block=</span><span class="s0">False</span><span class="s1">)</span>
+        <span class="s1">s.kill(block=</span><span class="s0">False</span><span class="s1">)</span>
+        <span class="s1">s.kill(block=</span><span class="s0">False</span><span class="s1">)</span>
+        <span class="s1">check(</span><span class="s2">1</span><span class="s0">, </span><span class="s2">0</span><span class="s1">)</span>
+        <span class="s1">gevent.sleep(DELAY)</span>
+        <span class="s1">check(</span><span class="s2">1</span><span class="s0">, </span><span class="s2">1</span><span class="s1">)</span>
+        <span class="s1">X = object()</span>
+        <span class="s1">kill_result = gevent.with_timeout(DELAY</span><span class="s0">, </span><span class="s1">s.kill</span><span class="s0">, </span><span class="s1">block=</span><span class="s0">True, </span><span class="s1">timeout_value=X)</span>
+        <span class="s0">assert </span><span class="s1">kill_result </span><span class="s0">is </span><span class="s1">X</span><span class="s0">, </span><span class="s1">repr(kill_result)</span>
+        <span class="s0">assert </span><span class="s1">len(s) == </span><span class="s2">2</span><span class="s0">, </span><span class="s1">s</span>
+        <span class="s1">check(</span><span class="s2">1</span><span class="s0">, </span><span class="s2">1</span><span class="s1">)</span>
+
+        <span class="s1">p1.kill(SpecialError)</span>
+        <span class="s1">p2.kill(SpecialError)</span>
+
+    <span class="s0">def </span><span class="s1">test_killall_subclass(self):</span>
+        <span class="s1">p1 = GreenletSubclass.spawn(</span><span class="s0">lambda</span><span class="s1">: </span><span class="s2">1 </span><span class="s1">/ </span><span class="s2">0</span><span class="s1">)</span>
+        <span class="s1">p2 = GreenletSubclass.spawn(</span><span class="s0">lambda</span><span class="s1">: gevent.sleep(</span><span class="s2">10</span><span class="s1">))</span>
+        <span class="s1">s = pool.Group([p1</span><span class="s0">, </span><span class="s1">p2])</span>
+        <span class="s1">s.kill()</span>
+
+    <span class="s0">def </span><span class="s1">test_killall_iterable_argument_non_block(self):</span>
+        <span class="s1">p1 = GreenletSubclass.spawn(</span><span class="s0">lambda</span><span class="s1">: gevent.sleep(</span><span class="s2">0.5</span><span class="s1">))</span>
+        <span class="s1">p2 = GreenletSubclass.spawn(</span><span class="s0">lambda</span><span class="s1">: gevent.sleep(</span><span class="s2">0.5</span><span class="s1">))</span>
+        <span class="s1">s = set()</span>
+        <span class="s1">s.add(p1)</span>
+        <span class="s1">s.add(p2)</span>
+        <span class="s1">gevent.killall(s</span><span class="s0">, </span><span class="s1">block=</span><span class="s0">False</span><span class="s1">)</span>
+        <span class="s1">gevent.sleep(</span><span class="s2">0.5</span><span class="s1">)</span>
+        <span class="s0">for </span><span class="s1">g </span><span class="s0">in </span><span class="s1">s:</span>
+            <span class="s0">assert </span><span class="s1">g.dead</span>
+
+    <span class="s0">def </span><span class="s1">test_killall_iterable_argument_timeout_not_started(self):</span>
+        <span class="s0">def </span><span class="s1">f():</span>
+            <span class="s0">try</span><span class="s1">:</span>
+                <span class="s1">gevent.sleep(</span><span class="s2">1.5</span><span class="s1">)</span>
+            <span class="s0">except</span><span class="s1">: </span><span class="s3"># pylint:disable=bare-except</span>
+                <span class="s1">gevent.sleep(</span><span class="s2">1</span><span class="s1">)</span>
+        <span class="s1">p1 = GreenletSubclass.spawn(f)</span>
+        <span class="s1">p2 = GreenletSubclass.spawn(f)</span>
+        <span class="s1">s = set()</span>
+        <span class="s1">s.add(p1)</span>
+        <span class="s1">s.add(p2)</span>
+        <span class="s1">gevent.killall(s</span><span class="s0">, </span><span class="s1">timeout=</span><span class="s2">0.5</span><span class="s1">)</span>
+
+        <span class="s0">for </span><span class="s1">g </span><span class="s0">in </span><span class="s1">s:</span>
+            <span class="s1">self.assertTrue(g.dead</span><span class="s0">, </span><span class="s1">g)</span>
+
+    <span class="s0">def </span><span class="s1">test_killall_iterable_argument_timeout_started(self):</span>
+        <span class="s0">def </span><span class="s1">f():</span>
+            <span class="s0">try</span><span class="s1">:</span>
+                <span class="s1">gevent.sleep(</span><span class="s2">1.5</span><span class="s1">)</span>
+            <span class="s0">except</span><span class="s1">: </span><span class="s3"># pylint:disable=bare-except</span>
+                <span class="s1">gevent.sleep(</span><span class="s2">1</span><span class="s1">)</span>
+        <span class="s1">p1 = GreenletSubclass.spawn(f)</span>
+        <span class="s1">p2 = GreenletSubclass.spawn(f)</span>
+
+        <span class="s1">s = set()</span>
+        <span class="s1">s.add(p1)</span>
+        <span class="s1">s.add(p2)</span>
+        <span class="s3"># Get them both running.</span>
+        <span class="s1">gevent.sleep(timing.SMALLEST_RELIABLE_DELAY)</span>
+        <span class="s0">with </span><span class="s1">self.assertRaises(Timeout):</span>
+            <span class="s1">gevent.killall(s</span><span class="s0">, </span><span class="s1">timeout=</span><span class="s2">0.5</span><span class="s1">)</span>
+
+        <span class="s0">for </span><span class="s1">g </span><span class="s0">in </span><span class="s1">s:</span>
+            <span class="s1">self.assertFalse(g.dead</span><span class="s0">, </span><span class="s1">g)</span>
+
+
+<span class="s0">class </span><span class="s1">GreenletSubclass(gevent.Greenlet):</span>
+    <span class="s0">pass</span>
+
+
+<span class="s0">if </span><span class="s1">__name__ == </span><span class="s4">'__main__'</span><span class="s1">:</span>
+    <span class="s1">greentest.main()</span>
+</pre>
+</body>
+</html>

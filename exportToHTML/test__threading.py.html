@@ -1,0 +1,115 @@
+<html>
+<head>
+<title>test__threading.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #629755; font-style: italic;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #cc7832;}
+.s3 { color: #808080;}
+.s4 { color: #6a8759;}
+.s5 { color: #6897bb;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+test__threading.py</font>
+</center></td></tr></table>
+<pre><span class="s0">&quot;&quot;&quot; 
+Tests specifically for the monkey-patched threading module. 
+&quot;&quot;&quot;</span>
+<span class="s2">from </span><span class="s1">gevent </span><span class="s2">import </span><span class="s1">monkey; monkey.patch_all() </span><span class="s3"># pragma: testrunner-no-monkey-combine</span>
+<span class="s2">import </span><span class="s1">gevent.hub</span>
+
+<span class="s3"># check that the locks initialized by 'threading' did not init the hub</span>
+<span class="s2">assert </span><span class="s1">gevent.hub._get_hub() </span><span class="s2">is None, </span><span class="s4">'monkey.patch_all() should not init hub'</span>
+
+<span class="s2">import </span><span class="s1">gevent</span>
+<span class="s2">import </span><span class="s1">gevent.testing </span><span class="s2">as </span><span class="s1">greentest</span>
+<span class="s2">import </span><span class="s1">threading</span>
+
+
+<span class="s2">def </span><span class="s1">helper():</span>
+    <span class="s1">threading.current_thread()</span>
+    <span class="s1">gevent.sleep(</span><span class="s5">0.2</span><span class="s1">)</span>
+
+
+<span class="s2">class </span><span class="s1">TestCleanup(greentest.TestCase):</span>
+
+    <span class="s2">def </span><span class="s1">_do_test(self</span><span class="s2">, </span><span class="s1">spawn):</span>
+        <span class="s1">before = len(threading._active)</span>
+        <span class="s1">g = spawn(helper)</span>
+        <span class="s1">gevent.sleep(</span><span class="s5">0.1</span><span class="s1">)</span>
+        <span class="s1">self.assertEqual(len(threading._active)</span><span class="s2">, </span><span class="s1">before + </span><span class="s5">1</span><span class="s1">)</span>
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s1">g.join()</span>
+        <span class="s2">except </span><span class="s1">AttributeError:</span>
+            <span class="s2">while not </span><span class="s1">g.dead:</span>
+                <span class="s1">gevent.sleep()</span>
+            <span class="s3"># Raw greenlet has no join(), uses a weakref to cleanup.</span>
+            <span class="s3"># so the greenlet has to die. On CPython, it's enough to</span>
+            <span class="s3"># simply delete our reference.</span>
+            <span class="s2">del </span><span class="s1">g</span>
+            <span class="s3"># On PyPy, it might take a GC, but for some reason, even</span>
+            <span class="s3"># running several GC's doesn't clean it up under 5.6.0.</span>
+            <span class="s3"># So we skip the test.</span>
+            <span class="s3">#import gc</span>
+            <span class="s3">#gc.collect()</span>
+
+        <span class="s1">self.assertEqual(len(threading._active)</span><span class="s2">, </span><span class="s1">before)</span>
+
+
+    <span class="s2">def </span><span class="s1">test_cleanup_gevent(self):</span>
+        <span class="s1">self._do_test(gevent.spawn)</span>
+
+    <span class="s1">@greentest.skipOnPyPy(</span><span class="s4">&quot;weakref is not cleaned up in a timely fashion&quot;</span><span class="s1">)</span>
+    <span class="s2">def </span><span class="s1">test_cleanup_raw(self):</span>
+        <span class="s1">self._do_test(gevent.spawn_raw)</span>
+
+
+<span class="s2">class </span><span class="s1">TestLockThread(greentest.TestCase):</span>
+
+    <span class="s2">def </span><span class="s1">_spawn(self</span><span class="s2">, </span><span class="s1">func):</span>
+        <span class="s1">t = threading.Thread(target=func)</span>
+        <span class="s1">t.start()</span>
+        <span class="s2">return </span><span class="s1">t</span>
+
+    <span class="s2">def </span><span class="s1">test_spin_lock_switches(self):</span>
+        <span class="s3"># https://github.com/gevent/gevent/issues/1464</span>
+        <span class="s3"># pylint:disable=consider-using-with</span>
+        <span class="s1">lock = threading.Lock()</span>
+        <span class="s1">lock.acquire()</span>
+        <span class="s1">spawned = []</span>
+
+        <span class="s2">def </span><span class="s1">background():</span>
+            <span class="s1">spawned.append(</span><span class="s2">True</span><span class="s1">)</span>
+            <span class="s2">while </span><span class="s5">1</span><span class="s1">:</span>
+                <span class="s3"># blocking= in Py3, wait (no default, no name) in Py2</span>
+                <span class="s2">if </span><span class="s1">lock.acquire(</span><span class="s2">False</span><span class="s1">):</span>
+                    <span class="s2">break</span>
+
+        <span class="s1">thread = threading.Thread(target=background)</span>
+        <span class="s3"># If lock.acquire(False) doesn't yield when it fails,</span>
+        <span class="s3"># then this never returns.</span>
+        <span class="s1">thread.start()</span>
+        <span class="s3"># Verify it tried to run</span>
+        <span class="s1">self.assertEqual(spawned</span><span class="s2">, </span><span class="s1">[</span><span class="s2">True</span><span class="s1">])</span>
+        <span class="s3"># We can attempt to join it, which won't work.</span>
+        <span class="s1">thread.join(</span><span class="s5">0</span><span class="s1">)</span>
+        <span class="s3"># We can release the lock and then it will acquire.</span>
+        <span class="s1">lock.release()</span>
+        <span class="s1">thread.join()</span>
+
+
+<span class="s2">class </span><span class="s1">TestLockGreenlet(TestLockThread):</span>
+
+    <span class="s2">def </span><span class="s1">_spawn(self</span><span class="s2">, </span><span class="s1">func):</span>
+        <span class="s2">return </span><span class="s1">gevent.spawn(func)</span>
+
+<span class="s2">if </span><span class="s1">__name__ == </span><span class="s4">'__main__'</span><span class="s1">:</span>
+    <span class="s1">greentest.main()</span>
+</pre>
+</body>
+</html>

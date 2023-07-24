@@ -1,0 +1,258 @@
+<html>
+<head>
+<title>shell-1.1.4.tm</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #a9b7c6;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+shell-1.1.4.tm</font>
+</center></td></tr></table>
+<pre>
+<span class="s0"># -*- tcl -*-</span>
+<span class="s0"># ### ### ### ######### ######### #########</span>
+<span class="s0">## Overview</span>
+
+<span class="s0"># Higher-level commands which invoke the functionality of this package</span>
+<span class="s0"># for an arbitrary tcl shell (tclsh, wish, ...). This is required by a</span>
+<span class="s0"># repository as while the tcl shell executing packages uses the same</span>
+<span class="s0"># platform in general as a repository application there can be</span>
+<span class="s0"># differences in detail (i.e. 32/64 bit builds).</span>
+
+<span class="s0"># ### ### ### ######### ######### #########</span>
+<span class="s0">## Requirements</span>
+
+<span class="s0">package require platform</span>
+<span class="s0">namespace eval ::platform::shell {}</span>
+
+<span class="s0"># ### ### ### ######### ######### #########</span>
+<span class="s0">## Implementation</span>
+
+<span class="s0"># -- platform::shell::generic</span>
+
+<span class="s0">proc ::platform::shell::generic {shell} {</span>
+    <span class="s0"># Argument is the path to a tcl shell.</span>
+
+    <span class="s0">CHECK $shell</span>
+    <span class="s0">LOCATE base out</span>
+
+    <span class="s0">set     code {}</span>
+    <span class="s0"># Forget any pre-existing platform package, it might be in</span>
+    <span class="s0"># conflict with this one.</span>
+    <span class="s0">lappend code {package forget platform}</span>
+    <span class="s0"># Inject our platform package</span>
+    <span class="s0">lappend code [list source $base]</span>
+    <span class="s0"># Query and print the architecture</span>
+    <span class="s0">lappend code {puts [platform::generic]}</span>
+    <span class="s0"># And done</span>
+    <span class="s0">lappend code {exit 0}</span>
+
+    <span class="s0">set arch [RUN $shell [join $code \n]]</span>
+
+    <span class="s0">if {$out} {file delete -force $base}</span>
+    <span class="s0">return $arch</span>
+<span class="s0">}</span>
+
+<span class="s0"># -- platform::shell::identify</span>
+
+<span class="s0">proc ::platform::shell::identify {shell} {</span>
+    <span class="s0"># Argument is the path to a tcl shell.</span>
+
+    <span class="s0">CHECK $shell</span>
+    <span class="s0">LOCATE base out</span>
+
+    <span class="s0">set     code {}</span>
+    <span class="s0"># Forget any pre-existing platform package, it might be in</span>
+    <span class="s0"># conflict with this one.</span>
+    <span class="s0">lappend code {package forget platform}</span>
+    <span class="s0"># Inject our platform package</span>
+    <span class="s0">lappend code [list source $base]</span>
+    <span class="s0"># Query and print the architecture</span>
+    <span class="s0">lappend code {puts [platform::identify]}</span>
+    <span class="s0"># And done</span>
+    <span class="s0">lappend code {exit 0}</span>
+
+    <span class="s0">set arch [RUN $shell [join $code \n]]</span>
+
+    <span class="s0">if {$out} {file delete -force $base}</span>
+    <span class="s0">return $arch</span>
+<span class="s0">}</span>
+
+<span class="s0"># -- platform::shell::platform</span>
+
+<span class="s0">proc ::platform::shell::platform {shell} {</span>
+    <span class="s0"># Argument is the path to a tcl shell.</span>
+
+    <span class="s0">CHECK $shell</span>
+
+    <span class="s0">set     code {}</span>
+    <span class="s0">lappend code {puts $tcl_platform(platform)}</span>
+    <span class="s0">lappend code {exit 0}</span>
+
+    <span class="s0">return [RUN $shell [join $code \n]]</span>
+<span class="s0">}</span>
+
+<span class="s0"># ### ### ### ######### ######### #########</span>
+<span class="s0">## Internal helper commands.</span>
+
+<span class="s0">proc ::platform::shell::CHECK {shell} {</span>
+    <span class="s0">if {![file exists $shell]} {</span>
+	<span class="s0">return -code error &quot;Shell \&quot;$shell\&quot; does not exist&quot;</span>
+    <span class="s0">}</span>
+    <span class="s0">if {![file executable $shell]} {</span>
+	<span class="s0">return -code error &quot;Shell \&quot;$shell\&quot; is not executable (permissions)&quot;</span>
+    <span class="s0">}</span>
+    <span class="s0">return</span>
+<span class="s0">}</span>
+
+<span class="s0">proc ::platform::shell::LOCATE {bv ov} {</span>
+    <span class="s0">upvar 1 $bv base $ov out</span>
+
+    <span class="s0"># Locate the platform package for injection into the specified</span>
+    <span class="s0"># shell. We are using package management to find it, whereever it</span>
+    <span class="s0"># is, instead of using hardwired relative paths. This allows us to</span>
+    <span class="s0"># install the two packages as TMs without breaking the code</span>
+    <span class="s0"># here. If the found package is wrapped we copy the code somewhere</span>
+    <span class="s0"># where the spawned shell will be able to read it.</span>
+
+    <span class="s0"># This code is brittle, it needs has to adapt to whatever changes</span>
+    <span class="s0"># are made to the TM code, i.e. the provide statement generated by</span>
+    <span class="s0"># tm.tcl</span>
+
+    <span class="s0">set pl [package ifneeded platform [package require platform]]</span>
+    <span class="s0">set base [lindex $pl end]</span>
+
+    <span class="s0">set out 0</span>
+    <span class="s0">if {[lindex [file system $base]] ne &quot;native&quot;} {</span>
+	<span class="s0">set temp [TEMP]</span>
+	<span class="s0">file copy -force $base $temp</span>
+	<span class="s0">set base $temp</span>
+	<span class="s0">set out 1</span>
+    <span class="s0">}</span>
+    <span class="s0">return</span>
+<span class="s0">}</span>
+
+<span class="s0">proc ::platform::shell::RUN {shell code} {</span>
+    <span class="s0">set     c [TEMP]</span>
+    <span class="s0">set    cc [open $c w]</span>
+    <span class="s0">puts  $cc $code</span>
+    <span class="s0">close $cc</span>
+
+    <span class="s0">set e [TEMP]</span>
+
+    <span class="s0">set code [catch {</span>
+        <span class="s0">exec $shell $c 2&gt; $e</span>
+    <span class="s0">} res]</span>
+
+    <span class="s0">file delete $c</span>
+
+    <span class="s0">if {$code} {</span>
+	<span class="s0">append res \n[read [set chan [open $e r]]][close $chan]</span>
+	<span class="s0">file delete $e</span>
+	<span class="s0">return -code error &quot;Shell \&quot;$shell\&quot; is not executable ($res)&quot;</span>
+    <span class="s0">}</span>
+
+    <span class="s0">file delete $e</span>
+    <span class="s0">return $res</span>
+<span class="s0">}</span>
+
+<span class="s0">proc ::platform::shell::TEMP {} {</span>
+    <span class="s0">set prefix platform</span>
+
+    <span class="s0"># This code is copied out of Tcllib's fileutil package.</span>
+    <span class="s0"># (TempFile/tempfile)</span>
+
+    <span class="s0">set tmpdir [DIR]</span>
+
+    <span class="s0">set chars &quot;abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789&quot;</span>
+    <span class="s0">set nrand_chars 10</span>
+    <span class="s0">set maxtries 10</span>
+    <span class="s0">set access [list RDWR CREAT EXCL TRUNC]</span>
+    <span class="s0">set permission 0600</span>
+    <span class="s0">set channel &quot;&quot;</span>
+    <span class="s0">set checked_dir_writable 0</span>
+    <span class="s0">set mypid [pid]</span>
+    <span class="s0">for {set i 0} {$i &lt; $maxtries} {incr i} {</span>
+ 	<span class="s0">set newname $prefix</span>
+ 	<span class="s0">for {set j 0} {$j &lt; $nrand_chars} {incr j} {</span>
+ 	    <span class="s0">append newname [string index $chars \</span>
+		    <span class="s0">[expr {int(rand()*62)}]]</span>
+ 	<span class="s0">}</span>
+	<span class="s0">set newname [file join $tmpdir $newname]</span>
+ 	<span class="s0">if {[file exists $newname]} {</span>
+ 	    <span class="s0">after 1</span>
+ 	<span class="s0">} else {</span>
+ 	    <span class="s0">if {[catch {open $newname $access $permission} channel]} {</span>
+ 		<span class="s0">if {!$checked_dir_writable} {</span>
+ 		    <span class="s0">set dirname [file dirname $newname]</span>
+ 		    <span class="s0">if {![file writable $dirname]} {</span>
+ 			<span class="s0">return -code error &quot;Directory $dirname is not writable&quot;</span>
+ 		    <span class="s0">}</span>
+ 		    <span class="s0">set checked_dir_writable 1</span>
+ 		<span class="s0">}</span>
+ 	    <span class="s0">} else {</span>
+ 		<span class="s0"># Success</span>
+		<span class="s0">close $channel</span>
+ 		<span class="s0">return [file normalize $newname]</span>
+ 	    <span class="s0">}</span>
+ 	<span class="s0">}</span>
+    <span class="s0">}</span>
+    <span class="s0">if {$channel ne &quot;&quot;} {</span>
+ 	<span class="s0">return -code error &quot;Failed to open a temporary file: $channel&quot;</span>
+    <span class="s0">} else {</span>
+ 	<span class="s0">return -code error &quot;Failed to find an unused temporary file name&quot;</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+
+<span class="s0">proc ::platform::shell::DIR {} {</span>
+    <span class="s0"># This code is copied out of Tcllib's fileutil package.</span>
+    <span class="s0"># (TempDir/tempdir)</span>
+
+    <span class="s0">global tcl_platform env</span>
+
+    <span class="s0">set attempdirs [list]</span>
+
+    <span class="s0">foreach tmp {TMPDIR TEMP TMP} {</span>
+	<span class="s0">if { [info exists env($tmp)] } {</span>
+	    <span class="s0">lappend attempdirs $env($tmp)</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+
+    <span class="s0">switch $tcl_platform(platform) {</span>
+	<span class="s0">windows {</span>
+	    <span class="s0">lappend attempdirs &quot;C:\\TEMP&quot; &quot;C:\\TMP&quot; &quot;\\TEMP&quot; &quot;\\TMP&quot;</span>
+	<span class="s0">}</span>
+	<span class="s0">macintosh {</span>
+	    <span class="s0">set tmpdir $env(TRASH_FOLDER)  ;# a better place?</span>
+	<span class="s0">}</span>
+	<span class="s0">default {</span>
+	    <span class="s0">lappend attempdirs \</span>
+		<span class="s0">[file join / tmp] \</span>
+		<span class="s0">[file join / var tmp] \</span>
+		<span class="s0">[file join / usr tmp]</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+
+    <span class="s0">lappend attempdirs [pwd]</span>
+
+    <span class="s0">foreach tmp $attempdirs {</span>
+	<span class="s0">if { [file isdirectory $tmp] &amp;&amp; [file writable $tmp] } {</span>
+	    <span class="s0">return [file normalize $tmp]</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+
+    <span class="s0"># Fail if nothing worked.</span>
+    <span class="s0">return -code error &quot;Unable to determine a proper directory for temporary files&quot;</span>
+<span class="s0">}</span>
+
+<span class="s0"># ### ### ### ######### ######### #########</span>
+<span class="s0">## Ready</span>
+
+<span class="s0">package provide platform::shell 1.1.4</span>
+</pre>
+</body>
+</html>

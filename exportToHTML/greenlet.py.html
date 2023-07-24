@@ -1,0 +1,1216 @@
+<html>
+<head>
+<title>greenlet.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #cc7832;}
+.s3 { color: #6a8759;}
+.s4 { color: #629755; font-style: italic;}
+.s5 { color: #6897bb;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+greenlet.py</font>
+</center></td></tr></table>
+<pre><span class="s0"># Copyright (c) 2009-2012 Denis Bilenko. See LICENSE for details.</span>
+<span class="s0"># cython: auto_pickle=False,embedsignature=True,always_allow_keywords=False</span>
+<span class="s0"># pylint:disable=too-many-lines</span>
+<span class="s2">from </span><span class="s1">__future__ </span><span class="s2">import </span><span class="s1">absolute_import</span><span class="s2">, </span><span class="s1">print_function</span><span class="s2">, </span><span class="s1">division</span>
+
+<span class="s2">from </span><span class="s1">sys </span><span class="s2">import </span><span class="s1">_getframe </span><span class="s2">as </span><span class="s1">sys_getframe</span>
+<span class="s2">from </span><span class="s1">sys </span><span class="s2">import </span><span class="s1">exc_info </span><span class="s2">as </span><span class="s1">sys_exc_info</span>
+<span class="s2">from </span><span class="s1">weakref </span><span class="s2">import </span><span class="s1">ref </span><span class="s2">as </span><span class="s1">wref</span>
+
+<span class="s0"># XXX: How to get cython to let us rename this as RawGreenlet</span>
+<span class="s0"># like we prefer?</span>
+<span class="s2">from </span><span class="s1">greenlet </span><span class="s2">import </span><span class="s1">greenlet</span>
+<span class="s2">from </span><span class="s1">greenlet </span><span class="s2">import </span><span class="s1">GreenletExit</span>
+
+<span class="s2">from </span><span class="s1">gevent._compat </span><span class="s2">import </span><span class="s1">reraise</span>
+<span class="s2">from </span><span class="s1">gevent._compat </span><span class="s2">import </span><span class="s1">PYPY </span><span class="s2">as </span><span class="s1">_PYPY</span>
+<span class="s2">from </span><span class="s1">gevent._tblib </span><span class="s2">import </span><span class="s1">dump_traceback</span>
+<span class="s2">from </span><span class="s1">gevent._tblib </span><span class="s2">import </span><span class="s1">load_traceback</span>
+
+<span class="s2">from </span><span class="s1">gevent.exceptions </span><span class="s2">import </span><span class="s1">InvalidSwitchError</span>
+
+<span class="s2">from </span><span class="s1">gevent._hub_primitives </span><span class="s2">import </span><span class="s1">iwait_on_objects </span><span class="s2">as </span><span class="s1">iwait</span>
+<span class="s2">from </span><span class="s1">gevent._hub_primitives </span><span class="s2">import </span><span class="s1">wait_on_objects </span><span class="s2">as </span><span class="s1">wait</span>
+
+<span class="s2">from </span><span class="s1">gevent.timeout </span><span class="s2">import </span><span class="s1">Timeout</span>
+
+<span class="s2">from </span><span class="s1">gevent._config </span><span class="s2">import </span><span class="s1">config </span><span class="s2">as </span><span class="s1">GEVENT_CONFIG</span>
+<span class="s2">from </span><span class="s1">gevent._util </span><span class="s2">import </span><span class="s1">readproperty</span>
+<span class="s2">from </span><span class="s1">gevent._hub_local </span><span class="s2">import </span><span class="s1">get_hub_noargs </span><span class="s2">as </span><span class="s1">get_hub</span>
+<span class="s2">from </span><span class="s1">gevent </span><span class="s2">import </span><span class="s1">_waiter</span>
+
+
+<span class="s1">__all__ = [</span>
+    <span class="s3">'Greenlet'</span><span class="s2">,</span>
+    <span class="s3">'joinall'</span><span class="s2">,</span>
+    <span class="s3">'killall'</span><span class="s2">,</span>
+<span class="s1">]</span>
+
+
+<span class="s0"># In Cython, we define these as 'cdef inline' functions. The</span>
+<span class="s0"># compilation unit cannot have a direct assignment to them (import</span>
+<span class="s0"># is assignment) without generating a 'lvalue is not valid target'</span>
+<span class="s0"># error.</span>
+<span class="s1">locals()[</span><span class="s3">'getcurrent'</span><span class="s1">] = __import__(</span><span class="s3">'greenlet'</span><span class="s1">).getcurrent</span>
+<span class="s1">locals()[</span><span class="s3">'greenlet_init'</span><span class="s1">] = </span><span class="s2">lambda</span><span class="s1">: </span><span class="s2">None</span>
+<span class="s1">locals()[</span><span class="s3">'Waiter'</span><span class="s1">] = _waiter.Waiter</span>
+<span class="s0"># With Cython, this raises a TypeError if the parent is *not*</span>
+<span class="s0"># the hub (SwitchOutGreenletWithLoop); in pure-Python, we will</span>
+<span class="s0"># very likely get an AttributeError immediately after when we access `loop`;</span>
+<span class="s0"># The TypeError message is more informative on Python 2.</span>
+<span class="s0"># This must ONLY be called when we know that `s` is not None and is in fact a greenlet</span>
+<span class="s0"># object (e.g., when called on `self`)</span>
+<span class="s1">locals()[</span><span class="s3">'get_my_hub'</span><span class="s1">] = </span><span class="s2">lambda </span><span class="s1">s: s.parent</span>
+<span class="s0"># This must also ONLY be called when we know that S is not None and is in fact a greenlet</span>
+<span class="s0"># object (including the result of getcurrent())</span>
+<span class="s1">locals()[</span><span class="s3">'get_generic_parent'</span><span class="s1">] = </span><span class="s2">lambda </span><span class="s1">s: s.parent</span>
+
+<span class="s0"># Frame access</span>
+<span class="s1">locals()[</span><span class="s3">'Gevent_PyFrame_GetCode'</span><span class="s1">] = </span><span class="s2">lambda </span><span class="s1">frame: frame.f_code</span>
+<span class="s1">locals()[</span><span class="s3">'Gevent_PyFrame_GetLineNumber'</span><span class="s1">] = </span><span class="s2">lambda </span><span class="s1">frame: frame.f_lineno</span>
+<span class="s1">locals()[</span><span class="s3">'Gevent_PyFrame_GetBack'</span><span class="s1">] = </span><span class="s2">lambda </span><span class="s1">frame: frame.f_back</span>
+
+
+<span class="s2">if </span><span class="s1">_PYPY:</span>
+    <span class="s2">import </span><span class="s1">_continuation </span><span class="s0"># pylint:disable=import-error</span>
+    <span class="s1">_continulet = _continuation.continulet</span>
+
+
+<span class="s2">class </span><span class="s1">SpawnedLink(object):</span>
+    <span class="s4">&quot;&quot;&quot; 
+    A wrapper around link that calls it in another greenlet. 
+ 
+    Can be called only from main loop. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">__slots__ = [</span><span class="s3">'callback'</span><span class="s1">]</span>
+
+    <span class="s2">def </span><span class="s1">__init__(self</span><span class="s2">, </span><span class="s1">callback):</span>
+        <span class="s2">if not </span><span class="s1">callable(callback):</span>
+            <span class="s2">raise </span><span class="s1">TypeError(</span><span class="s3">&quot;Expected callable: %r&quot; </span><span class="s1">% (callback</span><span class="s2">, </span><span class="s1">))</span>
+        <span class="s1">self.callback = callback</span>
+
+    <span class="s2">def </span><span class="s1">__call__(self</span><span class="s2">, </span><span class="s1">source):</span>
+        <span class="s1">g = greenlet(self.callback</span><span class="s2">, </span><span class="s1">get_hub())</span>
+        <span class="s1">g.switch(source)</span>
+
+    <span class="s2">def </span><span class="s1">__hash__(self):</span>
+        <span class="s2">return </span><span class="s1">hash(self.callback)</span>
+
+    <span class="s2">def </span><span class="s1">__eq__(self</span><span class="s2">, </span><span class="s1">other):</span>
+        <span class="s2">return </span><span class="s1">self.callback == getattr(other</span><span class="s2">, </span><span class="s3">'callback'</span><span class="s2">, </span><span class="s1">other)</span>
+
+    <span class="s2">def </span><span class="s1">__str__(self):</span>
+        <span class="s2">return </span><span class="s1">str(self.callback)</span>
+
+    <span class="s2">def </span><span class="s1">__repr__(self):</span>
+        <span class="s2">return </span><span class="s1">repr(self.callback)</span>
+
+    <span class="s2">def </span><span class="s1">__getattr__(self</span><span class="s2">, </span><span class="s1">item):</span>
+        <span class="s2">assert </span><span class="s1">item != </span><span class="s3">'callback'</span>
+        <span class="s2">return </span><span class="s1">getattr(self.callback</span><span class="s2">, </span><span class="s1">item)</span>
+
+
+<span class="s2">class </span><span class="s1">SuccessSpawnedLink(SpawnedLink):</span>
+    <span class="s4">&quot;&quot;&quot;A wrapper around link that calls it in another greenlet only if source succeed. 
+ 
+    Can be called only from main loop. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">__slots__ = []</span>
+
+    <span class="s2">def </span><span class="s1">__call__(self</span><span class="s2">, </span><span class="s1">source):</span>
+        <span class="s2">if </span><span class="s1">source.successful():</span>
+            <span class="s2">return </span><span class="s1">SpawnedLink.__call__(self</span><span class="s2">, </span><span class="s1">source)</span>
+
+
+<span class="s2">class </span><span class="s1">FailureSpawnedLink(SpawnedLink):</span>
+    <span class="s4">&quot;&quot;&quot;A wrapper around link that calls it in another greenlet only if source failed. 
+ 
+    Can be called only from main loop. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">__slots__ = []</span>
+
+    <span class="s2">def </span><span class="s1">__call__(self</span><span class="s2">, </span><span class="s1">source):</span>
+        <span class="s2">if not </span><span class="s1">source.successful():</span>
+            <span class="s2">return </span><span class="s1">SpawnedLink.__call__(self</span><span class="s2">, </span><span class="s1">source)</span>
+
+<span class="s2">class </span><span class="s1">_Frame(object):</span>
+
+    <span class="s1">__slots__ = (</span><span class="s3">'f_code'</span><span class="s2">, </span><span class="s3">'f_lineno'</span><span class="s2">, </span><span class="s3">'f_back'</span><span class="s1">)</span>
+
+    <span class="s2">def </span><span class="s1">__init__(self):</span>
+        <span class="s1">self.f_code = </span><span class="s2">None</span>
+        <span class="s1">self.f_back = </span><span class="s2">None</span>
+        <span class="s1">self.f_lineno = </span><span class="s5">0</span>
+
+    <span class="s1">@property</span>
+    <span class="s2">def </span><span class="s1">f_globals(self):</span>
+        <span class="s2">return None</span>
+
+
+<span class="s2">def </span><span class="s1">_extract_stack(limit):</span>
+    <span class="s2">try</span><span class="s1">:</span>
+        <span class="s1">frame = sys_getframe()</span>
+    <span class="s2">except </span><span class="s1">ValueError:</span>
+        <span class="s0"># In certain embedded cases that directly use the Python C api</span>
+        <span class="s0"># to call Greenlet.spawn (e.g., uwsgi) this can raise</span>
+        <span class="s0"># `ValueError: call stack is not deep enough`. This is because</span>
+        <span class="s0"># the Cython stack frames for Greenlet.spawn -&gt;</span>
+        <span class="s0"># Greenlet.__init__ -&gt; _extract_stack are all on the C level,</span>
+        <span class="s0"># not the Python level.</span>
+        <span class="s0"># See https://github.com/gevent/gevent/issues/1212</span>
+        <span class="s1">frame = </span><span class="s2">None</span>
+
+    <span class="s1">newest_Frame = </span><span class="s2">None</span>
+    <span class="s1">newer_Frame = </span><span class="s2">None</span>
+
+    <span class="s2">while </span><span class="s1">limit </span><span class="s2">and </span><span class="s1">frame </span><span class="s2">is not None</span><span class="s1">:</span>
+        <span class="s1">limit -= </span><span class="s5">1</span>
+        <span class="s1">older_Frame = _Frame()</span>
+        <span class="s0"># Arguments are always passed to the constructor as Python objects,</span>
+        <span class="s0"># meaning we wind up boxing the f_lineno just to unbox it if we pass it.</span>
+        <span class="s0"># It's faster to simply assign once the object is created.</span>
+        <span class="s1">older_Frame.f_code = Gevent_PyFrame_GetCode(frame)  </span><span class="s0"># pylint:disable=undefined-variable</span>
+        <span class="s1">older_Frame.f_lineno = Gevent_PyFrame_GetLineNumber(frame) </span><span class="s0"># pylint:disable=undefined-variable</span>
+        <span class="s2">if </span><span class="s1">newer_Frame </span><span class="s2">is not None</span><span class="s1">:</span>
+            <span class="s1">newer_Frame.f_back = older_Frame</span>
+        <span class="s1">newer_Frame = older_Frame</span>
+        <span class="s2">if </span><span class="s1">newest_Frame </span><span class="s2">is None</span><span class="s1">:</span>
+            <span class="s1">newest_Frame = newer_Frame</span>
+
+        <span class="s1">frame = Gevent_PyFrame_GetBack(frame) </span><span class="s0"># pylint:disable=undefined-variable</span>
+
+    <span class="s2">return </span><span class="s1">newest_Frame</span>
+
+
+<span class="s1">_greenlet__init__ = greenlet.__init__</span>
+
+<span class="s2">class </span><span class="s1">Greenlet(greenlet):</span>
+    <span class="s4">&quot;&quot;&quot; 
+    A light-weight cooperatively-scheduled execution unit. 
+    &quot;&quot;&quot;</span>
+    <span class="s0"># pylint:disable=too-many-public-methods,too-many-instance-attributes</span>
+
+    <span class="s1">spawning_stack_limit = </span><span class="s5">10</span>
+
+    <span class="s0"># pylint:disable=keyword-arg-before-vararg,super-init-not-called</span>
+    <span class="s2">def </span><span class="s1">__init__(self</span><span class="s2">, </span><span class="s1">run=</span><span class="s2">None, </span><span class="s1">*args</span><span class="s2">, </span><span class="s1">**kwargs):</span>
+        <span class="s4">&quot;&quot;&quot; 
+        :param args: The arguments passed to the ``run`` function. 
+        :param kwargs: The keyword arguments passed to the ``run`` function. 
+        :keyword callable run: The callable object to run. If not given, this object's 
+            `_run` method will be invoked (typically defined by subclasses). 
+ 
+        .. versionchanged:: 1.1b1 
+            The ``run`` argument to the constructor is now verified to be a callable 
+            object. Previously, passing a non-callable object would fail after the greenlet 
+            was spawned. 
+ 
+        .. versionchanged:: 1.3b1 
+           The ``GEVENT_TRACK_GREENLET_TREE`` configuration value may be set to 
+           a false value to disable ``spawn_tree_locals``, ``spawning_greenlet``, 
+           and ``spawning_stack``. The first two will be None in that case, and the 
+           latter will be empty. 
+ 
+        .. versionchanged:: 1.5 
+           Greenlet objects are now more careful to verify that their ``parent`` is really 
+           a gevent hub, raising a ``TypeError`` earlier instead of an ``AttributeError`` later. 
+ 
+        .. versionchanged:: 20.12.1 
+           Greenlet objects now function as context managers. Exiting the ``with`` suite 
+           ensures that the greenlet has completed by :meth:`joining &lt;join&gt;` 
+           the greenlet (blocking, with 
+           no timeout). If the body of the suite raises an exception, the greenlet is 
+           :meth:`killed &lt;kill&gt;` with the default arguments and not joined in that case. 
+        &quot;&quot;&quot;</span>
+        <span class="s0"># The attributes are documented in the .rst file</span>
+
+        <span class="s0"># greenlet.greenlet(run=None, parent=None)</span>
+        <span class="s0"># Calling it with both positional arguments instead of a keyword</span>
+        <span class="s0"># argument (parent=get_hub()) speeds up creation of this object ~30%:</span>
+        <span class="s0"># python -m timeit -s 'import gevent' 'gevent.Greenlet()'</span>
+        <span class="s0"># Python 3.5: 2.70usec with keywords vs 1.94usec with positional</span>
+        <span class="s0"># Python 3.4: 2.32usec with keywords vs 1.74usec with positional</span>
+        <span class="s0"># Python 3.3: 2.55usec with keywords vs 1.92usec with positional</span>
+        <span class="s0"># Python 2.7: 1.73usec with keywords vs 1.40usec with positional</span>
+
+        <span class="s0"># Timings taken Feb 21 2018 prior to integration of #755</span>
+        <span class="s0"># python -m perf timeit -s 'import gevent' 'gevent.Greenlet()'</span>
+        <span class="s0"># 3.6.4       : Mean +- std dev: 1.08 us +- 0.05 us</span>
+        <span class="s0"># 2.7.14      : Mean +- std dev: 1.44 us +- 0.06 us</span>
+        <span class="s0"># PyPy2 5.10.0: Mean +- std dev: 2.14 ns +- 0.08 ns</span>
+
+        <span class="s0"># After the integration of spawning_stack, spawning_greenlet,</span>
+        <span class="s0"># and spawn_tree_locals on that same date:</span>
+        <span class="s0"># 3.6.4       : Mean +- std dev: 8.92 us +- 0.36 us -&gt;  8.2x</span>
+        <span class="s0"># 2.7.14      : Mean +- std dev: 14.8 us +- 0.5 us  -&gt; 10.2x</span>
+        <span class="s0"># PyPy2 5.10.0: Mean +- std dev: 3.24 us +- 0.17 us -&gt;  1.5x</span>
+
+        <span class="s0"># Compiling with Cython gets us to these numbers:</span>
+        <span class="s0"># 3.6.4        : Mean +- std dev: 3.63 us +- 0.14 us</span>
+        <span class="s0"># 2.7.14       : Mean +- std dev: 3.37 us +- 0.20 us</span>
+        <span class="s0"># PyPy2 5.10.0 : Mean +- std dev: 4.44 us +- 0.28 us</span>
+
+        <span class="s0"># Switching to reified frames and some more tuning gets us here:</span>
+        <span class="s0"># 3.7.2        : Mean +- std dev: 2.53 us +- 0.15 us</span>
+        <span class="s0"># 2.7.16       : Mean +- std dev: 2.35 us +- 0.12 us</span>
+        <span class="s0"># PyPy2 7.1    : Mean +- std dev: 11.6 us +- 0.4 us</span>
+
+        <span class="s0"># Compared to the released 1.4 (tested at the same time):</span>
+        <span class="s0"># 3.7.2        : Mean +- std dev: 3.21 us +- 0.32 us</span>
+        <span class="s0"># 2.7.16       : Mean +- std dev: 3.11 us +- 0.19 us</span>
+        <span class="s0"># PyPy2 7.1    : Mean +- std dev: 12.3 us +- 0.8 us</span>
+
+        <span class="s1">_greenlet__init__(self</span><span class="s2">, None, </span><span class="s1">get_hub())</span>
+
+        <span class="s2">if </span><span class="s1">run </span><span class="s2">is not None</span><span class="s1">:</span>
+            <span class="s1">self._run = run</span>
+
+        <span class="s0"># If they didn't pass a callable at all, then they must</span>
+        <span class="s0"># already have one. Note that subclassing to override the run() method</span>
+        <span class="s0"># itself has never been documented or supported.</span>
+        <span class="s2">if not </span><span class="s1">callable(self._run):</span>
+            <span class="s2">raise </span><span class="s1">TypeError(</span><span class="s3">&quot;The run argument or self._run must be callable&quot;</span><span class="s1">)</span>
+
+        <span class="s1">self.args = args</span>
+        <span class="s1">self.kwargs = kwargs</span>
+        <span class="s1">self.value = </span><span class="s2">None</span>
+
+        <span class="s0">#: An event, such as a timer or a callback that fires. It is established in</span>
+        <span class="s0">#: start() and start_later() as those two objects, respectively.</span>
+        <span class="s0">#: Once this becomes non-None, the Greenlet cannot be started again. Conversely,</span>
+        <span class="s0">#: kill() and throw() check for non-None to determine if this object has ever been</span>
+        <span class="s0">#: scheduled for starting. A placeholder _cancelled_start_event is assigned by them to prevent</span>
+        <span class="s0">#: the greenlet from being started in the future, if necessary.</span>
+        <span class="s0">#: In the usual case, this transitions as follows: None -&gt; event -&gt; _start_completed_event.</span>
+        <span class="s0">#: A value of None means we've never been started.</span>
+        <span class="s1">self._start_event = </span><span class="s2">None</span>
+
+        <span class="s1">self._notifier = </span><span class="s2">None</span>
+        <span class="s1">self._formatted_info = </span><span class="s2">None</span>
+        <span class="s1">self._links = []</span>
+        <span class="s1">self._ident = </span><span class="s2">None</span>
+
+        <span class="s0"># Initial state: None.</span>
+        <span class="s0"># Completed successfully: (None, None, None)</span>
+        <span class="s0"># Failed with exception: (t, v, dump_traceback(tb)))</span>
+        <span class="s1">self._exc_info = </span><span class="s2">None</span>
+
+        <span class="s2">if </span><span class="s1">GEVENT_CONFIG.track_greenlet_tree:</span>
+            <span class="s1">spawner = getcurrent() </span><span class="s0"># pylint:disable=undefined-variable</span>
+            <span class="s1">self.spawning_greenlet = wref(spawner)</span>
+            <span class="s2">try</span><span class="s1">:</span>
+                <span class="s1">self.spawn_tree_locals = spawner.spawn_tree_locals</span>
+            <span class="s2">except </span><span class="s1">AttributeError:</span>
+                <span class="s1">self.spawn_tree_locals = {}</span>
+                <span class="s2">if </span><span class="s1">get_generic_parent(spawner) </span><span class="s2">is not None</span><span class="s1">: </span><span class="s0"># pylint:disable=undefined-variable</span>
+                    <span class="s0"># The main greenlet has no parent.</span>
+                    <span class="s0"># Its children get separate locals.</span>
+                    <span class="s1">spawner.spawn_tree_locals = self.spawn_tree_locals</span>
+
+            <span class="s1">self.spawning_stack = _extract_stack(self.spawning_stack_limit)</span>
+            <span class="s0"># Don't copy the spawning greenlet's</span>
+            <span class="s0"># '_spawning_stack_frames' into ours. That's somewhat</span>
+            <span class="s0"># confusing, and, if we're not careful, a deep spawn tree</span>
+            <span class="s0"># can lead to excessive memory usage (an infinite spawning</span>
+            <span class="s0"># tree could lead to unbounded memory usage without care</span>
+            <span class="s0"># --- see https://github.com/gevent/gevent/issues/1371)</span>
+            <span class="s0"># The _spawning_stack_frames may be cleared out later if we access spawning_stack</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s0"># None is the default for all of these in Cython, but we</span>
+            <span class="s0"># need to declare them for pure-Python mode.</span>
+            <span class="s1">self.spawning_greenlet = </span><span class="s2">None</span>
+            <span class="s1">self.spawn_tree_locals = </span><span class="s2">None</span>
+            <span class="s1">self.spawning_stack = </span><span class="s2">None</span>
+
+    <span class="s2">def </span><span class="s1">_get_minimal_ident(self):</span>
+        <span class="s0"># Helper function for cython, to allow typing `reg` and making a</span>
+        <span class="s0"># C call to get_ident.</span>
+
+        <span class="s0"># If we're being accessed from a hub different than the one running</span>
+        <span class="s0"># us, aka get_hub() is not self.parent, then calling hub.ident_registry.get_ident()</span>
+        <span class="s0"># may be quietly broken: it's not thread safe.</span>
+        <span class="s0"># If our parent is no longer the hub for whatever reason, this will raise a</span>
+        <span class="s0"># AttributeError or TypeError.</span>
+        <span class="s1">hub = get_my_hub(self) </span><span class="s0"># pylint:disable=undefined-variable</span>
+
+        <span class="s1">reg = hub.ident_registry</span>
+        <span class="s2">return </span><span class="s1">reg.get_ident(self)</span>
+
+    <span class="s1">@property</span>
+    <span class="s2">def </span><span class="s1">minimal_ident(self):</span>
+        <span class="s4">&quot;&quot;&quot; 
+        A small, unique non-negative integer that identifies this object. 
+ 
+        This is similar to :attr:`threading.Thread.ident` (and `id`) 
+        in that as long as this object is alive, no other greenlet *in 
+        this hub* will have the same id, but it makes a stronger 
+        guarantee that the assigned values will be small and 
+        sequential. Sometime after this object has died, the value 
+        will be available for reuse. 
+ 
+        To get ids that are unique across all hubs, combine this with 
+        the hub's (``self.parent``) ``minimal_ident``. 
+ 
+        Accessing this property from threads other than the thread running 
+        this greenlet is not defined. 
+ 
+        .. versionadded:: 1.3a2 
+ 
+        &quot;&quot;&quot;</span>
+        <span class="s0"># Not @Lazy, implemented manually because _ident is in the structure</span>
+        <span class="s0"># of the greenlet for fast access</span>
+        <span class="s2">if </span><span class="s1">self._ident </span><span class="s2">is None</span><span class="s1">:</span>
+            <span class="s1">self._ident = self._get_minimal_ident()</span>
+        <span class="s2">return </span><span class="s1">self._ident</span>
+
+    <span class="s1">@readproperty</span>
+    <span class="s2">def </span><span class="s1">name(self):</span>
+        <span class="s4">&quot;&quot;&quot; 
+        The greenlet name. By default, a unique name is constructed using 
+        the :attr:`minimal_ident`. You can assign a string to this 
+        value to change it. It is shown in the `repr` of this object if it 
+        has been assigned to or if the `minimal_ident` has already been generated. 
+ 
+        .. versionadded:: 1.3a2 
+        .. versionchanged:: 1.4 
+           Stop showing generated names in the `repr` when the ``minimal_ident`` 
+           hasn't been requested. This reduces overhead and may be less confusing, 
+           since ``minimal_ident`` can get reused. 
+        &quot;&quot;&quot;</span>
+        <span class="s2">return </span><span class="s3">'Greenlet-%d' </span><span class="s1">% (self.minimal_ident</span><span class="s2">,</span><span class="s1">)</span>
+
+    <span class="s2">def </span><span class="s1">_raise_exception(self):</span>
+        <span class="s1">reraise(*self.exc_info)</span>
+
+    <span class="s1">@property</span>
+    <span class="s2">def </span><span class="s1">loop(self):</span>
+        <span class="s0"># needed by killall</span>
+        <span class="s1">hub = get_my_hub(self) </span><span class="s0"># pylint:disable=undefined-variable</span>
+        <span class="s2">return </span><span class="s1">hub.loop</span>
+
+    <span class="s2">def </span><span class="s1">__nonzero__(self):</span>
+        <span class="s2">return </span><span class="s1">self._start_event </span><span class="s2">is not None and </span><span class="s1">self._exc_info </span><span class="s2">is None</span>
+    <span class="s2">try</span><span class="s1">:</span>
+        <span class="s1">__bool__ = __nonzero__ </span><span class="s0"># Python 3</span>
+    <span class="s2">except </span><span class="s1">NameError: </span><span class="s0"># pragma: no cover</span>
+        <span class="s0"># When we're compiled with Cython, the __nonzero__ function</span>
+        <span class="s0"># goes directly into the slot and can't be accessed by name.</span>
+        <span class="s2">pass</span>
+
+    <span class="s0">### Lifecycle</span>
+
+    <span class="s2">if </span><span class="s1">_PYPY:</span>
+        <span class="s0"># oops - pypy's .dead relies on __nonzero__ which we overriden above</span>
+        <span class="s1">@property</span>
+        <span class="s2">def </span><span class="s1">dead(self):</span>
+            <span class="s4">&quot;Boolean indicating that the greenlet is dead and will not run again.&quot;</span>
+            <span class="s0"># pylint:disable=no-member</span>
+            <span class="s2">if </span><span class="s1">self._greenlet__main:</span>
+                <span class="s2">return False</span>
+            <span class="s2">if </span><span class="s1">self.__start_cancelled_by_kill() </span><span class="s2">or </span><span class="s1">self.__started_but_aborted():</span>
+                <span class="s2">return True</span>
+
+            <span class="s2">return </span><span class="s1">self._greenlet__started </span><span class="s2">and not </span><span class="s1">_continulet.is_pending(self)</span>
+    <span class="s2">else</span><span class="s1">:</span>
+        <span class="s1">@property</span>
+        <span class="s2">def </span><span class="s1">dead(self):</span>
+            <span class="s4">&quot;&quot;&quot; 
+            Boolean indicating that the greenlet is dead and will not run again. 
+ 
+            This is true if: 
+ 
+            1. We were never started, but were :meth:`killed &lt;kill&gt;` 
+               immediately after creation (not possible with :meth:`spawn`); OR 
+            2. We were started, but were killed before running; OR 
+            3. We have run and terminated (by raising an exception out of the 
+               started function or by reaching the end of the started function). 
+            &quot;&quot;&quot;</span>
+            <span class="s2">return </span><span class="s1">(</span>
+                <span class="s1">self.__start_cancelled_by_kill()</span>
+                <span class="s2">or </span><span class="s1">self.__started_but_aborted()</span>
+                <span class="s2">or </span><span class="s1">greenlet.dead.__get__(self)</span>
+            <span class="s1">)</span>
+
+    <span class="s2">def </span><span class="s1">__never_started_or_killed(self):</span>
+        <span class="s2">return </span><span class="s1">self._start_event </span><span class="s2">is None</span>
+
+    <span class="s2">def </span><span class="s1">__start_pending(self):</span>
+        <span class="s2">return </span><span class="s1">(</span>
+            <span class="s1">self._start_event </span><span class="s2">is not None</span>
+            <span class="s2">and </span><span class="s1">(self._start_event.pending </span><span class="s2">or </span><span class="s1">getattr(self._start_event</span><span class="s2">, </span><span class="s3">'active'</span><span class="s2">, False</span><span class="s1">))</span>
+        <span class="s1">)</span>
+
+    <span class="s2">def </span><span class="s1">__start_cancelled_by_kill(self):</span>
+        <span class="s2">return </span><span class="s1">self._start_event </span><span class="s2">is </span><span class="s1">_cancelled_start_event</span>
+
+    <span class="s2">def </span><span class="s1">__start_completed(self):</span>
+        <span class="s2">return </span><span class="s1">self._start_event </span><span class="s2">is </span><span class="s1">_start_completed_event</span>
+
+    <span class="s2">def </span><span class="s1">__started_but_aborted(self):</span>
+        <span class="s2">return </span><span class="s1">(</span>
+            <span class="s2">not </span><span class="s1">self.__never_started_or_killed() </span><span class="s0"># we have been started or killed</span>
+            <span class="s2">and not </span><span class="s1">self.__start_cancelled_by_kill() </span><span class="s0"># we weren't killed, so we must have been started</span>
+            <span class="s2">and not </span><span class="s1">self.__start_completed() </span><span class="s0"># the start never completed</span>
+            <span class="s2">and not </span><span class="s1">self.__start_pending() </span><span class="s0"># and we're not pending, so we must have been aborted</span>
+        <span class="s1">)</span>
+
+    <span class="s2">def </span><span class="s1">__cancel_start(self):</span>
+        <span class="s2">if </span><span class="s1">self._start_event </span><span class="s2">is None</span><span class="s1">:</span>
+            <span class="s0"># prevent self from ever being started in the future</span>
+            <span class="s1">self._start_event = _cancelled_start_event</span>
+        <span class="s0"># cancel any pending start event</span>
+        <span class="s0"># NOTE: If this was a real pending start event, this will leave a</span>
+        <span class="s0"># &quot;dangling&quot; callback/timer object in the hub.loop.callbacks list;</span>
+        <span class="s0"># depending on where we are in the event loop, it may even be in a local</span>
+        <span class="s0"># variable copy of that list (in _run_callbacks). This isn't a problem,</span>
+        <span class="s0"># except for the leak-tests.</span>
+        <span class="s1">self._start_event.stop()</span>
+        <span class="s1">self._start_event.close()</span>
+
+    <span class="s2">def </span><span class="s1">__handle_death_before_start(self</span><span class="s2">, </span><span class="s1">args):</span>
+        <span class="s0"># args is (t, v, tb) or simply t or v.</span>
+        <span class="s0"># The last two cases are transformed into (t, v, None);</span>
+        <span class="s0"># if the single argument is an exception type, a new instance</span>
+        <span class="s0"># is created; if the single argument is not an exception type and also</span>
+        <span class="s0"># not an exception, it is wrapped in a BaseException (this is not</span>
+        <span class="s0"># documented, but should result in better behaviour in the event of a</span>
+        <span class="s0"># user error---instead of silently printing something to stderr, we still</span>
+        <span class="s0"># kill the greenlet).</span>
+        <span class="s2">if </span><span class="s1">self._exc_info </span><span class="s2">is None and </span><span class="s1">self.dead:</span>
+            <span class="s0"># the greenlet was never switched to before and it will</span>
+            <span class="s0"># never be; _report_error was not called, the result was</span>
+            <span class="s0"># not set, and the links weren't notified. Let's do it</span>
+            <span class="s0"># here.</span>
+            <span class="s0">#</span>
+            <span class="s0"># checking that self.dead is true is essential, because</span>
+            <span class="s0"># throw() does not necessarily kill the greenlet (if the</span>
+            <span class="s0"># exception raised by throw() is caught somewhere inside</span>
+            <span class="s0"># the greenlet).</span>
+            <span class="s2">if </span><span class="s1">len(args) == </span><span class="s5">1</span><span class="s1">:</span>
+                <span class="s1">arg = args[</span><span class="s5">0</span><span class="s1">]</span>
+                <span class="s2">if </span><span class="s1">isinstance(arg</span><span class="s2">, </span><span class="s1">type) </span><span class="s2">and </span><span class="s1">issubclass(arg</span><span class="s2">, </span><span class="s1">BaseException):</span>
+                    <span class="s1">args = (arg</span><span class="s2">, </span><span class="s1">arg()</span><span class="s2">, None</span><span class="s1">)</span>
+                <span class="s2">else</span><span class="s1">:</span>
+                    <span class="s1">args = (type(arg)</span><span class="s2">, </span><span class="s1">arg</span><span class="s2">, None</span><span class="s1">)</span>
+            <span class="s2">elif not </span><span class="s1">args:</span>
+                <span class="s1">args = (GreenletExit</span><span class="s2">, </span><span class="s1">GreenletExit()</span><span class="s2">, None</span><span class="s1">)</span>
+            <span class="s2">if not </span><span class="s1">issubclass(args[</span><span class="s5">0</span><span class="s1">]</span><span class="s2">, </span><span class="s1">BaseException):</span>
+                <span class="s0"># Random non-type, non-exception arguments.</span>
+                <span class="s1">print(</span><span class="s3">&quot;RANDOM CRAP&quot;</span><span class="s2">, </span><span class="s1">args)</span>
+                <span class="s2">import </span><span class="s1">traceback; traceback.print_stack()</span>
+                <span class="s1">args = (BaseException</span><span class="s2">, </span><span class="s1">BaseException(args)</span><span class="s2">, None</span><span class="s1">)</span>
+            <span class="s2">assert </span><span class="s1">issubclass(args[</span><span class="s5">0</span><span class="s1">]</span><span class="s2">, </span><span class="s1">BaseException)</span>
+            <span class="s1">self.__report_error(args)</span>
+
+    <span class="s1">@property</span>
+    <span class="s2">def </span><span class="s1">started(self):</span>
+        <span class="s0"># DEPRECATED</span>
+        <span class="s2">return </span><span class="s1">bool(self)</span>
+
+    <span class="s2">def </span><span class="s1">ready(self):</span>
+        <span class="s4">&quot;&quot;&quot; 
+        Return a true value if and only if the greenlet has finished 
+        execution. 
+ 
+        .. versionchanged:: 1.1 
+            This function is only guaranteed to return true or false *values*, not 
+            necessarily the literal constants ``True`` or ``False``. 
+        &quot;&quot;&quot;</span>
+        <span class="s2">return </span><span class="s1">self.dead </span><span class="s2">or </span><span class="s1">self._exc_info </span><span class="s2">is not None</span>
+
+    <span class="s2">def </span><span class="s1">successful(self):</span>
+        <span class="s4">&quot;&quot;&quot; 
+        Return a true value if and only if the greenlet has finished execution 
+        successfully, that is, without raising an error. 
+ 
+        .. tip:: A greenlet that has been killed with the default 
+            :class:`GreenletExit` exception is considered successful. 
+            That is, ``GreenletExit`` is not considered an error. 
+ 
+        .. note:: This function is only guaranteed to return true or false *values*, 
+              not necessarily the literal constants ``True`` or ``False``. 
+        &quot;&quot;&quot;</span>
+        <span class="s2">return </span><span class="s1">self._exc_info </span><span class="s2">is not None and </span><span class="s1">self._exc_info[</span><span class="s5">1</span><span class="s1">] </span><span class="s2">is None</span>
+
+    <span class="s2">def </span><span class="s1">__repr__(self):</span>
+        <span class="s1">classname = self.__class__.__name__</span>
+        <span class="s0"># If no name has been assigned, don't generate one, including a minimal_ident,</span>
+        <span class="s0"># if not necessary. This reduces the use of weak references and associated</span>
+        <span class="s0"># overhead.</span>
+        <span class="s2">if </span><span class="s3">'name' </span><span class="s2">not in </span><span class="s1">self.__dict__ </span><span class="s2">and </span><span class="s1">self._ident </span><span class="s2">is None</span><span class="s1">:</span>
+            <span class="s1">name = </span><span class="s3">' '</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">name = </span><span class="s3">' &quot;%s&quot; ' </span><span class="s1">% (self.name</span><span class="s2">,</span><span class="s1">)</span>
+        <span class="s1">result = </span><span class="s3">'&lt;%s%sat %s' </span><span class="s1">% (classname</span><span class="s2">, </span><span class="s1">name</span><span class="s2">, </span><span class="s1">hex(id(self)))</span>
+        <span class="s1">formatted = self._formatinfo()</span>
+        <span class="s2">if </span><span class="s1">formatted:</span>
+            <span class="s1">result += </span><span class="s3">': ' </span><span class="s1">+ formatted</span>
+        <span class="s2">return </span><span class="s1">result + </span><span class="s3">'&gt;'</span>
+
+
+    <span class="s2">def </span><span class="s1">_formatinfo(self):</span>
+        <span class="s1">info = self._formatted_info</span>
+        <span class="s2">if </span><span class="s1">info </span><span class="s2">is not None</span><span class="s1">:</span>
+            <span class="s2">return </span><span class="s1">info</span>
+
+        <span class="s0"># Are we running an arbitrary function provided to the constructor,</span>
+        <span class="s0"># or did a subclass override _run?</span>
+        <span class="s1">func = self._run</span>
+        <span class="s1">im_self = getattr(func</span><span class="s2">, </span><span class="s3">'__self__'</span><span class="s2">, None</span><span class="s1">)</span>
+        <span class="s2">if </span><span class="s1">im_self </span><span class="s2">is </span><span class="s1">self:</span>
+            <span class="s1">funcname = </span><span class="s3">'_run'</span>
+        <span class="s2">elif </span><span class="s1">im_self </span><span class="s2">is not None</span><span class="s1">:</span>
+            <span class="s1">funcname = repr(func)</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">funcname = getattr(func</span><span class="s2">, </span><span class="s3">'__name__'</span><span class="s2">, </span><span class="s3">''</span><span class="s1">) </span><span class="s2">or </span><span class="s1">repr(func)</span>
+
+        <span class="s1">result = funcname</span>
+        <span class="s1">args = []</span>
+        <span class="s2">if </span><span class="s1">self.args:</span>
+            <span class="s1">args = [repr(x)[:</span><span class="s5">50</span><span class="s1">] </span><span class="s2">for </span><span class="s1">x </span><span class="s2">in </span><span class="s1">self.args]</span>
+        <span class="s2">if </span><span class="s1">self.kwargs:</span>
+            <span class="s1">args.extend([</span><span class="s3">'%s=%s' </span><span class="s1">% (key</span><span class="s2">, </span><span class="s1">repr(value)[:</span><span class="s5">50</span><span class="s1">]) </span><span class="s2">for </span><span class="s1">(key</span><span class="s2">, </span><span class="s1">value) </span><span class="s2">in </span><span class="s1">self.kwargs.items()])</span>
+        <span class="s2">if </span><span class="s1">args:</span>
+            <span class="s1">result += </span><span class="s3">'(' </span><span class="s1">+ </span><span class="s3">', '</span><span class="s1">.join(args) + </span><span class="s3">')'</span>
+        <span class="s0"># it is important to save the result here, because once the greenlet exits '_run' attribute will be removed</span>
+        <span class="s1">self._formatted_info = result</span>
+        <span class="s2">return </span><span class="s1">result</span>
+
+    <span class="s1">@property</span>
+    <span class="s2">def </span><span class="s1">exception(self):</span>
+        <span class="s4">&quot;&quot;&quot; 
+        Holds the exception instance raised by the function if the 
+        greenlet has finished with an error. Otherwise ``None``. 
+        &quot;&quot;&quot;</span>
+        <span class="s2">return </span><span class="s1">self._exc_info[</span><span class="s5">1</span><span class="s1">] </span><span class="s2">if </span><span class="s1">self._exc_info </span><span class="s2">is not None else None</span>
+
+    <span class="s1">@property</span>
+    <span class="s2">def </span><span class="s1">exc_info(self):</span>
+        <span class="s4">&quot;&quot;&quot; 
+        Holds the exc_info three-tuple raised by the function if the 
+        greenlet finished with an error. Otherwise a false value. 
+ 
+        .. note:: This is a provisional API and may change. 
+ 
+        .. versionadded:: 1.1 
+        &quot;&quot;&quot;</span>
+        <span class="s1">ei = self._exc_info</span>
+        <span class="s2">if </span><span class="s1">ei </span><span class="s2">is not None and </span><span class="s1">ei[</span><span class="s5">0</span><span class="s1">] </span><span class="s2">is not None</span><span class="s1">:</span>
+            <span class="s2">return </span><span class="s1">(</span>
+                <span class="s1">ei[</span><span class="s5">0</span><span class="s1">]</span><span class="s2">,</span>
+                <span class="s1">ei[</span><span class="s5">1</span><span class="s1">]</span><span class="s2">,</span>
+                <span class="s0"># The pickled traceback may be None if we couldn't pickle it.</span>
+                <span class="s1">load_traceback(ei[</span><span class="s5">2</span><span class="s1">]) </span><span class="s2">if </span><span class="s1">ei[</span><span class="s5">2</span><span class="s1">] </span><span class="s2">else None</span>
+            <span class="s1">)</span>
+
+    <span class="s2">def </span><span class="s1">throw(self</span><span class="s2">, </span><span class="s1">*args):</span>
+        <span class="s4">&quot;&quot;&quot;Immediately switch into the greenlet and raise an exception in it. 
+ 
+        Should only be called from the HUB, otherwise the current greenlet is left unscheduled forever. 
+        To raise an exception in a safe manner from any greenlet, use :meth:`kill`. 
+ 
+        If a greenlet was started but never switched to yet, then also 
+        a) cancel the event that will start it 
+        b) fire the notifications as if an exception was raised in a greenlet 
+        &quot;&quot;&quot;</span>
+        <span class="s1">self.__cancel_start()</span>
+
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s2">if not </span><span class="s1">self.dead:</span>
+                <span class="s0"># Prevent switching into a greenlet *at all* if we had never</span>
+                <span class="s0"># started it. Usually this is the same thing that happens by throwing,</span>
+                <span class="s0"># but if this is done from the hub with nothing else running, prevents a</span>
+                <span class="s0"># LoopExit.</span>
+                <span class="s1">greenlet.throw(self</span><span class="s2">, </span><span class="s1">*args)</span>
+        <span class="s2">finally</span><span class="s1">:</span>
+            <span class="s1">self.__handle_death_before_start(args)</span>
+
+    <span class="s2">def </span><span class="s1">start(self):</span>
+        <span class="s4">&quot;&quot;&quot;Schedule the greenlet to run in this loop iteration&quot;&quot;&quot;</span>
+        <span class="s2">if </span><span class="s1">self._start_event </span><span class="s2">is None</span><span class="s1">:</span>
+            <span class="s1">_call_spawn_callbacks(self)</span>
+            <span class="s1">hub = get_my_hub(self) </span><span class="s0"># pylint:disable=undefined-variable</span>
+            <span class="s1">self._start_event = hub.loop.run_callback(self.switch)</span>
+
+    <span class="s2">def </span><span class="s1">start_later(self</span><span class="s2">, </span><span class="s1">seconds):</span>
+        <span class="s4">&quot;&quot;&quot; 
+        start_later(seconds) -&gt; None 
+ 
+        Schedule the greenlet to run in the future loop iteration 
+        *seconds* later 
+        &quot;&quot;&quot;</span>
+        <span class="s2">if </span><span class="s1">self._start_event </span><span class="s2">is None</span><span class="s1">:</span>
+            <span class="s1">_call_spawn_callbacks(self)</span>
+            <span class="s1">hub = get_my_hub(self) </span><span class="s0"># pylint:disable=undefined-variable</span>
+            <span class="s1">self._start_event = hub.loop.timer(seconds)</span>
+            <span class="s1">self._start_event.start(self.switch)</span>
+
+    <span class="s1">@staticmethod</span>
+    <span class="s2">def </span><span class="s1">add_spawn_callback(callback):</span>
+        <span class="s4">&quot;&quot;&quot; 
+        add_spawn_callback(callback) -&gt; None 
+ 
+        Set up a *callback* to be invoked when :class:`Greenlet` objects 
+        are started. 
+ 
+        The invocation order of spawn callbacks is unspecified.  Adding the 
+        same callback more than one time will not cause it to be called more 
+        than once. 
+ 
+        .. versionadded:: 1.4.0 
+        &quot;&quot;&quot;</span>
+        <span class="s2">global </span><span class="s1">_spawn_callbacks</span>
+        <span class="s2">if </span><span class="s1">_spawn_callbacks </span><span class="s2">is None</span><span class="s1">:  </span><span class="s0"># pylint:disable=used-before-assignment</span>
+            <span class="s1">_spawn_callbacks = set()</span>
+        <span class="s1">_spawn_callbacks.add(callback)</span>
+
+    <span class="s1">@staticmethod</span>
+    <span class="s2">def </span><span class="s1">remove_spawn_callback(callback):</span>
+        <span class="s4">&quot;&quot;&quot; 
+        remove_spawn_callback(callback) -&gt; None 
+ 
+        Remove *callback* function added with :meth:`Greenlet.add_spawn_callback`. 
+        This function will not fail if *callback* has been already removed or 
+        if *callback* was never added. 
+ 
+        .. versionadded:: 1.4.0 
+        &quot;&quot;&quot;</span>
+        <span class="s2">global </span><span class="s1">_spawn_callbacks</span>
+        <span class="s2">if </span><span class="s1">_spawn_callbacks </span><span class="s2">is not None</span><span class="s1">:</span>
+            <span class="s1">_spawn_callbacks.discard(callback)</span>
+            <span class="s2">if not </span><span class="s1">_spawn_callbacks:</span>
+                <span class="s1">_spawn_callbacks = </span><span class="s2">None</span>
+
+    <span class="s1">@classmethod</span>
+    <span class="s2">def </span><span class="s1">spawn(cls</span><span class="s2">, </span><span class="s1">*args</span><span class="s2">, </span><span class="s1">**kwargs):</span>
+        <span class="s4">&quot;&quot;&quot; 
+        spawn(function, *args, **kwargs) -&gt; Greenlet 
+ 
+        Create a new :class:`Greenlet` object and schedule it to run ``function(*args, **kwargs)``. 
+        This can be used as ``gevent.spawn`` or ``Greenlet.spawn``. 
+ 
+        The arguments are passed to :meth:`Greenlet.__init__`. 
+ 
+        .. versionchanged:: 1.1b1 
+            If a *function* is given that is not callable, immediately raise a :exc:`TypeError` 
+            instead of spawning a greenlet that will raise an uncaught TypeError. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">g = cls(*args</span><span class="s2">, </span><span class="s1">**kwargs)</span>
+        <span class="s1">g.start()</span>
+        <span class="s2">return </span><span class="s1">g</span>
+
+    <span class="s1">@classmethod</span>
+    <span class="s2">def </span><span class="s1">spawn_later(cls</span><span class="s2">, </span><span class="s1">seconds</span><span class="s2">, </span><span class="s1">*args</span><span class="s2">, </span><span class="s1">**kwargs):</span>
+        <span class="s4">&quot;&quot;&quot; 
+        spawn_later(seconds, function, *args, **kwargs) -&gt; Greenlet 
+ 
+        Create and return a new `Greenlet` object scheduled to run ``function(*args, **kwargs)`` 
+        in a future loop iteration *seconds* later. This can be used as ``Greenlet.spawn_later`` 
+        or ``gevent.spawn_later``. 
+ 
+        The arguments are passed to :meth:`Greenlet.__init__`. 
+ 
+        .. versionchanged:: 1.1b1 
+           If an argument that's meant to be a function (the first argument in *args*, or the ``run`` keyword ) 
+           is given to this classmethod (and not a classmethod of a subclass), 
+           it is verified to be callable. Previously, the spawned greenlet would have failed 
+           when it started running. 
+        &quot;&quot;&quot;</span>
+        <span class="s2">if </span><span class="s1">cls </span><span class="s2">is </span><span class="s1">Greenlet </span><span class="s2">and not </span><span class="s1">args </span><span class="s2">and </span><span class="s3">'run' </span><span class="s2">not in </span><span class="s1">kwargs:</span>
+            <span class="s2">raise </span><span class="s1">TypeError(</span><span class="s3">&quot;&quot;</span><span class="s1">)</span>
+        <span class="s1">g = cls(*args</span><span class="s2">, </span><span class="s1">**kwargs)</span>
+        <span class="s1">g.start_later(seconds)</span>
+        <span class="s2">return </span><span class="s1">g</span>
+
+    <span class="s2">def </span><span class="s1">_maybe_kill_before_start(self</span><span class="s2">, </span><span class="s1">exception):</span>
+        <span class="s0"># Helper for Greenlet.kill(), and also for killall()</span>
+        <span class="s1">self.__cancel_start()</span>
+        <span class="s1">self.__free()</span>
+        <span class="s1">dead = self.dead</span>
+        <span class="s2">if </span><span class="s1">dead:</span>
+            <span class="s2">if </span><span class="s1">isinstance(exception</span><span class="s2">, </span><span class="s1">tuple) </span><span class="s2">and </span><span class="s1">len(exception) == </span><span class="s5">3</span><span class="s1">:</span>
+                <span class="s1">args = exception</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s1">args = (exception</span><span class="s2">,</span><span class="s1">)</span>
+            <span class="s1">self.__handle_death_before_start(args)</span>
+        <span class="s2">return </span><span class="s1">dead</span>
+
+    <span class="s2">def </span><span class="s1">kill(self</span><span class="s2">, </span><span class="s1">exception=GreenletExit</span><span class="s2">, </span><span class="s1">block=</span><span class="s2">True, </span><span class="s1">timeout=</span><span class="s2">None</span><span class="s1">):</span>
+        <span class="s4">&quot;&quot;&quot; 
+        Raise the ``exception`` in the greenlet. 
+ 
+        If ``block`` is ``True`` (the default), wait until the greenlet 
+        dies or the optional timeout expires; this may require switching 
+        greenlets. 
+        If block is ``False``, the current greenlet is not unscheduled. 
+ 
+        This function always returns ``None`` and never raises an error. It 
+        may be called multpile times on the same greenlet object, and may be 
+        called on an unstarted or dead greenlet. 
+ 
+        .. note:: 
+ 
+            Depending on what this greenlet is executing and the state 
+            of the event loop, the exception may or may not be raised 
+            immediately when this greenlet resumes execution. It may 
+            be raised on a subsequent green call, or, if this greenlet 
+            exits before making such a call, it may not be raised at 
+            all. As of 1.1, an example where the exception is raised 
+            later is if this greenlet had called :func:`sleep(0) 
+            &lt;gevent.sleep&gt;`; an example where the exception is raised 
+            immediately is if this greenlet had called 
+            :func:`sleep(0.1) &lt;gevent.sleep&gt;`. 
+ 
+        .. caution:: 
+ 
+            Use care when killing greenlets. If the code executing is not 
+            exception safe (e.g., makes proper use of ``finally``) then an 
+            unexpected exception could result in corrupted state. Using 
+            a :meth:`link` or :meth:`rawlink` (cheaper) may be a safer way to 
+            clean up resources. 
+ 
+        See also :func:`gevent.kill` and :func:`gevent.killall`. 
+ 
+        :keyword type exception: The type of exception to raise in the greenlet. The default 
+            is :class:`GreenletExit`, which indicates a :meth:`successful` completion 
+            of the greenlet. 
+ 
+        .. versionchanged:: 0.13.0 
+            *block* is now ``True`` by default. 
+        .. versionchanged:: 1.1a2 
+            If this greenlet had never been switched to, killing it will 
+            prevent it from *ever* being switched to. Links (:meth:`rawlink`) 
+            will still be executed, though. 
+        .. versionchanged:: 20.12.1 
+            If this greenlet is :meth:`ready`, immediately return instead of 
+            requiring a trip around the event loop. 
+        &quot;&quot;&quot;</span>
+        <span class="s2">if not </span><span class="s1">self._maybe_kill_before_start(exception):</span>
+            <span class="s2">if </span><span class="s1">self.ready():</span>
+                <span class="s2">return</span>
+
+            <span class="s1">waiter = Waiter() </span><span class="s2">if </span><span class="s1">block </span><span class="s2">else None </span><span class="s0"># pylint:disable=undefined-variable</span>
+            <span class="s1">hub = get_my_hub(self) </span><span class="s0"># pylint:disable=undefined-variable</span>
+            <span class="s1">hub.loop.run_callback(_kill</span><span class="s2">, </span><span class="s1">self</span><span class="s2">, </span><span class="s1">exception</span><span class="s2">, </span><span class="s1">waiter)</span>
+            <span class="s2">if </span><span class="s1">waiter </span><span class="s2">is not None</span><span class="s1">:</span>
+                <span class="s1">waiter.get()</span>
+                <span class="s1">self.join(timeout)</span>
+
+    <span class="s2">def </span><span class="s1">get(self</span><span class="s2">, </span><span class="s1">block=</span><span class="s2">True, </span><span class="s1">timeout=</span><span class="s2">None</span><span class="s1">):</span>
+        <span class="s4">&quot;&quot;&quot; 
+        get(block=True, timeout=None) -&gt; object 
+ 
+        Return the result the greenlet has returned or re-raise the 
+        exception it has raised. 
+ 
+        If block is ``False``, raise :class:`gevent.Timeout` if the 
+        greenlet is still alive. If block is ``True``, unschedule the 
+        current greenlet until the result is available or the timeout 
+        expires. In the latter case, :class:`gevent.Timeout` is 
+        raised. 
+        &quot;&quot;&quot;</span>
+        <span class="s2">if </span><span class="s1">self.ready():</span>
+            <span class="s2">if </span><span class="s1">self.successful():</span>
+                <span class="s2">return </span><span class="s1">self.value</span>
+            <span class="s1">self._raise_exception()</span>
+        <span class="s2">if not </span><span class="s1">block:</span>
+            <span class="s2">raise </span><span class="s1">Timeout()</span>
+
+        <span class="s1">switch = getcurrent().switch </span><span class="s0"># pylint:disable=undefined-variable</span>
+        <span class="s1">self.rawlink(switch)</span>
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s1">t = Timeout._start_new_or_dummy(timeout)</span>
+            <span class="s2">try</span><span class="s1">:</span>
+                <span class="s1">result = get_my_hub(self).switch() </span><span class="s0"># pylint:disable=undefined-variable</span>
+                <span class="s2">if </span><span class="s1">result </span><span class="s2">is not </span><span class="s1">self:</span>
+                    <span class="s2">raise </span><span class="s1">InvalidSwitchError(</span><span class="s3">'Invalid switch into Greenlet.get(): %r' </span><span class="s1">% (result</span><span class="s2">, </span><span class="s1">))</span>
+            <span class="s2">finally</span><span class="s1">:</span>
+                <span class="s1">t.cancel()</span>
+        <span class="s2">except</span><span class="s1">:</span>
+            <span class="s0"># unlinking in 'except' instead of finally is an optimization:</span>
+            <span class="s0"># if switch occurred normally then link was already removed in _notify_links</span>
+            <span class="s0"># and there's no need to touch the links set.</span>
+            <span class="s0"># Note, however, that if &quot;Invalid switch&quot; assert was removed and invalid switch</span>
+            <span class="s0"># did happen, the link would remain, causing another invalid switch later in this greenlet.</span>
+            <span class="s1">self.unlink(switch)</span>
+            <span class="s2">raise</span>
+
+        <span class="s2">if </span><span class="s1">self.ready():</span>
+            <span class="s2">if </span><span class="s1">self.successful():</span>
+                <span class="s2">return </span><span class="s1">self.value</span>
+            <span class="s1">self._raise_exception()</span>
+
+    <span class="s2">def </span><span class="s1">join(self</span><span class="s2">, </span><span class="s1">timeout=</span><span class="s2">None</span><span class="s1">):</span>
+        <span class="s4">&quot;&quot;&quot; 
+        join(timeout=None) -&gt; None 
+ 
+        Wait until the greenlet finishes or *timeout* expires. Return 
+        ``None`` regardless. 
+        &quot;&quot;&quot;</span>
+        <span class="s2">if </span><span class="s1">self.ready():</span>
+            <span class="s2">return</span>
+
+        <span class="s1">switch = getcurrent().switch </span><span class="s0"># pylint:disable=undefined-variable</span>
+        <span class="s1">self.rawlink(switch)</span>
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s1">t = Timeout._start_new_or_dummy(timeout)</span>
+            <span class="s2">try</span><span class="s1">:</span>
+                <span class="s1">result = get_my_hub(self).switch() </span><span class="s0"># pylint:disable=undefined-variable</span>
+                <span class="s2">if </span><span class="s1">result </span><span class="s2">is not </span><span class="s1">self:</span>
+                    <span class="s2">raise </span><span class="s1">InvalidSwitchError(</span><span class="s3">'Invalid switch into Greenlet.join(): %r' </span><span class="s1">% (result</span><span class="s2">, </span><span class="s1">))</span>
+            <span class="s2">finally</span><span class="s1">:</span>
+                <span class="s1">t.cancel()</span>
+        <span class="s2">except </span><span class="s1">Timeout </span><span class="s2">as </span><span class="s1">ex:</span>
+            <span class="s1">self.unlink(switch)</span>
+            <span class="s2">if </span><span class="s1">ex </span><span class="s2">is not </span><span class="s1">t:</span>
+                <span class="s2">raise</span>
+        <span class="s2">except</span><span class="s1">:</span>
+            <span class="s1">self.unlink(switch)</span>
+            <span class="s2">raise</span>
+
+    <span class="s2">def </span><span class="s1">__enter__(self):</span>
+        <span class="s2">return </span><span class="s1">self</span>
+
+    <span class="s2">def </span><span class="s1">__exit__(self</span><span class="s2">, </span><span class="s1">t</span><span class="s2">, </span><span class="s1">v</span><span class="s2">, </span><span class="s1">tb):</span>
+        <span class="s2">if </span><span class="s1">t </span><span class="s2">is None</span><span class="s1">:</span>
+            <span class="s2">try</span><span class="s1">:</span>
+                <span class="s1">self.join()</span>
+            <span class="s2">finally</span><span class="s1">:</span>
+                <span class="s1">self.kill()</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">self.kill((t</span><span class="s2">, </span><span class="s1">v</span><span class="s2">, </span><span class="s1">tb))</span>
+
+    <span class="s2">def </span><span class="s1">__report_result(self</span><span class="s2">, </span><span class="s1">result):</span>
+        <span class="s1">self._exc_info = (</span><span class="s2">None, None, None</span><span class="s1">)</span>
+        <span class="s1">self.value = result</span>
+        <span class="s2">if </span><span class="s1">self._links </span><span class="s2">and not </span><span class="s1">self._notifier:</span>
+            <span class="s1">hub = get_my_hub(self) </span><span class="s0"># pylint:disable=undefined-variable</span>
+            <span class="s1">self._notifier = hub.loop.run_callback(self._notify_links)</span>
+
+    <span class="s2">def </span><span class="s1">__report_error(self</span><span class="s2">, </span><span class="s1">exc_info):</span>
+        <span class="s2">if </span><span class="s1">isinstance(exc_info[</span><span class="s5">1</span><span class="s1">]</span><span class="s2">, </span><span class="s1">GreenletExit):</span>
+            <span class="s1">self.__report_result(exc_info[</span><span class="s5">1</span><span class="s1">])</span>
+            <span class="s2">return</span>
+
+        <span class="s0"># Depending on the error, we may not be able to pickle it.</span>
+        <span class="s0"># In particular, RecursionError can be a problem.</span>
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s1">tb = dump_traceback(exc_info[</span><span class="s5">2</span><span class="s1">])</span>
+        <span class="s2">except</span><span class="s1">: </span><span class="s0"># pylint:disable=bare-except</span>
+            <span class="s1">tb = </span><span class="s2">None</span>
+        <span class="s1">self._exc_info = exc_info[</span><span class="s5">0</span><span class="s1">]</span><span class="s2">, </span><span class="s1">exc_info[</span><span class="s5">1</span><span class="s1">]</span><span class="s2">, </span><span class="s1">tb</span>
+
+        <span class="s1">hub = get_my_hub(self) </span><span class="s0"># pylint:disable=undefined-variable</span>
+        <span class="s2">if </span><span class="s1">self._links </span><span class="s2">and not </span><span class="s1">self._notifier:</span>
+            <span class="s1">self._notifier = hub.loop.run_callback(self._notify_links)</span>
+
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s1">hub.handle_error(self</span><span class="s2">, </span><span class="s1">*exc_info)</span>
+        <span class="s2">finally</span><span class="s1">:</span>
+            <span class="s2">del </span><span class="s1">exc_info</span>
+
+    <span class="s2">def </span><span class="s1">run(self):</span>
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s1">self.__cancel_start()</span>
+            <span class="s1">self._start_event = _start_completed_event</span>
+
+            <span class="s2">try</span><span class="s1">:</span>
+                <span class="s1">result = self._run(*self.args</span><span class="s2">, </span><span class="s1">**self.kwargs)</span>
+            <span class="s2">except</span><span class="s1">: </span><span class="s0"># pylint:disable=bare-except</span>
+                <span class="s1">self.__report_error(sys_exc_info())</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s1">self.__report_result(result)</span>
+        <span class="s2">finally</span><span class="s1">:</span>
+            <span class="s1">self.__free()</span>
+
+    <span class="s2">def </span><span class="s1">__free(self):</span>
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s0"># It seems that Cython 0.29.13 sometimes miscompiles</span>
+            <span class="s0"># self.__dict__.pop('_run', None) ? When we moved this out of the</span>
+            <span class="s0"># inline finally: block in run(), we started getting strange</span>
+            <span class="s0"># exceptions from places that subclassed Greenlet.</span>
+            <span class="s2">del </span><span class="s1">self._run</span>
+        <span class="s2">except </span><span class="s1">AttributeError:</span>
+            <span class="s2">pass</span>
+        <span class="s1">self.args = ()</span>
+        <span class="s1">self.kwargs.clear()</span>
+
+    <span class="s2">def </span><span class="s1">_run(self):</span>
+        <span class="s4">&quot;&quot;&quot; 
+        Subclasses may override this method to take any number of 
+        arguments and keyword arguments. 
+ 
+        .. versionadded:: 1.1a3 
+            Previously, if no callable object was 
+            passed to the constructor, the spawned greenlet would later 
+            fail with an AttributeError. 
+        &quot;&quot;&quot;</span>
+        <span class="s0"># We usually override this in __init__</span>
+        <span class="s0"># pylint: disable=method-hidden</span>
+        <span class="s2">return</span>
+
+    <span class="s2">def </span><span class="s1">has_links(self):</span>
+        <span class="s2">return </span><span class="s1">len(self._links)</span>
+
+    <span class="s2">def </span><span class="s1">rawlink(self</span><span class="s2">, </span><span class="s1">callback):</span>
+        <span class="s4">&quot;&quot;&quot; 
+        Register a callable to be executed when the greenlet finishes 
+        execution. 
+ 
+        The *callback* will be called with this instance as an 
+        argument. 
+ 
+        The *callback* will be called even if linked after the greenlet 
+        is already ready(). 
+ 
+        .. caution:: 
+            The *callback* will be called in the hub and 
+            **MUST NOT** raise an exception. 
+        &quot;&quot;&quot;</span>
+        <span class="s2">if not </span><span class="s1">callable(callback):</span>
+            <span class="s2">raise </span><span class="s1">TypeError(</span><span class="s3">'Expected callable: %r' </span><span class="s1">% (callback</span><span class="s2">, </span><span class="s1">))</span>
+        <span class="s1">self._links.append(callback) </span><span class="s0"># pylint:disable=no-member</span>
+        <span class="s2">if </span><span class="s1">self.ready() </span><span class="s2">and </span><span class="s1">self._links </span><span class="s2">and not </span><span class="s1">self._notifier:</span>
+            <span class="s1">hub = get_my_hub(self) </span><span class="s0"># pylint:disable=undefined-variable</span>
+            <span class="s1">self._notifier = hub.loop.run_callback(self._notify_links)</span>
+
+    <span class="s2">def </span><span class="s1">link(self</span><span class="s2">, </span><span class="s1">callback</span><span class="s2">, </span><span class="s1">SpawnedLink=SpawnedLink):</span>
+        <span class="s4">&quot;&quot;&quot; 
+        Link greenlet's completion to a callable. 
+ 
+        The *callback* will be called with this instance as an 
+        argument once this greenlet is dead. A callable is called in 
+        its own :class:`greenlet.greenlet` (*not* a 
+        :class:`Greenlet`). 
+ 
+        The *callback* will be called even if linked after the greenlet 
+        is already ready(). 
+        &quot;&quot;&quot;</span>
+        <span class="s0"># XXX: Is the redefinition of SpawnedLink supposed to just be an</span>
+        <span class="s0"># optimization, or do people use it? It's not documented</span>
+        <span class="s0"># pylint:disable=redefined-outer-name</span>
+        <span class="s1">self.rawlink(SpawnedLink(callback))</span>
+
+    <span class="s2">def </span><span class="s1">unlink(self</span><span class="s2">, </span><span class="s1">callback):</span>
+        <span class="s4">&quot;&quot;&quot;Remove the callback set by :meth:`link` or :meth:`rawlink`&quot;&quot;&quot;</span>
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s1">self._links.remove(callback) </span><span class="s0"># pylint:disable=no-member</span>
+        <span class="s2">except </span><span class="s1">ValueError:</span>
+            <span class="s2">pass</span>
+
+    <span class="s2">def </span><span class="s1">unlink_all(self):</span>
+        <span class="s4">&quot;&quot;&quot; 
+        Remove all the callbacks. 
+ 
+        .. versionadded:: 1.3a2 
+        &quot;&quot;&quot;</span>
+        <span class="s2">del </span><span class="s1">self._links[:]</span>
+
+    <span class="s2">def </span><span class="s1">link_value(self</span><span class="s2">, </span><span class="s1">callback</span><span class="s2">, </span><span class="s1">SpawnedLink=SuccessSpawnedLink):</span>
+        <span class="s4">&quot;&quot;&quot; 
+        Like :meth:`link` but *callback* is only notified when the greenlet 
+        has completed successfully. 
+        &quot;&quot;&quot;</span>
+        <span class="s0"># pylint:disable=redefined-outer-name</span>
+        <span class="s1">self.link(callback</span><span class="s2">, </span><span class="s1">SpawnedLink=SpawnedLink)</span>
+
+    <span class="s2">def </span><span class="s1">link_exception(self</span><span class="s2">, </span><span class="s1">callback</span><span class="s2">, </span><span class="s1">SpawnedLink=FailureSpawnedLink):</span>
+        <span class="s4">&quot;&quot;&quot; 
+        Like :meth:`link` but *callback* is only notified when the 
+        greenlet dies because of an unhandled exception. 
+        &quot;&quot;&quot;</span>
+        <span class="s0"># pylint:disable=redefined-outer-name</span>
+        <span class="s1">self.link(callback</span><span class="s2">, </span><span class="s1">SpawnedLink=SpawnedLink)</span>
+
+    <span class="s2">def </span><span class="s1">_notify_links(self):</span>
+        <span class="s2">while </span><span class="s1">self._links:</span>
+            <span class="s0"># Early links are allowed to remove later links</span>
+            <span class="s0"># before we get to them, and they're also allowed to</span>
+            <span class="s0"># add new links, so we have to be careful about iterating.</span>
+
+            <span class="s0"># We don't expect this list to be very large, so the time spent</span>
+            <span class="s0"># manipulating it should be small. a deque is probably not justified.</span>
+            <span class="s0"># Cython has optimizations to transform this into a memmove anyway.</span>
+            <span class="s1">link = self._links.pop(</span><span class="s5">0</span><span class="s1">)</span>
+            <span class="s2">try</span><span class="s1">:</span>
+                <span class="s1">link(self)</span>
+            <span class="s2">except</span><span class="s1">: </span><span class="s0"># pylint:disable=bare-except, undefined-variable</span>
+                <span class="s1">get_my_hub(self).handle_error((link</span><span class="s2">, </span><span class="s1">self)</span><span class="s2">, </span><span class="s1">*sys_exc_info())</span>
+
+
+<span class="s2">class </span><span class="s1">_dummy_event(object):</span>
+    <span class="s1">__slots__ = (</span><span class="s3">'pending'</span><span class="s2">, </span><span class="s3">'active'</span><span class="s1">)</span>
+
+    <span class="s2">def </span><span class="s1">__init__(self):</span>
+        <span class="s1">self.pending = self.active = </span><span class="s2">False</span>
+
+    <span class="s2">def </span><span class="s1">stop(self):</span>
+        <span class="s2">pass</span>
+
+    <span class="s2">def </span><span class="s1">start(self</span><span class="s2">, </span><span class="s1">cb): </span><span class="s0"># pylint:disable=unused-argument</span>
+        <span class="s2">raise </span><span class="s1">AssertionError(</span><span class="s3">&quot;Cannot start the dummy event&quot;</span><span class="s1">)</span>
+
+    <span class="s2">def </span><span class="s1">close(self):</span>
+        <span class="s2">pass</span>
+
+<span class="s1">_cancelled_start_event = _dummy_event()</span>
+<span class="s1">_start_completed_event = _dummy_event()</span>
+
+
+<span class="s0"># This is *only* called as a callback from the hub via Greenlet.kill(),</span>
+<span class="s0"># and its first argument is the Greenlet. So we can be sure about the types.</span>
+<span class="s2">def </span><span class="s1">_kill(glet</span><span class="s2">, </span><span class="s1">exception</span><span class="s2">, </span><span class="s1">waiter):</span>
+    <span class="s2">try</span><span class="s1">:</span>
+        <span class="s2">if </span><span class="s1">isinstance(exception</span><span class="s2">, </span><span class="s1">tuple) </span><span class="s2">and </span><span class="s1">len(exception) == </span><span class="s5">3</span><span class="s1">:</span>
+            <span class="s1">glet.throw(*exception)</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">glet.throw(exception)</span>
+    <span class="s2">except</span><span class="s1">: </span><span class="s0"># pylint:disable=bare-except, undefined-variable</span>
+        <span class="s0"># XXX do we need this here?</span>
+        <span class="s1">get_my_hub(glet).handle_error(glet</span><span class="s2">, </span><span class="s1">*sys_exc_info())</span>
+    <span class="s2">if </span><span class="s1">waiter </span><span class="s2">is not None</span><span class="s1">:</span>
+        <span class="s1">waiter.switch(</span><span class="s2">None</span><span class="s1">)</span>
+
+
+<span class="s2">def </span><span class="s1">joinall(greenlets</span><span class="s2">, </span><span class="s1">timeout=</span><span class="s2">None, </span><span class="s1">raise_error=</span><span class="s2">False, </span><span class="s1">count=</span><span class="s2">None</span><span class="s1">):</span>
+    <span class="s4">&quot;&quot;&quot; 
+    Wait for the ``greenlets`` to finish. 
+ 
+    :param greenlets: A sequence (supporting :func:`len`) of greenlets to wait for. 
+    :keyword float timeout: If given, the maximum number of seconds to wait. 
+    :return: A sequence of the greenlets that finished before the timeout (if any) 
+        expired. 
+    &quot;&quot;&quot;</span>
+    <span class="s2">if not </span><span class="s1">raise_error:</span>
+        <span class="s2">return </span><span class="s1">wait(greenlets</span><span class="s2">, </span><span class="s1">timeout=timeout</span><span class="s2">, </span><span class="s1">count=count)</span>
+
+    <span class="s1">done = []</span>
+    <span class="s2">for </span><span class="s1">obj </span><span class="s2">in </span><span class="s1">iwait(greenlets</span><span class="s2">, </span><span class="s1">timeout=timeout</span><span class="s2">, </span><span class="s1">count=count):</span>
+        <span class="s2">if </span><span class="s1">getattr(obj</span><span class="s2">, </span><span class="s3">'exception'</span><span class="s2">, None</span><span class="s1">) </span><span class="s2">is not None</span><span class="s1">:</span>
+            <span class="s2">if </span><span class="s1">hasattr(obj</span><span class="s2">, </span><span class="s3">'_raise_exception'</span><span class="s1">):</span>
+                <span class="s1">obj._raise_exception()</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s2">raise </span><span class="s1">obj.exception</span>
+        <span class="s1">done.append(obj)</span>
+    <span class="s2">return </span><span class="s1">done</span>
+
+
+<span class="s2">def </span><span class="s1">_killall3(greenlets</span><span class="s2">, </span><span class="s1">exception</span><span class="s2">, </span><span class="s1">waiter):</span>
+    <span class="s1">diehards = []</span>
+    <span class="s2">for </span><span class="s1">g </span><span class="s2">in </span><span class="s1">greenlets:</span>
+        <span class="s2">if not </span><span class="s1">g.dead:</span>
+            <span class="s2">try</span><span class="s1">:</span>
+                <span class="s1">g.throw(exception)</span>
+            <span class="s2">except</span><span class="s1">: </span><span class="s0"># pylint:disable=bare-except, undefined-variable</span>
+                <span class="s1">get_my_hub(g).handle_error(g</span><span class="s2">, </span><span class="s1">*sys_exc_info())</span>
+            <span class="s2">if not </span><span class="s1">g.dead:</span>
+                <span class="s1">diehards.append(g)</span>
+    <span class="s1">waiter.switch(diehards)</span>
+
+
+<span class="s2">def </span><span class="s1">_killall(greenlets</span><span class="s2">, </span><span class="s1">exception):</span>
+    <span class="s2">for </span><span class="s1">g </span><span class="s2">in </span><span class="s1">greenlets:</span>
+        <span class="s2">if not </span><span class="s1">g.dead:</span>
+            <span class="s2">try</span><span class="s1">:</span>
+                <span class="s1">g.throw(exception)</span>
+            <span class="s2">except</span><span class="s1">: </span><span class="s0"># pylint:disable=bare-except, undefined-variable</span>
+                <span class="s1">get_my_hub(g).handle_error(g</span><span class="s2">, </span><span class="s1">*sys_exc_info())</span>
+
+
+<span class="s2">def </span><span class="s1">_call_spawn_callbacks(gr):</span>
+    <span class="s2">if </span><span class="s1">_spawn_callbacks </span><span class="s2">is not None</span><span class="s1">:</span>
+        <span class="s2">for </span><span class="s1">cb </span><span class="s2">in </span><span class="s1">_spawn_callbacks:</span>
+            <span class="s1">cb(gr)</span>
+
+
+<span class="s1">_spawn_callbacks = </span><span class="s2">None</span>
+
+
+<span class="s2">def </span><span class="s1">killall(greenlets</span><span class="s2">, </span><span class="s1">exception=GreenletExit</span><span class="s2">, </span><span class="s1">block=</span><span class="s2">True, </span><span class="s1">timeout=</span><span class="s2">None</span><span class="s1">):</span>
+    <span class="s4">&quot;&quot;&quot; 
+    Forceably terminate all the *greenlets* by causing them to raise *exception*. 
+ 
+    .. caution:: Use care when killing greenlets. If they are not prepared for exceptions, 
+       this could result in corrupted state. 
+ 
+    :param greenlets: A **bounded** iterable of the non-None greenlets to terminate. 
+       *All* the items in this iterable must be greenlets that belong to the same hub, 
+       which should be the hub for this current thread. If this is a generator or iterator 
+       that switches greenlets, the results are undefined. 
+    :keyword exception: The type of exception to raise in the greenlets. By default this is 
+        :class:`GreenletExit`. 
+    :keyword bool block: If True (the default) then this function only returns when all the 
+        greenlets are dead; the current greenlet is unscheduled during that process. 
+        If greenlets ignore the initial exception raised in them, 
+        then they will be joined (with :func:`gevent.joinall`) and allowed to die naturally. 
+        If False, this function returns immediately and greenlets will raise 
+        the exception asynchronously. 
+    :keyword float timeout: A time in seconds to wait for greenlets to die. If given, it is 
+        only honored when ``block`` is True. 
+    :raise Timeout: If blocking and a timeout is given that elapses before 
+        all the greenlets are dead. 
+ 
+    .. versionchanged:: 1.1a2 
+        *greenlets* can be any iterable of greenlets, like an iterator or a set. 
+        Previously it had to be a list or tuple. 
+    .. versionchanged:: 1.5a3 
+        Any :class:`Greenlet` in the *greenlets* list that hadn't been switched to before 
+        calling this method will never be switched to. This makes this function 
+        behave like :meth:`Greenlet.kill`. This does not apply to raw greenlets. 
+    .. versionchanged:: 1.5a3 
+        Now accepts raw greenlets created by :func:`gevent.spawn_raw`. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s1">need_killed = []</span>
+    <span class="s2">for </span><span class="s1">glet </span><span class="s2">in </span><span class="s1">greenlets:</span>
+        <span class="s0"># Quick pass through to prevent any greenlet from</span>
+        <span class="s0"># actually being switched to if it hasn't already.</span>
+        <span class="s0"># (Previously we called ``list(greenlets)`` so we're still</span>
+        <span class="s0"># linear.)</span>
+        <span class="s0">#</span>
+        <span class="s0"># We don't use glet.kill() here because we don't want to schedule</span>
+        <span class="s0"># any callbacks in the loop; we're about to handle that more directly.</span>
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s1">cancel = glet._maybe_kill_before_start</span>
+        <span class="s2">except </span><span class="s1">AttributeError:</span>
+            <span class="s1">need_killed.append(glet)</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s2">if not </span><span class="s1">cancel(exception):</span>
+                <span class="s1">need_killed.append(glet)</span>
+
+    <span class="s2">if not </span><span class="s1">need_killed:</span>
+        <span class="s2">return</span>
+
+    <span class="s1">loop = glet.loop </span><span class="s0"># pylint:disable=undefined-loop-variable</span>
+    <span class="s2">if </span><span class="s1">block:</span>
+        <span class="s1">waiter = Waiter() </span><span class="s0"># pylint:disable=undefined-variable</span>
+        <span class="s1">loop.run_callback(_killall3</span><span class="s2">, </span><span class="s1">need_killed</span><span class="s2">, </span><span class="s1">exception</span><span class="s2">, </span><span class="s1">waiter)</span>
+        <span class="s1">t = Timeout._start_new_or_dummy(timeout)</span>
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s1">alive = waiter.get()</span>
+            <span class="s2">if </span><span class="s1">alive:</span>
+                <span class="s1">joinall(alive</span><span class="s2">, </span><span class="s1">raise_error=</span><span class="s2">False</span><span class="s1">)</span>
+        <span class="s2">finally</span><span class="s1">:</span>
+            <span class="s1">t.cancel()</span>
+    <span class="s2">else</span><span class="s1">:</span>
+        <span class="s1">loop.run_callback(_killall</span><span class="s2">, </span><span class="s1">need_killed</span><span class="s2">, </span><span class="s1">exception)</span>
+
+<span class="s2">def </span><span class="s1">_init():</span>
+    <span class="s1">greenlet_init() </span><span class="s0"># pylint:disable=undefined-variable</span>
+
+<span class="s1">_init()</span>
+
+<span class="s2">from </span><span class="s1">gevent._util </span><span class="s2">import </span><span class="s1">import_c_accel</span>
+<span class="s1">import_c_accel(globals()</span><span class="s2">, </span><span class="s3">'gevent._greenlet'</span><span class="s1">)</span>
+</pre>
+</body>
+</html>

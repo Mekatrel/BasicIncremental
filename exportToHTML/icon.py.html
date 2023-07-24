@@ -1,0 +1,282 @@
+<html>
+<head>
+<title>icon.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #629755; font-style: italic;}
+.s3 { color: #cc7832;}
+.s4 { color: #6897bb;}
+.s5 { color: #a5c261;}
+.s6 { color: #6a8759;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+icon.py</font>
+</center></td></tr></table>
+<pre><span class="s0">#-----------------------------------------------------------------------------</span>
+<span class="s0"># Copyright (c) 2013-2021, PyInstaller Development Team.</span>
+<span class="s0">#</span>
+<span class="s0"># Distributed under the terms of the GNU General Public License (version 2</span>
+<span class="s0"># or later) with exception for distributing the bootloader.</span>
+<span class="s0">#</span>
+<span class="s0"># The full license is in the file COPYING.txt, distributed with this software.</span>
+<span class="s0">#</span>
+<span class="s0"># SPDX-License-Identifier: (GPL-2.0-or-later WITH Bootloader-exception)</span>
+<span class="s0">#-----------------------------------------------------------------------------</span>
+<span class="s2">&quot;&quot;&quot; 
+The code in this module supports the --icon parameter on Windows. 
+(For --icon support under Mac OS, see building/osx.py.) 
+ 
+The only entry point, called from api.py, is CopyIcons(), below. All the elaborate structure of classes that follows 
+is used to support the operation of CopyIcons_FromIco(). None of these classes and globals are referenced outside 
+this module. 
+&quot;&quot;&quot;</span>
+
+<span class="s3">import </span><span class="s1">os.path</span>
+<span class="s3">import </span><span class="s1">struct</span>
+
+<span class="s3">import </span><span class="s1">PyInstaller.log </span><span class="s3">as </span><span class="s1">logging</span>
+<span class="s3">from </span><span class="s1">PyInstaller </span><span class="s3">import </span><span class="s1">config</span>
+<span class="s3">from </span><span class="s1">PyInstaller.compat </span><span class="s3">import </span><span class="s1">pywintypes</span><span class="s3">, </span><span class="s1">win32api</span>
+
+<span class="s1">logger = logging.getLogger(__name__)</span>
+
+<span class="s1">RT_ICON = </span><span class="s4">3</span>
+<span class="s1">RT_GROUP_ICON = </span><span class="s4">14</span>
+<span class="s1">LOAD_LIBRARY_AS_DATAFILE = </span><span class="s4">2</span>
+
+
+<span class="s3">class </span><span class="s1">Structure:</span>
+    <span class="s3">def </span><span class="s1">__init__(self):</span>
+        <span class="s1">size = self._sizeInBytes = struct.calcsize(self._format_)</span>
+        <span class="s1">self._fields_ = list(struct.unpack(self._format_</span><span class="s3">, </span><span class="s5">b'</span><span class="s3">\000</span><span class="s5">' </span><span class="s1">* size))</span>
+        <span class="s1">indexes = self._indexes_ = {}</span>
+        <span class="s3">for </span><span class="s1">i</span><span class="s3">, </span><span class="s1">nm </span><span class="s3">in </span><span class="s1">enumerate(self._names_):</span>
+            <span class="s1">indexes[nm] = i</span>
+
+    <span class="s3">def </span><span class="s1">dump(self):</span>
+        <span class="s1">logger.info(</span><span class="s6">&quot;DUMP of %s&quot;</span><span class="s3">, </span><span class="s1">self)</span>
+        <span class="s3">for </span><span class="s1">name </span><span class="s3">in </span><span class="s1">self._names_:</span>
+            <span class="s3">if not </span><span class="s1">name.startswith(</span><span class="s6">'_'</span><span class="s1">):</span>
+                <span class="s1">logger.info(</span><span class="s6">&quot;%20s = %s&quot;</span><span class="s3">, </span><span class="s1">name</span><span class="s3">, </span><span class="s1">getattr(self</span><span class="s3">, </span><span class="s1">name))</span>
+        <span class="s1">logger.info(</span><span class="s6">&quot;&quot;</span><span class="s1">)</span>
+
+    <span class="s3">def </span><span class="s1">__getattr__(self</span><span class="s3">, </span><span class="s1">name):</span>
+        <span class="s3">if </span><span class="s1">name </span><span class="s3">in </span><span class="s1">self._names_:</span>
+            <span class="s1">index = self._indexes_[name]</span>
+            <span class="s3">return </span><span class="s1">self._fields_[index]</span>
+        <span class="s3">try</span><span class="s1">:</span>
+            <span class="s3">return </span><span class="s1">self.__dict__[name]</span>
+        <span class="s3">except </span><span class="s1">KeyError </span><span class="s3">as </span><span class="s1">e:</span>
+            <span class="s3">raise </span><span class="s1">AttributeError(name) </span><span class="s3">from </span><span class="s1">e</span>
+
+    <span class="s3">def </span><span class="s1">__setattr__(self</span><span class="s3">, </span><span class="s1">name</span><span class="s3">, </span><span class="s1">value):</span>
+        <span class="s3">if </span><span class="s1">name </span><span class="s3">in </span><span class="s1">self._names_:</span>
+            <span class="s1">index = self._indexes_[name]</span>
+            <span class="s1">self._fields_[index] = value</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s1">self.__dict__[name] = value</span>
+
+    <span class="s3">def </span><span class="s1">tostring(self):</span>
+        <span class="s3">return </span><span class="s1">struct.pack(self._format_</span><span class="s3">, </span><span class="s1">*self._fields_)</span>
+
+    <span class="s3">def </span><span class="s1">fromfile(self</span><span class="s3">, </span><span class="s1">file):</span>
+        <span class="s1">data = file.read(self._sizeInBytes)</span>
+        <span class="s1">self._fields_ = list(struct.unpack(self._format_</span><span class="s3">, </span><span class="s1">data))</span>
+
+
+<span class="s3">class </span><span class="s1">ICONDIRHEADER(Structure):</span>
+    <span class="s1">_names_ = </span><span class="s6">&quot;idReserved&quot;</span><span class="s3">, </span><span class="s6">&quot;idType&quot;</span><span class="s3">, </span><span class="s6">&quot;idCount&quot;</span>
+    <span class="s1">_format_ = </span><span class="s6">&quot;hhh&quot;</span>
+
+
+<span class="s3">class </span><span class="s1">ICONDIRENTRY(Structure):</span>
+    <span class="s1">_names_ = (</span><span class="s6">&quot;bWidth&quot;</span><span class="s3">, </span><span class="s6">&quot;bHeight&quot;</span><span class="s3">, </span><span class="s6">&quot;bColorCount&quot;</span><span class="s3">, </span><span class="s6">&quot;bReserved&quot;</span><span class="s3">, </span><span class="s6">&quot;wPlanes&quot;</span><span class="s3">, </span><span class="s6">&quot;wBitCount&quot;</span><span class="s3">, </span><span class="s6">&quot;dwBytesInRes&quot;</span><span class="s3">, </span><span class="s6">&quot;dwImageOffset&quot;</span><span class="s1">)</span>
+    <span class="s1">_format_ = </span><span class="s6">&quot;bbbbhhii&quot;</span>
+
+
+<span class="s3">class </span><span class="s1">GRPICONDIR(Structure):</span>
+    <span class="s1">_names_ = </span><span class="s6">&quot;idReserved&quot;</span><span class="s3">, </span><span class="s6">&quot;idType&quot;</span><span class="s3">, </span><span class="s6">&quot;idCount&quot;</span>
+    <span class="s1">_format_ = </span><span class="s6">&quot;hhh&quot;</span>
+
+
+<span class="s3">class </span><span class="s1">GRPICONDIRENTRY(Structure):</span>
+    <span class="s1">_names_ = (</span><span class="s6">&quot;bWidth&quot;</span><span class="s3">, </span><span class="s6">&quot;bHeight&quot;</span><span class="s3">, </span><span class="s6">&quot;bColorCount&quot;</span><span class="s3">, </span><span class="s6">&quot;bReserved&quot;</span><span class="s3">, </span><span class="s6">&quot;wPlanes&quot;</span><span class="s3">, </span><span class="s6">&quot;wBitCount&quot;</span><span class="s3">, </span><span class="s6">&quot;dwBytesInRes&quot;</span><span class="s3">, </span><span class="s6">&quot;nID&quot;</span><span class="s1">)</span>
+    <span class="s1">_format_ = </span><span class="s6">&quot;bbbbhhih&quot;</span>
+
+
+<span class="s0"># An IconFile instance is created for each .ico file given.</span>
+<span class="s3">class </span><span class="s1">IconFile:</span>
+    <span class="s3">def </span><span class="s1">__init__(self</span><span class="s3">, </span><span class="s1">path):</span>
+        <span class="s1">self.path = path</span>
+        <span class="s3">if not </span><span class="s1">os.path.isabs(path):</span>
+            <span class="s1">self.path = os.path.join(config.CONF[</span><span class="s6">'specpath'</span><span class="s1">]</span><span class="s3">, </span><span class="s1">path)</span>
+        <span class="s3">try</span><span class="s1">:</span>
+            <span class="s0"># The path is from the user parameter, don't trust it.</span>
+            <span class="s1">file = open(self.path</span><span class="s3">, </span><span class="s6">&quot;rb&quot;</span><span class="s1">)</span>
+        <span class="s3">except </span><span class="s1">OSError:</span>
+            <span class="s0"># The icon file can't be opened for some reason. Stop the</span>
+            <span class="s0"># program with an informative message.</span>
+            <span class="s3">raise </span><span class="s1">SystemExit(</span><span class="s6">'Unable to open icon file {}'</span><span class="s1">.format(path))</span>
+        <span class="s1">self.entries = []</span>
+        <span class="s1">self.images = []</span>
+        <span class="s1">header = self.header = ICONDIRHEADER()</span>
+        <span class="s1">header.fromfile(file)</span>
+        <span class="s3">for </span><span class="s1">i </span><span class="s3">in </span><span class="s1">range(header.idCount):</span>
+            <span class="s1">entry = ICONDIRENTRY()</span>
+            <span class="s1">entry.fromfile(file)</span>
+            <span class="s1">self.entries.append(entry)</span>
+        <span class="s3">for </span><span class="s1">e </span><span class="s3">in </span><span class="s1">self.entries:</span>
+            <span class="s1">file.seek(e.dwImageOffset</span><span class="s3">, </span><span class="s4">0</span><span class="s1">)</span>
+            <span class="s1">self.images.append(file.read(e.dwBytesInRes))</span>
+
+    <span class="s3">def </span><span class="s1">grp_icon_dir(self):</span>
+        <span class="s3">return </span><span class="s1">self.header.tostring()</span>
+
+    <span class="s3">def </span><span class="s1">grp_icondir_entries(self</span><span class="s3">, </span><span class="s1">id=</span><span class="s4">1</span><span class="s1">):</span>
+        <span class="s1">data = </span><span class="s5">b''</span>
+        <span class="s3">for </span><span class="s1">entry </span><span class="s3">in </span><span class="s1">self.entries:</span>
+            <span class="s1">e = GRPICONDIRENTRY()</span>
+            <span class="s3">for </span><span class="s1">n </span><span class="s3">in </span><span class="s1">e._names_[:-</span><span class="s4">1</span><span class="s1">]:</span>
+                <span class="s1">setattr(e</span><span class="s3">, </span><span class="s1">n</span><span class="s3">, </span><span class="s1">getattr(entry</span><span class="s3">, </span><span class="s1">n))</span>
+            <span class="s1">e.nID = id</span>
+            <span class="s1">id = id + </span><span class="s4">1</span>
+            <span class="s1">data = data + e.tostring()</span>
+        <span class="s3">return </span><span class="s1">data</span>
+
+
+<span class="s3">def </span><span class="s1">CopyIcons_FromIco(dstpath</span><span class="s3">, </span><span class="s1">srcpath</span><span class="s3">, </span><span class="s1">id=</span><span class="s4">1</span><span class="s1">):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Use the Win API UpdateResource facility to apply the icon resource(s) to the .exe file. 
+ 
+    :param str dstpath: absolute path of the .exe file being built. 
+    :param str srcpath: list of 1 or more .ico file paths 
+    &quot;&quot;&quot;</span>
+    <span class="s1">icons = map(IconFile</span><span class="s3">, </span><span class="s1">srcpath)</span>
+    <span class="s1">logger.info(</span><span class="s6">&quot;Copying icons from %s&quot;</span><span class="s3">, </span><span class="s1">srcpath)</span>
+
+    <span class="s1">hdst = win32api.BeginUpdateResource(dstpath</span><span class="s3">, </span><span class="s4">0</span><span class="s1">)</span>
+
+    <span class="s1">iconid = </span><span class="s4">1</span>
+    <span class="s0"># Each step in the following enumerate() will instantiate an IconFile object, as a result of deferred execution</span>
+    <span class="s0"># of the map() above.</span>
+    <span class="s3">for </span><span class="s1">i</span><span class="s3">, </span><span class="s1">f </span><span class="s3">in </span><span class="s1">enumerate(icons):</span>
+        <span class="s1">data = f.grp_icon_dir()</span>
+        <span class="s1">data = data + f.grp_icondir_entries(iconid)</span>
+        <span class="s1">win32api.UpdateResource(hdst</span><span class="s3">, </span><span class="s1">RT_GROUP_ICON</span><span class="s3">, </span><span class="s1">i</span><span class="s3">, </span><span class="s1">data)</span>
+        <span class="s1">logger.info(</span><span class="s6">&quot;Writing RT_GROUP_ICON %d resource with %d bytes&quot;</span><span class="s3">, </span><span class="s1">i</span><span class="s3">, </span><span class="s1">len(data))</span>
+        <span class="s3">for </span><span class="s1">data </span><span class="s3">in </span><span class="s1">f.images:</span>
+            <span class="s1">win32api.UpdateResource(hdst</span><span class="s3">, </span><span class="s1">RT_ICON</span><span class="s3">, </span><span class="s1">iconid</span><span class="s3">, </span><span class="s1">data)</span>
+            <span class="s1">logger.info(</span><span class="s6">&quot;Writing RT_ICON %d resource with %d bytes&quot;</span><span class="s3">, </span><span class="s1">iconid</span><span class="s3">, </span><span class="s1">len(data))</span>
+            <span class="s1">iconid = iconid + </span><span class="s4">1</span>
+
+    <span class="s1">win32api.EndUpdateResource(hdst</span><span class="s3">, </span><span class="s4">0</span><span class="s1">)</span>
+
+
+<span class="s3">def </span><span class="s1">CopyIcons(dstpath</span><span class="s3">, </span><span class="s1">srcpath):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Called from building/api.py to handle icons. If the input was by --icon on the command line, srcpath is a single 
+    string. However, it is possible to modify the spec file adding icon=['foo.ico','bar.ico'] to the EXE() statement. 
+    In that case, srcpath is a list of strings. 
+ 
+    The string format is either path-to-.ico or path-to-.exe,n for n an integer resource index in the .exe. In either 
+    case, the path can be relative or absolute. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s3">if </span><span class="s1">isinstance(srcpath</span><span class="s3">, </span><span class="s1">str):</span>
+        <span class="s0"># Just a single string, make it a one-element list.</span>
+        <span class="s1">srcpath = [srcpath]</span>
+
+    <span class="s3">def </span><span class="s1">splitter(s):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Convert &quot;pathname&quot; to tuple (&quot;pathname&quot;, None) 
+        Convert &quot;pathname,n&quot; to tuple (&quot;pathname&quot;, n) 
+        &quot;&quot;&quot;</span>
+        <span class="s3">try</span><span class="s1">:</span>
+            <span class="s1">srcpath</span><span class="s3">, </span><span class="s1">index = s.split(</span><span class="s6">','</span><span class="s1">)</span>
+            <span class="s3">return </span><span class="s1">srcpath.strip()</span><span class="s3">, </span><span class="s1">int(index)</span>
+        <span class="s3">except </span><span class="s1">ValueError:</span>
+            <span class="s3">return </span><span class="s1">s</span><span class="s3">, None</span>
+
+    <span class="s0"># split all the items in the list into tuples as above.</span>
+    <span class="s1">srcpath = list(map(splitter</span><span class="s3">, </span><span class="s1">srcpath))</span>
+
+    <span class="s3">if </span><span class="s1">len(srcpath) &gt; </span><span class="s4">1</span><span class="s1">:</span>
+        <span class="s0"># More than one icon source given. We currently handle multiple icons by calling CopyIcons_FromIco(), which only</span>
+        <span class="s0"># allows .ico. In principle we could accept a mix of .ico and .exe, but it would complicate things. If you need</span>
+        <span class="s0"># it, submit a pull request.</span>
+        <span class="s0">#</span>
+        <span class="s0"># Note that a &quot;,index&quot; on a .ico is just ignored in the single or multiple case.</span>
+        <span class="s1">srcs = []</span>
+        <span class="s3">for </span><span class="s1">s </span><span class="s3">in </span><span class="s1">srcpath:</span>
+            <span class="s1">e = os.path.splitext(s[</span><span class="s4">0</span><span class="s1">])[</span><span class="s4">1</span><span class="s1">]</span>
+            <span class="s3">if </span><span class="s1">e.lower() != </span><span class="s6">'.ico'</span><span class="s1">:</span>
+                <span class="s3">raise </span><span class="s1">ValueError(</span><span class="s6">'Multiple icons supported only from .ico files'</span><span class="s1">)</span>
+            <span class="s1">srcs.append(s[</span><span class="s4">0</span><span class="s1">])</span>
+        <span class="s3">return </span><span class="s1">CopyIcons_FromIco(dstpath</span><span class="s3">, </span><span class="s1">srcs)</span>
+
+    <span class="s0"># Just one source given.</span>
+    <span class="s1">srcpath</span><span class="s3">, </span><span class="s1">index = srcpath[</span><span class="s4">0</span><span class="s1">]</span>
+    <span class="s1">srcext = os.path.splitext(srcpath)[</span><span class="s4">1</span><span class="s1">]</span>
+    <span class="s0"># Handle the simple case of foo.ico, ignoring any index.</span>
+    <span class="s3">if </span><span class="s1">srcext.lower() == </span><span class="s6">'.ico'</span><span class="s1">:</span>
+        <span class="s3">return </span><span class="s1">CopyIcons_FromIco(dstpath</span><span class="s3">, </span><span class="s1">[srcpath])</span>
+
+    <span class="s0"># Single source is not .ico, presumably it is .exe (and if not, some error will occur). If relative, make it</span>
+    <span class="s0"># relative to the .spec file.</span>
+    <span class="s3">if not </span><span class="s1">os.path.isabs(srcpath):</span>
+        <span class="s1">srcpath = os.path.join(config.CONF[</span><span class="s6">'specpath'</span><span class="s1">]</span><span class="s3">, </span><span class="s1">srcpath)</span>
+    <span class="s3">if </span><span class="s1">index </span><span class="s3">is not None</span><span class="s1">:</span>
+        <span class="s1">logger.info(</span><span class="s6">&quot;Copying icon from %s, %d&quot;</span><span class="s3">, </span><span class="s1">srcpath</span><span class="s3">, </span><span class="s1">index)</span>
+    <span class="s3">else</span><span class="s1">:</span>
+        <span class="s1">logger.info(</span><span class="s6">&quot;Copying icons from %s&quot;</span><span class="s3">, </span><span class="s1">srcpath)</span>
+
+    <span class="s0"># Bail out quickly if the input is invalid. Letting images in the wrong format be passed to Windows API gives very</span>
+    <span class="s0"># cryptic error messages, as it is generally unclear why PyInstaller would treat an image file as an executable.</span>
+    <span class="s3">if </span><span class="s1">srcext != </span><span class="s6">&quot;.exe&quot;</span><span class="s1">:</span>
+        <span class="s3">raise </span><span class="s1">ValueError(</span>
+            <span class="s6">f&quot;Received icon path '</span><span class="s3">{</span><span class="s1">srcpath</span><span class="s3">}</span><span class="s6">' which exists but is not in the correct format. On Windows, only '.ico' &quot;</span>
+            <span class="s6">f&quot;images or other '.exe' files may be used as icons. Please convert your '</span><span class="s3">{</span><span class="s1">srcext</span><span class="s3">}</span><span class="s6">' file to a '.ico' &quot;</span>
+            <span class="s6">&quot;and try again.&quot;</span>
+        <span class="s1">)</span>
+
+    <span class="s3">try</span><span class="s1">:</span>
+        <span class="s0"># Attempt to load the .ico or .exe containing the icon into memory using the same mechanism as if it were a DLL.</span>
+        <span class="s0"># If this fails for any reason (for example if the file does not exist or is not a .ico/.exe) then LoadLibraryEx</span>
+        <span class="s0"># returns a null handle and win32api raises a unique exception with a win error code and a string.</span>
+        <span class="s1">hsrc = win32api.LoadLibraryEx(srcpath</span><span class="s3">, </span><span class="s4">0</span><span class="s3">, </span><span class="s1">LOAD_LIBRARY_AS_DATAFILE)</span>
+    <span class="s3">except </span><span class="s1">pywintypes.error </span><span class="s3">as </span><span class="s1">W32E:</span>
+        <span class="s0"># We could continue with no icon (i.e., just return), but it seems best to terminate the build with a message.</span>
+        <span class="s3">raise </span><span class="s1">SystemExit(</span>
+            <span class="s6">&quot;Unable to load icon file {}</span><span class="s3">\n    </span><span class="s6">{} (Error code {})&quot;</span><span class="s1">.format(srcpath</span><span class="s3">, </span><span class="s1">W32E.strerror</span><span class="s3">, </span><span class="s1">W32E.winerror)</span>
+        <span class="s1">)</span>
+    <span class="s1">hdst = win32api.BeginUpdateResource(dstpath</span><span class="s3">, </span><span class="s4">0</span><span class="s1">)</span>
+    <span class="s3">if </span><span class="s1">index </span><span class="s3">is None</span><span class="s1">:</span>
+        <span class="s1">grpname = win32api.EnumResourceNames(hsrc</span><span class="s3">, </span><span class="s1">RT_GROUP_ICON)[</span><span class="s4">0</span><span class="s1">]</span>
+    <span class="s3">elif </span><span class="s1">index &gt;= </span><span class="s4">0</span><span class="s1">:</span>
+        <span class="s1">grpname = win32api.EnumResourceNames(hsrc</span><span class="s3">, </span><span class="s1">RT_GROUP_ICON)[index]</span>
+    <span class="s3">else</span><span class="s1">:</span>
+        <span class="s1">grpname = -index</span>
+    <span class="s1">data = win32api.LoadResource(hsrc</span><span class="s3">, </span><span class="s1">RT_GROUP_ICON</span><span class="s3">, </span><span class="s1">grpname)</span>
+    <span class="s1">win32api.UpdateResource(hdst</span><span class="s3">, </span><span class="s1">RT_GROUP_ICON</span><span class="s3">, </span><span class="s1">grpname</span><span class="s3">, </span><span class="s1">data)</span>
+    <span class="s3">for </span><span class="s1">iconname </span><span class="s3">in </span><span class="s1">win32api.EnumResourceNames(hsrc</span><span class="s3">, </span><span class="s1">RT_ICON):</span>
+        <span class="s1">data = win32api.LoadResource(hsrc</span><span class="s3">, </span><span class="s1">RT_ICON</span><span class="s3">, </span><span class="s1">iconname)</span>
+        <span class="s1">win32api.UpdateResource(hdst</span><span class="s3">, </span><span class="s1">RT_ICON</span><span class="s3">, </span><span class="s1">iconname</span><span class="s3">, </span><span class="s1">data)</span>
+    <span class="s1">win32api.FreeLibrary(hsrc)</span>
+    <span class="s1">win32api.EndUpdateResource(hdst</span><span class="s3">, </span><span class="s4">0</span><span class="s1">)</span>
+
+
+<span class="s3">if </span><span class="s1">__name__ == </span><span class="s6">&quot;__main__&quot;</span><span class="s1">:</span>
+    <span class="s3">import </span><span class="s1">sys</span>
+
+    <span class="s1">dstpath = sys.argv[</span><span class="s4">1</span><span class="s1">]</span>
+    <span class="s1">srcpath = sys.argv[</span><span class="s4">2</span><span class="s1">:]</span>
+    <span class="s1">CopyIcons(dstpath</span><span class="s3">, </span><span class="s1">srcpath)</span>
+</pre>
+</body>
+</html>

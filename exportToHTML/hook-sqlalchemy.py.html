@@ -1,0 +1,98 @@
+<html>
+<head>
+<title>hook-sqlalchemy.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #cc7832;}
+.s3 { color: #6a8759;}
+.s4 { color: #629755; font-style: italic;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+hook-sqlalchemy.py</font>
+</center></td></tr></table>
+<pre><span class="s0">#-----------------------------------------------------------------------------</span>
+<span class="s0"># Copyright (c) 2005-2021, PyInstaller Development Team.</span>
+<span class="s0">#</span>
+<span class="s0"># Distributed under the terms of the GNU General Public License (version 2</span>
+<span class="s0"># or later) with exception for distributing the bootloader.</span>
+<span class="s0">#</span>
+<span class="s0"># The full license is in the file COPYING.txt, distributed with this software.</span>
+<span class="s0">#</span>
+<span class="s0"># SPDX-License-Identifier: (GPL-2.0-or-later WITH Bootloader-exception)</span>
+<span class="s0">#-----------------------------------------------------------------------------</span>
+
+<span class="s2">import </span><span class="s1">re</span>
+
+<span class="s2">from </span><span class="s1">PyInstaller.lib.modulegraph.modulegraph </span><span class="s2">import </span><span class="s1">SourceModule</span>
+<span class="s2">from </span><span class="s1">PyInstaller.lib.modulegraph.util </span><span class="s2">import </span><span class="s1">guess_encoding</span>
+<span class="s2">from </span><span class="s1">PyInstaller.utils.hooks </span><span class="s2">import </span><span class="s1">exec_statement</span><span class="s2">, </span><span class="s1">is_module_satisfies</span><span class="s2">, </span><span class="s1">logger</span>
+
+<span class="s0"># 'sqlalchemy.testing' causes bundling a lot of unnecessary modules.</span>
+<span class="s1">excludedimports = [</span><span class="s3">'sqlalchemy.testing'</span><span class="s1">]</span>
+
+<span class="s0"># Include most common database bindings some database bindings are detected and include some are not. We should</span>
+<span class="s0"># explicitly include database backends.</span>
+<span class="s1">hiddenimports = [</span><span class="s3">'pysqlite2'</span><span class="s2">, </span><span class="s3">'MySQLdb'</span><span class="s2">, </span><span class="s3">'psycopg2'</span><span class="s2">, </span><span class="s3">'sqlalchemy.ext.baked'</span><span class="s1">]</span>
+
+<span class="s2">if </span><span class="s1">is_module_satisfies(</span><span class="s3">'sqlalchemy &gt;= 1.4'</span><span class="s1">):</span>
+    <span class="s1">hiddenimports.append(</span><span class="s3">&quot;sqlalchemy.sql.default_comparator&quot;</span><span class="s1">)</span>
+
+<span class="s0"># In SQLAlchemy &gt;= 0.6, the &quot;sqlalchemy.dialects&quot; package provides dialects.</span>
+<span class="s2">if </span><span class="s1">is_module_satisfies(</span><span class="s3">'sqlalchemy &gt;= 0.6'</span><span class="s1">):</span>
+    <span class="s1">dialects = exec_statement(</span><span class="s3">&quot;import sqlalchemy.dialects;print(sqlalchemy.dialects.__all__)&quot;</span><span class="s1">)</span>
+    <span class="s1">dialects = eval(dialects.strip())</span>
+
+    <span class="s2">for </span><span class="s1">n </span><span class="s2">in </span><span class="s1">dialects:</span>
+        <span class="s1">hiddenimports.append(</span><span class="s3">&quot;sqlalchemy.dialects.&quot; </span><span class="s1">+ n)</span>
+<span class="s0"># In SQLAlchemy &lt;= 0.5, the &quot;sqlalchemy.databases&quot; package provides dialects.</span>
+<span class="s2">else</span><span class="s1">:</span>
+    <span class="s1">databases = exec_statement(</span><span class="s3">&quot;import sqlalchemy.databases; print(sqlalchemy.databases.__all__)&quot;</span><span class="s1">)</span>
+    <span class="s1">databases = eval(databases.strip())</span>
+
+    <span class="s2">for </span><span class="s1">n </span><span class="s2">in </span><span class="s1">databases:</span>
+        <span class="s1">hiddenimports.append(</span><span class="s3">&quot;sqlalchemy.databases.&quot; </span><span class="s1">+ n)</span>
+
+
+<span class="s2">def </span><span class="s1">hook(hook_api):</span>
+    <span class="s4">&quot;&quot;&quot; 
+    SQLAlchemy 0.9 introduced the decorator 'util.dependencies'.  This decorator does imports. E.g.: 
+ 
+            @util.dependencies(&quot;sqlalchemy.sql.schema&quot;) 
+ 
+    This hook scans for included SQLAlchemy modules and then scans those modules for any util.dependencies and marks 
+    those modules as hidden imports. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s2">if not </span><span class="s1">is_module_satisfies(</span><span class="s3">'sqlalchemy &gt;= 0.9'</span><span class="s1">):</span>
+        <span class="s2">return</span>
+
+    <span class="s0"># this parser is very simplistic but seems to catch all cases as of V1.1</span>
+    <span class="s1">depend_regex = re.compile(</span><span class="s3">r'@util.dependencies\([\'&quot;](.*?)[\'&quot;]\)'</span><span class="s1">)</span>
+
+    <span class="s1">hidden_imports_set = set()</span>
+    <span class="s1">known_imports = set()</span>
+    <span class="s2">for </span><span class="s1">node </span><span class="s2">in </span><span class="s1">hook_api.module_graph.iter_graph(start=hook_api.module):</span>
+        <span class="s2">if </span><span class="s1">isinstance(node</span><span class="s2">, </span><span class="s1">SourceModule) </span><span class="s2">and </span><span class="s1">\</span>
+                <span class="s1">node.identifier.startswith(</span><span class="s3">'sqlalchemy.'</span><span class="s1">):</span>
+            <span class="s1">known_imports.add(node.identifier)</span>
+            <span class="s0"># Determine the encoding of the source file.</span>
+            <span class="s2">with </span><span class="s1">open(node.filename</span><span class="s2">, </span><span class="s3">'rb'</span><span class="s1">) </span><span class="s2">as </span><span class="s1">f:</span>
+                <span class="s1">encoding = guess_encoding(f)</span>
+            <span class="s0"># Use that to open the file.</span>
+            <span class="s2">with </span><span class="s1">open(node.filename</span><span class="s2">, </span><span class="s3">'r'</span><span class="s2">, </span><span class="s1">encoding=encoding) </span><span class="s2">as </span><span class="s1">f:</span>
+                <span class="s2">for </span><span class="s1">match </span><span class="s2">in </span><span class="s1">depend_regex.findall(f.read()):</span>
+                    <span class="s1">hidden_imports_set.add(match)</span>
+
+    <span class="s1">hidden_imports_set -= known_imports</span>
+    <span class="s2">if </span><span class="s1">len(hidden_imports_set):</span>
+        <span class="s1">logger.info(</span><span class="s3">&quot;  Found %d sqlalchemy hidden imports&quot;</span><span class="s2">, </span><span class="s1">len(hidden_imports_set))</span>
+        <span class="s1">hook_api.add_imports(*list(hidden_imports_set))</span>
+</pre>
+</body>
+</html>

@@ -1,0 +1,329 @@
+<html>
+<head>
+<title>verifier.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #cc7832;}
+.s3 { color: #6897bb;}
+.s4 { color: #6a8759;}
+.s5 { color: #629755; font-style: italic;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+verifier.py</font>
+</center></td></tr></table>
+<pre><span class="s0">#</span>
+<span class="s0"># DEPRECATED: implementation for ffi.verify()</span>
+<span class="s0">#</span>
+<span class="s2">import </span><span class="s1">sys</span><span class="s2">, </span><span class="s1">os</span><span class="s2">, </span><span class="s1">binascii</span><span class="s2">, </span><span class="s1">shutil</span><span class="s2">, </span><span class="s1">io</span>
+<span class="s2">from </span><span class="s1">. </span><span class="s2">import </span><span class="s1">__version_verifier_modules__</span>
+<span class="s2">from </span><span class="s1">. </span><span class="s2">import </span><span class="s1">ffiplatform</span>
+<span class="s2">from </span><span class="s1">.error </span><span class="s2">import </span><span class="s1">VerificationError</span>
+
+<span class="s2">if </span><span class="s1">sys.version_info &gt;= (</span><span class="s3">3</span><span class="s2">, </span><span class="s3">3</span><span class="s1">):</span>
+    <span class="s2">import </span><span class="s1">importlib.machinery</span>
+    <span class="s2">def </span><span class="s1">_extension_suffixes():</span>
+        <span class="s2">return </span><span class="s1">importlib.machinery.EXTENSION_SUFFIXES[:]</span>
+<span class="s2">else</span><span class="s1">:</span>
+    <span class="s2">import </span><span class="s1">imp</span>
+    <span class="s2">def </span><span class="s1">_extension_suffixes():</span>
+        <span class="s2">return </span><span class="s1">[suffix </span><span class="s2">for </span><span class="s1">suffix</span><span class="s2">, </span><span class="s1">_</span><span class="s2">, </span><span class="s1">type </span><span class="s2">in </span><span class="s1">imp.get_suffixes()</span>
+                <span class="s2">if </span><span class="s1">type == imp.C_EXTENSION]</span>
+
+
+<span class="s2">if </span><span class="s1">sys.version_info &gt;= (</span><span class="s3">3</span><span class="s2">,</span><span class="s1">):</span>
+    <span class="s1">NativeIO = io.StringIO</span>
+<span class="s2">else</span><span class="s1">:</span>
+    <span class="s2">class </span><span class="s1">NativeIO(io.BytesIO):</span>
+        <span class="s2">def </span><span class="s1">write(self</span><span class="s2">, </span><span class="s1">s):</span>
+            <span class="s2">if </span><span class="s1">isinstance(s</span><span class="s2">, </span><span class="s1">unicode):</span>
+                <span class="s1">s = s.encode(</span><span class="s4">'ascii'</span><span class="s1">)</span>
+            <span class="s1">super(NativeIO</span><span class="s2">, </span><span class="s1">self).write(s)</span>
+
+
+<span class="s2">class </span><span class="s1">Verifier(object):</span>
+
+    <span class="s2">def </span><span class="s1">__init__(self</span><span class="s2">, </span><span class="s1">ffi</span><span class="s2">, </span><span class="s1">preamble</span><span class="s2">, </span><span class="s1">tmpdir=</span><span class="s2">None, </span><span class="s1">modulename=</span><span class="s2">None,</span>
+                 <span class="s1">ext_package=</span><span class="s2">None, </span><span class="s1">tag=</span><span class="s4">''</span><span class="s2">, </span><span class="s1">force_generic_engine=</span><span class="s2">False,</span>
+                 <span class="s1">source_extension=</span><span class="s4">'.c'</span><span class="s2">, </span><span class="s1">flags=</span><span class="s2">None, </span><span class="s1">relative_to=</span><span class="s2">None, </span><span class="s1">**kwds):</span>
+        <span class="s2">if </span><span class="s1">ffi._parser._uses_new_feature:</span>
+            <span class="s2">raise </span><span class="s1">VerificationError(</span>
+                <span class="s4">&quot;feature not supported with ffi.verify(), but only &quot;</span>
+                <span class="s4">&quot;with ffi.set_source(): %s&quot; </span><span class="s1">% (ffi._parser._uses_new_feature</span><span class="s2">,</span><span class="s1">))</span>
+        <span class="s1">self.ffi = ffi</span>
+        <span class="s1">self.preamble = preamble</span>
+        <span class="s2">if not </span><span class="s1">modulename:</span>
+            <span class="s1">flattened_kwds = ffiplatform.flatten(kwds)</span>
+        <span class="s1">vengine_class = _locate_engine_class(ffi</span><span class="s2">, </span><span class="s1">force_generic_engine)</span>
+        <span class="s1">self._vengine = vengine_class(self)</span>
+        <span class="s1">self._vengine.patch_extension_kwds(kwds)</span>
+        <span class="s1">self.flags = flags</span>
+        <span class="s1">self.kwds = self.make_relative_to(kwds</span><span class="s2">, </span><span class="s1">relative_to)</span>
+        <span class="s0">#</span>
+        <span class="s2">if </span><span class="s1">modulename:</span>
+            <span class="s2">if </span><span class="s1">tag:</span>
+                <span class="s2">raise </span><span class="s1">TypeError(</span><span class="s4">&quot;can't specify both 'modulename' and 'tag'&quot;</span><span class="s1">)</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">key = </span><span class="s4">'</span><span class="s2">\x00</span><span class="s4">'</span><span class="s1">.join([</span><span class="s4">'%d.%d' </span><span class="s1">% sys.version_info[:</span><span class="s3">2</span><span class="s1">]</span><span class="s2">,</span>
+                               <span class="s1">__version_verifier_modules__</span><span class="s2">,</span>
+                               <span class="s1">preamble</span><span class="s2">, </span><span class="s1">flattened_kwds] +</span>
+                              <span class="s1">ffi._cdefsources)</span>
+            <span class="s2">if </span><span class="s1">sys.version_info &gt;= (</span><span class="s3">3</span><span class="s2">,</span><span class="s1">):</span>
+                <span class="s1">key = key.encode(</span><span class="s4">'utf-8'</span><span class="s1">)</span>
+            <span class="s1">k1 = hex(binascii.crc32(key[</span><span class="s3">0</span><span class="s1">::</span><span class="s3">2</span><span class="s1">]) &amp; </span><span class="s3">0xffffffff</span><span class="s1">)</span>
+            <span class="s1">k1 = k1.lstrip(</span><span class="s4">'0x'</span><span class="s1">).rstrip(</span><span class="s4">'L'</span><span class="s1">)</span>
+            <span class="s1">k2 = hex(binascii.crc32(key[</span><span class="s3">1</span><span class="s1">::</span><span class="s3">2</span><span class="s1">]) &amp; </span><span class="s3">0xffffffff</span><span class="s1">)</span>
+            <span class="s1">k2 = k2.lstrip(</span><span class="s4">'0'</span><span class="s1">).rstrip(</span><span class="s4">'L'</span><span class="s1">)</span>
+            <span class="s1">modulename = </span><span class="s4">'_cffi_%s_%s%s%s' </span><span class="s1">% (tag</span><span class="s2">, </span><span class="s1">self._vengine._class_key</span><span class="s2">,</span>
+                                              <span class="s1">k1</span><span class="s2">, </span><span class="s1">k2)</span>
+        <span class="s1">suffix = _get_so_suffixes()[</span><span class="s3">0</span><span class="s1">]</span>
+        <span class="s1">self.tmpdir = tmpdir </span><span class="s2">or </span><span class="s1">_caller_dir_pycache()</span>
+        <span class="s1">self.sourcefilename = os.path.join(self.tmpdir</span><span class="s2">, </span><span class="s1">modulename + source_extension)</span>
+        <span class="s1">self.modulefilename = os.path.join(self.tmpdir</span><span class="s2">, </span><span class="s1">modulename + suffix)</span>
+        <span class="s1">self.ext_package = ext_package</span>
+        <span class="s1">self._has_source = </span><span class="s2">False</span>
+        <span class="s1">self._has_module = </span><span class="s2">False</span>
+
+    <span class="s2">def </span><span class="s1">write_source(self</span><span class="s2">, </span><span class="s1">file=</span><span class="s2">None</span><span class="s1">):</span>
+        <span class="s5">&quot;&quot;&quot;Write the C source code.  It is produced in 'self.sourcefilename', 
+        which can be tweaked beforehand.&quot;&quot;&quot;</span>
+        <span class="s2">with </span><span class="s1">self.ffi._lock:</span>
+            <span class="s2">if </span><span class="s1">self._has_source </span><span class="s2">and </span><span class="s1">file </span><span class="s2">is None</span><span class="s1">:</span>
+                <span class="s2">raise </span><span class="s1">VerificationError(</span>
+                    <span class="s4">&quot;source code already written&quot;</span><span class="s1">)</span>
+            <span class="s1">self._write_source(file)</span>
+
+    <span class="s2">def </span><span class="s1">compile_module(self):</span>
+        <span class="s5">&quot;&quot;&quot;Write the C source code (if not done already) and compile it. 
+        This produces a dynamic link library in 'self.modulefilename'.&quot;&quot;&quot;</span>
+        <span class="s2">with </span><span class="s1">self.ffi._lock:</span>
+            <span class="s2">if </span><span class="s1">self._has_module:</span>
+                <span class="s2">raise </span><span class="s1">VerificationError(</span><span class="s4">&quot;module already compiled&quot;</span><span class="s1">)</span>
+            <span class="s2">if not </span><span class="s1">self._has_source:</span>
+                <span class="s1">self._write_source()</span>
+            <span class="s1">self._compile_module()</span>
+
+    <span class="s2">def </span><span class="s1">load_library(self):</span>
+        <span class="s5">&quot;&quot;&quot;Get a C module from this Verifier instance. 
+        Returns an instance of a FFILibrary class that behaves like the 
+        objects returned by ffi.dlopen(), but that delegates all 
+        operations to the C module.  If necessary, the C code is written 
+        and compiled first. 
+        &quot;&quot;&quot;</span>
+        <span class="s2">with </span><span class="s1">self.ffi._lock:</span>
+            <span class="s2">if not </span><span class="s1">self._has_module:</span>
+                <span class="s1">self._locate_module()</span>
+                <span class="s2">if not </span><span class="s1">self._has_module:</span>
+                    <span class="s2">if not </span><span class="s1">self._has_source:</span>
+                        <span class="s1">self._write_source()</span>
+                    <span class="s1">self._compile_module()</span>
+            <span class="s2">return </span><span class="s1">self._load_library()</span>
+
+    <span class="s2">def </span><span class="s1">get_module_name(self):</span>
+        <span class="s1">basename = os.path.basename(self.modulefilename)</span>
+        <span class="s0"># kill both the .so extension and the other .'s, as introduced</span>
+        <span class="s0"># by Python 3: 'basename.cpython-33m.so'</span>
+        <span class="s1">basename = basename.split(</span><span class="s4">'.'</span><span class="s2">, </span><span class="s3">1</span><span class="s1">)[</span><span class="s3">0</span><span class="s1">]</span>
+        <span class="s0"># and the _d added in Python 2 debug builds --- but try to be</span>
+        <span class="s0"># conservative and not kill a legitimate _d</span>
+        <span class="s2">if </span><span class="s1">basename.endswith(</span><span class="s4">'_d'</span><span class="s1">) </span><span class="s2">and </span><span class="s1">hasattr(sys</span><span class="s2">, </span><span class="s4">'gettotalrefcount'</span><span class="s1">):</span>
+            <span class="s1">basename = basename[:-</span><span class="s3">2</span><span class="s1">]</span>
+        <span class="s2">return </span><span class="s1">basename</span>
+
+    <span class="s2">def </span><span class="s1">get_extension(self):</span>
+        <span class="s1">ffiplatform._hack_at_distutils() </span><span class="s0"># backward compatibility hack</span>
+        <span class="s2">if not </span><span class="s1">self._has_source:</span>
+            <span class="s2">with </span><span class="s1">self.ffi._lock:</span>
+                <span class="s2">if not </span><span class="s1">self._has_source:</span>
+                    <span class="s1">self._write_source()</span>
+        <span class="s1">sourcename = ffiplatform.maybe_relative_path(self.sourcefilename)</span>
+        <span class="s1">modname = self.get_module_name()</span>
+        <span class="s2">return </span><span class="s1">ffiplatform.get_extension(sourcename</span><span class="s2">, </span><span class="s1">modname</span><span class="s2">, </span><span class="s1">**self.kwds)</span>
+
+    <span class="s2">def </span><span class="s1">generates_python_module(self):</span>
+        <span class="s2">return </span><span class="s1">self._vengine._gen_python_module</span>
+
+    <span class="s2">def </span><span class="s1">make_relative_to(self</span><span class="s2">, </span><span class="s1">kwds</span><span class="s2">, </span><span class="s1">relative_to):</span>
+        <span class="s2">if </span><span class="s1">relative_to </span><span class="s2">and </span><span class="s1">os.path.dirname(relative_to):</span>
+            <span class="s1">dirname = os.path.dirname(relative_to)</span>
+            <span class="s1">kwds = kwds.copy()</span>
+            <span class="s2">for </span><span class="s1">key </span><span class="s2">in </span><span class="s1">ffiplatform.LIST_OF_FILE_NAMES:</span>
+                <span class="s2">if </span><span class="s1">key </span><span class="s2">in </span><span class="s1">kwds:</span>
+                    <span class="s1">lst = kwds[key]</span>
+                    <span class="s2">if not </span><span class="s1">isinstance(lst</span><span class="s2">, </span><span class="s1">(list</span><span class="s2">, </span><span class="s1">tuple)):</span>
+                        <span class="s2">raise </span><span class="s1">TypeError(</span><span class="s4">&quot;keyword '%s' should be a list or tuple&quot;</span>
+                                        <span class="s1">% (key</span><span class="s2">,</span><span class="s1">))</span>
+                    <span class="s1">lst = [os.path.join(dirname</span><span class="s2">, </span><span class="s1">fn) </span><span class="s2">for </span><span class="s1">fn </span><span class="s2">in </span><span class="s1">lst]</span>
+                    <span class="s1">kwds[key] = lst</span>
+        <span class="s2">return </span><span class="s1">kwds</span>
+
+    <span class="s0"># ----------</span>
+
+    <span class="s2">def </span><span class="s1">_locate_module(self):</span>
+        <span class="s2">if not </span><span class="s1">os.path.isfile(self.modulefilename):</span>
+            <span class="s2">if </span><span class="s1">self.ext_package:</span>
+                <span class="s2">try</span><span class="s1">:</span>
+                    <span class="s1">pkg = __import__(self.ext_package</span><span class="s2">, None, None, </span><span class="s1">[</span><span class="s4">'__doc__'</span><span class="s1">])</span>
+                <span class="s2">except </span><span class="s1">ImportError:</span>
+                    <span class="s2">return      </span><span class="s0"># cannot import the package itself, give up</span>
+                    <span class="s0"># (e.g. it might be called differently before installation)</span>
+                <span class="s1">path = pkg.__path__</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s1">path = </span><span class="s2">None</span>
+            <span class="s1">filename = self._vengine.find_module(self.get_module_name()</span><span class="s2">, </span><span class="s1">path</span><span class="s2">,</span>
+                                                 <span class="s1">_get_so_suffixes())</span>
+            <span class="s2">if </span><span class="s1">filename </span><span class="s2">is None</span><span class="s1">:</span>
+                <span class="s2">return</span>
+            <span class="s1">self.modulefilename = filename</span>
+        <span class="s1">self._vengine.collect_types()</span>
+        <span class="s1">self._has_module = </span><span class="s2">True</span>
+
+    <span class="s2">def </span><span class="s1">_write_source_to(self</span><span class="s2">, </span><span class="s1">file):</span>
+        <span class="s1">self._vengine._f = file</span>
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s1">self._vengine.write_source_to_f()</span>
+        <span class="s2">finally</span><span class="s1">:</span>
+            <span class="s2">del </span><span class="s1">self._vengine._f</span>
+
+    <span class="s2">def </span><span class="s1">_write_source(self</span><span class="s2">, </span><span class="s1">file=</span><span class="s2">None</span><span class="s1">):</span>
+        <span class="s2">if </span><span class="s1">file </span><span class="s2">is not None</span><span class="s1">:</span>
+            <span class="s1">self._write_source_to(file)</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s0"># Write our source file to an in memory file.</span>
+            <span class="s1">f = NativeIO()</span>
+            <span class="s1">self._write_source_to(f)</span>
+            <span class="s1">source_data = f.getvalue()</span>
+
+            <span class="s0"># Determine if this matches the current file</span>
+            <span class="s2">if </span><span class="s1">os.path.exists(self.sourcefilename):</span>
+                <span class="s2">with </span><span class="s1">open(self.sourcefilename</span><span class="s2">, </span><span class="s4">&quot;r&quot;</span><span class="s1">) </span><span class="s2">as </span><span class="s1">fp:</span>
+                    <span class="s1">needs_written = </span><span class="s2">not </span><span class="s1">(fp.read() == source_data)</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s1">needs_written = </span><span class="s2">True</span>
+
+            <span class="s0"># Actually write the file out if it doesn't match</span>
+            <span class="s2">if </span><span class="s1">needs_written:</span>
+                <span class="s1">_ensure_dir(self.sourcefilename)</span>
+                <span class="s2">with </span><span class="s1">open(self.sourcefilename</span><span class="s2">, </span><span class="s4">&quot;w&quot;</span><span class="s1">) </span><span class="s2">as </span><span class="s1">fp:</span>
+                    <span class="s1">fp.write(source_data)</span>
+
+            <span class="s0"># Set this flag</span>
+            <span class="s1">self._has_source = </span><span class="s2">True</span>
+
+    <span class="s2">def </span><span class="s1">_compile_module(self):</span>
+        <span class="s0"># compile this C source</span>
+        <span class="s1">tmpdir = os.path.dirname(self.sourcefilename)</span>
+        <span class="s1">outputfilename = ffiplatform.compile(tmpdir</span><span class="s2">, </span><span class="s1">self.get_extension())</span>
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s1">same = ffiplatform.samefile(outputfilename</span><span class="s2">, </span><span class="s1">self.modulefilename)</span>
+        <span class="s2">except </span><span class="s1">OSError:</span>
+            <span class="s1">same = </span><span class="s2">False</span>
+        <span class="s2">if not </span><span class="s1">same:</span>
+            <span class="s1">_ensure_dir(self.modulefilename)</span>
+            <span class="s1">shutil.move(outputfilename</span><span class="s2">, </span><span class="s1">self.modulefilename)</span>
+        <span class="s1">self._has_module = </span><span class="s2">True</span>
+
+    <span class="s2">def </span><span class="s1">_load_library(self):</span>
+        <span class="s2">assert </span><span class="s1">self._has_module</span>
+        <span class="s2">if </span><span class="s1">self.flags </span><span class="s2">is not None</span><span class="s1">:</span>
+            <span class="s2">return </span><span class="s1">self._vengine.load_library(self.flags)</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s2">return </span><span class="s1">self._vengine.load_library()</span>
+
+<span class="s0"># ____________________________________________________________</span>
+
+<span class="s1">_FORCE_GENERIC_ENGINE = </span><span class="s2">False      </span><span class="s0"># for tests</span>
+
+<span class="s2">def </span><span class="s1">_locate_engine_class(ffi</span><span class="s2">, </span><span class="s1">force_generic_engine):</span>
+    <span class="s2">if </span><span class="s1">_FORCE_GENERIC_ENGINE:</span>
+        <span class="s1">force_generic_engine = </span><span class="s2">True</span>
+    <span class="s2">if not </span><span class="s1">force_generic_engine:</span>
+        <span class="s2">if </span><span class="s4">'__pypy__' </span><span class="s2">in </span><span class="s1">sys.builtin_module_names:</span>
+            <span class="s1">force_generic_engine = </span><span class="s2">True</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s2">try</span><span class="s1">:</span>
+                <span class="s2">import </span><span class="s1">_cffi_backend</span>
+            <span class="s2">except </span><span class="s1">ImportError:</span>
+                <span class="s1">_cffi_backend = </span><span class="s4">'?'</span>
+            <span class="s2">if </span><span class="s1">ffi._backend </span><span class="s2">is not </span><span class="s1">_cffi_backend:</span>
+                <span class="s1">force_generic_engine = </span><span class="s2">True</span>
+    <span class="s2">if </span><span class="s1">force_generic_engine:</span>
+        <span class="s2">from </span><span class="s1">. </span><span class="s2">import </span><span class="s1">vengine_gen</span>
+        <span class="s2">return </span><span class="s1">vengine_gen.VGenericEngine</span>
+    <span class="s2">else</span><span class="s1">:</span>
+        <span class="s2">from </span><span class="s1">. </span><span class="s2">import </span><span class="s1">vengine_cpy</span>
+        <span class="s2">return </span><span class="s1">vengine_cpy.VCPythonEngine</span>
+
+<span class="s0"># ____________________________________________________________</span>
+
+<span class="s1">_TMPDIR = </span><span class="s2">None</span>
+
+<span class="s2">def </span><span class="s1">_caller_dir_pycache():</span>
+    <span class="s2">if </span><span class="s1">_TMPDIR:</span>
+        <span class="s2">return </span><span class="s1">_TMPDIR</span>
+    <span class="s1">result = os.environ.get(</span><span class="s4">'CFFI_TMPDIR'</span><span class="s1">)</span>
+    <span class="s2">if </span><span class="s1">result:</span>
+        <span class="s2">return </span><span class="s1">result</span>
+    <span class="s1">filename = sys._getframe(</span><span class="s3">2</span><span class="s1">).f_code.co_filename</span>
+    <span class="s2">return </span><span class="s1">os.path.abspath(os.path.join(os.path.dirname(filename)</span><span class="s2">,</span>
+                           <span class="s4">'__pycache__'</span><span class="s1">))</span>
+
+<span class="s2">def </span><span class="s1">set_tmpdir(dirname):</span>
+    <span class="s5">&quot;&quot;&quot;Set the temporary directory to use instead of __pycache__.&quot;&quot;&quot;</span>
+    <span class="s2">global </span><span class="s1">_TMPDIR</span>
+    <span class="s1">_TMPDIR = dirname</span>
+
+<span class="s2">def </span><span class="s1">cleanup_tmpdir(tmpdir=</span><span class="s2">None, </span><span class="s1">keep_so=</span><span class="s2">False</span><span class="s1">):</span>
+    <span class="s5">&quot;&quot;&quot;Clean up the temporary directory by removing all files in it 
+    called `_cffi_*.{c,so}` as well as the `build` subdirectory.&quot;&quot;&quot;</span>
+    <span class="s1">tmpdir = tmpdir </span><span class="s2">or </span><span class="s1">_caller_dir_pycache()</span>
+    <span class="s2">try</span><span class="s1">:</span>
+        <span class="s1">filelist = os.listdir(tmpdir)</span>
+    <span class="s2">except </span><span class="s1">OSError:</span>
+        <span class="s2">return</span>
+    <span class="s2">if </span><span class="s1">keep_so:</span>
+        <span class="s1">suffix = </span><span class="s4">'.c'   </span><span class="s0"># only remove .c files</span>
+    <span class="s2">else</span><span class="s1">:</span>
+        <span class="s1">suffix = _get_so_suffixes()[</span><span class="s3">0</span><span class="s1">].lower()</span>
+    <span class="s2">for </span><span class="s1">fn </span><span class="s2">in </span><span class="s1">filelist:</span>
+        <span class="s2">if </span><span class="s1">fn.lower().startswith(</span><span class="s4">'_cffi_'</span><span class="s1">) </span><span class="s2">and </span><span class="s1">(</span>
+                <span class="s1">fn.lower().endswith(suffix) </span><span class="s2">or </span><span class="s1">fn.lower().endswith(</span><span class="s4">'.c'</span><span class="s1">)):</span>
+            <span class="s2">try</span><span class="s1">:</span>
+                <span class="s1">os.unlink(os.path.join(tmpdir</span><span class="s2">, </span><span class="s1">fn))</span>
+            <span class="s2">except </span><span class="s1">OSError:</span>
+                <span class="s2">pass</span>
+    <span class="s1">clean_dir = [os.path.join(tmpdir</span><span class="s2">, </span><span class="s4">'build'</span><span class="s1">)]</span>
+    <span class="s2">for </span><span class="s1">dir </span><span class="s2">in </span><span class="s1">clean_dir:</span>
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s2">for </span><span class="s1">fn </span><span class="s2">in </span><span class="s1">os.listdir(dir):</span>
+                <span class="s1">fn = os.path.join(dir</span><span class="s2">, </span><span class="s1">fn)</span>
+                <span class="s2">if </span><span class="s1">os.path.isdir(fn):</span>
+                    <span class="s1">clean_dir.append(fn)</span>
+                <span class="s2">else</span><span class="s1">:</span>
+                    <span class="s1">os.unlink(fn)</span>
+        <span class="s2">except </span><span class="s1">OSError:</span>
+            <span class="s2">pass</span>
+
+<span class="s2">def </span><span class="s1">_get_so_suffixes():</span>
+    <span class="s1">suffixes = _extension_suffixes()</span>
+    <span class="s2">if not </span><span class="s1">suffixes:</span>
+        <span class="s0"># bah, no C_EXTENSION available.  Occurs on pypy without cpyext</span>
+        <span class="s2">if </span><span class="s1">sys.platform == </span><span class="s4">'win32'</span><span class="s1">:</span>
+            <span class="s1">suffixes = [</span><span class="s4">&quot;.pyd&quot;</span><span class="s1">]</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">suffixes = [</span><span class="s4">&quot;.so&quot;</span><span class="s1">]</span>
+
+    <span class="s2">return </span><span class="s1">suffixes</span>
+
+<span class="s2">def </span><span class="s1">_ensure_dir(filename):</span>
+    <span class="s1">dirname = os.path.dirname(filename)</span>
+    <span class="s2">if </span><span class="s1">dirname </span><span class="s2">and not </span><span class="s1">os.path.isdir(dirname):</span>
+        <span class="s1">os.makedirs(dirname)</span>
+</pre>
+</body>
+</html>

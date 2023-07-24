@@ -1,0 +1,582 @@
+<html>
+<head>
+<title>imphook.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #629755; font-style: italic;}
+.s3 { color: #cc7832;}
+.s4 { color: #6897bb;}
+.s5 { color: #6a8759;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+imphook.py</font>
+</center></td></tr></table>
+<pre><span class="s0">#-----------------------------------------------------------------------------</span>
+<span class="s0"># Copyright (c) 2005-2021, PyInstaller Development Team.</span>
+<span class="s0">#</span>
+<span class="s0"># Distributed under the terms of the GNU General Public License (version 2</span>
+<span class="s0"># or later) with exception for distributing the bootloader.</span>
+<span class="s0">#</span>
+<span class="s0"># The full license is in the file COPYING.txt, distributed with this software.</span>
+<span class="s0">#</span>
+<span class="s0"># SPDX-License-Identifier: (GPL-2.0-or-later WITH Bootloader-exception)</span>
+<span class="s0">#-----------------------------------------------------------------------------</span>
+<span class="s2">&quot;&quot;&quot; 
+Code related to processing of import hooks. 
+&quot;&quot;&quot;</span>
+
+<span class="s3">import </span><span class="s1">glob</span>
+<span class="s3">import </span><span class="s1">os.path</span>
+<span class="s3">import </span><span class="s1">sys</span>
+<span class="s3">import </span><span class="s1">weakref</span>
+
+<span class="s3">from </span><span class="s1">PyInstaller </span><span class="s3">import </span><span class="s1">log </span><span class="s3">as </span><span class="s1">logging</span>
+<span class="s3">from </span><span class="s1">PyInstaller.building.utils </span><span class="s3">import </span><span class="s1">format_binaries_and_datas</span>
+<span class="s3">from </span><span class="s1">PyInstaller.compat </span><span class="s3">import </span><span class="s1">expand_path</span><span class="s3">, </span><span class="s1">importlib_load_source</span>
+<span class="s3">from </span><span class="s1">PyInstaller.depend.imphookapi </span><span class="s3">import </span><span class="s1">PostGraphAPI</span>
+<span class="s3">from </span><span class="s1">PyInstaller.exceptions </span><span class="s3">import </span><span class="s1">ImportErrorWhenRunningHook</span>
+
+<span class="s1">logger = logging.getLogger(__name__)</span>
+
+<span class="s0"># Safety check: Hook module names need to be unique. Duplicate names might occur if the cached PyuModuleGraph has an</span>
+<span class="s0"># issue.</span>
+<span class="s1">HOOKS_MODULE_NAMES = set()</span>
+
+
+<span class="s3">class </span><span class="s1">ModuleHookCache(dict):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Cache of lazily loadable hook script objects. 
+ 
+    This cache is implemented as a `dict` subclass mapping from the fully-qualified names of all modules with at 
+    least one hook script to lists of `ModuleHook` instances encapsulating these scripts. As a `dict` subclass, 
+    all cached module names and hook scripts are accessible via standard dictionary operations. 
+ 
+    Attributes 
+    ---------- 
+    module_graph : ModuleGraph 
+        Current module graph. 
+    _hook_module_name_prefix : str 
+        String prefixing the names of all in-memory modules lazily loaded from cached hook scripts. See also the 
+        `hook_module_name_prefix` parameter passed to the `ModuleHook.__init__()` method. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s1">_cache_id_next = </span><span class="s4">0</span>
+    <span class="s5">&quot;&quot;&quot; 
+    0-based identifier unique to the next `ModuleHookCache` to be instantiated. 
+ 
+    This identifier is incremented on each instantiation of a new `ModuleHookCache` to isolate in-memory modules of 
+    lazily loaded hook scripts in that cache to the same cache-specific namespace, preventing edge-case collisions 
+    with existing in-memory modules in other caches. 
+ 
+    &quot;&quot;&quot;</span>
+    <span class="s3">def </span><span class="s1">__init__(self</span><span class="s3">, </span><span class="s1">module_graph</span><span class="s3">, </span><span class="s1">hook_dirs):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Cache all hook scripts in the passed directories. 
+ 
+        **Order of caching is significant** with respect to hooks for the same module, as the values of this 
+        dictionary are lists. Hooks for the same module will be run in the order in which they are cached. Previously 
+        cached hooks are always preserved rather than overidden. 
+ 
+        By default, official hooks are cached _before_ user-defined hooks. For modules with both official and 
+        user-defined hooks, this implies that the former take priority over and hence will be loaded _before_ the 
+        latter. 
+ 
+        Parameters 
+        ---------- 
+        module_graph : ModuleGraph 
+            Current module graph. 
+        hook_dirs : list 
+            List of the absolute or relative paths of all directories containing **hook scripts** (i.e., 
+            Python scripts with filenames matching `hook-{module_name}.py`, where `{module_name}` is the module 
+            hooked by that script) to be cached. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">super().__init__()</span>
+
+        <span class="s0"># To avoid circular references and hence increased memory consumption, a weak rather than strong reference is</span>
+        <span class="s0"># stored to the passed graph. Since this graph is guaranteed to live longer than this cache,</span>
+        <span class="s0"># this is guaranteed to be safe.</span>
+        <span class="s1">self.module_graph = weakref.proxy(module_graph)</span>
+
+        <span class="s0"># String unique to this cache prefixing the names of all in-memory modules lazily loaded from cached hook</span>
+        <span class="s0"># scripts, privatized for safety.</span>
+        <span class="s1">self._hook_module_name_prefix = </span><span class="s5">'__PyInstaller_hooks_{}_'</span><span class="s1">.format(ModuleHookCache._cache_id_next)</span>
+        <span class="s1">ModuleHookCache._cache_id_next += </span><span class="s4">1</span>
+
+        <span class="s0"># Cache all hook scripts in the passed directories.</span>
+        <span class="s1">self._cache_hook_dirs(hook_dirs)</span>
+
+    <span class="s3">def </span><span class="s1">_cache_hook_dirs(self</span><span class="s3">, </span><span class="s1">hook_dirs):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Cache all hook scripts in the passed directories. 
+ 
+        Parameters 
+        ---------- 
+        hook_dirs : list 
+            List of the absolute or relative paths of all directories containing hook scripts to be cached. 
+        &quot;&quot;&quot;</span>
+
+        <span class="s3">for </span><span class="s1">hook_dir </span><span class="s3">in </span><span class="s1">hook_dirs:</span>
+            <span class="s0"># Canonicalize this directory's path and validate its existence.</span>
+            <span class="s1">hook_dir = os.path.abspath(expand_path(hook_dir))</span>
+            <span class="s3">if not </span><span class="s1">os.path.isdir(hook_dir):</span>
+                <span class="s3">raise </span><span class="s1">FileNotFoundError(</span><span class="s5">'Hook directory &quot;{}&quot; not found.'</span><span class="s1">.format(hook_dir))</span>
+
+            <span class="s0"># For each hook script in this directory...</span>
+            <span class="s1">hook_filenames = glob.glob(os.path.join(hook_dir</span><span class="s3">, </span><span class="s5">'hook-*.py'</span><span class="s1">))</span>
+            <span class="s3">for </span><span class="s1">hook_filename </span><span class="s3">in </span><span class="s1">hook_filenames:</span>
+                <span class="s0"># Fully-qualified name of this hook's corresponding module, constructed by removing the &quot;hook-&quot; prefix</span>
+                <span class="s0"># and &quot;.py&quot; suffix.</span>
+                <span class="s1">module_name = os.path.basename(hook_filename)[</span><span class="s4">5</span><span class="s1">:-</span><span class="s4">3</span><span class="s1">]</span>
+                <span class="s3">if </span><span class="s1">module_name </span><span class="s3">in </span><span class="s1">self:</span>
+                    <span class="s1">logger.warning(</span>
+                        <span class="s5">&quot;Several hooks defined for module %r. Please take care they do not conflict.&quot;</span><span class="s3">, </span><span class="s1">module_name</span>
+                    <span class="s1">)</span>
+
+                <span class="s0"># Lazily loadable hook object.</span>
+                <span class="s1">module_hook = ModuleHook(</span>
+                    <span class="s1">module_graph=self.module_graph</span><span class="s3">,</span>
+                    <span class="s1">module_name=module_name</span><span class="s3">,</span>
+                    <span class="s1">hook_filename=hook_filename</span><span class="s3">,</span>
+                    <span class="s1">hook_module_name_prefix=self._hook_module_name_prefix</span><span class="s3">,</span>
+                <span class="s1">)</span>
+
+                <span class="s0"># Add this hook to this module's list of hooks.</span>
+                <span class="s1">module_hooks = self.setdefault(module_name</span><span class="s3">, </span><span class="s1">[])</span>
+                <span class="s1">module_hooks.append(module_hook)</span>
+
+    <span class="s3">def </span><span class="s1">remove_modules(self</span><span class="s3">, </span><span class="s1">*module_names):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Remove the passed modules and all hook scripts cached for these modules from this cache. 
+ 
+        Parameters 
+        ---------- 
+        module_names : list 
+            List of all fully-qualified module names to be removed. 
+        &quot;&quot;&quot;</span>
+
+        <span class="s3">for </span><span class="s1">module_name </span><span class="s3">in </span><span class="s1">module_names:</span>
+            <span class="s0"># Unload this module's hook script modules from memory. Since these are top-level pure-Python modules cached</span>
+            <span class="s0"># only in the &quot;sys.modules&quot; dictionary, popping these modules from this dictionary suffices to garbage</span>
+            <span class="s0"># collect these modules.</span>
+            <span class="s1">module_hooks = self.get(module_name</span><span class="s3">, </span><span class="s1">[])</span>
+            <span class="s3">for </span><span class="s1">module_hook </span><span class="s3">in </span><span class="s1">module_hooks:</span>
+                <span class="s1">sys.modules.pop(module_hook.hook_module_name</span><span class="s3">, None</span><span class="s1">)</span>
+
+            <span class="s0"># Remove this module and its hook script objects from this cache.</span>
+            <span class="s1">self.pop(module_name</span><span class="s3">, None</span><span class="s1">)</span>
+
+
+<span class="s0"># Dictionary mapping the names of magic attributes required by the &quot;ModuleHook&quot; class to 2-tuples &quot;(default_type,</span>
+<span class="s0"># sanitizer_func)&quot;, where:</span>
+<span class="s0">#</span>
+<span class="s0"># * &quot;default_type&quot; is the type to which that attribute will be initialized when that hook is lazily loaded.</span>
+<span class="s0"># * &quot;sanitizer_func&quot; is the callable sanitizing the original value of that attribute defined by that hook into a</span>
+<span class="s0">#   safer value consumable by &quot;ModuleHook&quot; callers if any or &quot;None&quot; if the original value requires no sanitization.</span>
+<span class="s0">#</span>
+<span class="s0"># To avoid subtleties in the ModuleHook.__getattr__() method, this dictionary is declared as a module rather than a</span>
+<span class="s0"># class attribute. If declared as a class attribute and then undefined (...for whatever reason), attempting to access</span>
+<span class="s0"># this attribute from that method would produce infinite recursion.</span>
+<span class="s1">_MAGIC_MODULE_HOOK_ATTRS = {</span>
+    <span class="s0"># Collections in which order is insignificant. This includes:</span>
+    <span class="s0">#</span>
+    <span class="s0"># * &quot;datas&quot;, sanitized from hook-style 2-tuple lists defined by hooks into TOC-style 2-tuple sets consumable by</span>
+    <span class="s0">#   &quot;ModuleHook&quot; callers.</span>
+    <span class="s0"># * &quot;binaries&quot;, sanitized in the same way.</span>
+    <span class="s5">'datas'</span><span class="s1">: (set</span><span class="s3">, </span><span class="s1">format_binaries_and_datas)</span><span class="s3">,</span>
+    <span class="s5">'binaries'</span><span class="s1">: (set</span><span class="s3">, </span><span class="s1">format_binaries_and_datas)</span><span class="s3">,</span>
+    <span class="s5">'excludedimports'</span><span class="s1">: (set</span><span class="s3">, None</span><span class="s1">)</span><span class="s3">,</span>
+
+    <span class="s0"># Collections in which order is significant. This includes:</span>
+    <span class="s0">#</span>
+    <span class="s0"># * &quot;hiddenimports&quot;, as order of importation is significant. On module importation, hook scripts are loaded and hook</span>
+    <span class="s0">#   functions declared by these scripts are called. As these scripts and functions can have side effects dependent</span>
+    <span class="s0">#   on module importation order, module importation itself can have side effects dependent on this order!</span>
+    <span class="s5">'hiddenimports'</span><span class="s1">: (list</span><span class="s3">, None</span><span class="s1">)</span><span class="s3">,</span>
+<span class="s1">}</span>
+
+
+<span class="s3">class </span><span class="s1">ModuleHook(object):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Cached object encapsulating a lazy loadable hook script. 
+ 
+    This object exposes public attributes (e.g., `datas`) of the underlying hook script as attributes of the same 
+    name of this object. On the first access of any such attribute, this hook script is lazily loaded into an 
+    in-memory private module reused on subsequent accesses. These dynamic attributes are referred to as &quot;magic.&quot; All 
+    other static attributes of this object (e.g., `hook_module_name`) are referred to as &quot;non-magic.&quot; 
+ 
+    Attributes (Magic) 
+    ---------- 
+    datas : set 
+        Set of `TOC`-style 2-tuples `(target_file, source_file)` for all external non-executable files required by 
+        the module being hooked, converted from the `datas` list of hook-style 2-tuples `(source_dir_or_glob, 
+        target_dir)` defined by this hook script. 
+    binaries : set 
+        Set of `TOC`-style 2-tuples `(target_file, source_file)` for all external executable files required by the 
+        module being hooked, converted from the `binaries` list of hook-style 2-tuples `(source_dir_or_glob, 
+        target_dir)` defined by this hook script. 
+    excludedimports : set 
+        Set of the fully-qualified names of all modules imported by the module being hooked to be ignored rather than 
+        imported from that module, converted from the `excludedimports` list defined by this hook script. These 
+        modules will only be &quot;locally&quot; rather than &quot;globally&quot; ignored. These modules will remain importable from all 
+        modules other than the module being hooked. 
+    hiddenimports : set 
+        Set of the fully-qualified names of all modules imported by the module being hooked that are _not_ 
+        automatically detectable by PyInstaller (usually due to being dynamically imported in that module), 
+        converted from the `hiddenimports` list defined by this hook script. 
+ 
+    Attributes (Non-magic) 
+    ---------- 
+    module_graph : ModuleGraph 
+        Current module graph. 
+    module_name : str 
+        Name of the module hooked by this hook script. 
+    hook_filename : str 
+        Absolute or relative path of this hook script. 
+    hook_module_name : str 
+        Name of the in-memory module of this hook script's interpreted contents. 
+    _hook_module : module 
+        In-memory module of this hook script's interpreted contents, lazily loaded on the first call to the 
+        `_load_hook_module()` method _or_ `None` if this method has yet to be accessed. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s0">#-- Magic --</span>
+
+    <span class="s3">def </span><span class="s1">__init__(self</span><span class="s3">, </span><span class="s1">module_graph</span><span class="s3">, </span><span class="s1">module_name</span><span class="s3">, </span><span class="s1">hook_filename</span><span class="s3">, </span><span class="s1">hook_module_name_prefix):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Initialize this metadata. 
+ 
+        Parameters 
+        ---------- 
+        module_graph : ModuleGraph 
+            Current module graph. 
+        module_name : str 
+            Name of the module hooked by this hook script. 
+        hook_filename : str 
+            Absolute or relative path of this hook script. 
+        hook_module_name_prefix : str 
+            String prefixing the name of the in-memory module for this hook script. To avoid namespace clashes with 
+            similar modules created by other `ModuleHook` objects in other `ModuleHookCache` containers, this string 
+            _must_ be unique to the `ModuleHookCache` container containing this `ModuleHook` object. If this string 
+            is non-unique, an existing in-memory module will be erroneously reused when lazily loading this hook 
+            script, thus erroneously resanitizing previously sanitized hook script attributes (e.g., `datas`) with 
+            the `format_binaries_and_datas()` helper. 
+ 
+        &quot;&quot;&quot;</span>
+        <span class="s0"># Note that the passed module graph is already a weak reference, avoiding circular reference issues. See</span>
+        <span class="s0"># ModuleHookCache.__init__(). TODO: Add a failure message</span>
+        <span class="s3">assert </span><span class="s1">isinstance(module_graph</span><span class="s3">, </span><span class="s1">weakref.ProxyTypes)</span>
+        <span class="s1">self.module_graph = module_graph</span>
+        <span class="s1">self.module_name = module_name</span>
+        <span class="s1">self.hook_filename = hook_filename</span>
+
+        <span class="s0"># Name of the in-memory module fabricated to refer to this hook script.</span>
+        <span class="s1">self.hook_module_name = hook_module_name_prefix + self.module_name.replace(</span><span class="s5">'.'</span><span class="s3">, </span><span class="s5">'_'</span><span class="s1">)</span>
+
+        <span class="s0"># Safety check, see above</span>
+        <span class="s3">global </span><span class="s1">HOOKS_MODULE_NAMES</span>
+        <span class="s3">if </span><span class="s1">self.hook_module_name </span><span class="s3">in </span><span class="s1">HOOKS_MODULE_NAMES:</span>
+            <span class="s0"># When self._shallow is true, this class never loads the hook and sets the attributes to empty values</span>
+            <span class="s1">self._shallow = </span><span class="s3">True</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s1">self._shallow = </span><span class="s3">False</span>
+            <span class="s1">HOOKS_MODULE_NAMES.add(self.hook_module_name)</span>
+
+        <span class="s0"># Attributes subsequently defined by the _load_hook_module() method.</span>
+        <span class="s1">self._hook_module = </span><span class="s3">None</span>
+
+    <span class="s3">def </span><span class="s1">__getattr__(self</span><span class="s3">, </span><span class="s1">attr_name):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Get the magic attribute with the passed name (e.g., `datas`) from this lazily loaded hook script if any _or_ 
+        raise `AttributeError` otherwise. 
+ 
+        This special method is called only for attributes _not_ already defined by this object. This includes 
+        undefined attributes and the first attempt to access magic attributes. 
+ 
+        This special method is _not_ called for subsequent attempts to access magic attributes. The first attempt to 
+        access magic attributes defines corresponding instance variables accessible via the `self.__dict__` instance 
+        dictionary (e.g., as `self.datas`) without calling this method. This approach also allows magic attributes to 
+        be deleted from this object _without_ defining the `__delattr__()` special method. 
+ 
+        See Also 
+        ---------- 
+        Class docstring for supported magic attributes. 
+        &quot;&quot;&quot;</span>
+
+        <span class="s0"># If this is a magic attribute, initialize this attribute by lazy loading this hook script and then return</span>
+        <span class="s0"># this attribute. To avoid recursion, the superclass method rather than getattr() is called.</span>
+        <span class="s3">if </span><span class="s1">attr_name </span><span class="s3">in </span><span class="s1">_MAGIC_MODULE_HOOK_ATTRS:</span>
+            <span class="s1">self._load_hook_module()</span>
+            <span class="s3">return </span><span class="s1">super().__getattr__(attr_name)</span>
+        <span class="s0"># Else, this is an undefined attribute. Raise an exception.</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s3">raise </span><span class="s1">AttributeError(attr_name)</span>
+
+    <span class="s3">def </span><span class="s1">__setattr__(self</span><span class="s3">, </span><span class="s1">attr_name</span><span class="s3">, </span><span class="s1">attr_value):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Set the attribute with the passed name to the passed value. 
+ 
+        If this is a magic attribute, this hook script will be lazily loaded before setting this attribute. Unlike 
+        `__getattr__()`, this special method is called to set _any_ attribute -- including magic, non-magic, 
+        and undefined attributes. 
+ 
+        See Also 
+        ---------- 
+        Class docstring for supported magic attributes. 
+        &quot;&quot;&quot;</span>
+
+        <span class="s0"># If this is a magic attribute, initialize this attribute by lazy loading this hook script before overwriting</span>
+        <span class="s0"># this attribute.</span>
+        <span class="s3">if </span><span class="s1">attr_name </span><span class="s3">in </span><span class="s1">_MAGIC_MODULE_HOOK_ATTRS:</span>
+            <span class="s1">self._load_hook_module()</span>
+
+        <span class="s0"># Set this attribute to the passed value. To avoid recursion, the superclass method rather than setattr() is</span>
+        <span class="s0"># called.</span>
+        <span class="s3">return </span><span class="s1">super().__setattr__(attr_name</span><span class="s3">, </span><span class="s1">attr_value)</span>
+
+    <span class="s0">#-- Loading --</span>
+
+    <span class="s3">def </span><span class="s1">_load_hook_module(self):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Lazily load this hook script into an in-memory private module. 
+ 
+        This method (and, indeed, this class) preserves all attributes and functions defined by this hook script as 
+        is, ensuring sane behaviour in hook functions _not_ expecting unplanned external modification. Instead, 
+        this method copies public attributes defined by this hook script (e.g., `binaries`) into private attributes 
+        of this object, which the special `__getattr__()` and `__setattr__()` methods safely expose to external 
+        callers. For public attributes _not_ defined by this hook script, the corresponding private attributes will 
+        be assigned sane defaults. For some public attributes defined by this hook script, the corresponding private 
+        attributes will be transformed into objects more readily and safely consumed elsewhere by external callers. 
+ 
+        See Also 
+        ---------- 
+        Class docstring for supported attributes. 
+        &quot;&quot;&quot;</span>
+
+        <span class="s0"># If this hook script module has already been loaded, or we are _shallow, noop.</span>
+        <span class="s3">if </span><span class="s1">self._hook_module </span><span class="s3">is not None or </span><span class="s1">self._shallow:</span>
+            <span class="s3">if </span><span class="s1">self._shallow:</span>
+                <span class="s1">self._hook_module = </span><span class="s3">True  </span><span class="s0"># Not None</span>
+                <span class="s0"># Inform the user</span>
+                <span class="s1">logger.debug(</span>
+                    <span class="s5">'Skipping module hook %r from %r because a hook for %s has already been loaded.'</span><span class="s3">,</span>
+                    <span class="s1">*os.path.split(self.hook_filename)[::-</span><span class="s4">1</span><span class="s1">]</span><span class="s3">, </span><span class="s1">self.module_name</span>
+                <span class="s1">)</span>
+                <span class="s0"># Set the default attributes to empty instances of the type.</span>
+                <span class="s3">for </span><span class="s1">attr_name</span><span class="s3">, </span><span class="s1">(attr_type</span><span class="s3">, </span><span class="s1">_) </span><span class="s3">in </span><span class="s1">_MAGIC_MODULE_HOOK_ATTRS.items():</span>
+                    <span class="s1">super().__setattr__(attr_name</span><span class="s3">, </span><span class="s1">attr_type())</span>
+            <span class="s3">return</span>
+
+        <span class="s0"># Load and execute the hook script. Even if mechanisms from the import machinery are used, this does not import</span>
+        <span class="s0"># the hook as the module.</span>
+        <span class="s1">head</span><span class="s3">, </span><span class="s1">tail = os.path.split(self.hook_filename)</span>
+        <span class="s1">logger.info(</span><span class="s5">'Loading module hook %r from %r...'</span><span class="s3">, </span><span class="s1">tail</span><span class="s3">, </span><span class="s1">head)</span>
+        <span class="s3">try</span><span class="s1">:</span>
+            <span class="s1">self._hook_module = importlib_load_source(self.hook_module_name</span><span class="s3">, </span><span class="s1">self.hook_filename)</span>
+        <span class="s3">except </span><span class="s1">ImportError:</span>
+            <span class="s1">logger.debug(</span><span class="s5">&quot;Hook failed with:&quot;</span><span class="s3">, </span><span class="s1">exc_info=</span><span class="s3">True</span><span class="s1">)</span>
+            <span class="s3">raise </span><span class="s1">ImportErrorWhenRunningHook(self.hook_module_name</span><span class="s3">, </span><span class="s1">self.hook_filename)</span>
+
+        <span class="s0"># Copy hook script attributes into magic attributes exposed as instance variables of the current &quot;ModuleHook&quot;</span>
+        <span class="s0"># instance.</span>
+        <span class="s3">for </span><span class="s1">attr_name</span><span class="s3">, </span><span class="s1">(default_type</span><span class="s3">, </span><span class="s1">sanitizer_func) </span><span class="s3">in </span><span class="s1">_MAGIC_MODULE_HOOK_ATTRS.items():</span>
+            <span class="s0"># Unsanitized value of this attribute.</span>
+            <span class="s1">attr_value = getattr(self._hook_module</span><span class="s3">, </span><span class="s1">attr_name</span><span class="s3">, None</span><span class="s1">)</span>
+
+            <span class="s0"># If this attribute is undefined, expose a sane default instead.</span>
+            <span class="s3">if </span><span class="s1">attr_value </span><span class="s3">is None</span><span class="s1">:</span>
+                <span class="s1">attr_value = default_type()</span>
+            <span class="s0"># Else if this attribute requires sanitization, do so.</span>
+            <span class="s3">elif </span><span class="s1">sanitizer_func </span><span class="s3">is not None</span><span class="s1">:</span>
+                <span class="s1">attr_value = sanitizer_func(attr_value)</span>
+            <span class="s0"># Else, expose the unsanitized value of this attribute.</span>
+
+            <span class="s0"># Expose this attribute as an instance variable of the same name.</span>
+            <span class="s1">setattr(self</span><span class="s3">, </span><span class="s1">attr_name</span><span class="s3">, </span><span class="s1">attr_value)</span>
+
+    <span class="s0">#-- Hooks --</span>
+
+    <span class="s3">def </span><span class="s1">post_graph(self</span><span class="s3">, </span><span class="s1">analysis):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Call the **post-graph hook** (i.e., `hook()` function) defined by this hook script, if any. 
+ 
+        Parameters 
+        ---------- 
+        analysis: build_main.Analysis 
+            Analysis that calls the hook 
+ 
+        This method is intended to be called _after_ the module graph for this application is constructed. 
+        &quot;&quot;&quot;</span>
+
+        <span class="s0"># Lazily load this hook script into an in-memory module.</span>
+        <span class="s1">self._load_hook_module()</span>
+
+        <span class="s0"># Call this hook script's hook() function, which modifies attributes accessed by subsequent methods and hence</span>
+        <span class="s0"># must be called first.</span>
+        <span class="s1">self._process_hook_func(analysis)</span>
+
+        <span class="s0"># Order is insignificant here.</span>
+        <span class="s1">self._process_hidden_imports()</span>
+        <span class="s1">self._process_excluded_imports()</span>
+
+    <span class="s3">def </span><span class="s1">_process_hook_func(self</span><span class="s3">, </span><span class="s1">analysis):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Call this hook's `hook()` function if defined. 
+ 
+        Parameters 
+        ---------- 
+        analysis: build_main.Analysis 
+            Analysis that calls the hook 
+        &quot;&quot;&quot;</span>
+
+        <span class="s0"># If this hook script defines no hook() function, noop.</span>
+        <span class="s3">if not </span><span class="s1">hasattr(self._hook_module</span><span class="s3">, </span><span class="s5">'hook'</span><span class="s1">):</span>
+            <span class="s3">return</span>
+
+        <span class="s0"># Call this hook() function.</span>
+        <span class="s1">hook_api = PostGraphAPI(module_name=self.module_name</span><span class="s3">, </span><span class="s1">module_graph=self.module_graph</span><span class="s3">, </span><span class="s1">analysis=analysis)</span>
+        <span class="s3">try</span><span class="s1">:</span>
+            <span class="s1">self._hook_module.hook(hook_api)</span>
+        <span class="s3">except </span><span class="s1">ImportError:</span>
+            <span class="s1">logger.debug(</span><span class="s5">&quot;Hook failed with:&quot;</span><span class="s3">, </span><span class="s1">exc_info=</span><span class="s3">True</span><span class="s1">)</span>
+            <span class="s3">raise </span><span class="s1">ImportErrorWhenRunningHook(self.hook_module_name</span><span class="s3">, </span><span class="s1">self.hook_filename)</span>
+
+        <span class="s0"># Update all magic attributes modified by the prior call.</span>
+        <span class="s1">self.datas.update(set(hook_api._added_datas))</span>
+        <span class="s1">self.binaries.update(set(hook_api._added_binaries))</span>
+        <span class="s1">self.hiddenimports.extend(hook_api._added_imports)</span>
+
+        <span class="s0"># FIXME: Deleted imports should be appended to self.excludedimports rather than handled here. However, see the</span>
+        <span class="s0">#        _process_excluded_imports() FIXME below for a sensible alternative.</span>
+        <span class="s3">for </span><span class="s1">deleted_module_name </span><span class="s3">in </span><span class="s1">hook_api._deleted_imports:</span>
+            <span class="s0"># Remove the graph link between the hooked module and item. This removes the 'item' node from the graph if</span>
+            <span class="s0"># no other links go to it (no other modules import it)</span>
+            <span class="s1">self.module_graph.removeReference(hook_api.node</span><span class="s3">, </span><span class="s1">deleted_module_name)</span>
+
+    <span class="s3">def </span><span class="s1">_process_hidden_imports(self):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Add all imports listed in this hook script's `hiddenimports` attribute to the module graph as if directly 
+        imported by this hooked module. 
+ 
+        These imports are typically _not_ implicitly detectable by PyInstaller and hence must be explicitly defined 
+        by hook scripts. 
+        &quot;&quot;&quot;</span>
+
+        <span class="s0"># For each hidden import required by the module being hooked...</span>
+        <span class="s3">for </span><span class="s1">import_module_name </span><span class="s3">in </span><span class="s1">self.hiddenimports:</span>
+            <span class="s3">try</span><span class="s1">:</span>
+                <span class="s0"># Graph node for this module. Do not implicitly create namespace packages for non-existent packages.</span>
+                <span class="s1">caller = self.module_graph.find_node(self.module_name</span><span class="s3">, </span><span class="s1">create_nspkg=</span><span class="s3">False</span><span class="s1">)</span>
+
+                <span class="s0"># Manually import this hidden import from this module.</span>
+                <span class="s1">self.module_graph.import_hook(import_module_name</span><span class="s3">, </span><span class="s1">caller)</span>
+            <span class="s0"># If this hidden import is unimportable, print a non-fatal warning. Hidden imports often become</span>
+            <span class="s0"># desynchronized from upstream packages and hence are only &quot;soft&quot; recommendations.</span>
+            <span class="s3">except </span><span class="s1">ImportError:</span>
+                <span class="s1">logger.warning(</span><span class="s5">'Hidden import &quot;%s&quot; not found!'</span><span class="s3">, </span><span class="s1">import_module_name)</span>
+
+    <span class="s0"># FIXME: This is pretty... intense. Attempting to cleanly &quot;undo&quot; prior module graph operations is a recipe for</span>
+    <span class="s0">#        subtle edge cases and difficult-to-debug issues. It would be both safer and simpler to prevent these</span>
+    <span class="s0">#        imports from being added to the graph in the first place. To do so:</span>
+    <span class="s0">#</span>
+    <span class="s0"># * Remove the _process_excluded_imports() method below.</span>
+    <span class="s0"># * Remove the PostGraphAPI.del_imports() method, which cannot reasonably be supported by the following solution,</span>
+    <span class="s0">#   appears to be currently broken, and (in any case) is not called anywhere in the PyInstaller codebase.</span>
+    <span class="s0"># * Override the ModuleGraph._safe_import_hook() superclass method with a new PyiModuleGraph._safe_import_hook()</span>
+    <span class="s0">#   subclass method resembling:</span>
+    <span class="s0">#</span>
+    <span class="s0">#      def _safe_import_hook(</span>
+    <span class="s0">#          self, target_module_name, source_module, fromlist,</span>
+    <span class="s0">#          level=DEFAULT_IMPORT_LEVEL, attr=None):</span>
+    <span class="s0">#</span>
+    <span class="s0">#          if source_module.identifier in self._module_hook_cache:</span>
+    <span class="s0">#              for module_hook in self._module_hook_cache[</span>
+    <span class="s0">#                  source_module.identifier]:</span>
+    <span class="s0">#                  if target_module_name in module_hook.excludedimports:</span>
+    <span class="s0">#                      return []</span>
+    <span class="s0">#</span>
+    <span class="s0">#          return super()._safe_import_hook(</span>
+    <span class="s0">#              target_module_name, source_module, fromlist,</span>
+    <span class="s0">#              level=level, attr=attr)</span>
+    <span class="s3">def </span><span class="s1">_process_excluded_imports(self):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        'excludedimports' is a list of Python module names that PyInstaller should not detect as dependency of this 
+        module name. 
+ 
+        So remove all import-edges from the current module (and it's submodules) to the given `excludedimports` (end 
+        their submodules). 
+        &quot;&quot;&quot;</span>
+        <span class="s3">def </span><span class="s1">find_all_package_nodes(name):</span>
+            <span class="s1">mods = [name]</span>
+            <span class="s1">name += </span><span class="s5">'.'</span>
+            <span class="s3">for </span><span class="s1">subnode </span><span class="s3">in </span><span class="s1">self.module_graph.nodes():</span>
+                <span class="s3">if </span><span class="s1">subnode.identifier.startswith(name):</span>
+                    <span class="s1">mods.append(subnode.identifier)</span>
+            <span class="s3">return </span><span class="s1">mods</span>
+
+        <span class="s0"># If this hook excludes no imports, noop.</span>
+        <span class="s3">if not </span><span class="s1">self.excludedimports:</span>
+            <span class="s3">return</span>
+
+        <span class="s0"># Collect all submodules of this module.</span>
+        <span class="s1">hooked_mods = find_all_package_nodes(self.module_name)</span>
+
+        <span class="s0"># Collect all dependencies and their submodules</span>
+        <span class="s0"># TODO: Optimize this by using a pattern and walking the graph only once.</span>
+        <span class="s3">for </span><span class="s1">item </span><span class="s3">in </span><span class="s1">set(self.excludedimports):</span>
+            <span class="s1">excluded_node = self.module_graph.find_node(item</span><span class="s3">, </span><span class="s1">create_nspkg=</span><span class="s3">False</span><span class="s1">)</span>
+            <span class="s3">if </span><span class="s1">excluded_node </span><span class="s3">is None</span><span class="s1">:</span>
+                <span class="s1">logger.info(</span><span class="s5">&quot;Import to be excluded not found: %r&quot;</span><span class="s3">, </span><span class="s1">item)</span>
+                <span class="s3">continue</span>
+            <span class="s1">imports_to_remove = set(find_all_package_nodes(item))</span>
+
+            <span class="s0"># Remove references between module nodes, as though they would not be imported from 'name'. Note: Doing this</span>
+            <span class="s0"># in a nested loop is less efficient than collecting all import to remove first, but log messages are easier</span>
+            <span class="s0"># to understand since related to the &quot;Excluding ...&quot; message above.</span>
+            <span class="s3">for </span><span class="s1">src </span><span class="s3">in </span><span class="s1">hooked_mods:</span>
+                <span class="s0"># modules, this `src` does import</span>
+                <span class="s1">references = set(node.identifier </span><span class="s3">for </span><span class="s1">node </span><span class="s3">in </span><span class="s1">self.module_graph.outgoing(src))</span>
+
+                <span class="s0"># Remove all of these imports which are also in &quot;imports_to_remove&quot;.</span>
+                <span class="s3">for </span><span class="s1">dest </span><span class="s3">in </span><span class="s1">imports_to_remove &amp; references:</span>
+                    <span class="s1">self.module_graph.removeReference(src</span><span class="s3">, </span><span class="s1">dest)</span>
+                    <span class="s1">logger.debug(</span><span class="s5">&quot;Excluding import of %s from module %s&quot;</span><span class="s3">, </span><span class="s1">dest</span><span class="s3">, </span><span class="s1">src)</span>
+
+
+<span class="s3">class </span><span class="s1">AdditionalFilesCache(object):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Cache for storing what binaries and datas were pushed by what modules when import hooks were processed. 
+    &quot;&quot;&quot;</span>
+    <span class="s3">def </span><span class="s1">__init__(self):</span>
+        <span class="s1">self._binaries = {}</span>
+        <span class="s1">self._datas = {}</span>
+
+    <span class="s3">def </span><span class="s1">add(self</span><span class="s3">, </span><span class="s1">modname</span><span class="s3">, </span><span class="s1">binaries</span><span class="s3">, </span><span class="s1">datas):</span>
+
+        <span class="s1">self._binaries.setdefault(modname</span><span class="s3">, </span><span class="s1">[])</span>
+        <span class="s1">self._binaries[modname].extend(binaries </span><span class="s3">or </span><span class="s1">[])</span>
+        <span class="s1">self._datas.setdefault(modname</span><span class="s3">, </span><span class="s1">[])</span>
+        <span class="s1">self._datas[modname].extend(datas </span><span class="s3">or </span><span class="s1">[])</span>
+
+    <span class="s3">def </span><span class="s1">__contains__(self</span><span class="s3">, </span><span class="s1">name):</span>
+        <span class="s3">return </span><span class="s1">name </span><span class="s3">in </span><span class="s1">self._binaries </span><span class="s3">or </span><span class="s1">name </span><span class="s3">in </span><span class="s1">self._datas</span>
+
+    <span class="s3">def </span><span class="s1">binaries(self</span><span class="s3">, </span><span class="s1">modname):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Return list of binaries for given module name. 
+        &quot;&quot;&quot;</span>
+        <span class="s3">return </span><span class="s1">self._binaries[modname]</span>
+
+    <span class="s3">def </span><span class="s1">datas(self</span><span class="s3">, </span><span class="s1">modname):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Return list of datas for given module name. 
+        &quot;&quot;&quot;</span>
+        <span class="s3">return </span><span class="s1">self._datas[modname]</span>
+</pre>
+</body>
+</html>

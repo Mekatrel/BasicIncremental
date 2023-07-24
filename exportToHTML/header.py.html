@@ -1,0 +1,604 @@
+<html>
+<head>
+<title>header.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #629755; font-style: italic;}
+.s3 { color: #cc7832;}
+.s4 { color: #6a8759;}
+.s5 { color: #a5c261;}
+.s6 { color: #6897bb;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+header.py</font>
+</center></td></tr></table>
+<pre><span class="s0"># Copyright (C) 2002-2007 Python Software Foundation</span>
+<span class="s0"># Author: Ben Gertzfield, Barry Warsaw</span>
+<span class="s0"># Contact: email-sig@python.org</span>
+
+<span class="s2">&quot;&quot;&quot;Header encoding and decoding functionality.&quot;&quot;&quot;</span>
+<span class="s3">from </span><span class="s1">__future__ </span><span class="s3">import </span><span class="s1">unicode_literals</span>
+<span class="s3">from </span><span class="s1">__future__ </span><span class="s3">import </span><span class="s1">division</span>
+<span class="s3">from </span><span class="s1">__future__ </span><span class="s3">import </span><span class="s1">absolute_import</span>
+<span class="s3">from </span><span class="s1">future.builtins </span><span class="s3">import </span><span class="s1">bytes</span><span class="s3">, </span><span class="s1">range</span><span class="s3">, </span><span class="s1">str</span><span class="s3">, </span><span class="s1">super</span><span class="s3">, </span><span class="s1">zip</span>
+
+<span class="s1">__all__ = [</span>
+    <span class="s4">'Header'</span><span class="s3">,</span>
+    <span class="s4">'decode_header'</span><span class="s3">,</span>
+    <span class="s4">'make_header'</span><span class="s3">,</span>
+    <span class="s1">]</span>
+
+<span class="s3">import </span><span class="s1">re</span>
+<span class="s3">import </span><span class="s1">binascii</span>
+
+<span class="s3">from </span><span class="s1">future.backports </span><span class="s3">import </span><span class="s1">email</span>
+<span class="s3">from </span><span class="s1">future.backports.email </span><span class="s3">import </span><span class="s1">base64mime</span>
+<span class="s3">from </span><span class="s1">future.backports.email.errors </span><span class="s3">import </span><span class="s1">HeaderParseError</span>
+<span class="s3">import </span><span class="s1">future.backports.email.charset </span><span class="s3">as </span><span class="s1">_charset</span>
+
+<span class="s0"># Helpers</span>
+<span class="s3">from </span><span class="s1">future.backports.email.quoprimime </span><span class="s3">import </span><span class="s1">_max_append</span><span class="s3">, </span><span class="s1">header_decode</span>
+
+<span class="s1">Charset = _charset.Charset</span>
+
+<span class="s1">NL = </span><span class="s4">'</span><span class="s3">\n</span><span class="s4">'</span>
+<span class="s1">SPACE = </span><span class="s4">' '</span>
+<span class="s1">BSPACE = </span><span class="s5">b' '</span>
+<span class="s1">SPACE8 = </span><span class="s4">' ' </span><span class="s1">* </span><span class="s6">8</span>
+<span class="s1">EMPTYSTRING = </span><span class="s4">''</span>
+<span class="s1">MAXLINELEN = </span><span class="s6">78</span>
+<span class="s1">FWS = </span><span class="s4">' </span><span class="s3">\t</span><span class="s4">'</span>
+
+<span class="s1">USASCII = Charset(</span><span class="s4">'us-ascii'</span><span class="s1">)</span>
+<span class="s1">UTF8 = Charset(</span><span class="s4">'utf-8'</span><span class="s1">)</span>
+
+<span class="s0"># Match encoded-word strings in the form =?charset?q?Hello_World?=</span>
+<span class="s1">ecre = re.compile(</span><span class="s4">r''' 
+  =\?                   # literal =? 
+  (?P&lt;charset&gt;[^?]*?)   # non-greedy up to the next ? is the charset 
+  \?                    # literal ? 
+  (?P&lt;encoding&gt;[qb])    # either a &quot;q&quot; or a &quot;b&quot;, case insensitive 
+  \?                    # literal ? 
+  (?P&lt;encoded&gt;.*?)      # non-greedy up to the next ?= is the encoded string 
+  \?=                   # literal ?= 
+  '''</span><span class="s3">, </span><span class="s1">re.VERBOSE | re.IGNORECASE | re.MULTILINE)</span>
+
+<span class="s0"># Field name regexp, including trailing colon, but not separating whitespace,</span>
+<span class="s0"># according to RFC 2822.  Character range is from tilde to exclamation mark.</span>
+<span class="s0"># For use with .match()</span>
+<span class="s1">fcre = re.compile(</span><span class="s4">r'[\041-\176]+:$'</span><span class="s1">)</span>
+
+<span class="s0"># Find a header embedded in a putative header value.  Used to check for</span>
+<span class="s0"># header injection attack.</span>
+<span class="s1">_embeded_header = re.compile(</span><span class="s4">r'\n[^ \t]+:'</span><span class="s1">)</span>
+
+
+<span class="s3">def </span><span class="s1">decode_header(header):</span>
+    <span class="s2">&quot;&quot;&quot;Decode a message header value without converting charset. 
+ 
+    Returns a list of (string, charset) pairs containing each of the decoded 
+    parts of the header.  Charset is None for non-encoded parts of the header, 
+    otherwise a lower-case string containing the name of the character set 
+    specified in the encoded string. 
+ 
+    header may be a string that may or may not contain RFC2047 encoded words, 
+    or it may be a Header object. 
+ 
+    An email.errors.HeaderParseError may be raised when certain decoding error 
+    occurs (e.g. a base64 decoding exception). 
+    &quot;&quot;&quot;</span>
+    <span class="s0"># If it is a Header object, we can just return the encoded chunks.</span>
+    <span class="s3">if </span><span class="s1">hasattr(header</span><span class="s3">, </span><span class="s4">'_chunks'</span><span class="s1">):</span>
+        <span class="s3">return </span><span class="s1">[(_charset._encode(string</span><span class="s3">, </span><span class="s1">str(charset))</span><span class="s3">, </span><span class="s1">str(charset))</span>
+                    <span class="s3">for </span><span class="s1">string</span><span class="s3">, </span><span class="s1">charset </span><span class="s3">in </span><span class="s1">header._chunks]</span>
+    <span class="s0"># If no encoding, just return the header with no charset.</span>
+    <span class="s3">if not </span><span class="s1">ecre.search(header):</span>
+        <span class="s3">return </span><span class="s1">[(header</span><span class="s3">, None</span><span class="s1">)]</span>
+    <span class="s0"># First step is to parse all the encoded parts into triplets of the form</span>
+    <span class="s0"># (encoded_string, encoding, charset).  For unencoded strings, the last</span>
+    <span class="s0"># two parts will be None.</span>
+    <span class="s1">words = []</span>
+    <span class="s3">for </span><span class="s1">line </span><span class="s3">in </span><span class="s1">header.splitlines():</span>
+        <span class="s1">parts = ecre.split(line)</span>
+        <span class="s1">first = </span><span class="s3">True</span>
+        <span class="s3">while </span><span class="s1">parts:</span>
+            <span class="s1">unencoded = parts.pop(</span><span class="s6">0</span><span class="s1">)</span>
+            <span class="s3">if </span><span class="s1">first:</span>
+                <span class="s1">unencoded = unencoded.lstrip()</span>
+                <span class="s1">first = </span><span class="s3">False</span>
+            <span class="s3">if </span><span class="s1">unencoded:</span>
+                <span class="s1">words.append((unencoded</span><span class="s3">, None, None</span><span class="s1">))</span>
+            <span class="s3">if </span><span class="s1">parts:</span>
+                <span class="s1">charset = parts.pop(</span><span class="s6">0</span><span class="s1">).lower()</span>
+                <span class="s1">encoding = parts.pop(</span><span class="s6">0</span><span class="s1">).lower()</span>
+                <span class="s1">encoded = parts.pop(</span><span class="s6">0</span><span class="s1">)</span>
+                <span class="s1">words.append((encoded</span><span class="s3">, </span><span class="s1">encoding</span><span class="s3">, </span><span class="s1">charset))</span>
+    <span class="s0"># Now loop over words and remove words that consist of whitespace</span>
+    <span class="s0"># between two encoded strings.</span>
+    <span class="s3">import </span><span class="s1">sys</span>
+    <span class="s1">droplist = []</span>
+    <span class="s3">for </span><span class="s1">n</span><span class="s3">, </span><span class="s1">w </span><span class="s3">in </span><span class="s1">enumerate(words):</span>
+        <span class="s3">if </span><span class="s1">n&gt;</span><span class="s6">1 </span><span class="s3">and </span><span class="s1">w[</span><span class="s6">1</span><span class="s1">] </span><span class="s3">and </span><span class="s1">words[n-</span><span class="s6">2</span><span class="s1">][</span><span class="s6">1</span><span class="s1">] </span><span class="s3">and </span><span class="s1">words[n-</span><span class="s6">1</span><span class="s1">][</span><span class="s6">0</span><span class="s1">].isspace():</span>
+            <span class="s1">droplist.append(n-</span><span class="s6">1</span><span class="s1">)</span>
+    <span class="s3">for </span><span class="s1">d </span><span class="s3">in </span><span class="s1">reversed(droplist):</span>
+        <span class="s3">del </span><span class="s1">words[d]</span>
+
+    <span class="s0"># The next step is to decode each encoded word by applying the reverse</span>
+    <span class="s0"># base64 or quopri transformation.  decoded_words is now a list of the</span>
+    <span class="s0"># form (decoded_word, charset).</span>
+    <span class="s1">decoded_words = []</span>
+    <span class="s3">for </span><span class="s1">encoded_string</span><span class="s3">, </span><span class="s1">encoding</span><span class="s3">, </span><span class="s1">charset </span><span class="s3">in </span><span class="s1">words:</span>
+        <span class="s3">if </span><span class="s1">encoding </span><span class="s3">is None</span><span class="s1">:</span>
+            <span class="s0"># This is an unencoded word.</span>
+            <span class="s1">decoded_words.append((encoded_string</span><span class="s3">, </span><span class="s1">charset))</span>
+        <span class="s3">elif </span><span class="s1">encoding == </span><span class="s4">'q'</span><span class="s1">:</span>
+            <span class="s1">word = header_decode(encoded_string)</span>
+            <span class="s1">decoded_words.append((word</span><span class="s3">, </span><span class="s1">charset))</span>
+        <span class="s3">elif </span><span class="s1">encoding == </span><span class="s4">'b'</span><span class="s1">:</span>
+            <span class="s1">paderr = len(encoded_string) % </span><span class="s6">4   </span><span class="s0"># Postel's law: add missing padding</span>
+            <span class="s3">if </span><span class="s1">paderr:</span>
+                <span class="s1">encoded_string += </span><span class="s4">'==='</span><span class="s1">[:</span><span class="s6">4 </span><span class="s1">- paderr]</span>
+            <span class="s3">try</span><span class="s1">:</span>
+                <span class="s1">word = base64mime.decode(encoded_string)</span>
+            <span class="s3">except </span><span class="s1">binascii.Error:</span>
+                <span class="s3">raise </span><span class="s1">HeaderParseError(</span><span class="s4">'Base64 decoding error'</span><span class="s1">)</span>
+            <span class="s3">else</span><span class="s1">:</span>
+                <span class="s1">decoded_words.append((word</span><span class="s3">, </span><span class="s1">charset))</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s3">raise </span><span class="s1">AssertionError(</span><span class="s4">'Unexpected encoding: ' </span><span class="s1">+ encoding)</span>
+    <span class="s0"># Now convert all words to bytes and collapse consecutive runs of</span>
+    <span class="s0"># similarly encoded words.</span>
+    <span class="s1">collapsed = []</span>
+    <span class="s1">last_word = last_charset = </span><span class="s3">None</span>
+    <span class="s3">for </span><span class="s1">word</span><span class="s3">, </span><span class="s1">charset </span><span class="s3">in </span><span class="s1">decoded_words:</span>
+        <span class="s3">if </span><span class="s1">isinstance(word</span><span class="s3">, </span><span class="s1">str):</span>
+            <span class="s1">word = bytes(word</span><span class="s3">, </span><span class="s4">'raw-unicode-escape'</span><span class="s1">)</span>
+        <span class="s3">if </span><span class="s1">last_word </span><span class="s3">is None</span><span class="s1">:</span>
+            <span class="s1">last_word = word</span>
+            <span class="s1">last_charset = charset</span>
+        <span class="s3">elif </span><span class="s1">charset != last_charset:</span>
+            <span class="s1">collapsed.append((last_word</span><span class="s3">, </span><span class="s1">last_charset))</span>
+            <span class="s1">last_word = word</span>
+            <span class="s1">last_charset = charset</span>
+        <span class="s3">elif </span><span class="s1">last_charset </span><span class="s3">is None</span><span class="s1">:</span>
+            <span class="s1">last_word += BSPACE + word</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s1">last_word += word</span>
+    <span class="s1">collapsed.append((last_word</span><span class="s3">, </span><span class="s1">last_charset))</span>
+    <span class="s3">return </span><span class="s1">collapsed</span>
+
+
+<span class="s3">def </span><span class="s1">make_header(decoded_seq</span><span class="s3">, </span><span class="s1">maxlinelen=</span><span class="s3">None, </span><span class="s1">header_name=</span><span class="s3">None,</span>
+                <span class="s1">continuation_ws=</span><span class="s4">' '</span><span class="s1">):</span>
+    <span class="s2">&quot;&quot;&quot;Create a Header from a sequence of pairs as returned by decode_header() 
+ 
+    decode_header() takes a header value string and returns a sequence of 
+    pairs of the format (decoded_string, charset) where charset is the string 
+    name of the character set. 
+ 
+    This function takes one of those sequence of pairs and returns a Header 
+    instance.  Optional maxlinelen, header_name, and continuation_ws are as in 
+    the Header constructor. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">h = Header(maxlinelen=maxlinelen</span><span class="s3">, </span><span class="s1">header_name=header_name</span><span class="s3">,</span>
+               <span class="s1">continuation_ws=continuation_ws)</span>
+    <span class="s3">for </span><span class="s1">s</span><span class="s3">, </span><span class="s1">charset </span><span class="s3">in </span><span class="s1">decoded_seq:</span>
+        <span class="s0"># None means us-ascii but we can simply pass it on to h.append()</span>
+        <span class="s3">if </span><span class="s1">charset </span><span class="s3">is not None and not </span><span class="s1">isinstance(charset</span><span class="s3">, </span><span class="s1">Charset):</span>
+            <span class="s1">charset = Charset(charset)</span>
+        <span class="s1">h.append(s</span><span class="s3">, </span><span class="s1">charset)</span>
+    <span class="s3">return </span><span class="s1">h</span>
+
+
+<span class="s3">class </span><span class="s1">Header(object):</span>
+    <span class="s3">def </span><span class="s1">__init__(self</span><span class="s3">, </span><span class="s1">s=</span><span class="s3">None, </span><span class="s1">charset=</span><span class="s3">None,</span>
+                 <span class="s1">maxlinelen=</span><span class="s3">None, </span><span class="s1">header_name=</span><span class="s3">None,</span>
+                 <span class="s1">continuation_ws=</span><span class="s4">' '</span><span class="s3">, </span><span class="s1">errors=</span><span class="s4">'strict'</span><span class="s1">):</span>
+        <span class="s2">&quot;&quot;&quot;Create a MIME-compliant header that can contain many character sets. 
+ 
+        Optional s is the initial header value.  If None, the initial header 
+        value is not set.  You can later append to the header with .append() 
+        method calls.  s may be a byte string or a Unicode string, but see the 
+        .append() documentation for semantics. 
+ 
+        Optional charset serves two purposes: it has the same meaning as the 
+        charset argument to the .append() method.  It also sets the default 
+        character set for all subsequent .append() calls that omit the charset 
+        argument.  If charset is not provided in the constructor, the us-ascii 
+        charset is used both as s's initial charset and as the default for 
+        subsequent .append() calls. 
+ 
+        The maximum line length can be specified explicitly via maxlinelen. For 
+        splitting the first line to a shorter value (to account for the field 
+        header which isn't included in s, e.g. `Subject') pass in the name of 
+        the field in header_name.  The default maxlinelen is 78 as recommended 
+        by RFC 2822. 
+ 
+        continuation_ws must be RFC 2822 compliant folding whitespace (usually 
+        either a space or a hard tab) which will be prepended to continuation 
+        lines. 
+ 
+        errors is passed through to the .append() call. 
+        &quot;&quot;&quot;</span>
+        <span class="s3">if </span><span class="s1">charset </span><span class="s3">is None</span><span class="s1">:</span>
+            <span class="s1">charset = USASCII</span>
+        <span class="s3">elif not </span><span class="s1">isinstance(charset</span><span class="s3">, </span><span class="s1">Charset):</span>
+            <span class="s1">charset = Charset(charset)</span>
+        <span class="s1">self._charset = charset</span>
+        <span class="s1">self._continuation_ws = continuation_ws</span>
+        <span class="s1">self._chunks = []</span>
+        <span class="s3">if </span><span class="s1">s </span><span class="s3">is not None</span><span class="s1">:</span>
+            <span class="s1">self.append(s</span><span class="s3">, </span><span class="s1">charset</span><span class="s3">, </span><span class="s1">errors)</span>
+        <span class="s3">if </span><span class="s1">maxlinelen </span><span class="s3">is None</span><span class="s1">:</span>
+            <span class="s1">maxlinelen = MAXLINELEN</span>
+        <span class="s1">self._maxlinelen = maxlinelen</span>
+        <span class="s3">if </span><span class="s1">header_name </span><span class="s3">is None</span><span class="s1">:</span>
+            <span class="s1">self._headerlen = </span><span class="s6">0</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s0"># Take the separating colon and space into account.</span>
+            <span class="s1">self._headerlen = len(header_name) + </span><span class="s6">2</span>
+
+    <span class="s3">def </span><span class="s1">__str__(self):</span>
+        <span class="s2">&quot;&quot;&quot;Return the string value of the header.&quot;&quot;&quot;</span>
+        <span class="s1">self._normalize()</span>
+        <span class="s1">uchunks = []</span>
+        <span class="s1">lastcs = </span><span class="s3">None</span>
+        <span class="s1">lastspace = </span><span class="s3">None</span>
+        <span class="s3">for </span><span class="s1">string</span><span class="s3">, </span><span class="s1">charset </span><span class="s3">in </span><span class="s1">self._chunks:</span>
+            <span class="s0"># We must preserve spaces between encoded and non-encoded word</span>
+            <span class="s0"># boundaries, which means for us we need to add a space when we go</span>
+            <span class="s0"># from a charset to None/us-ascii, or from None/us-ascii to a</span>
+            <span class="s0"># charset.  Only do this for the second and subsequent chunks.</span>
+            <span class="s0"># Don't add a space if the None/us-ascii string already has</span>
+            <span class="s0"># a space (trailing or leading depending on transition)</span>
+            <span class="s1">nextcs = charset</span>
+            <span class="s3">if </span><span class="s1">nextcs == _charset.UNKNOWN8BIT:</span>
+                <span class="s1">original_bytes = string.encode(</span><span class="s4">'ascii'</span><span class="s3">, </span><span class="s4">'surrogateescape'</span><span class="s1">)</span>
+                <span class="s1">string = original_bytes.decode(</span><span class="s4">'ascii'</span><span class="s3">, </span><span class="s4">'replace'</span><span class="s1">)</span>
+            <span class="s3">if </span><span class="s1">uchunks:</span>
+                <span class="s1">hasspace = string </span><span class="s3">and </span><span class="s1">self._nonctext(string[</span><span class="s6">0</span><span class="s1">])</span>
+                <span class="s3">if </span><span class="s1">lastcs </span><span class="s3">not in </span><span class="s1">(</span><span class="s3">None, </span><span class="s4">'us-ascii'</span><span class="s1">):</span>
+                    <span class="s3">if </span><span class="s1">nextcs </span><span class="s3">in </span><span class="s1">(</span><span class="s3">None, </span><span class="s4">'us-ascii'</span><span class="s1">) </span><span class="s3">and not </span><span class="s1">hasspace:</span>
+                        <span class="s1">uchunks.append(SPACE)</span>
+                        <span class="s1">nextcs = </span><span class="s3">None</span>
+                <span class="s3">elif </span><span class="s1">nextcs </span><span class="s3">not in </span><span class="s1">(</span><span class="s3">None, </span><span class="s4">'us-ascii'</span><span class="s1">) </span><span class="s3">and not </span><span class="s1">lastspace:</span>
+                    <span class="s1">uchunks.append(SPACE)</span>
+            <span class="s1">lastspace = string </span><span class="s3">and </span><span class="s1">self._nonctext(string[-</span><span class="s6">1</span><span class="s1">])</span>
+            <span class="s1">lastcs = nextcs</span>
+            <span class="s1">uchunks.append(string)</span>
+        <span class="s3">return </span><span class="s1">EMPTYSTRING.join(uchunks)</span>
+
+    <span class="s0"># Rich comparison operators for equality only.  BAW: does it make sense to</span>
+    <span class="s0"># have or explicitly disable &lt;, &lt;=, &gt;, &gt;= operators?</span>
+    <span class="s3">def </span><span class="s1">__eq__(self</span><span class="s3">, </span><span class="s1">other):</span>
+        <span class="s0"># other may be a Header or a string.  Both are fine so coerce</span>
+        <span class="s0"># ourselves to a unicode (of the unencoded header value), swap the</span>
+        <span class="s0"># args and do another comparison.</span>
+        <span class="s3">return </span><span class="s1">other == str(self)</span>
+
+    <span class="s3">def </span><span class="s1">__ne__(self</span><span class="s3">, </span><span class="s1">other):</span>
+        <span class="s3">return not </span><span class="s1">self == other</span>
+
+    <span class="s3">def </span><span class="s1">append(self</span><span class="s3">, </span><span class="s1">s</span><span class="s3">, </span><span class="s1">charset=</span><span class="s3">None, </span><span class="s1">errors=</span><span class="s4">'strict'</span><span class="s1">):</span>
+        <span class="s2">&quot;&quot;&quot;Append a string to the MIME header. 
+ 
+        Optional charset, if given, should be a Charset instance or the name 
+        of a character set (which will be converted to a Charset instance).  A 
+        value of None (the default) means that the charset given in the 
+        constructor is used. 
+ 
+        s may be a byte string or a Unicode string.  If it is a byte string 
+        (i.e. isinstance(s, str) is false), then charset is the encoding of 
+        that byte string, and a UnicodeError will be raised if the string 
+        cannot be decoded with that charset.  If s is a Unicode string, then 
+        charset is a hint specifying the character set of the characters in 
+        the string.  In either case, when producing an RFC 2822 compliant 
+        header using RFC 2047 rules, the string will be encoded using the 
+        output codec of the charset.  If the string cannot be encoded to the 
+        output codec, a UnicodeError will be raised. 
+ 
+        Optional `errors' is passed as the errors argument to the decode 
+        call if s is a byte string. 
+        &quot;&quot;&quot;</span>
+        <span class="s3">if </span><span class="s1">charset </span><span class="s3">is None</span><span class="s1">:</span>
+            <span class="s1">charset = self._charset</span>
+        <span class="s3">elif not </span><span class="s1">isinstance(charset</span><span class="s3">, </span><span class="s1">Charset):</span>
+            <span class="s1">charset = Charset(charset)</span>
+        <span class="s3">if not </span><span class="s1">isinstance(s</span><span class="s3">, </span><span class="s1">str):</span>
+            <span class="s1">input_charset = charset.input_codec </span><span class="s3">or </span><span class="s4">'us-ascii'</span>
+            <span class="s3">if </span><span class="s1">input_charset == _charset.UNKNOWN8BIT:</span>
+                <span class="s1">s = s.decode(</span><span class="s4">'us-ascii'</span><span class="s3">, </span><span class="s4">'surrogateescape'</span><span class="s1">)</span>
+            <span class="s3">else</span><span class="s1">:</span>
+                <span class="s1">s = s.decode(input_charset</span><span class="s3">, </span><span class="s1">errors)</span>
+        <span class="s0"># Ensure that the bytes we're storing can be decoded to the output</span>
+        <span class="s0"># character set, otherwise an early error is raised.</span>
+        <span class="s1">output_charset = charset.output_codec </span><span class="s3">or </span><span class="s4">'us-ascii'</span>
+        <span class="s3">if </span><span class="s1">output_charset != _charset.UNKNOWN8BIT:</span>
+            <span class="s3">try</span><span class="s1">:</span>
+                <span class="s1">s.encode(output_charset</span><span class="s3">, </span><span class="s1">errors)</span>
+            <span class="s3">except </span><span class="s1">UnicodeEncodeError:</span>
+                <span class="s3">if </span><span class="s1">output_charset!=</span><span class="s4">'us-ascii'</span><span class="s1">:</span>
+                    <span class="s3">raise</span>
+                <span class="s1">charset = UTF8</span>
+        <span class="s1">self._chunks.append((s</span><span class="s3">, </span><span class="s1">charset))</span>
+
+    <span class="s3">def </span><span class="s1">_nonctext(self</span><span class="s3">, </span><span class="s1">s):</span>
+        <span class="s2">&quot;&quot;&quot;True if string s is not a ctext character of RFC822. 
+        &quot;&quot;&quot;</span>
+        <span class="s3">return </span><span class="s1">s.isspace() </span><span class="s3">or </span><span class="s1">s </span><span class="s3">in </span><span class="s1">(</span><span class="s4">'('</span><span class="s3">, </span><span class="s4">')'</span><span class="s3">, </span><span class="s4">'</span><span class="s3">\\</span><span class="s4">'</span><span class="s1">)</span>
+
+    <span class="s3">def </span><span class="s1">encode(self</span><span class="s3">, </span><span class="s1">splitchars=</span><span class="s4">';, </span><span class="s3">\t</span><span class="s4">'</span><span class="s3">, </span><span class="s1">maxlinelen=</span><span class="s3">None, </span><span class="s1">linesep=</span><span class="s4">'</span><span class="s3">\n</span><span class="s4">'</span><span class="s1">):</span>
+        <span class="s2">r&quot;&quot;&quot;Encode a message header into an RFC-compliant format. 
+ 
+        There are many issues involved in converting a given string for use in 
+        an email header.  Only certain character sets are readable in most 
+        email clients, and as header strings can only contain a subset of 
+        7-bit ASCII, care must be taken to properly convert and encode (with 
+        Base64 or quoted-printable) header strings.  In addition, there is a 
+        75-character length limit on any given encoded header field, so 
+        line-wrapping must be performed, even with double-byte character sets. 
+ 
+        Optional maxlinelen specifies the maximum length of each generated 
+        line, exclusive of the linesep string.  Individual lines may be longer 
+        than maxlinelen if a folding point cannot be found.  The first line 
+        will be shorter by the length of the header name plus &quot;: &quot; if a header 
+        name was specified at Header construction time.  The default value for 
+        maxlinelen is determined at header construction time. 
+ 
+        Optional splitchars is a string containing characters which should be 
+        given extra weight by the splitting algorithm during normal header 
+        wrapping.  This is in very rough support of RFC 2822's `higher level 
+        syntactic breaks':  split points preceded by a splitchar are preferred 
+        during line splitting, with the characters preferred in the order in 
+        which they appear in the string.  Space and tab may be included in the 
+        string to indicate whether preference should be given to one over the 
+        other as a split point when other split chars do not appear in the line 
+        being split.  Splitchars does not affect RFC 2047 encoded lines. 
+ 
+        Optional linesep is a string to be used to separate the lines of 
+        the value.  The default value is the most useful for typical 
+        Python applications, but it can be set to \r\n to produce RFC-compliant 
+        line separators when needed. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">self._normalize()</span>
+        <span class="s3">if </span><span class="s1">maxlinelen </span><span class="s3">is None</span><span class="s1">:</span>
+            <span class="s1">maxlinelen = self._maxlinelen</span>
+        <span class="s0"># A maxlinelen of 0 means don't wrap.  For all practical purposes,</span>
+        <span class="s0"># choosing a huge number here accomplishes that and makes the</span>
+        <span class="s0"># _ValueFormatter algorithm much simpler.</span>
+        <span class="s3">if </span><span class="s1">maxlinelen == </span><span class="s6">0</span><span class="s1">:</span>
+            <span class="s1">maxlinelen = </span><span class="s6">1000000</span>
+        <span class="s1">formatter = _ValueFormatter(self._headerlen</span><span class="s3">, </span><span class="s1">maxlinelen</span><span class="s3">,</span>
+                                    <span class="s1">self._continuation_ws</span><span class="s3">, </span><span class="s1">splitchars)</span>
+        <span class="s1">lastcs = </span><span class="s3">None</span>
+        <span class="s1">hasspace = lastspace = </span><span class="s3">None</span>
+        <span class="s3">for </span><span class="s1">string</span><span class="s3">, </span><span class="s1">charset </span><span class="s3">in </span><span class="s1">self._chunks:</span>
+            <span class="s3">if </span><span class="s1">hasspace </span><span class="s3">is not None</span><span class="s1">:</span>
+                <span class="s1">hasspace = string </span><span class="s3">and </span><span class="s1">self._nonctext(string[</span><span class="s6">0</span><span class="s1">])</span>
+                <span class="s3">import </span><span class="s1">sys</span>
+                <span class="s3">if </span><span class="s1">lastcs </span><span class="s3">not in </span><span class="s1">(</span><span class="s3">None, </span><span class="s4">'us-ascii'</span><span class="s1">):</span>
+                    <span class="s3">if not </span><span class="s1">hasspace </span><span class="s3">or </span><span class="s1">charset </span><span class="s3">not in </span><span class="s1">(</span><span class="s3">None, </span><span class="s4">'us-ascii'</span><span class="s1">):</span>
+                        <span class="s1">formatter.add_transition()</span>
+                <span class="s3">elif </span><span class="s1">charset </span><span class="s3">not in </span><span class="s1">(</span><span class="s3">None, </span><span class="s4">'us-ascii'</span><span class="s1">) </span><span class="s3">and not </span><span class="s1">lastspace:</span>
+                    <span class="s1">formatter.add_transition()</span>
+            <span class="s1">lastspace = string </span><span class="s3">and </span><span class="s1">self._nonctext(string[-</span><span class="s6">1</span><span class="s1">])</span>
+            <span class="s1">lastcs = charset</span>
+            <span class="s1">hasspace = </span><span class="s3">False</span>
+            <span class="s1">lines = string.splitlines()</span>
+            <span class="s3">if </span><span class="s1">lines:</span>
+                <span class="s1">formatter.feed(</span><span class="s4">''</span><span class="s3">, </span><span class="s1">lines[</span><span class="s6">0</span><span class="s1">]</span><span class="s3">, </span><span class="s1">charset)</span>
+            <span class="s3">else</span><span class="s1">:</span>
+                <span class="s1">formatter.feed(</span><span class="s4">''</span><span class="s3">, </span><span class="s4">''</span><span class="s3">, </span><span class="s1">charset)</span>
+            <span class="s3">for </span><span class="s1">line </span><span class="s3">in </span><span class="s1">lines[</span><span class="s6">1</span><span class="s1">:]:</span>
+                <span class="s1">formatter.newline()</span>
+                <span class="s3">if </span><span class="s1">charset.header_encoding </span><span class="s3">is not None</span><span class="s1">:</span>
+                    <span class="s1">formatter.feed(self._continuation_ws</span><span class="s3">, </span><span class="s4">' ' </span><span class="s1">+ line.lstrip()</span><span class="s3">,</span>
+                                   <span class="s1">charset)</span>
+                <span class="s3">else</span><span class="s1">:</span>
+                    <span class="s1">sline = line.lstrip()</span>
+                    <span class="s1">fws = line[:len(line)-len(sline)]</span>
+                    <span class="s1">formatter.feed(fws</span><span class="s3">, </span><span class="s1">sline</span><span class="s3">, </span><span class="s1">charset)</span>
+            <span class="s3">if </span><span class="s1">len(lines) &gt; </span><span class="s6">1</span><span class="s1">:</span>
+                <span class="s1">formatter.newline()</span>
+        <span class="s3">if </span><span class="s1">self._chunks:</span>
+            <span class="s1">formatter.add_transition()</span>
+        <span class="s1">value = formatter._str(linesep)</span>
+        <span class="s3">if </span><span class="s1">_embeded_header.search(value):</span>
+            <span class="s3">raise </span><span class="s1">HeaderParseError(</span><span class="s4">&quot;header value appears to contain &quot;</span>
+                <span class="s4">&quot;an embedded header: {!r}&quot;</span><span class="s1">.format(value))</span>
+        <span class="s3">return </span><span class="s1">value</span>
+
+    <span class="s3">def </span><span class="s1">_normalize(self):</span>
+        <span class="s0"># Step 1: Normalize the chunks so that all runs of identical charsets</span>
+        <span class="s0"># get collapsed into a single unicode string.</span>
+        <span class="s1">chunks = []</span>
+        <span class="s1">last_charset = </span><span class="s3">None</span>
+        <span class="s1">last_chunk = []</span>
+        <span class="s3">for </span><span class="s1">string</span><span class="s3">, </span><span class="s1">charset </span><span class="s3">in </span><span class="s1">self._chunks:</span>
+            <span class="s3">if </span><span class="s1">charset == last_charset:</span>
+                <span class="s1">last_chunk.append(string)</span>
+            <span class="s3">else</span><span class="s1">:</span>
+                <span class="s3">if </span><span class="s1">last_charset </span><span class="s3">is not None</span><span class="s1">:</span>
+                    <span class="s1">chunks.append((SPACE.join(last_chunk)</span><span class="s3">, </span><span class="s1">last_charset))</span>
+                <span class="s1">last_chunk = [string]</span>
+                <span class="s1">last_charset = charset</span>
+        <span class="s3">if </span><span class="s1">last_chunk:</span>
+            <span class="s1">chunks.append((SPACE.join(last_chunk)</span><span class="s3">, </span><span class="s1">last_charset))</span>
+        <span class="s1">self._chunks = chunks</span>
+
+
+<span class="s3">class </span><span class="s1">_ValueFormatter(object):</span>
+    <span class="s3">def </span><span class="s1">__init__(self</span><span class="s3">, </span><span class="s1">headerlen</span><span class="s3">, </span><span class="s1">maxlen</span><span class="s3">, </span><span class="s1">continuation_ws</span><span class="s3">, </span><span class="s1">splitchars):</span>
+        <span class="s1">self._maxlen = maxlen</span>
+        <span class="s1">self._continuation_ws = continuation_ws</span>
+        <span class="s1">self._continuation_ws_len = len(continuation_ws)</span>
+        <span class="s1">self._splitchars = splitchars</span>
+        <span class="s1">self._lines = []</span>
+        <span class="s1">self._current_line = _Accumulator(headerlen)</span>
+
+    <span class="s3">def </span><span class="s1">_str(self</span><span class="s3">, </span><span class="s1">linesep):</span>
+        <span class="s1">self.newline()</span>
+        <span class="s3">return </span><span class="s1">linesep.join(self._lines)</span>
+
+    <span class="s3">def </span><span class="s1">__str__(self):</span>
+        <span class="s3">return </span><span class="s1">self._str(NL)</span>
+
+    <span class="s3">def </span><span class="s1">newline(self):</span>
+        <span class="s1">end_of_line = self._current_line.pop()</span>
+        <span class="s3">if </span><span class="s1">end_of_line != (</span><span class="s4">' '</span><span class="s3">, </span><span class="s4">''</span><span class="s1">):</span>
+            <span class="s1">self._current_line.push(*end_of_line)</span>
+        <span class="s3">if </span><span class="s1">len(self._current_line) &gt; </span><span class="s6">0</span><span class="s1">:</span>
+            <span class="s3">if </span><span class="s1">self._current_line.is_onlyws():</span>
+                <span class="s1">self._lines[-</span><span class="s6">1</span><span class="s1">] += str(self._current_line)</span>
+            <span class="s3">else</span><span class="s1">:</span>
+                <span class="s1">self._lines.append(str(self._current_line))</span>
+        <span class="s1">self._current_line.reset()</span>
+
+    <span class="s3">def </span><span class="s1">add_transition(self):</span>
+        <span class="s1">self._current_line.push(</span><span class="s4">' '</span><span class="s3">, </span><span class="s4">''</span><span class="s1">)</span>
+
+    <span class="s3">def </span><span class="s1">feed(self</span><span class="s3">, </span><span class="s1">fws</span><span class="s3">, </span><span class="s1">string</span><span class="s3">, </span><span class="s1">charset):</span>
+        <span class="s0"># If the charset has no header encoding (i.e. it is an ASCII encoding)</span>
+        <span class="s0"># then we must split the header at the &quot;highest level syntactic break&quot;</span>
+        <span class="s0"># possible. Note that we don't have a lot of smarts about field</span>
+        <span class="s0"># syntax; we just try to break on semi-colons, then commas, then</span>
+        <span class="s0"># whitespace.  Eventually, this should be pluggable.</span>
+        <span class="s3">if </span><span class="s1">charset.header_encoding </span><span class="s3">is None</span><span class="s1">:</span>
+            <span class="s1">self._ascii_split(fws</span><span class="s3">, </span><span class="s1">string</span><span class="s3">, </span><span class="s1">self._splitchars)</span>
+            <span class="s3">return</span>
+        <span class="s0"># Otherwise, we're doing either a Base64 or a quoted-printable</span>
+        <span class="s0"># encoding which means we don't need to split the line on syntactic</span>
+        <span class="s0"># breaks.  We can basically just find enough characters to fit on the</span>
+        <span class="s0"># current line, minus the RFC 2047 chrome.  What makes this trickier</span>
+        <span class="s0"># though is that we have to split at octet boundaries, not character</span>
+        <span class="s0"># boundaries but it's only safe to split at character boundaries so at</span>
+        <span class="s0"># best we can only get close.</span>
+        <span class="s1">encoded_lines = charset.header_encode_lines(string</span><span class="s3">, </span><span class="s1">self._maxlengths())</span>
+        <span class="s0"># The first element extends the current line, but if it's None then</span>
+        <span class="s0"># nothing more fit on the current line so start a new line.</span>
+        <span class="s3">try</span><span class="s1">:</span>
+            <span class="s1">first_line = encoded_lines.pop(</span><span class="s6">0</span><span class="s1">)</span>
+        <span class="s3">except </span><span class="s1">IndexError:</span>
+            <span class="s0"># There are no encoded lines, so we're done.</span>
+            <span class="s3">return</span>
+        <span class="s3">if </span><span class="s1">first_line </span><span class="s3">is not None</span><span class="s1">:</span>
+            <span class="s1">self._append_chunk(fws</span><span class="s3">, </span><span class="s1">first_line)</span>
+        <span class="s3">try</span><span class="s1">:</span>
+            <span class="s1">last_line = encoded_lines.pop()</span>
+        <span class="s3">except </span><span class="s1">IndexError:</span>
+            <span class="s0"># There was only one line.</span>
+            <span class="s3">return</span>
+        <span class="s1">self.newline()</span>
+        <span class="s1">self._current_line.push(self._continuation_ws</span><span class="s3">, </span><span class="s1">last_line)</span>
+        <span class="s0"># Everything else are full lines in themselves.</span>
+        <span class="s3">for </span><span class="s1">line </span><span class="s3">in </span><span class="s1">encoded_lines:</span>
+            <span class="s1">self._lines.append(self._continuation_ws + line)</span>
+
+    <span class="s3">def </span><span class="s1">_maxlengths(self):</span>
+        <span class="s0"># The first line's length.</span>
+        <span class="s3">yield </span><span class="s1">self._maxlen - len(self._current_line)</span>
+        <span class="s3">while True</span><span class="s1">:</span>
+            <span class="s3">yield </span><span class="s1">self._maxlen - self._continuation_ws_len</span>
+
+    <span class="s3">def </span><span class="s1">_ascii_split(self</span><span class="s3">, </span><span class="s1">fws</span><span class="s3">, </span><span class="s1">string</span><span class="s3">, </span><span class="s1">splitchars):</span>
+        <span class="s0"># The RFC 2822 header folding algorithm is simple in principle but</span>
+        <span class="s0"># complex in practice.  Lines may be folded any place where &quot;folding</span>
+        <span class="s0"># white space&quot; appears by inserting a linesep character in front of the</span>
+        <span class="s0"># FWS.  The complication is that not all spaces or tabs qualify as FWS,</span>
+        <span class="s0"># and we are also supposed to prefer to break at &quot;higher level</span>
+        <span class="s0"># syntactic breaks&quot;.  We can't do either of these without intimate</span>
+        <span class="s0"># knowledge of the structure of structured headers, which we don't have</span>
+        <span class="s0"># here.  So the best we can do here is prefer to break at the specified</span>
+        <span class="s0"># splitchars, and hope that we don't choose any spaces or tabs that</span>
+        <span class="s0"># aren't legal FWS.  (This is at least better than the old algorithm,</span>
+        <span class="s0"># where we would sometimes *introduce* FWS after a splitchar, or the</span>
+        <span class="s0"># algorithm before that, where we would turn all white space runs into</span>
+        <span class="s0"># single spaces or tabs.)</span>
+        <span class="s1">parts = re.split(</span><span class="s4">&quot;([&quot;</span><span class="s1">+FWS+</span><span class="s4">&quot;]+)&quot;</span><span class="s3">, </span><span class="s1">fws+string)</span>
+        <span class="s3">if </span><span class="s1">parts[</span><span class="s6">0</span><span class="s1">]:</span>
+            <span class="s1">parts[:</span><span class="s6">0</span><span class="s1">] = [</span><span class="s4">''</span><span class="s1">]</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s1">parts.pop(</span><span class="s6">0</span><span class="s1">)</span>
+        <span class="s3">for </span><span class="s1">fws</span><span class="s3">, </span><span class="s1">part </span><span class="s3">in </span><span class="s1">zip(*[iter(parts)]*</span><span class="s6">2</span><span class="s1">):</span>
+            <span class="s1">self._append_chunk(fws</span><span class="s3">, </span><span class="s1">part)</span>
+
+    <span class="s3">def </span><span class="s1">_append_chunk(self</span><span class="s3">, </span><span class="s1">fws</span><span class="s3">, </span><span class="s1">string):</span>
+        <span class="s1">self._current_line.push(fws</span><span class="s3">, </span><span class="s1">string)</span>
+        <span class="s3">if </span><span class="s1">len(self._current_line) &gt; self._maxlen:</span>
+            <span class="s0"># Find the best split point, working backward from the end.</span>
+            <span class="s0"># There might be none, on a long first line.</span>
+            <span class="s3">for </span><span class="s1">ch </span><span class="s3">in </span><span class="s1">self._splitchars:</span>
+                <span class="s3">for </span><span class="s1">i </span><span class="s3">in </span><span class="s1">range(self._current_line.part_count()-</span><span class="s6">1</span><span class="s3">, </span><span class="s6">0</span><span class="s3">, </span><span class="s1">-</span><span class="s6">1</span><span class="s1">):</span>
+                    <span class="s3">if </span><span class="s1">ch.isspace():</span>
+                        <span class="s1">fws = self._current_line[i][</span><span class="s6">0</span><span class="s1">]</span>
+                        <span class="s3">if </span><span class="s1">fws </span><span class="s3">and </span><span class="s1">fws[</span><span class="s6">0</span><span class="s1">]==ch:</span>
+                            <span class="s3">break</span>
+                    <span class="s1">prevpart = self._current_line[i-</span><span class="s6">1</span><span class="s1">][</span><span class="s6">1</span><span class="s1">]</span>
+                    <span class="s3">if </span><span class="s1">prevpart </span><span class="s3">and </span><span class="s1">prevpart[-</span><span class="s6">1</span><span class="s1">]==ch:</span>
+                        <span class="s3">break</span>
+                <span class="s3">else</span><span class="s1">:</span>
+                    <span class="s3">continue</span>
+                <span class="s3">break</span>
+            <span class="s3">else</span><span class="s1">:</span>
+                <span class="s1">fws</span><span class="s3">, </span><span class="s1">part = self._current_line.pop()</span>
+                <span class="s3">if </span><span class="s1">self._current_line._initial_size &gt; </span><span class="s6">0</span><span class="s1">:</span>
+                    <span class="s0"># There will be a header, so leave it on a line by itself.</span>
+                    <span class="s1">self.newline()</span>
+                    <span class="s3">if not </span><span class="s1">fws:</span>
+                        <span class="s0"># We don't use continuation_ws here because the whitespace</span>
+                        <span class="s0"># after a header should always be a space.</span>
+                        <span class="s1">fws = </span><span class="s4">' '</span>
+                <span class="s1">self._current_line.push(fws</span><span class="s3">, </span><span class="s1">part)</span>
+                <span class="s3">return</span>
+            <span class="s1">remainder = self._current_line.pop_from(i)</span>
+            <span class="s1">self._lines.append(str(self._current_line))</span>
+            <span class="s1">self._current_line.reset(remainder)</span>
+
+
+<span class="s3">class </span><span class="s1">_Accumulator(list):</span>
+
+    <span class="s3">def </span><span class="s1">__init__(self</span><span class="s3">, </span><span class="s1">initial_size=</span><span class="s6">0</span><span class="s1">):</span>
+        <span class="s1">self._initial_size = initial_size</span>
+        <span class="s1">super().__init__()</span>
+
+    <span class="s3">def </span><span class="s1">push(self</span><span class="s3">, </span><span class="s1">fws</span><span class="s3">, </span><span class="s1">string):</span>
+        <span class="s1">self.append((fws</span><span class="s3">, </span><span class="s1">string))</span>
+
+    <span class="s3">def </span><span class="s1">pop_from(self</span><span class="s3">, </span><span class="s1">i=</span><span class="s6">0</span><span class="s1">):</span>
+        <span class="s1">popped = self[i:]</span>
+        <span class="s1">self[i:] = []</span>
+        <span class="s3">return </span><span class="s1">popped</span>
+
+    <span class="s3">def </span><span class="s1">pop(self):</span>
+        <span class="s3">if </span><span class="s1">self.part_count()==</span><span class="s6">0</span><span class="s1">:</span>
+            <span class="s3">return </span><span class="s1">(</span><span class="s4">''</span><span class="s3">, </span><span class="s4">''</span><span class="s1">)</span>
+        <span class="s3">return </span><span class="s1">super().pop()</span>
+
+    <span class="s3">def </span><span class="s1">__len__(self):</span>
+        <span class="s3">return </span><span class="s1">sum((len(fws)+len(part) </span><span class="s3">for </span><span class="s1">fws</span><span class="s3">, </span><span class="s1">part </span><span class="s3">in </span><span class="s1">self)</span><span class="s3">,</span>
+                   <span class="s1">self._initial_size)</span>
+
+    <span class="s3">def </span><span class="s1">__str__(self):</span>
+        <span class="s3">return </span><span class="s1">EMPTYSTRING.join((EMPTYSTRING.join((fws</span><span class="s3">, </span><span class="s1">part))</span>
+                                <span class="s3">for </span><span class="s1">fws</span><span class="s3">, </span><span class="s1">part </span><span class="s3">in </span><span class="s1">self))</span>
+
+    <span class="s3">def </span><span class="s1">reset(self</span><span class="s3">, </span><span class="s1">startval=</span><span class="s3">None</span><span class="s1">):</span>
+        <span class="s3">if </span><span class="s1">startval </span><span class="s3">is None</span><span class="s1">:</span>
+            <span class="s1">startval = []</span>
+        <span class="s1">self[:] = startval</span>
+        <span class="s1">self._initial_size = </span><span class="s6">0</span>
+
+    <span class="s3">def </span><span class="s1">is_onlyws(self):</span>
+        <span class="s3">return </span><span class="s1">self._initial_size==</span><span class="s6">0 </span><span class="s3">and </span><span class="s1">(</span><span class="s3">not </span><span class="s1">self </span><span class="s3">or </span><span class="s1">str(self).isspace())</span>
+
+    <span class="s3">def </span><span class="s1">part_count(self):</span>
+        <span class="s3">return </span><span class="s1">super().__len__()</span>
+</pre>
+</body>
+</html>

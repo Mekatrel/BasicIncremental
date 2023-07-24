@@ -1,0 +1,425 @@
+<html>
+<head>
+<title>test__hub.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #cc7832;}
+.s3 { color: #6897bb;}
+.s4 { color: #6a8759;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+test__hub.py</font>
+</center></td></tr></table>
+<pre><span class="s0"># Copyright (c) 2009 AG Projects</span>
+<span class="s0"># Author: Denis Bilenko</span>
+<span class="s0">#</span>
+<span class="s0"># Permission is hereby granted, free of charge, to any person obtaining a copy</span>
+<span class="s0"># of this software and associated documentation files (the &quot;Software&quot;), to deal</span>
+<span class="s0"># in the Software without restriction, including without limitation the rights</span>
+<span class="s0"># to use, copy, modify, merge, publish, distribute, sublicense, and/or sell</span>
+<span class="s0"># copies of the Software, and to permit persons to whom the Software is</span>
+<span class="s0"># furnished to do so, subject to the following conditions:</span>
+<span class="s0">#</span>
+<span class="s0"># The above copyright notice and this permission notice shall be included in</span>
+<span class="s0"># all copies or substantial portions of the Software.</span>
+<span class="s0">#</span>
+<span class="s0"># THE SOFTWARE IS PROVIDED &quot;AS IS&quot;, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR</span>
+<span class="s0"># IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,</span>
+<span class="s0"># FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE</span>
+<span class="s0"># AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER</span>
+<span class="s0"># LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,</span>
+<span class="s0"># OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN</span>
+<span class="s0"># THE SOFTWARE.</span>
+
+<span class="s2">import </span><span class="s1">re</span>
+<span class="s2">import </span><span class="s1">time</span>
+<span class="s2">import </span><span class="s1">unittest</span>
+
+<span class="s2">import </span><span class="s1">gevent.testing </span><span class="s2">as </span><span class="s1">greentest</span>
+<span class="s2">import </span><span class="s1">gevent.testing.timing</span>
+
+<span class="s2">import </span><span class="s1">gevent</span>
+<span class="s2">from </span><span class="s1">gevent </span><span class="s2">import </span><span class="s1">socket</span>
+<span class="s2">from </span><span class="s1">gevent.hub </span><span class="s2">import </span><span class="s1">Waiter</span><span class="s2">, </span><span class="s1">get_hub</span>
+<span class="s2">from </span><span class="s1">gevent._compat </span><span class="s2">import </span><span class="s1">NativeStrIO</span>
+<span class="s2">from </span><span class="s1">gevent._compat </span><span class="s2">import </span><span class="s1">get_this_psutil_process</span>
+
+<span class="s1">DELAY = </span><span class="s3">0.1</span>
+
+
+<span class="s2">class </span><span class="s1">TestCloseSocketWhilePolling(greentest.TestCase):</span>
+
+    <span class="s2">def </span><span class="s1">test(self):</span>
+        <span class="s1">sock = socket.socket()</span>
+        <span class="s1">self._close_on_teardown(sock)</span>
+        <span class="s1">t = get_hub().loop.timer(</span><span class="s3">0</span><span class="s1">)</span>
+        <span class="s1">t.start(sock.close)</span>
+        <span class="s2">with </span><span class="s1">self.assertRaises(socket.error):</span>
+            <span class="s2">try</span><span class="s1">:</span>
+                <span class="s1">sock.connect((</span><span class="s4">'python.org'</span><span class="s2">, </span><span class="s3">81</span><span class="s1">))</span>
+            <span class="s2">finally</span><span class="s1">:</span>
+                <span class="s1">t.close()</span>
+
+        <span class="s1">gevent.sleep(</span><span class="s3">0</span><span class="s1">)</span>
+
+
+<span class="s2">class </span><span class="s1">TestExceptionInMainloop(greentest.TestCase):</span>
+
+    <span class="s2">def </span><span class="s1">test_sleep(self):</span>
+        <span class="s0"># even if there was an error in the mainloop, the hub should continue to work</span>
+        <span class="s1">start = time.time()</span>
+        <span class="s1">gevent.sleep(DELAY)</span>
+        <span class="s1">delay = time.time() - start</span>
+
+        <span class="s1">delay_range = DELAY * </span><span class="s3">0.9</span>
+        <span class="s1">self.assertTimeWithinRange(delay</span><span class="s2">, </span><span class="s1">DELAY - delay_range</span><span class="s2">, </span><span class="s1">DELAY + delay_range)</span>
+
+        <span class="s1">error = greentest.ExpectedException(</span><span class="s4">'TestExceptionInMainloop.test_sleep/fail'</span><span class="s1">)</span>
+
+        <span class="s2">def </span><span class="s1">fail():</span>
+            <span class="s2">raise </span><span class="s1">error</span>
+
+        <span class="s2">with </span><span class="s1">get_hub().loop.timer(</span><span class="s3">0.001</span><span class="s1">) </span><span class="s2">as </span><span class="s1">t:</span>
+            <span class="s1">t.start(fail)</span>
+
+            <span class="s1">self.expect_one_error()</span>
+
+            <span class="s1">start = time.time()</span>
+            <span class="s1">gevent.sleep(DELAY)</span>
+            <span class="s1">delay = time.time() - start</span>
+
+            <span class="s1">self.assert_error(value=error)</span>
+            <span class="s1">self.assertTimeWithinRange(delay</span><span class="s2">, </span><span class="s1">DELAY - delay_range</span><span class="s2">, </span><span class="s1">DELAY + delay_range)</span>
+
+
+
+<span class="s2">class </span><span class="s1">TestSleep(gevent.testing.timing.AbstractGenericWaitTestCase):</span>
+
+    <span class="s2">def </span><span class="s1">wait(self</span><span class="s2">, </span><span class="s1">timeout):</span>
+        <span class="s1">gevent.sleep(timeout)</span>
+
+    <span class="s2">def </span><span class="s1">test_simple(self):</span>
+        <span class="s1">gevent.sleep(</span><span class="s3">0</span><span class="s1">)</span>
+
+
+<span class="s2">class </span><span class="s1">TestWaiterGet(gevent.testing.timing.AbstractGenericWaitTestCase):</span>
+
+    <span class="s2">def </span><span class="s1">setUp(self):</span>
+        <span class="s1">super(TestWaiterGet</span><span class="s2">, </span><span class="s1">self).setUp()</span>
+        <span class="s1">self.waiter = Waiter()</span>
+
+    <span class="s2">def </span><span class="s1">wait(self</span><span class="s2">, </span><span class="s1">timeout):</span>
+        <span class="s2">with </span><span class="s1">get_hub().loop.timer(timeout) </span><span class="s2">as </span><span class="s1">evt:</span>
+            <span class="s1">evt.start(self.waiter.switch</span><span class="s2">, None</span><span class="s1">)</span>
+            <span class="s2">return </span><span class="s1">self.waiter.get()</span>
+
+
+<span class="s2">class </span><span class="s1">TestWaiter(greentest.TestCase):</span>
+
+    <span class="s2">def </span><span class="s1">test(self):</span>
+        <span class="s1">waiter = Waiter()</span>
+        <span class="s1">self.assertEqual(str(waiter)</span><span class="s2">, </span><span class="s4">'&lt;Waiter greenlet=None&gt;'</span><span class="s1">)</span>
+        <span class="s1">waiter.switch(</span><span class="s3">25</span><span class="s1">)</span>
+        <span class="s1">self.assertEqual(str(waiter)</span><span class="s2">, </span><span class="s4">'&lt;Waiter greenlet=None value=25&gt;'</span><span class="s1">)</span>
+        <span class="s1">self.assertEqual(waiter.get()</span><span class="s2">, </span><span class="s3">25</span><span class="s1">)</span>
+
+        <span class="s1">waiter = Waiter()</span>
+        <span class="s1">waiter.throw(ZeroDivisionError)</span>
+        <span class="s2">assert </span><span class="s1">re.match(</span><span class="s4">'^&lt;Waiter greenlet=None exc_info=.*ZeroDivisionError.*$'</span><span class="s2">, </span><span class="s1">str(waiter))</span><span class="s2">, </span><span class="s1">str(waiter)</span>
+        <span class="s1">self.assertRaises(ZeroDivisionError</span><span class="s2">, </span><span class="s1">waiter.get)</span>
+
+        <span class="s1">waiter = Waiter()</span>
+        <span class="s1">g = gevent.spawn(waiter.get)</span>
+        <span class="s1">g.name = </span><span class="s4">'AName'</span>
+        <span class="s1">gevent.sleep(</span><span class="s3">0</span><span class="s1">)</span>
+        <span class="s1">str_waiter = str(waiter)</span>
+        <span class="s1">self.assertTrue(str_waiter.startswith(</span><span class="s4">'&lt;Waiter greenlet=&lt;Greenlet &quot;AName'</span><span class="s1">)</span><span class="s2">,</span>
+                        <span class="s1">str_waiter)</span>
+
+        <span class="s1">g.kill()</span>
+
+
+<span class="s1">@greentest.skipOnCI(</span><span class="s4">&quot;Racy on CI&quot;</span><span class="s1">)</span>
+<span class="s2">class </span><span class="s1">TestPeriodicMonitoringThread(greentest.TestCase):</span>
+
+    <span class="s2">def </span><span class="s1">_reset_hub(self):</span>
+        <span class="s1">hub = get_hub()</span>
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s2">del </span><span class="s1">hub.exception_stream</span>
+        <span class="s2">except </span><span class="s1">AttributeError:</span>
+            <span class="s2">pass</span>
+        <span class="s2">if </span><span class="s1">hub._threadpool </span><span class="s2">is not None</span><span class="s1">:</span>
+            <span class="s1">hub.threadpool.join()</span>
+            <span class="s1">hub.threadpool.kill()</span>
+            <span class="s2">del </span><span class="s1">hub.threadpool</span>
+
+
+    <span class="s2">def </span><span class="s1">setUp(self):</span>
+        <span class="s1">super(TestPeriodicMonitoringThread</span><span class="s2">, </span><span class="s1">self).setUp()</span>
+        <span class="s1">self.monitor_thread = gevent.config.monitor_thread</span>
+        <span class="s1">gevent.config.monitor_thread = </span><span class="s2">True</span>
+        <span class="s2">from </span><span class="s1">gevent.monkey </span><span class="s2">import </span><span class="s1">get_original</span>
+        <span class="s1">self.lock = get_original(</span><span class="s4">'threading'</span><span class="s2">, </span><span class="s4">'Lock'</span><span class="s1">)()</span>
+        <span class="s1">self.monitor_fired = </span><span class="s3">0</span>
+        <span class="s1">self.monitored_hubs = set()</span>
+        <span class="s1">self._reset_hub()</span>
+
+    <span class="s2">def </span><span class="s1">tearDown(self):</span>
+        <span class="s1">hub = get_hub()</span>
+        <span class="s2">if not </span><span class="s1">self.monitor_thread </span><span class="s2">and </span><span class="s1">hub.periodic_monitoring_thread:</span>
+            <span class="s0"># If it was true, nothing to do. If it was false, tear things down.</span>
+            <span class="s1">hub.periodic_monitoring_thread.kill()</span>
+            <span class="s1">hub.periodic_monitoring_thread = </span><span class="s2">None</span>
+        <span class="s1">gevent.config.monitor_thread = self.monitor_thread</span>
+        <span class="s1">self.monitored_hubs = </span><span class="s2">None</span>
+        <span class="s1">self._reset_hub()</span>
+        <span class="s1">super(TestPeriodicMonitoringThread</span><span class="s2">, </span><span class="s1">self).tearDown()</span>
+
+    <span class="s2">def </span><span class="s1">_monitor(self</span><span class="s2">, </span><span class="s1">hub):</span>
+        <span class="s2">with </span><span class="s1">self.lock:</span>
+            <span class="s1">self.monitor_fired += </span><span class="s3">1</span>
+            <span class="s2">if </span><span class="s1">self.monitored_hubs </span><span class="s2">is not None</span><span class="s1">:</span>
+                <span class="s1">self.monitored_hubs.add(hub)</span>
+
+    <span class="s2">def </span><span class="s1">test_config(self):</span>
+        <span class="s1">self.assertEqual(</span><span class="s3">0.1</span><span class="s2">, </span><span class="s1">gevent.config.max_blocking_time)</span>
+
+    <span class="s2">def </span><span class="s1">_run_monitoring_threads(self</span><span class="s2">, </span><span class="s1">monitor</span><span class="s2">, </span><span class="s1">kill=</span><span class="s2">True</span><span class="s1">):</span>
+        <span class="s1">self.assertTrue(monitor.should_run)</span>
+        <span class="s2">from </span><span class="s1">threading </span><span class="s2">import </span><span class="s1">Condition</span>
+        <span class="s1">cond = Condition()</span>
+        <span class="s1">cond.acquire()</span>
+
+        <span class="s2">def </span><span class="s1">monitor_cond(_hub):</span>
+            <span class="s1">cond.acquire()</span>
+            <span class="s1">cond.notify_all()</span>
+            <span class="s1">cond.release()</span>
+            <span class="s2">if </span><span class="s1">kill:</span>
+                <span class="s0"># Only run once. Especially helpful on PyPy, where</span>
+                <span class="s0"># formatting stacks is expensive.</span>
+                <span class="s1">monitor.kill()</span>
+
+        <span class="s1">monitor.add_monitoring_function(monitor_cond</span><span class="s2">, </span><span class="s3">0.01</span><span class="s1">)</span>
+
+        <span class="s1">cond.wait()</span>
+        <span class="s1">cond.release()</span>
+        <span class="s1">monitor.add_monitoring_function(monitor_cond</span><span class="s2">, None</span><span class="s1">)</span>
+
+    <span class="s1">@greentest.ignores_leakcheck</span>
+    <span class="s2">def </span><span class="s1">test_kill_removes_trace(self):</span>
+        <span class="s2">from </span><span class="s1">greenlet </span><span class="s2">import </span><span class="s1">gettrace</span>
+        <span class="s1">hub = get_hub()</span>
+        <span class="s1">hub.start_periodic_monitoring_thread()</span>
+        <span class="s1">self.assertIsNotNone(gettrace())</span>
+        <span class="s1">hub.periodic_monitoring_thread.kill()</span>
+        <span class="s1">self.assertIsNone(gettrace())</span>
+
+    <span class="s1">@greentest.ignores_leakcheck</span>
+    <span class="s2">def </span><span class="s1">test_blocking_this_thread(self):</span>
+        <span class="s1">hub = get_hub()</span>
+        <span class="s1">stream = hub.exception_stream = NativeStrIO()</span>
+        <span class="s1">monitor = hub.start_periodic_monitoring_thread()</span>
+        <span class="s1">self.assertIsNotNone(monitor)</span>
+
+        <span class="s1">basic_monitor_func_count = </span><span class="s3">1</span>
+        <span class="s2">if </span><span class="s1">get_this_psutil_process() </span><span class="s2">is not None</span><span class="s1">:</span>
+            <span class="s0"># psutil is installed</span>
+            <span class="s1">basic_monitor_func_count += </span><span class="s3">1</span>
+
+        <span class="s1">self.assertEqual(basic_monitor_func_count</span><span class="s2">,</span>
+                         <span class="s1">len(monitor.monitoring_functions()))</span>
+        <span class="s1">monitor.add_monitoring_function(self._monitor</span><span class="s2">, </span><span class="s3">0.1</span><span class="s1">)</span>
+        <span class="s1">self.assertEqual(basic_monitor_func_count + </span><span class="s3">1</span><span class="s2">,</span>
+                         <span class="s1">len(monitor.monitoring_functions()))</span>
+        <span class="s1">self.assertEqual(self._monitor</span><span class="s2">, </span><span class="s1">monitor.monitoring_functions()[-</span><span class="s3">1</span><span class="s1">].function)</span>
+        <span class="s1">self.assertEqual(</span><span class="s3">0.1</span><span class="s2">, </span><span class="s1">monitor.monitoring_functions()[-</span><span class="s3">1</span><span class="s1">].period)</span>
+
+        <span class="s0"># We must make sure we have switched greenlets at least once,</span>
+        <span class="s0"># otherwise we can't detect a failure.</span>
+        <span class="s1">gevent.sleep(hub.loop.approx_timer_resolution)</span>
+        <span class="s2">assert </span><span class="s1">hub.exception_stream </span><span class="s2">is </span><span class="s1">stream</span>
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s1">time.sleep(</span><span class="s3">0.3</span><span class="s1">) </span><span class="s0"># Thrice the default</span>
+            <span class="s1">self._run_monitoring_threads(monitor)</span>
+        <span class="s2">finally</span><span class="s1">:</span>
+            <span class="s1">monitor.add_monitoring_function(self._monitor</span><span class="s2">, None</span><span class="s1">)</span>
+            <span class="s1">self.assertEqual(basic_monitor_func_count</span><span class="s2">,</span>
+                             <span class="s1">len(monitor._monitoring_functions))</span>
+            <span class="s2">assert </span><span class="s1">hub.exception_stream </span><span class="s2">is </span><span class="s1">stream</span>
+            <span class="s1">monitor.kill()</span>
+            <span class="s2">del </span><span class="s1">hub.exception_stream</span>
+
+
+        <span class="s1">self.assertGreaterEqual(self.monitor_fired</span><span class="s2">, </span><span class="s3">1</span><span class="s1">)</span>
+        <span class="s1">data = stream.getvalue()</span>
+        <span class="s1">self.assertIn(</span><span class="s4">'appears to be blocked'</span><span class="s2">, </span><span class="s1">data)</span>
+        <span class="s1">self.assertIn(</span><span class="s4">'PeriodicMonitoringThread'</span><span class="s2">, </span><span class="s1">data)</span>
+
+    <span class="s2">def </span><span class="s1">_prep_worker_thread(self):</span>
+        <span class="s1">hub = get_hub()</span>
+        <span class="s1">threadpool = hub.threadpool</span>
+
+        <span class="s1">worker_hub = threadpool.apply(get_hub)</span>
+        <span class="s2">assert </span><span class="s1">hub </span><span class="s2">is not </span><span class="s1">worker_hub</span>
+        <span class="s1">stream = NativeStrIO()</span>
+
+        <span class="s0"># It does not have a monitoring thread yet</span>
+        <span class="s1">self.assertIsNone(worker_hub.periodic_monitoring_thread)</span>
+        <span class="s0"># So switch to it and give it one by letting it run.</span>
+        <span class="s0"># XXX: Python 3.10 appears to have made some changes in the memory model.</span>
+        <span class="s0"># Specifically, reading values from the background that are set in the</span>
+        <span class="s0"># background hub *from this thread* is flaky. It takes them awhile to show up.</span>
+        <span class="s0"># Really, that's correct and expected from a standard C point of view, as we</span>
+        <span class="s0"># don't insert any memory barriers or things like that. It just always used to</span>
+        <span class="s0"># work in the past. So now, rather than read them directly, we need to read them</span>
+        <span class="s0"># from the background thread itself. The same, apparently, goes for</span>
+        <span class="s0"># writing.</span>
+        <span class="s0"># Need to figure out what exactly the change was.</span>
+        <span class="s2">def </span><span class="s1">task():</span>
+            <span class="s1">get_hub().exception_stream = stream</span>
+            <span class="s1">gevent.sleep(</span><span class="s3">0.01</span><span class="s1">)</span>
+            <span class="s1">mon = get_hub().periodic_monitoring_thread</span>
+            <span class="s1">mon.add_monitoring_function(self._monitor</span><span class="s2">, </span><span class="s3">0.1</span><span class="s1">)</span>
+            <span class="s2">return </span><span class="s1">mon</span>
+        <span class="s1">worker_monitor = threadpool.apply(task)</span>
+        <span class="s1">self.assertIsNotNone(worker_monitor)</span>
+
+        <span class="s2">return </span><span class="s1">worker_hub</span><span class="s2">, </span><span class="s1">stream</span><span class="s2">, </span><span class="s1">worker_monitor</span>
+
+    <span class="s1">@greentest.ignores_leakcheck</span>
+    <span class="s2">def </span><span class="s1">test_blocking_threadpool_thread_task_queue(self):</span>
+        <span class="s0"># A threadpool thread spends much of its time</span>
+        <span class="s0"># blocked on the native Lock object. Unless we take</span>
+        <span class="s0"># care, if that thread had created a hub, it will constantly</span>
+        <span class="s0"># be reported as blocked.</span>
+
+        <span class="s1">worker_hub</span><span class="s2">, </span><span class="s1">stream</span><span class="s2">, </span><span class="s1">worker_monitor = self._prep_worker_thread()</span>
+
+        <span class="s0"># Now wait until the monitoring threads have run.</span>
+        <span class="s1">self._run_monitoring_threads(worker_monitor)</span>
+        <span class="s1">worker_monitor.kill()</span>
+
+        <span class="s0"># We did run the monitor in the worker thread, but it</span>
+        <span class="s0"># did NOT report itself blocked by the worker thread sitting there.</span>
+        <span class="s2">with </span><span class="s1">self.lock:</span>
+            <span class="s1">self.assertIn(worker_hub</span><span class="s2">, </span><span class="s1">self.monitored_hubs)</span>
+            <span class="s1">self.assertEqual(stream.getvalue()</span><span class="s2">, </span><span class="s4">''</span><span class="s1">)</span>
+
+    <span class="s1">@greentest.ignores_leakcheck</span>
+    <span class="s2">def </span><span class="s1">test_blocking_threadpool_thread_one_greenlet(self):</span>
+        <span class="s0"># If the background threadpool thread has no other greenlets to run</span>
+        <span class="s0"># and never switches, then even if it has a hub</span>
+        <span class="s0"># we don't report it blocking. The threadpool is *meant* to run</span>
+        <span class="s0"># tasks that block.</span>
+
+        <span class="s1">hub = get_hub()</span>
+        <span class="s1">threadpool = hub.threadpool</span>
+        <span class="s1">worker_hub</span><span class="s2">, </span><span class="s1">stream</span><span class="s2">, </span><span class="s1">worker_monitor = self._prep_worker_thread()</span>
+
+        <span class="s1">task = threadpool.spawn(time.sleep</span><span class="s2">, </span><span class="s3">0.3</span><span class="s1">)</span>
+        <span class="s0"># Now wait until the monitoring threads have run.</span>
+        <span class="s1">self._run_monitoring_threads(worker_monitor)</span>
+        <span class="s0"># and be sure the task ran</span>
+        <span class="s1">task.get()</span>
+        <span class="s1">worker_monitor.kill()</span>
+
+        <span class="s0"># We did run the monitor in the worker thread, but it</span>
+        <span class="s0"># did NOT report itself blocked by the worker thread</span>
+        <span class="s2">with </span><span class="s1">self.lock:</span>
+            <span class="s1">self.assertIn(worker_hub</span><span class="s2">, </span><span class="s1">self.monitored_hubs)</span>
+            <span class="s1">self.assertEqual(stream.getvalue()</span><span class="s2">, </span><span class="s4">''</span><span class="s1">)</span>
+
+
+    <span class="s1">@greentest.ignores_leakcheck</span>
+    <span class="s2">def </span><span class="s1">test_blocking_threadpool_thread_multi_greenlet(self):</span>
+        <span class="s0"># If the background threadpool thread ever switches</span>
+        <span class="s0"># greenlets, monitoring goes into affect.</span>
+
+        <span class="s1">hub = get_hub()</span>
+        <span class="s1">threadpool = hub.threadpool</span>
+        <span class="s1">worker_hub</span><span class="s2">, </span><span class="s1">stream</span><span class="s2">, </span><span class="s1">worker_monitor = self._prep_worker_thread()</span>
+
+        <span class="s2">def </span><span class="s1">task():</span>
+            <span class="s1">g = gevent.spawn(time.sleep</span><span class="s2">, </span><span class="s3">0.7</span><span class="s1">)</span>
+            <span class="s1">g.join()</span>
+
+        <span class="s1">task = threadpool.spawn(task)</span>
+        <span class="s0"># Now wait until the monitoring threads have run.</span>
+        <span class="s1">self._run_monitoring_threads(worker_monitor</span><span class="s2">, </span><span class="s1">kill=</span><span class="s2">False</span><span class="s1">)</span>
+        <span class="s0"># and be sure the task ran</span>
+        <span class="s1">task.get()</span>
+        <span class="s1">worker_monitor.kill()</span>
+
+        <span class="s0"># We did run the monitor in the worker thread, and it</span>
+        <span class="s0"># DID report itself blocked by the worker thread</span>
+        <span class="s1">self.assertIn(worker_hub</span><span class="s2">, </span><span class="s1">self.monitored_hubs)</span>
+        <span class="s1">data = stream.getvalue()</span>
+        <span class="s1">self.assertIn(</span><span class="s4">'appears to be blocked'</span><span class="s2">, </span><span class="s1">data)</span>
+        <span class="s1">self.assertIn(</span><span class="s4">'PeriodicMonitoringThread'</span><span class="s2">, </span><span class="s1">data)</span>
+
+
+<span class="s2">class </span><span class="s1">TestLoopInterface(unittest.TestCase):</span>
+
+    <span class="s2">def </span><span class="s1">test_implemensts_ILoop(self):</span>
+        <span class="s2">from </span><span class="s1">gevent.testing </span><span class="s2">import </span><span class="s1">verify</span>
+        <span class="s2">from </span><span class="s1">gevent._interfaces </span><span class="s2">import </span><span class="s1">ILoop</span>
+
+        <span class="s1">loop = get_hub().loop</span>
+
+        <span class="s1">verify.verifyObject(ILoop</span><span class="s2">, </span><span class="s1">loop)</span>
+
+    <span class="s2">def </span><span class="s1">test_callback_implements_ICallback(self):</span>
+        <span class="s2">from </span><span class="s1">gevent.testing </span><span class="s2">import </span><span class="s1">verify</span>
+        <span class="s2">from </span><span class="s1">gevent._interfaces </span><span class="s2">import </span><span class="s1">ICallback</span>
+
+        <span class="s1">loop = get_hub().loop</span>
+
+        <span class="s1">cb = loop.run_callback(</span><span class="s2">lambda</span><span class="s1">: </span><span class="s2">None</span><span class="s1">)</span>
+        <span class="s1">verify.verifyObject(ICallback</span><span class="s2">, </span><span class="s1">cb)</span>
+
+    <span class="s2">def </span><span class="s1">test_callback_ts_implements_ICallback(self):</span>
+        <span class="s2">from </span><span class="s1">gevent.testing </span><span class="s2">import </span><span class="s1">verify</span>
+        <span class="s2">from </span><span class="s1">gevent._interfaces </span><span class="s2">import </span><span class="s1">ICallback</span>
+
+        <span class="s1">loop = get_hub().loop</span>
+
+        <span class="s1">cb = loop.run_callback_threadsafe(</span><span class="s2">lambda</span><span class="s1">: </span><span class="s2">None</span><span class="s1">)</span>
+        <span class="s1">verify.verifyObject(ICallback</span><span class="s2">, </span><span class="s1">cb)</span>
+
+
+<span class="s2">class </span><span class="s1">TestHandleError(unittest.TestCase):</span>
+
+    <span class="s2">def </span><span class="s1">tearDown(self):</span>
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s2">del </span><span class="s1">get_hub().handle_error</span>
+        <span class="s2">except </span><span class="s1">AttributeError:</span>
+            <span class="s2">pass</span>
+
+    <span class="s2">def </span><span class="s1">test_exception_in_custom_handle_error_does_not_crash(self):</span>
+
+        <span class="s2">def </span><span class="s1">bad_handle_error(*args):</span>
+            <span class="s2">raise </span><span class="s1">AttributeError</span>
+
+        <span class="s1">get_hub().handle_error = bad_handle_error</span>
+
+        <span class="s2">class </span><span class="s1">MyException(Exception):</span>
+            <span class="s2">pass</span>
+
+        <span class="s2">def </span><span class="s1">raises():</span>
+            <span class="s2">raise </span><span class="s1">MyException</span>
+
+        <span class="s2">with </span><span class="s1">self.assertRaises(MyException):</span>
+            <span class="s1">gevent.spawn(raises).get()</span>
+
+
+<span class="s2">if </span><span class="s1">__name__ == </span><span class="s4">'__main__'</span><span class="s1">:</span>
+    <span class="s1">greentest.main()</span>
+</pre>
+</body>
+</html>

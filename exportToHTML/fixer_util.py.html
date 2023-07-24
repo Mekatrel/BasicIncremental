@@ -1,0 +1,542 @@
+<html>
+<head>
+<title>fixer_util.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #629755; font-style: italic;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #cc7832;}
+.s3 { color: #6a8759;}
+.s4 { color: #6897bb;}
+.s5 { color: #808080;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+fixer_util.py</font>
+</center></td></tr></table>
+<pre><span class="s0">&quot;&quot;&quot; 
+Utility functions from 2to3, 3to2 and python-modernize (and some home-grown 
+ones). 
+ 
+Licences: 
+2to3: PSF License v2 
+3to2: Apache Software License (from 3to2/setup.py) 
+python-modernize licence: BSD (from python-modernize/LICENSE) 
+&quot;&quot;&quot;</span>
+
+<span class="s2">from </span><span class="s1">lib2to3.fixer_util </span><span class="s2">import </span><span class="s1">(FromImport</span><span class="s2">, </span><span class="s1">Newline</span><span class="s2">, </span><span class="s1">is_import</span><span class="s2">,</span>
+                                <span class="s1">find_root</span><span class="s2">, </span><span class="s1">does_tree_import</span><span class="s2">, </span><span class="s1">Comma)</span>
+<span class="s2">from </span><span class="s1">lib2to3.pytree </span><span class="s2">import </span><span class="s1">Leaf</span><span class="s2">, </span><span class="s1">Node</span>
+<span class="s2">from </span><span class="s1">lib2to3.pygram </span><span class="s2">import </span><span class="s1">python_symbols </span><span class="s2">as </span><span class="s1">syms</span><span class="s2">, </span><span class="s1">python_grammar</span>
+<span class="s2">from </span><span class="s1">lib2to3.pygram </span><span class="s2">import </span><span class="s1">token</span>
+<span class="s2">from </span><span class="s1">lib2to3.fixer_util </span><span class="s2">import </span><span class="s1">(Node</span><span class="s2">, </span><span class="s1">Call</span><span class="s2">, </span><span class="s1">Name</span><span class="s2">, </span><span class="s1">syms</span><span class="s2">, </span><span class="s1">Comma</span><span class="s2">, </span><span class="s1">Number)</span>
+<span class="s2">import </span><span class="s1">re</span>
+
+
+<span class="s2">def </span><span class="s1">canonical_fix_name(fix</span><span class="s2">, </span><span class="s1">avail_fixes):</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Examples: 
+    &gt;&gt;&gt; canonical_fix_name('fix_wrap_text_literals') 
+    'libfuturize.fixes.fix_wrap_text_literals' 
+    &gt;&gt;&gt; canonical_fix_name('wrap_text_literals') 
+    'libfuturize.fixes.fix_wrap_text_literals' 
+    &gt;&gt;&gt; canonical_fix_name('wrap_te') 
+    ValueError(&quot;unknown fixer name&quot;) 
+    &gt;&gt;&gt; canonical_fix_name('wrap') 
+    ValueError(&quot;ambiguous fixer name&quot;) 
+    &quot;&quot;&quot;</span>
+    <span class="s2">if </span><span class="s3">&quot;.fix_&quot; </span><span class="s2">in </span><span class="s1">fix:</span>
+        <span class="s2">return </span><span class="s1">fix</span>
+    <span class="s2">else</span><span class="s1">:</span>
+        <span class="s2">if </span><span class="s1">fix.startswith(</span><span class="s3">'fix_'</span><span class="s1">):</span>
+            <span class="s1">fix = fix[</span><span class="s4">4</span><span class="s1">:]</span>
+        <span class="s5"># Infer the full module name for the fixer.</span>
+        <span class="s5"># First ensure that no names clash (e.g.</span>
+        <span class="s5"># lib2to3.fixes.fix_blah and libfuturize.fixes.fix_blah):</span>
+        <span class="s1">found = [f </span><span class="s2">for </span><span class="s1">f </span><span class="s2">in </span><span class="s1">avail_fixes</span>
+                 <span class="s2">if </span><span class="s1">f.endswith(</span><span class="s3">'fix_{0}'</span><span class="s1">.format(fix))]</span>
+        <span class="s2">if </span><span class="s1">len(found) &gt; </span><span class="s4">1</span><span class="s1">:</span>
+            <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s3">&quot;Ambiguous fixer name. Choose a fully qualified &quot;</span>
+                  <span class="s3">&quot;module name instead from these:</span><span class="s2">\n</span><span class="s3">&quot; </span><span class="s1">+</span>
+                  <span class="s3">&quot;</span><span class="s2">\n</span><span class="s3">&quot;</span><span class="s1">.join(</span><span class="s3">&quot;  &quot; </span><span class="s1">+ myf </span><span class="s2">for </span><span class="s1">myf </span><span class="s2">in </span><span class="s1">found))</span>
+        <span class="s2">elif </span><span class="s1">len(found) == </span><span class="s4">0</span><span class="s1">:</span>
+            <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s3">&quot;Unknown fixer. Use --list-fixes or -l for a list.&quot;</span><span class="s1">)</span>
+        <span class="s2">return </span><span class="s1">found[</span><span class="s4">0</span><span class="s1">]</span>
+
+
+
+<span class="s5">## These functions are from 3to2 by Joe Amenta:</span>
+
+<span class="s2">def </span><span class="s1">Star(prefix=</span><span class="s2">None</span><span class="s1">):</span>
+    <span class="s2">return </span><span class="s1">Leaf(token.STAR</span><span class="s2">, </span><span class="s3">u'*'</span><span class="s2">, </span><span class="s1">prefix=prefix)</span>
+
+<span class="s2">def </span><span class="s1">DoubleStar(prefix=</span><span class="s2">None</span><span class="s1">):</span>
+    <span class="s2">return </span><span class="s1">Leaf(token.DOUBLESTAR</span><span class="s2">, </span><span class="s3">u'**'</span><span class="s2">, </span><span class="s1">prefix=prefix)</span>
+
+<span class="s2">def </span><span class="s1">Minus(prefix=</span><span class="s2">None</span><span class="s1">):</span>
+    <span class="s2">return </span><span class="s1">Leaf(token.MINUS</span><span class="s2">, </span><span class="s3">u'-'</span><span class="s2">, </span><span class="s1">prefix=prefix)</span>
+
+<span class="s2">def </span><span class="s1">commatize(leafs):</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Accepts/turns: (Name, Name, ..., Name, Name) 
+    Returns/into: (Name, Comma, Name, Comma, ..., Name, Comma, Name) 
+    &quot;&quot;&quot;</span>
+    <span class="s1">new_leafs = []</span>
+    <span class="s2">for </span><span class="s1">leaf </span><span class="s2">in </span><span class="s1">leafs:</span>
+        <span class="s1">new_leafs.append(leaf)</span>
+        <span class="s1">new_leafs.append(Comma())</span>
+    <span class="s2">del </span><span class="s1">new_leafs[-</span><span class="s4">1</span><span class="s1">]</span>
+    <span class="s2">return </span><span class="s1">new_leafs</span>
+
+<span class="s2">def </span><span class="s1">indentation(node):</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Returns the indentation for this node 
+    Iff a node is in a suite, then it has indentation. 
+    &quot;&quot;&quot;</span>
+    <span class="s2">while </span><span class="s1">node.parent </span><span class="s2">is not None and </span><span class="s1">node.parent.type != syms.suite:</span>
+        <span class="s1">node = node.parent</span>
+    <span class="s2">if </span><span class="s1">node.parent </span><span class="s2">is None</span><span class="s1">:</span>
+        <span class="s2">return </span><span class="s3">u&quot;&quot;</span>
+    <span class="s5"># The first three children of a suite are NEWLINE, INDENT, (some other node)</span>
+    <span class="s5"># INDENT.value contains the indentation for this suite</span>
+    <span class="s5"># anything after (some other node) has the indentation as its prefix.</span>
+    <span class="s2">if </span><span class="s1">node.type == token.INDENT:</span>
+        <span class="s2">return </span><span class="s1">node.value</span>
+    <span class="s2">elif </span><span class="s1">node.prev_sibling </span><span class="s2">is not None and </span><span class="s1">node.prev_sibling.type == token.INDENT:</span>
+        <span class="s2">return </span><span class="s1">node.prev_sibling.value</span>
+    <span class="s2">elif </span><span class="s1">node.prev_sibling </span><span class="s2">is None</span><span class="s1">:</span>
+        <span class="s2">return </span><span class="s3">u&quot;&quot;</span>
+    <span class="s2">else</span><span class="s1">:</span>
+        <span class="s2">return </span><span class="s1">node.prefix</span>
+
+<span class="s2">def </span><span class="s1">indentation_step(node):</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Dirty little trick to get the difference between each indentation level 
+    Implemented by finding the shortest indentation string 
+    (technically, the &quot;least&quot; of all of the indentation strings, but 
+    tabs and spaces mixed won't get this far, so those are synonymous.) 
+    &quot;&quot;&quot;</span>
+    <span class="s1">r = find_root(node)</span>
+    <span class="s5"># Collect all indentations into one set.</span>
+    <span class="s1">all_indents = set(i.value </span><span class="s2">for </span><span class="s1">i </span><span class="s2">in </span><span class="s1">r.pre_order() </span><span class="s2">if </span><span class="s1">i.type == token.INDENT)</span>
+    <span class="s2">if not </span><span class="s1">all_indents:</span>
+        <span class="s5"># nothing is indented anywhere, so we get to pick what we want</span>
+        <span class="s2">return </span><span class="s3">u&quot;    &quot; </span><span class="s5"># four spaces is a popular convention</span>
+    <span class="s2">else</span><span class="s1">:</span>
+        <span class="s2">return </span><span class="s1">min(all_indents)</span>
+
+<span class="s2">def </span><span class="s1">suitify(parent):</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Turn the stuff after the first colon in parent's children 
+    into a suite, if it wasn't already 
+    &quot;&quot;&quot;</span>
+    <span class="s2">for </span><span class="s1">node </span><span class="s2">in </span><span class="s1">parent.children:</span>
+        <span class="s2">if </span><span class="s1">node.type == syms.suite:</span>
+            <span class="s5"># already in the prefered format, do nothing</span>
+            <span class="s2">return</span>
+
+    <span class="s5"># One-liners have no suite node, we have to fake one up</span>
+    <span class="s2">for </span><span class="s1">i</span><span class="s2">, </span><span class="s1">node </span><span class="s2">in </span><span class="s1">enumerate(parent.children):</span>
+        <span class="s2">if </span><span class="s1">node.type == token.COLON:</span>
+            <span class="s2">break</span>
+    <span class="s2">else</span><span class="s1">:</span>
+        <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s3">u&quot;No class suite and no ':'!&quot;</span><span class="s1">)</span>
+    <span class="s5"># Move everything into a suite node</span>
+    <span class="s1">suite = Node(syms.suite</span><span class="s2">, </span><span class="s1">[Newline()</span><span class="s2">, </span><span class="s1">Leaf(token.INDENT</span><span class="s2">, </span><span class="s1">indentation(node) + indentation_step(node))])</span>
+    <span class="s1">one_node = parent.children[i+</span><span class="s4">1</span><span class="s1">]</span>
+    <span class="s1">one_node.remove()</span>
+    <span class="s1">one_node.prefix = </span><span class="s3">u''</span>
+    <span class="s1">suite.append_child(one_node)</span>
+    <span class="s1">parent.append_child(suite)</span>
+
+<span class="s2">def </span><span class="s1">NameImport(package</span><span class="s2">, </span><span class="s1">as_name=</span><span class="s2">None, </span><span class="s1">prefix=</span><span class="s2">None</span><span class="s1">):</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Accepts a package (Name node), name to import it as (string), and 
+    optional prefix and returns a node: 
+    import &lt;package&gt; [as &lt;as_name&gt;] 
+    &quot;&quot;&quot;</span>
+    <span class="s2">if </span><span class="s1">prefix </span><span class="s2">is None</span><span class="s1">:</span>
+        <span class="s1">prefix = </span><span class="s3">u&quot;&quot;</span>
+    <span class="s1">children = [Name(</span><span class="s3">u&quot;import&quot;</span><span class="s2">, </span><span class="s1">prefix=prefix)</span><span class="s2">, </span><span class="s1">package]</span>
+    <span class="s2">if </span><span class="s1">as_name </span><span class="s2">is not None</span><span class="s1">:</span>
+        <span class="s1">children.extend([Name(</span><span class="s3">u&quot;as&quot;</span><span class="s2">, </span><span class="s1">prefix=</span><span class="s3">u&quot; &quot;</span><span class="s1">)</span><span class="s2">,</span>
+                         <span class="s1">Name(as_name</span><span class="s2">, </span><span class="s1">prefix=</span><span class="s3">u&quot; &quot;</span><span class="s1">)])</span>
+    <span class="s2">return </span><span class="s1">Node(syms.import_name</span><span class="s2">, </span><span class="s1">children)</span>
+
+<span class="s1">_compound_stmts = (syms.if_stmt</span><span class="s2">, </span><span class="s1">syms.while_stmt</span><span class="s2">, </span><span class="s1">syms.for_stmt</span><span class="s2">, </span><span class="s1">syms.try_stmt</span><span class="s2">, </span><span class="s1">syms.with_stmt)</span>
+<span class="s1">_import_stmts = (syms.import_name</span><span class="s2">, </span><span class="s1">syms.import_from)</span>
+
+<span class="s2">def </span><span class="s1">import_binding_scope(node):</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Generator yields all nodes for which a node (an import_stmt) has scope 
+    The purpose of this is for a call to _find() on each of them 
+    &quot;&quot;&quot;</span>
+    <span class="s5"># import_name / import_from are small_stmts</span>
+    <span class="s2">assert </span><span class="s1">node.type </span><span class="s2">in </span><span class="s1">_import_stmts</span>
+    <span class="s1">test = node.next_sibling</span>
+    <span class="s5"># A small_stmt can only be followed by a SEMI or a NEWLINE.</span>
+    <span class="s2">while </span><span class="s1">test.type == token.SEMI:</span>
+        <span class="s1">nxt = test.next_sibling</span>
+        <span class="s5"># A SEMI can only be followed by a small_stmt or a NEWLINE</span>
+        <span class="s2">if </span><span class="s1">nxt.type == token.NEWLINE:</span>
+            <span class="s2">break</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s2">yield </span><span class="s1">nxt</span>
+        <span class="s5"># A small_stmt can only be followed by either a SEMI or a NEWLINE</span>
+        <span class="s1">test = nxt.next_sibling</span>
+    <span class="s5"># Covered all subsequent small_stmts after the import_stmt</span>
+    <span class="s5"># Now to cover all subsequent stmts after the parent simple_stmt</span>
+    <span class="s1">parent = node.parent</span>
+    <span class="s2">assert </span><span class="s1">parent.type == syms.simple_stmt</span>
+    <span class="s1">test = parent.next_sibling</span>
+    <span class="s2">while </span><span class="s1">test </span><span class="s2">is not None</span><span class="s1">:</span>
+        <span class="s5"># Yes, this will yield NEWLINE and DEDENT.  Deal with it.</span>
+        <span class="s2">yield </span><span class="s1">test</span>
+        <span class="s1">test = test.next_sibling</span>
+
+    <span class="s1">context = parent.parent</span>
+    <span class="s5"># Recursively yield nodes following imports inside of a if/while/for/try/with statement</span>
+    <span class="s2">if </span><span class="s1">context.type </span><span class="s2">in </span><span class="s1">_compound_stmts:</span>
+        <span class="s5"># import is in a one-liner</span>
+        <span class="s1">c = context</span>
+        <span class="s2">while </span><span class="s1">c.next_sibling </span><span class="s2">is not None</span><span class="s1">:</span>
+            <span class="s2">yield </span><span class="s1">c.next_sibling</span>
+            <span class="s1">c = c.next_sibling</span>
+        <span class="s1">context = context.parent</span>
+
+    <span class="s5"># Can't chain one-liners on one line, so that takes care of that.</span>
+
+    <span class="s1">p = context.parent</span>
+    <span class="s2">if </span><span class="s1">p </span><span class="s2">is None</span><span class="s1">:</span>
+        <span class="s2">return</span>
+
+    <span class="s5"># in a multi-line suite</span>
+
+    <span class="s2">while </span><span class="s1">p.type </span><span class="s2">in </span><span class="s1">_compound_stmts:</span>
+
+        <span class="s2">if </span><span class="s1">context.type == syms.suite:</span>
+            <span class="s2">yield </span><span class="s1">context</span>
+
+        <span class="s1">context = context.next_sibling</span>
+
+        <span class="s2">if </span><span class="s1">context </span><span class="s2">is None</span><span class="s1">:</span>
+            <span class="s1">context = p.parent</span>
+            <span class="s1">p = context.parent</span>
+            <span class="s2">if </span><span class="s1">p </span><span class="s2">is None</span><span class="s1">:</span>
+                <span class="s2">break</span>
+
+<span class="s2">def </span><span class="s1">ImportAsName(name</span><span class="s2">, </span><span class="s1">as_name</span><span class="s2">, </span><span class="s1">prefix=</span><span class="s2">None</span><span class="s1">):</span>
+    <span class="s1">new_name = Name(name)</span>
+    <span class="s1">new_as = Name(</span><span class="s3">u&quot;as&quot;</span><span class="s2">, </span><span class="s1">prefix=</span><span class="s3">u&quot; &quot;</span><span class="s1">)</span>
+    <span class="s1">new_as_name = Name(as_name</span><span class="s2">, </span><span class="s1">prefix=</span><span class="s3">u&quot; &quot;</span><span class="s1">)</span>
+    <span class="s1">new_node = Node(syms.import_as_name</span><span class="s2">, </span><span class="s1">[new_name</span><span class="s2">, </span><span class="s1">new_as</span><span class="s2">, </span><span class="s1">new_as_name])</span>
+    <span class="s2">if </span><span class="s1">prefix </span><span class="s2">is not None</span><span class="s1">:</span>
+        <span class="s1">new_node.prefix = prefix</span>
+    <span class="s2">return </span><span class="s1">new_node</span>
+
+
+<span class="s2">def </span><span class="s1">is_docstring(node):</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Returns True if the node appears to be a docstring 
+    &quot;&quot;&quot;</span>
+    <span class="s2">return </span><span class="s1">(node.type == syms.simple_stmt </span><span class="s2">and</span>
+            <span class="s1">len(node.children) &gt; </span><span class="s4">0 </span><span class="s2">and </span><span class="s1">node.children[</span><span class="s4">0</span><span class="s1">].type == token.STRING)</span>
+
+
+<span class="s2">def </span><span class="s1">future_import(feature</span><span class="s2">, </span><span class="s1">node):</span>
+    <span class="s0">&quot;&quot;&quot; 
+    This seems to work 
+    &quot;&quot;&quot;</span>
+    <span class="s1">root = find_root(node)</span>
+
+    <span class="s2">if </span><span class="s1">does_tree_import(</span><span class="s3">u&quot;__future__&quot;</span><span class="s2">, </span><span class="s1">feature</span><span class="s2">, </span><span class="s1">node):</span>
+        <span class="s2">return</span>
+
+    <span class="s5"># Look for a shebang or encoding line</span>
+    <span class="s1">shebang_encoding_idx = </span><span class="s2">None</span>
+
+    <span class="s2">for </span><span class="s1">idx</span><span class="s2">, </span><span class="s1">node </span><span class="s2">in </span><span class="s1">enumerate(root.children):</span>
+        <span class="s5"># Is it a shebang or encoding line?</span>
+        <span class="s2">if </span><span class="s1">is_shebang_comment(node) </span><span class="s2">or </span><span class="s1">is_encoding_comment(node):</span>
+            <span class="s1">shebang_encoding_idx = idx</span>
+        <span class="s2">if </span><span class="s1">is_docstring(node):</span>
+            <span class="s5"># skip over docstring</span>
+            <span class="s2">continue</span>
+        <span class="s1">names = check_future_import(node)</span>
+        <span class="s2">if not </span><span class="s1">names:</span>
+            <span class="s5"># not a future statement; need to insert before this</span>
+            <span class="s2">break</span>
+        <span class="s2">if </span><span class="s1">feature </span><span class="s2">in </span><span class="s1">names:</span>
+            <span class="s5"># already imported</span>
+            <span class="s2">return</span>
+
+    <span class="s1">import_ = FromImport(</span><span class="s3">u'__future__'</span><span class="s2">, </span><span class="s1">[Leaf(token.NAME</span><span class="s2">, </span><span class="s1">feature</span><span class="s2">, </span><span class="s1">prefix=</span><span class="s3">&quot; &quot;</span><span class="s1">)])</span>
+    <span class="s2">if </span><span class="s1">shebang_encoding_idx == </span><span class="s4">0 </span><span class="s2">and </span><span class="s1">idx == </span><span class="s4">0</span><span class="s1">:</span>
+        <span class="s5"># If this __future__ import would go on the first line,</span>
+        <span class="s5"># detach the shebang / encoding prefix from the current first line.</span>
+        <span class="s5"># and attach it to our new __future__ import node.</span>
+        <span class="s1">import_.prefix = root.children[</span><span class="s4">0</span><span class="s1">].prefix</span>
+        <span class="s1">root.children[</span><span class="s4">0</span><span class="s1">].prefix = </span><span class="s3">u''</span>
+        <span class="s5"># End the __future__ import line with a newline and add a blank line</span>
+        <span class="s5"># afterwards:</span>
+    <span class="s1">children = [import_ </span><span class="s2">, </span><span class="s1">Newline()]</span>
+    <span class="s1">root.insert_child(idx</span><span class="s2">, </span><span class="s1">Node(syms.simple_stmt</span><span class="s2">, </span><span class="s1">children))</span>
+
+
+<span class="s2">def </span><span class="s1">future_import2(feature</span><span class="s2">, </span><span class="s1">node):</span>
+    <span class="s0">&quot;&quot;&quot; 
+    An alternative to future_import() which might not work ... 
+    &quot;&quot;&quot;</span>
+    <span class="s1">root = find_root(node)</span>
+
+    <span class="s2">if </span><span class="s1">does_tree_import(</span><span class="s3">u&quot;__future__&quot;</span><span class="s2">, </span><span class="s1">feature</span><span class="s2">, </span><span class="s1">node):</span>
+        <span class="s2">return</span>
+
+    <span class="s1">insert_pos = </span><span class="s4">0</span>
+    <span class="s2">for </span><span class="s1">idx</span><span class="s2">, </span><span class="s1">node </span><span class="s2">in </span><span class="s1">enumerate(root.children):</span>
+        <span class="s2">if </span><span class="s1">node.type == syms.simple_stmt </span><span class="s2">and </span><span class="s1">node.children </span><span class="s2">and </span><span class="s1">\</span>
+           <span class="s1">node.children[</span><span class="s4">0</span><span class="s1">].type == token.STRING:</span>
+            <span class="s1">insert_pos = idx + </span><span class="s4">1</span>
+            <span class="s2">break</span>
+
+    <span class="s2">for </span><span class="s1">thing_after </span><span class="s2">in </span><span class="s1">root.children[insert_pos:]:</span>
+        <span class="s2">if </span><span class="s1">thing_after.type == token.NEWLINE:</span>
+            <span class="s1">insert_pos += </span><span class="s4">1</span>
+            <span class="s2">continue</span>
+
+        <span class="s1">prefix = thing_after.prefix</span>
+        <span class="s1">thing_after.prefix = </span><span class="s3">u&quot;&quot;</span>
+        <span class="s2">break</span>
+    <span class="s2">else</span><span class="s1">:</span>
+        <span class="s1">prefix = </span><span class="s3">u&quot;&quot;</span>
+
+    <span class="s1">import_ = FromImport(</span><span class="s3">u&quot;__future__&quot;</span><span class="s2">, </span><span class="s1">[Leaf(token.NAME</span><span class="s2">, </span><span class="s1">feature</span><span class="s2">, </span><span class="s1">prefix=</span><span class="s3">u&quot; &quot;</span><span class="s1">)])</span>
+
+    <span class="s1">children = [import_</span><span class="s2">, </span><span class="s1">Newline()]</span>
+    <span class="s1">root.insert_child(insert_pos</span><span class="s2">, </span><span class="s1">Node(syms.simple_stmt</span><span class="s2">, </span><span class="s1">children</span><span class="s2">, </span><span class="s1">prefix=prefix))</span>
+
+<span class="s2">def </span><span class="s1">parse_args(arglist</span><span class="s2">, </span><span class="s1">scheme):</span>
+    <span class="s0">u&quot;&quot;&quot; 
+    Parse a list of arguments into a dict 
+    &quot;&quot;&quot;</span>
+    <span class="s1">arglist = [i </span><span class="s2">for </span><span class="s1">i </span><span class="s2">in </span><span class="s1">arglist </span><span class="s2">if </span><span class="s1">i.type != token.COMMA]</span>
+
+    <span class="s1">ret_mapping = dict([(k</span><span class="s2">, None</span><span class="s1">) </span><span class="s2">for </span><span class="s1">k </span><span class="s2">in </span><span class="s1">scheme])</span>
+
+    <span class="s2">for </span><span class="s1">i</span><span class="s2">, </span><span class="s1">arg </span><span class="s2">in </span><span class="s1">enumerate(arglist):</span>
+        <span class="s2">if </span><span class="s1">arg.type == syms.argument </span><span class="s2">and </span><span class="s1">arg.children[</span><span class="s4">1</span><span class="s1">].type == token.EQUAL:</span>
+            <span class="s5"># argument &lt; NAME '=' any &gt;</span>
+            <span class="s1">slot = arg.children[</span><span class="s4">0</span><span class="s1">].value</span>
+            <span class="s1">ret_mapping[slot] = arg.children[</span><span class="s4">2</span><span class="s1">]</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">slot = scheme[i]</span>
+            <span class="s1">ret_mapping[slot] = arg</span>
+
+    <span class="s2">return </span><span class="s1">ret_mapping</span>
+
+
+<span class="s5"># def is_import_from(node):</span>
+<span class="s5">#     &quot;&quot;&quot;Returns true if the node is a statement &quot;from ... import ...&quot;</span>
+<span class="s5">#     &quot;&quot;&quot;</span>
+<span class="s5">#     return node.type == syms.import_from</span>
+
+
+<span class="s2">def </span><span class="s1">is_import_stmt(node):</span>
+    <span class="s2">return </span><span class="s1">(node.type == syms.simple_stmt </span><span class="s2">and </span><span class="s1">node.children </span><span class="s2">and</span>
+            <span class="s1">is_import(node.children[</span><span class="s4">0</span><span class="s1">]))</span>
+
+
+<span class="s2">def </span><span class="s1">touch_import_top(package</span><span class="s2">, </span><span class="s1">name_to_import</span><span class="s2">, </span><span class="s1">node):</span>
+    <span class="s0">&quot;&quot;&quot;Works like `does_tree_import` but adds an import statement at the 
+    top if it was not imported (but below any __future__ imports) and below any 
+    comments such as shebang lines). 
+ 
+    Based on lib2to3.fixer_util.touch_import() 
+ 
+    Calling this multiple times adds the imports in reverse order. 
+ 
+    Also adds &quot;standard_library.install_aliases()&quot; after &quot;from future import 
+    standard_library&quot;.  This should probably be factored into another function. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s1">root = find_root(node)</span>
+
+    <span class="s2">if </span><span class="s1">does_tree_import(package</span><span class="s2">, </span><span class="s1">name_to_import</span><span class="s2">, </span><span class="s1">root):</span>
+        <span class="s2">return</span>
+
+    <span class="s5"># Ideally, we would look for whether futurize --all-imports has been run,</span>
+    <span class="s5"># as indicated by the presence of ``from builtins import (ascii, ...,</span>
+    <span class="s5"># zip)`` -- and, if it has, we wouldn't import the name again.</span>
+
+    <span class="s5"># Look for __future__ imports and insert below them</span>
+    <span class="s1">found = </span><span class="s2">False</span>
+    <span class="s2">for </span><span class="s1">name </span><span class="s2">in </span><span class="s1">[</span><span class="s3">'absolute_import'</span><span class="s2">, </span><span class="s3">'division'</span><span class="s2">, </span><span class="s3">'print_function'</span><span class="s2">,</span>
+                 <span class="s3">'unicode_literals'</span><span class="s1">]:</span>
+        <span class="s2">if </span><span class="s1">does_tree_import(</span><span class="s3">'__future__'</span><span class="s2">, </span><span class="s1">name</span><span class="s2">, </span><span class="s1">root):</span>
+            <span class="s1">found = </span><span class="s2">True</span>
+            <span class="s2">break</span>
+    <span class="s2">if </span><span class="s1">found:</span>
+        <span class="s5"># At least one __future__ import. We want to loop until we've seen them</span>
+        <span class="s5"># all.</span>
+        <span class="s1">start</span><span class="s2">, </span><span class="s1">end = </span><span class="s2">None, None</span>
+        <span class="s2">for </span><span class="s1">idx</span><span class="s2">, </span><span class="s1">node </span><span class="s2">in </span><span class="s1">enumerate(root.children):</span>
+            <span class="s2">if </span><span class="s1">check_future_import(node):</span>
+                <span class="s1">start = idx</span>
+                <span class="s5"># Start looping</span>
+                <span class="s1">idx2 = start</span>
+                <span class="s2">while </span><span class="s1">node:</span>
+                    <span class="s1">node = node.next_sibling</span>
+                    <span class="s1">idx2 += </span><span class="s4">1</span>
+                    <span class="s2">if not </span><span class="s1">check_future_import(node):</span>
+                        <span class="s1">end = idx2</span>
+                        <span class="s2">break</span>
+                <span class="s2">break</span>
+        <span class="s2">assert </span><span class="s1">start </span><span class="s2">is not None</span>
+        <span class="s2">assert </span><span class="s1">end </span><span class="s2">is not None</span>
+        <span class="s1">insert_pos = end</span>
+    <span class="s2">else</span><span class="s1">:</span>
+        <span class="s5"># No __future__ imports.</span>
+        <span class="s5"># We look for a docstring and insert the new node below that. If no docstring</span>
+        <span class="s5"># exists, just insert the node at the top.</span>
+        <span class="s2">for </span><span class="s1">idx</span><span class="s2">, </span><span class="s1">node </span><span class="s2">in </span><span class="s1">enumerate(root.children):</span>
+            <span class="s2">if </span><span class="s1">node.type != syms.simple_stmt:</span>
+                <span class="s2">break</span>
+            <span class="s2">if not </span><span class="s1">is_docstring(node):</span>
+                <span class="s5"># This is the usual case.</span>
+                <span class="s2">break</span>
+        <span class="s1">insert_pos = idx</span>
+
+    <span class="s2">if </span><span class="s1">package </span><span class="s2">is None</span><span class="s1">:</span>
+        <span class="s1">import_ = Node(syms.import_name</span><span class="s2">, </span><span class="s1">[</span>
+            <span class="s1">Leaf(token.NAME</span><span class="s2">, </span><span class="s3">u&quot;import&quot;</span><span class="s1">)</span><span class="s2">,</span>
+            <span class="s1">Leaf(token.NAME</span><span class="s2">, </span><span class="s1">name_to_import</span><span class="s2">, </span><span class="s1">prefix=</span><span class="s3">u&quot; &quot;</span><span class="s1">)</span>
+        <span class="s1">])</span>
+    <span class="s2">else</span><span class="s1">:</span>
+        <span class="s1">import_ = FromImport(package</span><span class="s2">, </span><span class="s1">[Leaf(token.NAME</span><span class="s2">, </span><span class="s1">name_to_import</span><span class="s2">, </span><span class="s1">prefix=</span><span class="s3">u&quot; &quot;</span><span class="s1">)])</span>
+        <span class="s2">if </span><span class="s1">name_to_import == </span><span class="s3">u'standard_library'</span><span class="s1">:</span>
+            <span class="s5"># Add:</span>
+            <span class="s5">#     standard_library.install_aliases()</span>
+            <span class="s5"># after:</span>
+            <span class="s5">#     from future import standard_library</span>
+            <span class="s1">install_hooks = Node(syms.simple_stmt</span><span class="s2">,</span>
+                                 <span class="s1">[Node(syms.power</span><span class="s2">,</span>
+                                       <span class="s1">[Leaf(token.NAME</span><span class="s2">, </span><span class="s3">u'standard_library'</span><span class="s1">)</span><span class="s2">,</span>
+                                        <span class="s1">Node(syms.trailer</span><span class="s2">, </span><span class="s1">[Leaf(token.DOT</span><span class="s2">, </span><span class="s3">u'.'</span><span class="s1">)</span><span class="s2">,</span>
+                                        <span class="s1">Leaf(token.NAME</span><span class="s2">, </span><span class="s3">u'install_aliases'</span><span class="s1">)])</span><span class="s2">,</span>
+                                        <span class="s1">Node(syms.trailer</span><span class="s2">, </span><span class="s1">[Leaf(token.LPAR</span><span class="s2">, </span><span class="s3">u'('</span><span class="s1">)</span><span class="s2">,</span>
+                                                            <span class="s1">Leaf(token.RPAR</span><span class="s2">, </span><span class="s3">u')'</span><span class="s1">)])</span>
+                                       <span class="s1">])</span>
+                                 <span class="s1">]</span>
+                                <span class="s1">)</span>
+            <span class="s1">children_hooks = [install_hooks</span><span class="s2">, </span><span class="s1">Newline()]</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">children_hooks = []</span>
+
+        <span class="s5"># FromImport(package, [Leaf(token.NAME, name_to_import, prefix=u&quot; &quot;)])</span>
+
+    <span class="s1">children_import = [import_</span><span class="s2">, </span><span class="s1">Newline()]</span>
+    <span class="s1">old_prefix = root.children[insert_pos].prefix</span>
+    <span class="s1">root.children[insert_pos].prefix = </span><span class="s3">u''</span>
+    <span class="s1">root.insert_child(insert_pos</span><span class="s2">, </span><span class="s1">Node(syms.simple_stmt</span><span class="s2">, </span><span class="s1">children_import</span><span class="s2">, </span><span class="s1">prefix=old_prefix))</span>
+    <span class="s2">if </span><span class="s1">len(children_hooks) &gt; </span><span class="s4">0</span><span class="s1">:</span>
+        <span class="s1">root.insert_child(insert_pos + </span><span class="s4">1</span><span class="s2">, </span><span class="s1">Node(syms.simple_stmt</span><span class="s2">, </span><span class="s1">children_hooks))</span>
+
+
+<span class="s5">## The following functions are from python-modernize by Armin Ronacher:</span>
+<span class="s5"># (a little edited).</span>
+
+<span class="s2">def </span><span class="s1">check_future_import(node):</span>
+    <span class="s0">&quot;&quot;&quot;If this is a future import, return set of symbols that are imported, 
+    else return None.&quot;&quot;&quot;</span>
+    <span class="s5"># node should be the import statement here</span>
+    <span class="s1">savenode = node</span>
+    <span class="s2">if not </span><span class="s1">(node.type == syms.simple_stmt </span><span class="s2">and </span><span class="s1">node.children):</span>
+        <span class="s2">return </span><span class="s1">set()</span>
+    <span class="s1">node = node.children[</span><span class="s4">0</span><span class="s1">]</span>
+    <span class="s5"># now node is the import_from node</span>
+    <span class="s2">if not </span><span class="s1">(node.type == syms.import_from </span><span class="s2">and</span>
+            <span class="s5"># node.type == token.NAME and      # seems to break it</span>
+            <span class="s1">hasattr(node.children[</span><span class="s4">1</span><span class="s1">]</span><span class="s2">, </span><span class="s3">'value'</span><span class="s1">) </span><span class="s2">and</span>
+            <span class="s1">node.children[</span><span class="s4">1</span><span class="s1">].value == </span><span class="s3">u'__future__'</span><span class="s1">):</span>
+        <span class="s2">return </span><span class="s1">set()</span>
+    <span class="s2">if </span><span class="s1">node.children[</span><span class="s4">3</span><span class="s1">].type == token.LPAR:</span>
+        <span class="s1">node = node.children[</span><span class="s4">4</span><span class="s1">]</span>
+    <span class="s2">else</span><span class="s1">:</span>
+        <span class="s1">node = node.children[</span><span class="s4">3</span><span class="s1">]</span>
+    <span class="s5"># now node is the import_as_name[s]</span>
+    <span class="s5"># print(python_grammar.number2symbol[node.type])  # breaks sometimes</span>
+    <span class="s2">if </span><span class="s1">node.type == syms.import_as_names:</span>
+        <span class="s1">result = set()</span>
+        <span class="s2">for </span><span class="s1">n </span><span class="s2">in </span><span class="s1">node.children:</span>
+            <span class="s2">if </span><span class="s1">n.type == token.NAME:</span>
+                <span class="s1">result.add(n.value)</span>
+            <span class="s2">elif </span><span class="s1">n.type == syms.import_as_name:</span>
+                <span class="s1">n = n.children[</span><span class="s4">0</span><span class="s1">]</span>
+                <span class="s2">assert </span><span class="s1">n.type == token.NAME</span>
+                <span class="s1">result.add(n.value)</span>
+        <span class="s2">return </span><span class="s1">result</span>
+    <span class="s2">elif </span><span class="s1">node.type == syms.import_as_name:</span>
+        <span class="s1">node = node.children[</span><span class="s4">0</span><span class="s1">]</span>
+        <span class="s2">assert </span><span class="s1">node.type == token.NAME</span>
+        <span class="s2">return </span><span class="s1">set([node.value])</span>
+    <span class="s2">elif </span><span class="s1">node.type == token.NAME:</span>
+        <span class="s2">return </span><span class="s1">set([node.value])</span>
+    <span class="s2">else</span><span class="s1">:</span>
+        <span class="s5"># TODO: handle brackets like this:</span>
+        <span class="s5">#     from __future__ import (absolute_import, division)</span>
+        <span class="s2">assert False, </span><span class="s3">&quot;strange import: %s&quot; </span><span class="s1">% savenode</span>
+
+
+<span class="s1">SHEBANG_REGEX = </span><span class="s3">r'^#!.*python'</span>
+<span class="s1">ENCODING_REGEX = </span><span class="s3">r&quot;^#.*coding[:=]\s*([-\w.]+)&quot;</span>
+
+
+<span class="s2">def </span><span class="s1">is_shebang_comment(node):</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Comments are prefixes for Leaf nodes. Returns whether the given node has a 
+    prefix that looks like a shebang line or an encoding line: 
+ 
+        #!/usr/bin/env python 
+        #!/usr/bin/python3 
+    &quot;&quot;&quot;</span>
+    <span class="s2">return </span><span class="s1">bool(re.match(SHEBANG_REGEX</span><span class="s2">, </span><span class="s1">node.prefix))</span>
+
+
+<span class="s2">def </span><span class="s1">is_encoding_comment(node):</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Comments are prefixes for Leaf nodes. Returns whether the given node has a 
+    prefix that looks like an encoding line: 
+ 
+        # coding: utf-8 
+        # encoding: utf-8 
+        # -*- coding: &lt;encoding name&gt; -*- 
+        # vim: set fileencoding=&lt;encoding name&gt; : 
+    &quot;&quot;&quot;</span>
+    <span class="s2">return </span><span class="s1">bool(re.match(ENCODING_REGEX</span><span class="s2">, </span><span class="s1">node.prefix))</span>
+
+
+<span class="s2">def </span><span class="s1">wrap_in_fn_call(fn_name</span><span class="s2">, </span><span class="s1">args</span><span class="s2">, </span><span class="s1">prefix=</span><span class="s2">None</span><span class="s1">):</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Example: 
+    &gt;&gt;&gt; wrap_in_fn_call(&quot;oldstr&quot;, (arg,)) 
+    oldstr(arg) 
+ 
+    &gt;&gt;&gt; wrap_in_fn_call(&quot;olddiv&quot;, (arg1, arg2)) 
+    olddiv(arg1, arg2) 
+ 
+    &gt;&gt;&gt; wrap_in_fn_call(&quot;olddiv&quot;, [arg1, comma, arg2, comma, arg3]) 
+    olddiv(arg1, arg2, arg3) 
+    &quot;&quot;&quot;</span>
+    <span class="s2">assert </span><span class="s1">len(args) &gt; </span><span class="s4">0</span>
+    <span class="s2">if </span><span class="s1">len(args) == </span><span class="s4">2</span><span class="s1">:</span>
+        <span class="s1">expr1</span><span class="s2">, </span><span class="s1">expr2 = args</span>
+        <span class="s1">newargs = [expr1</span><span class="s2">, </span><span class="s1">Comma()</span><span class="s2">, </span><span class="s1">expr2]</span>
+    <span class="s2">else</span><span class="s1">:</span>
+        <span class="s1">newargs = args</span>
+    <span class="s2">return </span><span class="s1">Call(Name(fn_name)</span><span class="s2">, </span><span class="s1">newargs</span><span class="s2">, </span><span class="s1">prefix=prefix)</span>
+</pre>
+</body>
+</html>

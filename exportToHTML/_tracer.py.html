@@ -1,0 +1,203 @@
+<html>
+<head>
+<title>_tracer.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #cc7832;}
+.s3 { color: #6a8759;}
+.s4 { color: #6897bb;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+_tracer.py</font>
+</center></td></tr></table>
+<pre><span class="s0"># Copyright (c) 2018 gevent. See LICENSE for details.</span>
+<span class="s0"># cython: auto_pickle=False,embedsignature=True,always_allow_keywords=False</span>
+<span class="s2">from </span><span class="s1">__future__ </span><span class="s2">import </span><span class="s1">print_function</span><span class="s2">, </span><span class="s1">absolute_import</span><span class="s2">, </span><span class="s1">division</span>
+
+<span class="s2">import </span><span class="s1">sys</span>
+<span class="s2">import </span><span class="s1">traceback</span>
+
+<span class="s2">from </span><span class="s1">greenlet </span><span class="s2">import </span><span class="s1">settrace</span>
+<span class="s2">from </span><span class="s1">greenlet </span><span class="s2">import </span><span class="s1">getcurrent</span>
+
+<span class="s2">from </span><span class="s1">gevent.util </span><span class="s2">import </span><span class="s1">format_run_info</span>
+
+<span class="s2">from </span><span class="s1">gevent._compat </span><span class="s2">import </span><span class="s1">perf_counter</span>
+<span class="s2">from </span><span class="s1">gevent._util </span><span class="s2">import </span><span class="s1">gmctime</span>
+
+
+<span class="s1">__all__ = [</span>
+    <span class="s3">'GreenletTracer'</span><span class="s2">,</span>
+    <span class="s3">'HubSwitchTracer'</span><span class="s2">,</span>
+    <span class="s3">'MaxSwitchTracer'</span><span class="s2">,</span>
+<span class="s1">]</span>
+
+<span class="s0"># Recall these classes are cython compiled, so</span>
+<span class="s0"># class variable declarations are bad.</span>
+
+
+<span class="s2">class </span><span class="s1">GreenletTracer(object):</span>
+    <span class="s2">def </span><span class="s1">__init__(self):</span>
+        <span class="s0"># A counter, incremented by the greenlet trace function</span>
+        <span class="s0"># we install on every greenlet switch. This is reset when the</span>
+        <span class="s0"># periodic monitoring thread runs.</span>
+
+        <span class="s1">self.greenlet_switch_counter = </span><span class="s4">0</span>
+
+        <span class="s0"># The greenlet last switched to.</span>
+        <span class="s1">self.active_greenlet = </span><span class="s2">None</span>
+
+        <span class="s0"># The trace function that was previously installed,</span>
+        <span class="s0"># if any.</span>
+        <span class="s0"># NOTE: Calling a class instance is cheaper than</span>
+        <span class="s0"># calling a bound method (at least when compiled with cython)</span>
+        <span class="s0"># even when it redirects to another function.</span>
+        <span class="s1">prev_trace = settrace(self)</span>
+
+        <span class="s1">self.previous_trace_function = prev_trace</span>
+
+        <span class="s1">self._killed = </span><span class="s2">False</span>
+
+    <span class="s2">def </span><span class="s1">kill(self):</span>
+        <span class="s0"># Must be called in the monitored thread.</span>
+        <span class="s2">if not </span><span class="s1">self._killed:</span>
+            <span class="s1">self._killed = </span><span class="s2">True</span>
+            <span class="s1">settrace(self.previous_trace_function)</span>
+            <span class="s1">self.previous_trace_function = </span><span class="s2">None</span>
+
+    <span class="s2">def </span><span class="s1">_trace(self</span><span class="s2">, </span><span class="s1">event</span><span class="s2">, </span><span class="s1">args):</span>
+        <span class="s0"># This function runs in the thread we are monitoring.</span>
+        <span class="s1">self.greenlet_switch_counter += </span><span class="s4">1</span>
+        <span class="s2">if </span><span class="s1">event </span><span class="s2">in </span><span class="s1">(</span><span class="s3">'switch'</span><span class="s2">, </span><span class="s3">'throw'</span><span class="s1">):</span>
+            <span class="s0"># args is (origin, target). This is the only defined</span>
+            <span class="s0"># case</span>
+            <span class="s1">self.active_greenlet = args[</span><span class="s4">1</span><span class="s1">]</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">self.active_greenlet = </span><span class="s2">None</span>
+        <span class="s2">if </span><span class="s1">self.previous_trace_function </span><span class="s2">is not None</span><span class="s1">:</span>
+            <span class="s1">self.previous_trace_function(event</span><span class="s2">, </span><span class="s1">args)</span>
+
+    <span class="s2">def </span><span class="s1">__call__(self</span><span class="s2">, </span><span class="s1">event</span><span class="s2">, </span><span class="s1">args):</span>
+        <span class="s2">return </span><span class="s1">self._trace(event</span><span class="s2">, </span><span class="s1">args)</span>
+
+    <span class="s2">def </span><span class="s1">did_block_hub(self</span><span class="s2">, </span><span class="s1">hub):</span>
+        <span class="s0"># Check to see if we have blocked since the last call to this</span>
+        <span class="s0"># method. Returns a true value if we blocked (not in the hub),</span>
+        <span class="s0"># a false value if everything is fine.</span>
+
+        <span class="s0"># This may be called in the same thread being traced or a</span>
+        <span class="s0"># different thread; if a different thread, there is a race</span>
+        <span class="s0"># condition with this being incremented in the thread we're</span>
+        <span class="s0"># monitoring, but probably not often enough to lead to</span>
+        <span class="s0"># annoying false positives.</span>
+
+        <span class="s1">active_greenlet = self.active_greenlet</span>
+        <span class="s1">did_switch = self.greenlet_switch_counter != </span><span class="s4">0</span>
+        <span class="s1">self.greenlet_switch_counter = </span><span class="s4">0</span>
+
+        <span class="s2">if </span><span class="s1">did_switch </span><span class="s2">or </span><span class="s1">active_greenlet </span><span class="s2">is None or </span><span class="s1">active_greenlet </span><span class="s2">is </span><span class="s1">hub:</span>
+            <span class="s0"># Either we switched, or nothing is running (we got a</span>
+            <span class="s0"># trace event we don't know about or were requested to</span>
+            <span class="s0"># ignore), or we spent the whole time in the hub, blocked</span>
+            <span class="s0"># for IO. Nothing to report.</span>
+            <span class="s2">return False</span>
+        <span class="s2">return True, </span><span class="s1">active_greenlet</span>
+
+    <span class="s2">def </span><span class="s1">ignore_current_greenlet_blocking(self):</span>
+        <span class="s0"># Don't pay attention to the current greenlet.</span>
+        <span class="s1">self.active_greenlet = </span><span class="s2">None</span>
+
+    <span class="s2">def </span><span class="s1">monitor_current_greenlet_blocking(self):</span>
+        <span class="s1">self.active_greenlet = getcurrent()</span>
+
+    <span class="s2">def </span><span class="s1">did_block_hub_report(self</span><span class="s2">, </span><span class="s1">hub</span><span class="s2">, </span><span class="s1">active_greenlet</span><span class="s2">, </span><span class="s1">format_kwargs):</span>
+        <span class="s0"># XXX: On Python 2 with greenlet 1.0a1, '%s' formatting a greenlet</span>
+        <span class="s0"># results in a unicode object. This is a bug in greenlet, I think.</span>
+        <span class="s0"># https://github.com/python-greenlet/greenlet/issues/218</span>
+        <span class="s1">report = [</span><span class="s3">'=' </span><span class="s1">* </span><span class="s4">80</span><span class="s2">,</span>
+                  <span class="s3">'</span><span class="s2">\n</span><span class="s3">%s : Greenlet %s appears to be blocked' </span><span class="s1">%</span>
+                  <span class="s1">(gmctime()</span><span class="s2">, </span><span class="s1">str(active_greenlet))]</span>
+        <span class="s1">report.append(</span><span class="s3">&quot;    Reported by %s&quot; </span><span class="s1">% (self</span><span class="s2">,</span><span class="s1">))</span>
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s1">frame = sys._current_frames()[hub.thread_ident]</span>
+        <span class="s2">except </span><span class="s1">KeyError:</span>
+            <span class="s0"># The thread holding the hub has died. Perhaps we shouldn't</span>
+            <span class="s0"># even report this?</span>
+            <span class="s1">stack = [</span><span class="s3">&quot;Unknown: No thread found for hub %r</span><span class="s2">\n</span><span class="s3">&quot; </span><span class="s1">% (hub</span><span class="s2">,</span><span class="s1">)]</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">stack = traceback.format_stack(frame)</span>
+        <span class="s1">report.append(</span><span class="s3">'Blocked Stack (for thread id %s):' </span><span class="s1">% (hex(hub.thread_ident)</span><span class="s2">,</span><span class="s1">))</span>
+        <span class="s1">report.append(</span><span class="s3">''</span><span class="s1">.join(stack))</span>
+        <span class="s1">report.append(</span><span class="s3">&quot;Info:&quot;</span><span class="s1">)</span>
+        <span class="s1">report.extend(format_run_info(**format_kwargs))</span>
+
+        <span class="s2">return </span><span class="s1">report</span>
+
+
+<span class="s2">class </span><span class="s1">_HubTracer(GreenletTracer):</span>
+    <span class="s2">def </span><span class="s1">__init__(self</span><span class="s2">, </span><span class="s1">hub</span><span class="s2">, </span><span class="s1">max_blocking_time):</span>
+        <span class="s1">GreenletTracer.__init__(self)</span>
+        <span class="s1">self.max_blocking_time = max_blocking_time</span>
+        <span class="s1">self.hub = hub</span>
+
+    <span class="s2">def </span><span class="s1">kill(self):</span>
+        <span class="s1">self.hub = </span><span class="s2">None</span>
+        <span class="s1">GreenletTracer.kill(self)</span>
+
+
+<span class="s2">class </span><span class="s1">HubSwitchTracer(_HubTracer):</span>
+    <span class="s0"># A greenlet tracer that records the last time we switched *into* the hub.</span>
+
+    <span class="s2">def </span><span class="s1">__init__(self</span><span class="s2">, </span><span class="s1">hub</span><span class="s2">, </span><span class="s1">max_blocking_time):</span>
+        <span class="s1">_HubTracer.__init__(self</span><span class="s2">, </span><span class="s1">hub</span><span class="s2">, </span><span class="s1">max_blocking_time)</span>
+        <span class="s1">self.last_entered_hub = </span><span class="s4">0</span>
+
+    <span class="s2">def </span><span class="s1">_trace(self</span><span class="s2">, </span><span class="s1">event</span><span class="s2">, </span><span class="s1">args):</span>
+        <span class="s1">GreenletTracer._trace(self</span><span class="s2">, </span><span class="s1">event</span><span class="s2">, </span><span class="s1">args)</span>
+        <span class="s2">if </span><span class="s1">self.active_greenlet </span><span class="s2">is </span><span class="s1">self.hub:</span>
+            <span class="s1">self.last_entered_hub = perf_counter()</span>
+
+    <span class="s2">def </span><span class="s1">did_block_hub(self</span><span class="s2">, </span><span class="s1">hub):</span>
+        <span class="s2">if </span><span class="s1">perf_counter() - self.last_entered_hub &gt; self.max_blocking_time:</span>
+            <span class="s2">return True, </span><span class="s1">self.active_greenlet</span>
+
+
+<span class="s2">class </span><span class="s1">MaxSwitchTracer(_HubTracer):</span>
+    <span class="s0"># A greenlet tracer that records the maximum time between switches,</span>
+    <span class="s0"># not including time spent in the hub.</span>
+
+    <span class="s2">def </span><span class="s1">__init__(self</span><span class="s2">, </span><span class="s1">hub</span><span class="s2">, </span><span class="s1">max_blocking_time):</span>
+        <span class="s1">_HubTracer.__init__(self</span><span class="s2">, </span><span class="s1">hub</span><span class="s2">, </span><span class="s1">max_blocking_time)</span>
+        <span class="s1">self.last_switch = perf_counter()</span>
+        <span class="s1">self.max_blocking = </span><span class="s4">0</span>
+
+    <span class="s2">def </span><span class="s1">_trace(self</span><span class="s2">, </span><span class="s1">event</span><span class="s2">, </span><span class="s1">args):</span>
+        <span class="s1">old_active = self.active_greenlet</span>
+        <span class="s1">GreenletTracer._trace(self</span><span class="s2">, </span><span class="s1">event</span><span class="s2">, </span><span class="s1">args)</span>
+        <span class="s2">if </span><span class="s1">old_active </span><span class="s2">is not </span><span class="s1">self.hub </span><span class="s2">and </span><span class="s1">old_active </span><span class="s2">is not None</span><span class="s1">:</span>
+            <span class="s0"># If we're switching out of the hub, the blocking</span>
+            <span class="s0"># time doesn't count.</span>
+            <span class="s1">switched_at = perf_counter()</span>
+            <span class="s1">self.max_blocking = max(self.max_blocking</span><span class="s2">,</span>
+                                    <span class="s1">switched_at - self.last_switch)</span>
+
+    <span class="s2">def </span><span class="s1">did_block_hub(self</span><span class="s2">, </span><span class="s1">hub):</span>
+        <span class="s2">if </span><span class="s1">self.max_blocking == </span><span class="s4">0</span><span class="s1">:</span>
+            <span class="s0"># We never switched. Check the time now</span>
+            <span class="s1">self.max_blocking = perf_counter() - self.last_switch</span>
+
+        <span class="s2">if </span><span class="s1">self.max_blocking &gt; self.max_blocking_time:</span>
+            <span class="s2">return True, </span><span class="s1">self.active_greenlet</span>
+
+
+<span class="s2">from </span><span class="s1">gevent._util </span><span class="s2">import </span><span class="s1">import_c_accel</span>
+<span class="s1">import_c_accel(globals()</span><span class="s2">, </span><span class="s3">'gevent.__tracer'</span><span class="s1">)</span>
+</pre>
+</body>
+</html>

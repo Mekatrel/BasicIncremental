@@ -1,0 +1,80 @@
+<html>
+<head>
+<title>test__monkey_sigchld_3.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #cc7832;}
+.s3 { color: #6897bb;}
+.s4 { color: #6a8759;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+test__monkey_sigchld_3.py</font>
+</center></td></tr></table>
+<pre><span class="s0"># Mimics what gunicorn workers do *if* the arbiter is also monkey-patched:</span>
+<span class="s0"># After forking from the master monkey-patched process, the child</span>
+<span class="s0"># resets signal handlers to SIG_DFL. If we then fork and watch *again*,</span>
+<span class="s0"># we shouldn't hang. (Note that we carefully handle this so as not to break</span>
+<span class="s0"># os.popen)</span>
+<span class="s2">from </span><span class="s1">__future__ </span><span class="s2">import </span><span class="s1">print_function</span>
+<span class="s0"># Patch in the parent process.</span>
+<span class="s2">import </span><span class="s1">gevent.monkey</span>
+<span class="s1">gevent.monkey.patch_all()</span>
+
+<span class="s2">from </span><span class="s1">gevent </span><span class="s2">import </span><span class="s1">get_hub</span>
+
+<span class="s2">import </span><span class="s1">os</span>
+<span class="s2">import </span><span class="s1">sys</span>
+
+<span class="s2">import </span><span class="s1">signal</span>
+<span class="s2">import </span><span class="s1">subprocess</span>
+
+<span class="s2">def </span><span class="s1">_waitpid(p):</span>
+    <span class="s2">try</span><span class="s1">:</span>
+        <span class="s1">_</span><span class="s2">, </span><span class="s1">stat = os.waitpid(p</span><span class="s2">, </span><span class="s3">0</span><span class="s1">)</span>
+    <span class="s2">except </span><span class="s1">OSError:</span>
+        <span class="s0"># Interrupted system call</span>
+        <span class="s1">_</span><span class="s2">, </span><span class="s1">stat = os.waitpid(p</span><span class="s2">, </span><span class="s3">0</span><span class="s1">)</span>
+    <span class="s2">assert </span><span class="s1">stat == </span><span class="s3">0</span><span class="s2">, </span><span class="s1">stat</span>
+
+<span class="s2">if </span><span class="s1">hasattr(signal</span><span class="s2">, </span><span class="s4">'SIGCHLD'</span><span class="s1">):</span>
+    <span class="s2">if </span><span class="s1">sys.version_info[:</span><span class="s3">2</span><span class="s1">] &gt;= (</span><span class="s3">3</span><span class="s2">, </span><span class="s3">8</span><span class="s1">) </span><span class="s2">and </span><span class="s1">os.environ.get(</span><span class="s4">&quot;PYTHONDEVMODE&quot;</span><span class="s1">):</span>
+        <span class="s0"># See test__monkey_sigchld.py</span>
+        <span class="s1">print(</span><span class="s4">&quot;Ran 1 tests in 0.0s (skipped=1)&quot;</span><span class="s1">)</span>
+        <span class="s1">sys.exit(</span><span class="s3">0</span><span class="s1">)</span>
+
+    <span class="s0"># Do what subprocess does and make sure we have the watcher</span>
+    <span class="s0"># in the parent</span>
+    <span class="s1">get_hub().loop.install_sigchld()</span>
+
+
+    <span class="s1">pid = os.fork()</span>
+
+    <span class="s2">if </span><span class="s1">pid: </span><span class="s0"># parent</span>
+        <span class="s1">_waitpid(pid)</span>
+    <span class="s2">else</span><span class="s1">:</span>
+        <span class="s0"># Child resets.</span>
+        <span class="s1">signal.signal(signal.SIGCHLD</span><span class="s2">, </span><span class="s1">signal.SIG_DFL)</span>
+
+        <span class="s0"># Go through subprocess because we expect it to automatically</span>
+        <span class="s0"># set up the waiting for us.</span>
+        <span class="s0"># not on Py2 pylint:disable=consider-using-with</span>
+        <span class="s1">popen = subprocess.Popen([sys.executable</span><span class="s2">, </span><span class="s4">'-c'</span><span class="s2">, </span><span class="s4">'import sys'</span><span class="s1">]</span><span class="s2">,</span>
+                                 <span class="s1">stdout=subprocess.PIPE</span><span class="s2">, </span><span class="s1">stderr=subprocess.PIPE)</span>
+        <span class="s1">popen.stderr.read()</span>
+        <span class="s1">popen.stdout.read()</span>
+        <span class="s1">popen.wait() </span><span class="s0"># This hangs if it doesn't.</span>
+        <span class="s1">popen.stderr.close()</span>
+        <span class="s1">popen.stdout.close()</span>
+        <span class="s1">sys.exit(</span><span class="s3">0</span><span class="s1">)</span>
+<span class="s2">else</span><span class="s1">:</span>
+    <span class="s1">print(</span><span class="s4">&quot;No SIGCHLD, not testing&quot;</span><span class="s1">)</span>
+    <span class="s1">print(</span><span class="s4">&quot;Ran 1 tests in 0.0s (skipped=1)&quot;</span><span class="s1">)</span>
+</pre>
+</body>
+</html>

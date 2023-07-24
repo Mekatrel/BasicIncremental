@@ -1,0 +1,140 @@
+<html>
+<head>
+<title>test__core_stat.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #cc7832;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #808080;}
+.s3 { color: #6897bb;}
+.s4 { color: #6a8759;}
+.s5 { color: #a5c261;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+test__core_stat.py</font>
+</center></td></tr></table>
+<pre><span class="s0">from </span><span class="s1">__future__ </span><span class="s0">import </span><span class="s1">print_function</span>
+
+<span class="s0">import </span><span class="s1">os</span>
+<span class="s0">import </span><span class="s1">tempfile</span>
+<span class="s0">import </span><span class="s1">time</span>
+
+<span class="s0">import </span><span class="s1">gevent</span>
+<span class="s0">import </span><span class="s1">gevent.core</span>
+
+<span class="s0">import </span><span class="s1">gevent.testing </span><span class="s0">as </span><span class="s1">greentest</span>
+<span class="s0">import </span><span class="s1">gevent.testing.flaky</span>
+
+<span class="s2">#pylint: disable=protected-access</span>
+
+
+<span class="s1">DELAY = </span><span class="s3">0.5</span>
+
+<span class="s1">WIN = greentest.WIN</span>
+
+<span class="s1">LIBUV = greentest.LIBUV</span>
+
+<span class="s0">class </span><span class="s1">TestCoreStat(greentest.TestCase):</span>
+
+    <span class="s1">__timeout__ = greentest.LARGE_TIMEOUT</span>
+
+    <span class="s0">def </span><span class="s1">setUp(self):</span>
+        <span class="s1">super(TestCoreStat</span><span class="s0">, </span><span class="s1">self).setUp()</span>
+        <span class="s1">fd</span><span class="s0">, </span><span class="s1">path = tempfile.mkstemp(suffix=</span><span class="s4">'.gevent_test_core_stat'</span><span class="s1">)</span>
+        <span class="s1">os.close(fd)</span>
+        <span class="s1">self.temp_path = path</span>
+        <span class="s1">self.hub = gevent.get_hub()</span>
+        <span class="s2"># If we don't specify an interval, we default to zero.</span>
+        <span class="s2"># libev interprets that as meaning to use its default interval,</span>
+        <span class="s2"># which is about 5 seconds. If we go below it's minimum check</span>
+        <span class="s2"># threshold, it bumps it up to the minimum.</span>
+        <span class="s1">self.watcher = self.hub.loop.stat(self.temp_path</span><span class="s0">, </span><span class="s1">interval=-</span><span class="s3">1</span><span class="s1">)</span>
+
+    <span class="s0">def </span><span class="s1">tearDown(self):</span>
+        <span class="s1">self.watcher.close()</span>
+        <span class="s0">if </span><span class="s1">os.path.exists(self.temp_path):</span>
+            <span class="s1">os.unlink(self.temp_path)</span>
+        <span class="s1">super(TestCoreStat</span><span class="s0">, </span><span class="s1">self).tearDown()</span>
+
+    <span class="s0">def </span><span class="s1">_write(self):</span>
+        <span class="s0">with </span><span class="s1">open(self.temp_path</span><span class="s0">, </span><span class="s4">'wb'</span><span class="s0">, </span><span class="s1">buffering=</span><span class="s3">0</span><span class="s1">) </span><span class="s0">as </span><span class="s1">f:</span>
+            <span class="s1">f.write(</span><span class="s5">b'x'</span><span class="s1">)</span>
+
+    <span class="s0">def </span><span class="s1">_check_attr(self</span><span class="s0">, </span><span class="s1">name</span><span class="s0">, </span><span class="s1">none):</span>
+        <span class="s2"># Deals with the complex behaviour of the 'attr' and 'prev'</span>
+        <span class="s2"># attributes on Windows. This codifies it, rather than simply letting</span>
+        <span class="s2"># the test fail, so we know exactly when and what changes it.</span>
+        <span class="s0">try</span><span class="s1">:</span>
+            <span class="s1">x = getattr(self.watcher</span><span class="s0">, </span><span class="s1">name)</span>
+        <span class="s0">except </span><span class="s1">ImportError:</span>
+            <span class="s0">if </span><span class="s1">WIN:</span>
+                <span class="s2"># the 'posix' module is not available</span>
+                <span class="s0">pass</span>
+            <span class="s0">else</span><span class="s1">:</span>
+                <span class="s0">raise</span>
+        <span class="s0">else</span><span class="s1">:</span>
+            <span class="s0">if </span><span class="s1">WIN </span><span class="s0">and not </span><span class="s1">LIBUV:</span>
+                <span class="s2"># The ImportError is only raised for the first time;</span>
+                <span class="s2"># after that, the attribute starts returning None</span>
+                <span class="s1">self.assertIsNone(x</span><span class="s0">, </span><span class="s4">&quot;Only None is supported on Windows&quot;</span><span class="s1">)</span>
+            <span class="s0">if </span><span class="s1">none:</span>
+                <span class="s1">self.assertIsNone(x</span><span class="s0">, </span><span class="s1">name)</span>
+            <span class="s0">else</span><span class="s1">:</span>
+                <span class="s1">self.assertIsNotNone(x</span><span class="s0">, </span><span class="s1">name)</span>
+
+    <span class="s0">def </span><span class="s1">_wait_on_greenlet(self</span><span class="s0">, </span><span class="s1">func</span><span class="s0">, </span><span class="s1">*greenlet_args):</span>
+        <span class="s1">start = time.time()</span>
+
+        <span class="s1">self.hub.loop.update_now()</span>
+        <span class="s1">greenlet = gevent.spawn_later(DELAY</span><span class="s0">, </span><span class="s1">func</span><span class="s0">, </span><span class="s1">*greenlet_args)</span>
+        <span class="s0">with </span><span class="s1">gevent.Timeout(</span><span class="s3">5 </span><span class="s1">+ DELAY + </span><span class="s3">0.5</span><span class="s1">):</span>
+            <span class="s1">self.hub.wait(self.watcher)</span>
+        <span class="s1">now = time.time()</span>
+
+        <span class="s1">self.assertGreaterEqual(now</span><span class="s0">, </span><span class="s1">start</span><span class="s0">, </span><span class="s4">&quot;Time must move forward&quot;</span><span class="s1">)</span>
+
+        <span class="s1">wait_duration = now - start</span>
+        <span class="s1">reaction = wait_duration - DELAY</span>
+
+        <span class="s0">if </span><span class="s1">reaction &lt;= </span><span class="s3">0.0</span><span class="s1">:</span>
+            <span class="s2"># Sigh. This is especially true on PyPy on Windows</span>
+            <span class="s0">raise </span><span class="s1">gevent.testing.flaky.FlakyTestRaceCondition(</span>
+                <span class="s4">&quot;Bad timer resolution (on Windows?), test is useless. Start %s, now %s&quot; </span><span class="s1">% (start</span><span class="s0">, </span><span class="s1">now))</span>
+
+        <span class="s1">self.assertGreaterEqual(</span>
+            <span class="s1">reaction</span><span class="s0">, </span><span class="s3">0.0</span><span class="s0">,</span>
+            <span class="s4">'Watcher %s reacted too early: %.3fs' </span><span class="s1">% (self.watcher</span><span class="s0">, </span><span class="s1">reaction))</span>
+
+        <span class="s1">greenlet.join()</span>
+
+    <span class="s0">def </span><span class="s1">test_watcher_basics(self):</span>
+        <span class="s1">watcher = self.watcher</span>
+        <span class="s1">filename = self.temp_path</span>
+        <span class="s1">self.assertEqual(watcher.path</span><span class="s0">, </span><span class="s1">filename)</span>
+        <span class="s1">filenames = filename </span><span class="s0">if </span><span class="s1">isinstance(filename</span><span class="s0">, </span><span class="s1">bytes) </span><span class="s0">else </span><span class="s1">filename.encode(</span><span class="s4">'ascii'</span><span class="s1">)</span>
+        <span class="s1">self.assertEqual(watcher._paths</span><span class="s0">, </span><span class="s1">filenames)</span>
+        <span class="s1">self.assertEqual(watcher.interval</span><span class="s0">, </span><span class="s1">-</span><span class="s3">1</span><span class="s1">)</span>
+
+    <span class="s0">def </span><span class="s1">test_write(self):</span>
+        <span class="s1">self._wait_on_greenlet(self._write)</span>
+
+        <span class="s1">self._check_attr(</span><span class="s4">'attr'</span><span class="s0">, False</span><span class="s1">)</span>
+        <span class="s1">self._check_attr(</span><span class="s4">'prev'</span><span class="s0">, False</span><span class="s1">)</span>
+        <span class="s2"># The watcher interval changed after it started; -1 is illegal</span>
+        <span class="s1">self.assertNotEqual(self.watcher.interval</span><span class="s0">, </span><span class="s1">-</span><span class="s3">1</span><span class="s1">)</span>
+
+    <span class="s0">def </span><span class="s1">test_unlink(self):</span>
+        <span class="s1">self._wait_on_greenlet(os.unlink</span><span class="s0">, </span><span class="s1">self.temp_path)</span>
+
+        <span class="s1">self._check_attr(</span><span class="s4">'attr'</span><span class="s0">, True</span><span class="s1">)</span>
+        <span class="s1">self._check_attr(</span><span class="s4">'prev'</span><span class="s0">, False</span><span class="s1">)</span>
+
+<span class="s0">if </span><span class="s1">__name__ == </span><span class="s4">'__main__'</span><span class="s1">:</span>
+    <span class="s1">greentest.main()</span>
+</pre>
+</body>
+</html>

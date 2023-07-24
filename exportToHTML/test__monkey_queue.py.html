@@ -1,0 +1,352 @@
+<html>
+<head>
+<title>test__monkey_queue.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #cc7832;}
+.s3 { color: #6897bb;}
+.s4 { color: #6a8759;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+test__monkey_queue.py</font>
+</center></td></tr></table>
+<pre><span class="s0"># Some simple queue module tests, plus some failure conditions</span>
+<span class="s0"># to ensure the Queue locks remain stable.</span>
+<span class="s2">from </span><span class="s1">gevent </span><span class="s2">import </span><span class="s1">monkey</span>
+<span class="s1">monkey.patch_all()</span>
+
+<span class="s2">from </span><span class="s1">gevent </span><span class="s2">import </span><span class="s1">queue </span><span class="s2">as </span><span class="s1">Queue</span>
+<span class="s2">import </span><span class="s1">threading</span>
+<span class="s2">import </span><span class="s1">time</span>
+<span class="s2">import </span><span class="s1">unittest</span>
+
+
+<span class="s1">QUEUE_SIZE = </span><span class="s3">5</span>
+
+<span class="s0"># A thread to run a function that unclogs a blocked Queue.</span>
+<span class="s2">class </span><span class="s1">_TriggerThread(threading.Thread):</span>
+    <span class="s2">def </span><span class="s1">__init__(self</span><span class="s2">, </span><span class="s1">fn</span><span class="s2">, </span><span class="s1">args):</span>
+        <span class="s1">self.fn = fn</span>
+        <span class="s1">self.args = args</span>
+        <span class="s0">#self.startedEvent = threading.Event()</span>
+        <span class="s2">from </span><span class="s1">gevent.event </span><span class="s2">import </span><span class="s1">Event</span>
+        <span class="s1">self.startedEvent = Event()</span>
+        <span class="s1">threading.Thread.__init__(self)</span>
+
+    <span class="s2">def </span><span class="s1">run(self):</span>
+        <span class="s0"># The sleep isn't necessary, but is intended to give the blocking</span>
+        <span class="s0"># function in the main thread a chance at actually blocking before</span>
+        <span class="s0"># we unclog it.  But if the sleep is longer than the timeout-based</span>
+        <span class="s0"># tests wait in their blocking functions, those tests will fail.</span>
+        <span class="s0"># So we give them much longer timeout values compared to the</span>
+        <span class="s0"># sleep here (I aimed at 10 seconds for blocking functions --</span>
+        <span class="s0"># they should never actually wait that long - they should make</span>
+        <span class="s0"># progress as soon as we call self.fn()).</span>
+        <span class="s1">time.sleep(</span><span class="s3">0.01</span><span class="s1">)</span>
+        <span class="s1">self.startedEvent.set()</span>
+        <span class="s1">self.fn(*self.args)</span>
+
+
+<span class="s0"># Execute a function that blocks, and in a separate thread, a function that</span>
+<span class="s0"># triggers the release.  Returns the result of the blocking function.  Caution:</span>
+<span class="s0"># block_func must guarantee to block until trigger_func is called, and</span>
+<span class="s0"># trigger_func must guarantee to change queue state so that block_func can make</span>
+<span class="s0"># enough progress to return.  In particular, a block_func that just raises an</span>
+<span class="s0"># exception regardless of whether trigger_func is called will lead to</span>
+<span class="s0"># timing-dependent sporadic failures, and one of those went rarely seen but</span>
+<span class="s0"># undiagnosed for years.  Now block_func must be unexceptional.  If block_func</span>
+<span class="s0"># is supposed to raise an exception, call do_exceptional_blocking_test()</span>
+<span class="s0"># instead.</span>
+
+<span class="s2">class </span><span class="s1">BlockingTestMixin(object):</span>
+
+    <span class="s2">def </span><span class="s1">do_blocking_test(self</span><span class="s2">, </span><span class="s1">block_func</span><span class="s2">, </span><span class="s1">block_args</span><span class="s2">, </span><span class="s1">trigger_func</span><span class="s2">, </span><span class="s1">trigger_args):</span>
+        <span class="s1">self.t = _TriggerThread(trigger_func</span><span class="s2">, </span><span class="s1">trigger_args)</span>
+        <span class="s1">self.t.start()</span>
+        <span class="s1">self.result = block_func(*block_args)</span>
+        <span class="s0"># If block_func returned before our thread made the call, we failed!</span>
+        <span class="s2">if not </span><span class="s1">self.t.startedEvent.isSet():</span>
+            <span class="s1">self.fail(</span><span class="s4">&quot;blocking function '%r' appeared not to block&quot; </span><span class="s1">%</span>
+                      <span class="s1">block_func)</span>
+        <span class="s1">self.t.join(</span><span class="s3">10</span><span class="s1">) </span><span class="s0"># make sure the thread terminates</span>
+        <span class="s2">if </span><span class="s1">self.t.is_alive():</span>
+            <span class="s1">self.fail(</span><span class="s4">&quot;trigger function '%r' appeared to not return&quot; </span><span class="s1">%</span>
+                      <span class="s1">trigger_func)</span>
+        <span class="s2">return </span><span class="s1">self.result</span>
+
+    <span class="s0"># Call this instead if block_func is supposed to raise an exception.</span>
+    <span class="s2">def </span><span class="s1">do_exceptional_blocking_test(self</span><span class="s2">, </span><span class="s1">block_func</span><span class="s2">, </span><span class="s1">block_args</span><span class="s2">, </span><span class="s1">trigger_func</span><span class="s2">,</span>
+                                     <span class="s1">trigger_args</span><span class="s2">, </span><span class="s1">expected_exception_class):</span>
+        <span class="s1">self.t = _TriggerThread(trigger_func</span><span class="s2">, </span><span class="s1">trigger_args)</span>
+        <span class="s1">self.t.start()</span>
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s2">with </span><span class="s1">self.assertRaises(expected_exception_class):</span>
+                <span class="s1">block_func(*block_args)</span>
+        <span class="s2">finally</span><span class="s1">:</span>
+            <span class="s1">self.t.join(</span><span class="s3">10</span><span class="s1">) </span><span class="s0"># make sure the thread terminates</span>
+            <span class="s2">if </span><span class="s1">self.t.is_alive():</span>
+                <span class="s1">self.fail(</span><span class="s4">&quot;trigger function '%r' appeared to not return&quot; </span><span class="s1">%</span>
+                          <span class="s1">trigger_func)</span>
+            <span class="s2">if not </span><span class="s1">self.t.startedEvent.isSet():</span>
+                <span class="s1">self.fail(</span><span class="s4">&quot;trigger thread ended but event never set&quot;</span><span class="s1">)</span>
+
+
+<span class="s2">class </span><span class="s1">BaseQueueTest(unittest.TestCase</span><span class="s2">, </span><span class="s1">BlockingTestMixin):</span>
+    <span class="s1">type2test = Queue.Queue</span>
+
+    <span class="s2">def </span><span class="s1">setUp(self):</span>
+        <span class="s1">self.cum = </span><span class="s3">0</span>
+        <span class="s1">self.cumlock = threading.Lock()</span>
+
+    <span class="s2">def </span><span class="s1">simple_queue_test(self</span><span class="s2">, </span><span class="s1">q):</span>
+        <span class="s2">if not </span><span class="s1">q.empty():</span>
+            <span class="s2">raise </span><span class="s1">RuntimeError(</span><span class="s4">&quot;Call this function with an empty queue&quot;</span><span class="s1">)</span>
+        <span class="s0"># I guess we better check things actually queue correctly a little :)</span>
+        <span class="s1">q.put(</span><span class="s3">111</span><span class="s1">)</span>
+        <span class="s1">q.put(</span><span class="s3">333</span><span class="s1">)</span>
+        <span class="s1">q.put(</span><span class="s3">222</span><span class="s1">)</span>
+        <span class="s1">q.put(</span><span class="s3">444</span><span class="s1">)</span>
+        <span class="s1">target_first_items = dict(</span>
+            <span class="s1">Queue=</span><span class="s3">111</span><span class="s2">,</span>
+            <span class="s1">LifoQueue=</span><span class="s3">444</span><span class="s2">,</span>
+            <span class="s1">PriorityQueue=</span><span class="s3">111</span><span class="s1">)</span>
+        <span class="s1">actual_first_item = (q.peek()</span><span class="s2">, </span><span class="s1">q.get())</span>
+        <span class="s1">self.assertEqual(actual_first_item</span><span class="s2">,</span>
+                         <span class="s1">(target_first_items[q.__class__.__name__]</span><span class="s2">,</span>
+                          <span class="s1">target_first_items[q.__class__.__name__])</span><span class="s2">,</span>
+                         <span class="s4">&quot;q.peek() and q.get() are not equal!&quot;</span><span class="s1">)</span>
+        <span class="s1">target_order = dict(Queue=[</span><span class="s3">333</span><span class="s2">, </span><span class="s3">222</span><span class="s2">, </span><span class="s3">444</span><span class="s1">]</span><span class="s2">,</span>
+                            <span class="s1">LifoQueue=[</span><span class="s3">222</span><span class="s2">, </span><span class="s3">333</span><span class="s2">, </span><span class="s3">111</span><span class="s1">]</span><span class="s2">,</span>
+                            <span class="s1">PriorityQueue=[</span><span class="s3">222</span><span class="s2">, </span><span class="s3">333</span><span class="s2">, </span><span class="s3">444</span><span class="s1">])</span>
+        <span class="s1">actual_order = [q.get()</span><span class="s2">, </span><span class="s1">q.get()</span><span class="s2">, </span><span class="s1">q.get()]</span>
+        <span class="s1">self.assertEqual(actual_order</span><span class="s2">, </span><span class="s1">target_order[q.__class__.__name__]</span><span class="s2">,</span>
+                         <span class="s4">&quot;Didn't seem to queue the correct data!&quot;</span><span class="s1">)</span>
+        <span class="s2">for </span><span class="s1">i </span><span class="s2">in </span><span class="s1">range(QUEUE_SIZE-</span><span class="s3">1</span><span class="s1">):</span>
+            <span class="s1">q.put(i)</span>
+            <span class="s1">self.assertFalse(q.empty()</span><span class="s2">, </span><span class="s4">&quot;Queue should not be empty&quot;</span><span class="s1">)</span>
+        <span class="s1">self.assertFalse(q.full()</span><span class="s2">, </span><span class="s4">&quot;Queue should not be full&quot;</span><span class="s1">)</span>
+        <span class="s1">q.put(</span><span class="s3">999</span><span class="s1">)</span>
+        <span class="s1">self.assertTrue(q.full()</span><span class="s2">, </span><span class="s4">&quot;Queue should be full&quot;</span><span class="s1">)</span>
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s1">q.put(</span><span class="s3">888</span><span class="s2">, </span><span class="s1">block=</span><span class="s3">0</span><span class="s1">)</span>
+            <span class="s1">self.fail(</span><span class="s4">&quot;Didn't appear to block with a full queue&quot;</span><span class="s1">)</span>
+        <span class="s2">except </span><span class="s1">Queue.Full:</span>
+            <span class="s2">pass</span>
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s1">q.put(</span><span class="s3">888</span><span class="s2">, </span><span class="s1">timeout=</span><span class="s3">0.01</span><span class="s1">)</span>
+            <span class="s1">self.fail(</span><span class="s4">&quot;Didn't appear to time-out with a full queue&quot;</span><span class="s1">)</span>
+        <span class="s2">except </span><span class="s1">Queue.Full:</span>
+            <span class="s2">pass</span>
+        <span class="s1">self.assertEqual(q.qsize()</span><span class="s2">, </span><span class="s1">QUEUE_SIZE)</span>
+        <span class="s0"># Test a blocking put</span>
+        <span class="s1">self.do_blocking_test(q.put</span><span class="s2">, </span><span class="s1">(</span><span class="s3">888</span><span class="s2">,</span><span class="s1">)</span><span class="s2">, </span><span class="s1">q.get</span><span class="s2">, </span><span class="s1">())</span>
+        <span class="s1">self.do_blocking_test(q.put</span><span class="s2">, </span><span class="s1">(</span><span class="s3">888</span><span class="s2">, True, </span><span class="s3">10</span><span class="s1">)</span><span class="s2">, </span><span class="s1">q.get</span><span class="s2">, </span><span class="s1">())</span>
+        <span class="s0"># Empty it</span>
+        <span class="s2">for </span><span class="s1">i </span><span class="s2">in </span><span class="s1">range(QUEUE_SIZE):</span>
+            <span class="s1">q.get()</span>
+        <span class="s1">self.assertTrue(q.empty()</span><span class="s2">, </span><span class="s4">&quot;Queue should be empty&quot;</span><span class="s1">)</span>
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s1">q.get(block=</span><span class="s3">0</span><span class="s1">)</span>
+            <span class="s1">self.fail(</span><span class="s4">&quot;Didn't appear to block with an empty queue&quot;</span><span class="s1">)</span>
+        <span class="s2">except </span><span class="s1">Queue.Empty:</span>
+            <span class="s2">pass</span>
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s1">q.get(timeout=</span><span class="s3">0.01</span><span class="s1">)</span>
+            <span class="s1">self.fail(</span><span class="s4">&quot;Didn't appear to time-out with an empty queue&quot;</span><span class="s1">)</span>
+        <span class="s2">except </span><span class="s1">Queue.Empty:</span>
+            <span class="s2">pass</span>
+        <span class="s0"># Test a blocking get</span>
+        <span class="s1">self.do_blocking_test(q.get</span><span class="s2">, </span><span class="s1">()</span><span class="s2">, </span><span class="s1">q.put</span><span class="s2">, </span><span class="s1">(</span><span class="s4">'empty'</span><span class="s2">,</span><span class="s1">))</span>
+        <span class="s1">self.do_blocking_test(q.get</span><span class="s2">, </span><span class="s1">(</span><span class="s2">True, </span><span class="s3">10</span><span class="s1">)</span><span class="s2">, </span><span class="s1">q.put</span><span class="s2">, </span><span class="s1">(</span><span class="s4">'empty'</span><span class="s2">,</span><span class="s1">))</span>
+
+    <span class="s2">def </span><span class="s1">worker(self</span><span class="s2">, </span><span class="s1">q):</span>
+        <span class="s2">while True</span><span class="s1">:</span>
+            <span class="s1">x = q.get()</span>
+            <span class="s2">if </span><span class="s1">x </span><span class="s2">is None</span><span class="s1">:</span>
+                <span class="s1">q.task_done()</span>
+                <span class="s2">return</span>
+            <span class="s0">#with self.cumlock:</span>
+            <span class="s1">self.cum += x</span>
+            <span class="s1">q.task_done()</span>
+
+    <span class="s2">def </span><span class="s1">queue_join_test(self</span><span class="s2">, </span><span class="s1">q):</span>
+        <span class="s1">self.cum = </span><span class="s3">0</span>
+        <span class="s2">for </span><span class="s1">i </span><span class="s2">in </span><span class="s1">(</span><span class="s3">0</span><span class="s2">, </span><span class="s3">1</span><span class="s1">):</span>
+            <span class="s1">threading.Thread(target=self.worker</span><span class="s2">, </span><span class="s1">args=(q</span><span class="s2">,</span><span class="s1">)).start()</span>
+        <span class="s2">for </span><span class="s1">i </span><span class="s2">in </span><span class="s1">range(</span><span class="s3">100</span><span class="s1">):</span>
+            <span class="s1">q.put(i)</span>
+        <span class="s1">q.join()</span>
+        <span class="s1">self.assertEqual(self.cum</span><span class="s2">, </span><span class="s1">sum(range(</span><span class="s3">100</span><span class="s1">))</span><span class="s2">,</span>
+                         <span class="s4">&quot;q.join() did not block until all tasks were done&quot;</span><span class="s1">)</span>
+        <span class="s2">for </span><span class="s1">i </span><span class="s2">in </span><span class="s1">(</span><span class="s3">0</span><span class="s2">, </span><span class="s3">1</span><span class="s1">):</span>
+            <span class="s1">q.put(</span><span class="s2">None</span><span class="s1">)         </span><span class="s0"># instruct the threads to close</span>
+        <span class="s1">q.join()                </span><span class="s0"># verify that you can join twice</span>
+
+    <span class="s2">def </span><span class="s1">test_queue_task_done(self):</span>
+        <span class="s0"># Test to make sure a queue task completed successfully.</span>
+        <span class="s1">q = Queue.JoinableQueue() </span><span class="s0"># self.type2test()</span>
+        <span class="s0"># XXX the same test in subclasses</span>
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s1">q.task_done()</span>
+        <span class="s2">except </span><span class="s1">ValueError:</span>
+            <span class="s2">pass</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">self.fail(</span><span class="s4">&quot;Did not detect task count going negative&quot;</span><span class="s1">)</span>
+
+    <span class="s2">def </span><span class="s1">test_queue_join(self):</span>
+        <span class="s0"># Test that a queue join()s successfully, and before anything else</span>
+        <span class="s0"># (done twice for insurance).</span>
+        <span class="s1">q = Queue.JoinableQueue() </span><span class="s0"># self.type2test()</span>
+        <span class="s0"># XXX the same test in subclass</span>
+        <span class="s1">self.queue_join_test(q)</span>
+        <span class="s1">self.queue_join_test(q)</span>
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s1">q.task_done()</span>
+        <span class="s2">except </span><span class="s1">ValueError:</span>
+            <span class="s2">pass</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">self.fail(</span><span class="s4">&quot;Did not detect task count going negative&quot;</span><span class="s1">)</span>
+
+    <span class="s2">def </span><span class="s1">test_queue_task_done_with_items(self):</span>
+        <span class="s0"># Passing items to the constructor allows for as</span>
+        <span class="s0"># many task_done calls. Joining before all the task done</span>
+        <span class="s0"># are called returns false</span>
+        <span class="s0"># XXX the same test in subclass</span>
+        <span class="s1">l = [</span><span class="s3">1</span><span class="s2">, </span><span class="s3">2</span><span class="s2">, </span><span class="s3">3</span><span class="s1">]</span>
+        <span class="s1">q = Queue.JoinableQueue(items=l)</span>
+        <span class="s2">for </span><span class="s1">i </span><span class="s2">in </span><span class="s1">l:</span>
+            <span class="s1">self.assertFalse(q.join(timeout=</span><span class="s3">0.001</span><span class="s1">))</span>
+            <span class="s1">self.assertEqual(i</span><span class="s2">, </span><span class="s1">q.get())</span>
+            <span class="s1">q.task_done()</span>
+
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s1">q.task_done()</span>
+        <span class="s2">except </span><span class="s1">ValueError:</span>
+            <span class="s2">pass</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">self.fail(</span><span class="s4">&quot;Did not detect task count going negative&quot;</span><span class="s1">)</span>
+        <span class="s1">self.assertTrue(q.join(timeout=</span><span class="s3">0.001</span><span class="s1">))</span>
+
+    <span class="s2">def </span><span class="s1">test_simple_queue(self):</span>
+        <span class="s0"># Do it a couple of times on the same queue.</span>
+        <span class="s0"># Done twice to make sure works with same instance reused.</span>
+        <span class="s1">q = self.type2test(QUEUE_SIZE)</span>
+        <span class="s1">self.simple_queue_test(q)</span>
+        <span class="s1">self.simple_queue_test(q)</span>
+
+<span class="s2">class </span><span class="s1">LifoQueueTest(BaseQueueTest):</span>
+    <span class="s1">type2test = Queue.LifoQueue</span>
+
+<span class="s2">class </span><span class="s1">PriorityQueueTest(BaseQueueTest):</span>
+    <span class="s1">type2test = Queue.PriorityQueue</span>
+
+    <span class="s2">def </span><span class="s1">test__init(self):</span>
+        <span class="s1">item1 = (</span><span class="s3">2</span><span class="s2">, </span><span class="s4">'b'</span><span class="s1">)</span>
+        <span class="s1">item2 = (</span><span class="s3">1</span><span class="s2">, </span><span class="s4">'a'</span><span class="s1">)</span>
+        <span class="s1">q = self.type2test(items=[item1</span><span class="s2">, </span><span class="s1">item2])</span>
+        <span class="s1">self.assertTupleEqual(item2</span><span class="s2">, </span><span class="s1">q.get_nowait())</span>
+        <span class="s1">self.assertTupleEqual(item1</span><span class="s2">, </span><span class="s1">q.get_nowait())</span>
+
+
+<span class="s0"># A Queue subclass that can provoke failure at a moment's notice :)</span>
+<span class="s2">class </span><span class="s1">FailingQueueException(Exception):</span>
+    <span class="s2">pass</span>
+
+<span class="s2">class </span><span class="s1">FailingQueue(Queue.Queue):</span>
+    <span class="s2">def </span><span class="s1">__init__(self</span><span class="s2">, </span><span class="s1">*args):</span>
+        <span class="s1">self.fail_next_put = </span><span class="s2">False</span>
+        <span class="s1">self.fail_next_get = </span><span class="s2">False</span>
+        <span class="s1">Queue.Queue.__init__(self</span><span class="s2">, </span><span class="s1">*args)</span>
+    <span class="s2">def </span><span class="s1">_put(self</span><span class="s2">, </span><span class="s1">item):</span>
+        <span class="s2">if </span><span class="s1">self.fail_next_put:</span>
+            <span class="s1">self.fail_next_put = </span><span class="s2">False</span>
+            <span class="s2">raise </span><span class="s1">FailingQueueException(</span><span class="s4">&quot;You Lose&quot;</span><span class="s1">)</span>
+        <span class="s2">return </span><span class="s1">Queue.Queue._put(self</span><span class="s2">, </span><span class="s1">item)</span>
+    <span class="s2">def </span><span class="s1">_get(self):</span>
+        <span class="s2">if </span><span class="s1">self.fail_next_get:</span>
+            <span class="s1">self.fail_next_get = </span><span class="s2">False</span>
+            <span class="s2">raise </span><span class="s1">FailingQueueException(</span><span class="s4">&quot;You Lose&quot;</span><span class="s1">)</span>
+        <span class="s2">return </span><span class="s1">Queue.Queue._get(self)</span>
+
+<span class="s2">class </span><span class="s1">FailingQueueTest(unittest.TestCase</span><span class="s2">, </span><span class="s1">BlockingTestMixin):</span>
+
+    <span class="s2">def </span><span class="s1">failing_queue_test(self</span><span class="s2">, </span><span class="s1">q):</span>
+        <span class="s2">if not </span><span class="s1">q.empty():</span>
+            <span class="s2">raise </span><span class="s1">RuntimeError(</span><span class="s4">&quot;Call this function with an empty queue&quot;</span><span class="s1">)</span>
+        <span class="s2">for </span><span class="s1">i </span><span class="s2">in </span><span class="s1">range(QUEUE_SIZE-</span><span class="s3">1</span><span class="s1">):</span>
+            <span class="s1">q.put(i)</span>
+        <span class="s0"># Test a failing non-blocking put.</span>
+        <span class="s1">q.fail_next_put = </span><span class="s2">True</span>
+        <span class="s2">with </span><span class="s1">self.assertRaises(FailingQueueException):</span>
+            <span class="s1">q.put(</span><span class="s4">&quot;oops&quot;</span><span class="s2">, </span><span class="s1">block=</span><span class="s3">0</span><span class="s1">)</span>
+
+        <span class="s1">q.fail_next_put = </span><span class="s2">True</span>
+        <span class="s2">with </span><span class="s1">self.assertRaises(FailingQueueException):</span>
+            <span class="s1">q.put(</span><span class="s4">&quot;oops&quot;</span><span class="s2">, </span><span class="s1">timeout=</span><span class="s3">0.1</span><span class="s1">)</span>
+        <span class="s1">q.put(</span><span class="s3">999</span><span class="s1">)</span>
+        <span class="s1">self.assertTrue(q.full()</span><span class="s2">, </span><span class="s4">&quot;Queue should be full&quot;</span><span class="s1">)</span>
+        <span class="s0"># Test a failing blocking put</span>
+        <span class="s1">q.fail_next_put = </span><span class="s2">True</span>
+        <span class="s2">with </span><span class="s1">self.assertRaises(FailingQueueException):</span>
+            <span class="s1">self.do_blocking_test(q.put</span><span class="s2">, </span><span class="s1">(</span><span class="s3">888</span><span class="s2">,</span><span class="s1">)</span><span class="s2">, </span><span class="s1">q.get</span><span class="s2">, </span><span class="s1">())</span>
+
+        <span class="s0"># Check the Queue isn't damaged.</span>
+        <span class="s0"># put failed, but get succeeded - re-add</span>
+        <span class="s1">q.put(</span><span class="s3">999</span><span class="s1">)</span>
+        <span class="s0"># Test a failing timeout put</span>
+        <span class="s1">q.fail_next_put = </span><span class="s2">True</span>
+        <span class="s1">self.do_exceptional_blocking_test(q.put</span><span class="s2">, </span><span class="s1">(</span><span class="s3">888</span><span class="s2">, True, </span><span class="s3">10</span><span class="s1">)</span><span class="s2">, </span><span class="s1">q.get</span><span class="s2">, </span><span class="s1">()</span><span class="s2">,</span>
+                                          <span class="s1">FailingQueueException)</span>
+        <span class="s0"># Check the Queue isn't damaged.</span>
+        <span class="s0"># put failed, but get succeeded - re-add</span>
+        <span class="s1">q.put(</span><span class="s3">999</span><span class="s1">)</span>
+        <span class="s1">self.assertTrue(q.full()</span><span class="s2">, </span><span class="s4">&quot;Queue should be full&quot;</span><span class="s1">)</span>
+        <span class="s1">q.get()</span>
+        <span class="s1">self.assertFalse(q.full()</span><span class="s2">, </span><span class="s4">&quot;Queue should not be full&quot;</span><span class="s1">)</span>
+        <span class="s1">q.put(</span><span class="s3">999</span><span class="s1">)</span>
+        <span class="s1">self.assertTrue(q.full()</span><span class="s2">, </span><span class="s4">&quot;Queue should be full&quot;</span><span class="s1">)</span>
+        <span class="s0"># Test a blocking put</span>
+        <span class="s1">self.do_blocking_test(q.put</span><span class="s2">, </span><span class="s1">(</span><span class="s3">888</span><span class="s2">,</span><span class="s1">)</span><span class="s2">, </span><span class="s1">q.get</span><span class="s2">, </span><span class="s1">())</span>
+        <span class="s0"># Empty it</span>
+        <span class="s2">for </span><span class="s1">i </span><span class="s2">in </span><span class="s1">range(QUEUE_SIZE):</span>
+            <span class="s1">q.get()</span>
+        <span class="s1">self.assertTrue(q.empty()</span><span class="s2">, </span><span class="s4">&quot;Queue should be empty&quot;</span><span class="s1">)</span>
+        <span class="s1">q.put(</span><span class="s4">&quot;first&quot;</span><span class="s1">)</span>
+        <span class="s1">q.fail_next_get = </span><span class="s2">True</span>
+        <span class="s2">with </span><span class="s1">self.assertRaises(FailingQueueException):</span>
+            <span class="s1">q.get()</span>
+
+        <span class="s1">self.assertFalse(q.empty()</span><span class="s2">, </span><span class="s4">&quot;Queue should not be empty&quot;</span><span class="s1">)</span>
+        <span class="s1">q.fail_next_get = </span><span class="s2">True</span>
+        <span class="s2">with </span><span class="s1">self.assertRaises(FailingQueueException):</span>
+            <span class="s1">q.get(timeout=</span><span class="s3">0.1</span><span class="s1">)</span>
+        <span class="s1">self.assertFalse(q.empty()</span><span class="s2">, </span><span class="s4">&quot;Queue should not be empty&quot;</span><span class="s1">)</span>
+        <span class="s1">q.get()</span>
+        <span class="s1">self.assertTrue(q.empty()</span><span class="s2">, </span><span class="s4">&quot;Queue should be empty&quot;</span><span class="s1">)</span>
+        <span class="s1">q.fail_next_get = </span><span class="s2">True</span>
+        <span class="s1">self.do_exceptional_blocking_test(q.get</span><span class="s2">, </span><span class="s1">()</span><span class="s2">, </span><span class="s1">q.put</span><span class="s2">, </span><span class="s1">(</span><span class="s4">'empty'</span><span class="s2">,</span><span class="s1">)</span><span class="s2">,</span>
+                                          <span class="s1">FailingQueueException)</span>
+        <span class="s0"># put succeeded, but get failed.</span>
+        <span class="s1">self.assertFalse(q.empty()</span><span class="s2">, </span><span class="s4">&quot;Queue should not be empty&quot;</span><span class="s1">)</span>
+        <span class="s1">q.get()</span>
+        <span class="s1">self.assertTrue(q.empty()</span><span class="s2">, </span><span class="s4">&quot;Queue should be empty&quot;</span><span class="s1">)</span>
+
+    <span class="s2">def </span><span class="s1">test_failing_queue(self):</span>
+        <span class="s0"># Test to make sure a queue is functioning correctly.</span>
+        <span class="s0"># Done twice to the same instance.</span>
+        <span class="s1">q = FailingQueue(QUEUE_SIZE)</span>
+        <span class="s1">self.failing_queue_test(q)</span>
+        <span class="s1">self.failing_queue_test(q)</span>
+
+
+<span class="s2">if </span><span class="s1">__name__ == </span><span class="s4">&quot;__main__&quot;</span><span class="s1">:</span>
+    <span class="s1">unittest.main()</span>
+</pre>
+</body>
+</html>

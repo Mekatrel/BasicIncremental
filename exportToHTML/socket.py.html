@@ -1,0 +1,187 @@
+<html>
+<head>
+<title>socket.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #629755; font-style: italic;}
+.s3 { color: #cc7832;}
+.s4 { color: #6a8759;}
+.s5 { color: #6897bb;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+socket.py</font>
+</center></td></tr></table>
+<pre><span class="s0"># Copyright (c) 2009-2014 Denis Bilenko and gevent contributors. See LICENSE for details.</span>
+
+<span class="s2">&quot;&quot;&quot;Cooperative low-level networking interface. 
+ 
+This module provides socket operations and some related functions. 
+The API of the functions and classes matches the API of the corresponding 
+items in the standard :mod:`socket` module exactly, but the synchronous functions 
+in this module only block the current greenlet and let the others run. 
+ 
+For convenience, exceptions (like :class:`error &lt;socket.error&gt;` and :class:`timeout &lt;socket.timeout&gt;`) 
+as well as the constants from the :mod:`socket` module are imported into this module. 
+&quot;&quot;&quot;</span>
+<span class="s0"># Our import magic sadly makes this warning useless</span>
+<span class="s0"># pylint: disable=undefined-variable</span>
+
+<span class="s3">from </span><span class="s1">gevent._compat </span><span class="s3">import </span><span class="s1">PY3</span>
+<span class="s3">from </span><span class="s1">gevent._compat </span><span class="s3">import </span><span class="s1">PY311</span>
+<span class="s3">from </span><span class="s1">gevent._compat </span><span class="s3">import </span><span class="s1">exc_clear</span>
+<span class="s3">from </span><span class="s1">gevent._util </span><span class="s3">import </span><span class="s1">copy_globals</span>
+
+
+<span class="s3">if </span><span class="s1">PY3:</span>
+    <span class="s3">from </span><span class="s1">gevent </span><span class="s3">import </span><span class="s1">_socket3 </span><span class="s3">as </span><span class="s1">_source </span><span class="s0"># python 2: pylint:disable=no-name-in-module</span>
+<span class="s3">else</span><span class="s1">:</span>
+    <span class="s3">from </span><span class="s1">gevent </span><span class="s3">import </span><span class="s1">_socket2 </span><span class="s3">as </span><span class="s1">_source</span>
+
+<span class="s0"># define some things we're expecting to overwrite; each module</span>
+<span class="s0"># needs to define these</span>
+<span class="s1">__implements__ = __dns__ = __all__ = __extensions__ = __imports__ = ()</span>
+
+
+<span class="s3">class </span><span class="s1">error(Exception):</span>
+    <span class="s1">errno = </span><span class="s3">None</span>
+
+
+<span class="s3">def </span><span class="s1">getfqdn(*args):</span>
+    <span class="s0"># pylint:disable=unused-argument</span>
+    <span class="s3">raise </span><span class="s1">NotImplementedError()</span>
+
+<span class="s1">copy_globals(_source</span><span class="s3">, </span><span class="s1">globals()</span><span class="s3">,</span>
+             <span class="s1">dunder_names_to_keep=(</span><span class="s4">'__implements__'</span><span class="s3">, </span><span class="s4">'__dns__'</span><span class="s3">, </span><span class="s4">'__all__'</span><span class="s3">,</span>
+                                   <span class="s4">'__extensions__'</span><span class="s3">, </span><span class="s4">'__imports__'</span><span class="s3">, </span><span class="s4">'__socket__'</span><span class="s1">)</span><span class="s3">,</span>
+             <span class="s1">cleanup_globs=</span><span class="s3">False</span><span class="s1">)</span>
+
+<span class="s0"># The _socket2 and _socket3 don't import things defined in</span>
+<span class="s0"># __extensions__, to help avoid confusing reference cycles in the</span>
+<span class="s0"># documentation and to prevent importing from the wrong place, but we</span>
+<span class="s0"># *do* need to expose them here. (NOTE: This may lead to some sphinx</span>
+<span class="s0"># warnings like:</span>
+<span class="s0">#    WARNING: missing attribute mentioned in :members: or __all__:</span>
+<span class="s0">#             module gevent._socket2, attribute cancel_wait</span>
+<span class="s0"># These can be ignored.)</span>
+<span class="s3">from </span><span class="s1">gevent </span><span class="s3">import </span><span class="s1">_socketcommon</span>
+<span class="s1">copy_globals(_socketcommon</span><span class="s3">, </span><span class="s1">globals()</span><span class="s3">,</span>
+             <span class="s1">only_names=_socketcommon.__extensions__)</span>
+
+<span class="s3">try</span><span class="s1">:</span>
+    <span class="s1">_GLOBAL_DEFAULT_TIMEOUT = __socket__._GLOBAL_DEFAULT_TIMEOUT</span>
+<span class="s3">except </span><span class="s1">AttributeError:</span>
+    <span class="s1">_GLOBAL_DEFAULT_TIMEOUT = object()</span>
+
+
+<span class="s3">def </span><span class="s1">create_connection(address</span><span class="s3">, </span><span class="s1">timeout=_GLOBAL_DEFAULT_TIMEOUT</span><span class="s3">, </span><span class="s1">source_address=</span><span class="s3">None, </span><span class="s1">**kwargs):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    create_connection(address, timeout=None, source_address=None, *, all_errors=False) -&gt; socket 
+ 
+    Connect to *address* and return the :class:`gevent.socket.socket` 
+    object. 
+ 
+    Convenience function. Connect to *address* (a 2-tuple ``(host, 
+    port)``) and return the socket object. Passing the optional 
+    *timeout* parameter will set the timeout on the socket instance 
+    before attempting to connect. If no *timeout* is supplied, the 
+    global default timeout setting returned by 
+    :func:`getdefaulttimeout` is used. If *source_address* is set it 
+    must be a tuple of (host, port) for the socket to bind as a source 
+    address before making the connection. A host of '' or port 0 tells 
+    the OS to use the default. 
+ 
+    .. versionchanged:: 20.6.0 
+        If the host part of the address includes an IPv6 scope ID, 
+        it will be used instead of ignored, if the platform supplies 
+        :func:`socket.inet_pton`. 
+    .. versionchanged:: 22.08.0 
+        Add the *all_errors* argument. This only has meaning on Python 3.11; 
+        it is a programming error to pass it on earlier versions. 
+    &quot;&quot;&quot;</span>
+    <span class="s0"># Sigh. This function is a near-copy of the CPython implementation.</span>
+    <span class="s0"># Even though we simplified some things, it's still a little complex to</span>
+    <span class="s0"># cope with error handling, which got even more complicated in 3.11.</span>
+    <span class="s0"># pylint:disable=too-many-locals,too-many-branches</span>
+
+    <span class="s1">all_errors = </span><span class="s3">False</span>
+    <span class="s3">if </span><span class="s1">PY311:</span>
+        <span class="s1">all_errors = kwargs.pop(</span><span class="s4">'all_errors'</span><span class="s3">, False</span><span class="s1">)</span>
+    <span class="s3">if </span><span class="s1">kwargs:</span>
+        <span class="s3">raise </span><span class="s1">TypeError(</span><span class="s4">&quot;Too many keyword arguments to create_connection&quot;</span><span class="s3">, </span><span class="s1">kwargs)</span>
+
+
+    <span class="s1">host</span><span class="s3">, </span><span class="s1">port = address</span>
+    <span class="s1">exceptions = []</span>
+    <span class="s0"># getaddrinfo is documented as returning a list, but our interface</span>
+    <span class="s0"># is pluggable, so be sure it does.</span>
+    <span class="s1">addrs = list(getaddrinfo(host</span><span class="s3">, </span><span class="s1">port</span><span class="s3">, </span><span class="s5">0</span><span class="s3">, </span><span class="s1">SOCK_STREAM))</span>
+    <span class="s3">if not </span><span class="s1">addrs:</span>
+        <span class="s3">raise </span><span class="s1">error(</span><span class="s4">&quot;getaddrinfo returns an empty list&quot;</span><span class="s1">)</span>
+
+    <span class="s3">for </span><span class="s1">res </span><span class="s3">in </span><span class="s1">addrs:</span>
+        <span class="s1">af</span><span class="s3">, </span><span class="s1">socktype</span><span class="s3">, </span><span class="s1">proto</span><span class="s3">, </span><span class="s1">_canonname</span><span class="s3">, </span><span class="s1">sa = res</span>
+        <span class="s1">sock = </span><span class="s3">None</span>
+        <span class="s3">try</span><span class="s1">:</span>
+            <span class="s1">sock = socket(af</span><span class="s3">, </span><span class="s1">socktype</span><span class="s3">, </span><span class="s1">proto)</span>
+            <span class="s3">if </span><span class="s1">timeout </span><span class="s3">is not </span><span class="s1">_GLOBAL_DEFAULT_TIMEOUT:</span>
+                <span class="s1">sock.settimeout(timeout)</span>
+            <span class="s3">if </span><span class="s1">source_address:</span>
+                <span class="s1">sock.bind(source_address)</span>
+            <span class="s1">sock.connect(sa)</span>
+
+        <span class="s3">except </span><span class="s1">error </span><span class="s3">as </span><span class="s1">exc:</span>
+            <span class="s3">if not </span><span class="s1">all_errors:</span>
+                <span class="s1">exceptions = [exc] </span><span class="s0"># raise only the last error</span>
+            <span class="s3">else</span><span class="s1">:</span>
+                <span class="s1">exceptions.append(exc)</span>
+            <span class="s3">del </span><span class="s1">exc </span><span class="s0"># cycle</span>
+            <span class="s3">if </span><span class="s1">sock </span><span class="s3">is not None</span><span class="s1">:</span>
+                <span class="s1">sock.close()</span>
+            <span class="s1">sock = </span><span class="s3">None</span>
+            <span class="s3">if </span><span class="s1">res </span><span class="s3">is </span><span class="s1">addrs[-</span><span class="s5">1</span><span class="s1">]:</span>
+                <span class="s3">if not </span><span class="s1">all_errors:</span>
+                    <span class="s3">del </span><span class="s1">exceptions[:]</span>
+                    <span class="s3">raise</span>
+                <span class="s3">try</span><span class="s1">:</span>
+                    <span class="s3">raise </span><span class="s1">ExceptionGroup(</span><span class="s4">&quot;create_connection failed&quot;</span><span class="s3">, </span><span class="s1">exceptions)</span>
+                <span class="s3">finally</span><span class="s1">:</span>
+                    <span class="s0"># Break explicitly a reference cycle</span>
+                    <span class="s3">del </span><span class="s1">exceptions[:]</span>
+            <span class="s0"># without exc_clear(), if connect() fails once, the socket</span>
+            <span class="s0"># is referenced by the frame in exc_info and the next</span>
+            <span class="s0"># bind() fails (see test__socket.TestCreateConnection)</span>
+            <span class="s0"># that does not happen with regular sockets though,</span>
+            <span class="s0"># because _socket.socket.connect() is a built-in. this is</span>
+            <span class="s0"># similar to &quot;getnameinfo loses a reference&quot; failure in</span>
+            <span class="s0"># test_socket.py</span>
+            <span class="s1">exc_clear()</span>
+        <span class="s3">except </span><span class="s1">BaseException:</span>
+            <span class="s0"># Things like GreenletExit,  Timeout and KeyboardInterrupt.</span>
+            <span class="s0"># These get raised immediately, being sure to</span>
+            <span class="s0"># close the socket</span>
+            <span class="s3">if </span><span class="s1">sock </span><span class="s3">is not None</span><span class="s1">:</span>
+                <span class="s1">sock.close()</span>
+            <span class="s1">sock = </span><span class="s3">None</span>
+            <span class="s3">raise</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s0"># break reference cycles</span>
+            <span class="s3">del </span><span class="s1">exceptions[:]</span>
+            <span class="s3">try</span><span class="s1">:</span>
+                <span class="s3">return </span><span class="s1">sock</span>
+            <span class="s3">finally</span><span class="s1">:</span>
+                <span class="s1">sock = </span><span class="s3">None</span>
+
+
+<span class="s0"># This is promised to be in the __all__ of the _source, but, for circularity reasons,</span>
+<span class="s0"># we implement it in this module. Mostly for documentation purposes, put it</span>
+<span class="s0"># in the _source too.</span>
+<span class="s1">_source.create_connection = create_connection</span>
+</pre>
+</body>
+</html>

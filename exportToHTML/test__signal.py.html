@@ -1,0 +1,141 @@
+<html>
+<head>
+<title>test__signal.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #cc7832;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #6a8759;}
+.s3 { color: #808080;}
+.s4 { color: #6897bb;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+test__signal.py</font>
+</center></td></tr></table>
+<pre><span class="s0">from </span><span class="s1">__future__ </span><span class="s0">import </span><span class="s1">print_function</span>
+<span class="s0">import </span><span class="s1">signal</span>
+<span class="s0">import </span><span class="s1">gevent.testing </span><span class="s0">as </span><span class="s1">greentest</span>
+<span class="s0">import </span><span class="s1">gevent</span>
+<span class="s0">import </span><span class="s1">pkg_resources</span>
+
+<span class="s0">try</span><span class="s1">:</span>
+    <span class="s1">cffi_version = pkg_resources.get_distribution(</span><span class="s2">'cffi'</span><span class="s1">).parsed_version</span>
+<span class="s0">except </span><span class="s1">Exception: </span><span class="s3"># pylint:disable=broad-except</span>
+    <span class="s3"># No cffi installed. Shouldn't happen to gevent standard tests,</span>
+    <span class="s3"># but maybe some downstream distributor removed it.</span>
+    <span class="s1">cffi_version = </span><span class="s0">None</span>
+
+<span class="s0">class </span><span class="s1">Expected(Exception):</span>
+    <span class="s0">pass</span>
+
+
+<span class="s0">def </span><span class="s1">raise_Expected():</span>
+    <span class="s0">raise </span><span class="s1">Expected(</span><span class="s2">'TestSignal'</span><span class="s1">)</span>
+
+
+<span class="s1">@greentest.skipUnless(hasattr(signal</span><span class="s0">, </span><span class="s2">'SIGALRM'</span><span class="s1">)</span><span class="s0">,</span>
+                      <span class="s2">&quot;Uses SIGALRM&quot;</span><span class="s1">)</span>
+<span class="s0">class </span><span class="s1">TestSignal(greentest.TestCase):</span>
+
+    <span class="s1">error_fatal = </span><span class="s0">False</span>
+    <span class="s1">__timeout__ = greentest.LARGE_TIMEOUT</span>
+
+    <span class="s0">def </span><span class="s1">test_handler(self):</span>
+        <span class="s0">with </span><span class="s1">self.assertRaises(TypeError):</span>
+            <span class="s1">gevent.signal_handler(signal.SIGALRM</span><span class="s0">, </span><span class="s4">1</span><span class="s1">)</span>
+
+    <span class="s0">def </span><span class="s1">test_alarm(self):</span>
+        <span class="s1">sig = gevent.signal_handler(signal.SIGALRM</span><span class="s0">, </span><span class="s1">raise_Expected)</span>
+        <span class="s1">self.assertFalse(sig.ref)</span>
+        <span class="s1">sig.ref = </span><span class="s0">True</span>
+        <span class="s1">self.assertTrue(sig.ref)</span>
+        <span class="s1">sig.ref = </span><span class="s0">False</span>
+
+        <span class="s0">def </span><span class="s1">test():</span>
+            <span class="s1">signal.alarm(</span><span class="s4">1</span><span class="s1">)</span>
+            <span class="s0">with </span><span class="s1">self.assertRaises(Expected) </span><span class="s0">as </span><span class="s1">exc:</span>
+                <span class="s1">gevent.sleep(</span><span class="s4">2</span><span class="s1">)</span>
+
+            <span class="s1">ex = exc.exception</span>
+            <span class="s1">self.assertEqual(str(ex)</span><span class="s0">, </span><span class="s2">'TestSignal'</span><span class="s1">)</span>
+
+        <span class="s0">try</span><span class="s1">:</span>
+            <span class="s1">test()</span>
+            <span class="s3"># also let's check that the handler stays installed.</span>
+            <span class="s1">test()</span>
+        <span class="s0">finally</span><span class="s1">:</span>
+            <span class="s1">sig.cancel()</span>
+
+
+    <span class="s1">@greentest.skipIf((greentest.PY3</span>
+                       <span class="s0">and </span><span class="s1">greentest.CFFI_BACKEND</span>
+                       <span class="s0">and </span><span class="s1">cffi_version &lt; pkg_resources.parse_version(</span><span class="s2">'1.11.3'</span><span class="s1">))</span><span class="s0">,</span>
+                      <span class="s2">&quot;https://bitbucket.org/cffi/cffi/issues/352/systemerror-returned-a-result-with-an&quot;</span><span class="s1">)</span>
+    <span class="s1">@greentest.ignores_leakcheck</span>
+    <span class="s0">def </span><span class="s1">test_reload(self):</span>
+        <span class="s3"># The site module tries to set attributes</span>
+        <span class="s3"># on all the modules that are loaded (specifically, __file__).</span>
+        <span class="s3"># If gevent.signal is loaded, and is our compatibility shim,</span>
+        <span class="s3"># this used to fail on Python 2: sys.modules['gevent.signal'] has no</span>
+        <span class="s3"># __loader__ attribute, so site.py's main() function tries to do</span>
+        <span class="s3"># gevent.signal.__file__ = os.path.abspath(gevent.signal.__file__), which</span>
+        <span class="s3"># used to not be allowed. (Under Python 3, __loader__ is present so this</span>
+        <span class="s3"># doesn't happen). See</span>
+        <span class="s3"># https://github.com/gevent/gevent/issues/805</span>
+
+        <span class="s3"># This fails on Python 3.5 under linux (travis CI) but not</span>
+        <span class="s3"># locally on macOS with (for both libuv and libev cffi); sometimes it</span>
+        <span class="s3"># failed with libuv on Python 3.6 too, but not always:</span>
+        <span class="s3">#   AttributeError: cffi library 'gevent.libuv._corecffi' has no function,</span>
+        <span class="s3">#      constant or global variable named '__loader__'</span>
+        <span class="s3"># which in turn leads to:</span>
+        <span class="s3">#   SystemError: &lt;built-in function getattr&gt; returned a result with an error set</span>
+
+        <span class="s3"># It's not safe to continue after a SystemError, so we just skip the test there.</span>
+
+        <span class="s3"># As of Jan 2018 with CFFI 1.11.2 this happens reliably on macOS 3.6 and 3.7</span>
+        <span class="s3"># as well.</span>
+
+        <span class="s3"># See https://bitbucket.org/cffi/cffi/issues/352/systemerror-returned-a-result-with-an</span>
+
+        <span class="s3"># This is fixed in 1.11.3</span>
+
+        <span class="s0">import </span><span class="s1">gevent.signal </span><span class="s3"># make sure it's in sys.modules pylint:disable=redefined-outer-name</span>
+        <span class="s0">assert </span><span class="s1">gevent.signal</span>
+        <span class="s0">import </span><span class="s1">site</span>
+        <span class="s0">if </span><span class="s1">greentest.PY3:</span>
+            <span class="s0">from </span><span class="s1">importlib </span><span class="s0">import </span><span class="s1">reload </span><span class="s0">as </span><span class="s1">reload_module</span>
+        <span class="s0">else</span><span class="s1">:</span>
+            <span class="s3"># builtin on py2</span>
+            <span class="s1">reload_module = reload </span><span class="s3"># pylint:disable=undefined-variable</span>
+
+        <span class="s0">try</span><span class="s1">:</span>
+            <span class="s1">reload_module(site)</span>
+        <span class="s0">except </span><span class="s1">TypeError:</span>
+            <span class="s3"># Non-CFFI on Travis triggers this, for some reason,</span>
+            <span class="s3"># but only on 3.6, not 3.4 or 3.5, and not yet on 3.7.</span>
+
+            <span class="s3"># The only module seen to trigger this is __main__, i.e., this module.</span>
+
+            <span class="s3"># This is hard to trigger in a virtualenv since it appears they</span>
+            <span class="s3"># install their own site.py, different from the one that ships with</span>
+            <span class="s3"># Python 3.6., and at least the version I have doesn't mess with</span>
+            <span class="s3"># __cached__</span>
+            <span class="s0">assert </span><span class="s1">greentest.PY36</span>
+            <span class="s0">import </span><span class="s1">sys</span>
+            <span class="s0">for </span><span class="s1">m </span><span class="s0">in </span><span class="s1">set(sys.modules.values()):</span>
+                <span class="s0">try</span><span class="s1">:</span>
+                    <span class="s0">if </span><span class="s1">m.__cached__ </span><span class="s0">is None</span><span class="s1">:</span>
+                        <span class="s1">print(</span><span class="s2">&quot;Module has None __cached__&quot;</span><span class="s0">, </span><span class="s1">m</span><span class="s0">, </span><span class="s1">file=sys.stderr)</span>
+                <span class="s0">except </span><span class="s1">AttributeError:</span>
+                    <span class="s0">continue</span>
+
+<span class="s0">if </span><span class="s1">__name__ == </span><span class="s2">'__main__'</span><span class="s1">:</span>
+    <span class="s1">greentest.main()</span>
+</pre>
+</body>
+</html>

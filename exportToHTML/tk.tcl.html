@@ -1,0 +1,711 @@
+<html>
+<head>
+<title>tk.tcl</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #a9b7c6;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+tk.tcl</font>
+</center></td></tr></table>
+<pre><span class="s0"># tk.tcl --</span>
+<span class="s0">#</span>
+<span class="s0"># Initialization script normally executed in the interpreter for each Tk-based</span>
+<span class="s0"># application.  Arranges class bindings for widgets.</span>
+<span class="s0">#</span>
+<span class="s0"># Copyright (c) 1992-1994 The Regents of the University of California.</span>
+<span class="s0"># Copyright (c) 1994-1996 Sun Microsystems, Inc.</span>
+<span class="s0"># Copyright (c) 1998-2000 Ajuba Solutions.</span>
+<span class="s0">#</span>
+<span class="s0"># See the file &quot;license.terms&quot; for information on usage and redistribution of</span>
+<span class="s0"># this file, and for a DISCLAIMER OF ALL WARRANTIES.</span>
+
+<span class="s0"># Verify that we have Tk binary and script components from the same release</span>
+<span class="s0">package require -exact Tk  8.6.6</span>
+
+<span class="s0"># Create a ::tk namespace</span>
+<span class="s0">namespace eval ::tk {</span>
+    <span class="s0"># Set up the msgcat commands</span>
+    <span class="s0">namespace eval msgcat {</span>
+	<span class="s0">namespace export mc mcmax</span>
+        <span class="s0">if {[interp issafe] || [catch {package require msgcat}]} {</span>
+            <span class="s0"># The msgcat package is not available.  Supply our own</span>
+            <span class="s0"># minimal replacement.</span>
+            <span class="s0">proc mc {src args} {</span>
+                <span class="s0">return [format $src {*}$args]</span>
+            <span class="s0">}</span>
+            <span class="s0">proc mcmax {args} {</span>
+                <span class="s0">set max 0</span>
+                <span class="s0">foreach string $args {</span>
+                    <span class="s0">set len [string length $string]</span>
+                    <span class="s0">if {$len&gt;$max} {</span>
+                        <span class="s0">set max $len</span>
+                    <span class="s0">}</span>
+                <span class="s0">}</span>
+                <span class="s0">return $max</span>
+            <span class="s0">}</span>
+        <span class="s0">} else {</span>
+            <span class="s0"># Get the commands from the msgcat package that Tk uses.</span>
+            <span class="s0">namespace import ::msgcat::mc</span>
+            <span class="s0">namespace import ::msgcat::mcmax</span>
+            <span class="s0">::msgcat::mcload [file join $::tk_library msgs]</span>
+        <span class="s0">}</span>
+    <span class="s0">}</span>
+    <span class="s0">namespace import ::tk::msgcat::*</span>
+<span class="s0">}</span>
+<span class="s0"># and a ::ttk namespace</span>
+<span class="s0">namespace eval ::ttk {</span>
+    <span class="s0">if {$::tk_library ne &quot;&quot;} {</span>
+	<span class="s0"># avoid file join to work in safe interps, but this is also x-plat ok</span>
+	<span class="s0">variable library $::tk_library/ttk</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+
+<span class="s0"># Add Ttk &amp; Tk's directory to the end of the auto-load search path, if it</span>
+<span class="s0"># isn't already on the path:</span>
+
+<span class="s0">if {[info exists ::auto_path] &amp;&amp; ($::tk_library ne &quot;&quot;)</span>
+    <span class="s0">&amp;&amp; ($::tk_library ni $::auto_path)</span>
+<span class="s0">} then {</span>
+    <span class="s0">lappend ::auto_path $::tk_library $::ttk::library</span>
+<span class="s0">}</span>
+
+<span class="s0"># Turn off strict Motif look and feel as a default.</span>
+
+<span class="s0">set ::tk_strictMotif 0</span>
+
+<span class="s0"># Turn on useinputmethods (X Input Methods) by default.</span>
+<span class="s0"># We catch this because safe interpreters may not allow the call.</span>
+
+<span class="s0">catch {tk useinputmethods 1}</span>
+
+<span class="s0"># ::tk::PlaceWindow --</span>
+<span class="s0">#   place a toplevel at a particular position</span>
+<span class="s0"># Arguments:</span>
+<span class="s0">#   toplevel	name of toplevel window</span>
+<span class="s0">#   ?placement?	pointer ?center? ; places $w centered on the pointer</span>
+<span class="s0">#		widget widgetPath ; centers $w over widget_name</span>
+<span class="s0">#		defaults to placing toplevel in the middle of the screen</span>
+<span class="s0">#   ?anchor?	center or widgetPath</span>
+<span class="s0"># Results:</span>
+<span class="s0">#   Returns nothing</span>
+<span class="s0">#</span>
+<span class="s0">proc ::tk::PlaceWindow {w {place &quot;&quot;} {anchor &quot;&quot;}} {</span>
+    <span class="s0">wm withdraw $w</span>
+    <span class="s0">update idletasks</span>
+    <span class="s0">set checkBounds 1</span>
+    <span class="s0">if {$place eq &quot;&quot;} {</span>
+	<span class="s0">set x [expr {([winfo screenwidth $w]-[winfo reqwidth $w])/2}]</span>
+	<span class="s0">set y [expr {([winfo screenheight $w]-[winfo reqheight $w])/2}]</span>
+	<span class="s0">set checkBounds 0</span>
+    <span class="s0">} elseif {[string equal -length [string length $place] $place &quot;pointer&quot;]} {</span>
+	<span class="s0">## place at POINTER (centered if $anchor == center)</span>
+	<span class="s0">if {[string equal -length [string length $anchor] $anchor &quot;center&quot;]} {</span>
+	    <span class="s0">set x [expr {[winfo pointerx $w]-[winfo reqwidth $w]/2}]</span>
+	    <span class="s0">set y [expr {[winfo pointery $w]-[winfo reqheight $w]/2}]</span>
+	<span class="s0">} else {</span>
+	    <span class="s0">set x [winfo pointerx $w]</span>
+	    <span class="s0">set y [winfo pointery $w]</span>
+	<span class="s0">}</span>
+    <span class="s0">} elseif {[string equal -length [string length $place] $place &quot;widget&quot;] &amp;&amp; \</span>
+	    <span class="s0">[winfo exists $anchor] &amp;&amp; [winfo ismapped $anchor]} {</span>
+	<span class="s0">## center about WIDGET $anchor, widget must be mapped</span>
+	<span class="s0">set x [expr {[winfo rootx $anchor] + \</span>
+		<span class="s0">([winfo width $anchor]-[winfo reqwidth $w])/2}]</span>
+	<span class="s0">set y [expr {[winfo rooty $anchor] + \</span>
+		<span class="s0">([winfo height $anchor]-[winfo reqheight $w])/2}]</span>
+    <span class="s0">} else {</span>
+	<span class="s0">set x [expr {([winfo screenwidth $w]-[winfo reqwidth $w])/2}]</span>
+	<span class="s0">set y [expr {([winfo screenheight $w]-[winfo reqheight $w])/2}]</span>
+	<span class="s0">set checkBounds 0</span>
+    <span class="s0">}</span>
+    <span class="s0">if {$checkBounds} {</span>
+	<span class="s0">if {$x &lt; [winfo vrootx $w]} {</span>
+	    <span class="s0">set x [winfo vrootx $w]</span>
+	<span class="s0">} elseif {$x &gt; ([winfo vrootx $w]+[winfo vrootwidth $w]-[winfo reqwidth $w])} {</span>
+	    <span class="s0">set x [expr {[winfo vrootx $w]+[winfo vrootwidth $w]-[winfo reqwidth $w]}]</span>
+	<span class="s0">}</span>
+	<span class="s0">if {$y &lt; [winfo vrooty $w]} {</span>
+	    <span class="s0">set y [winfo vrooty $w]</span>
+	<span class="s0">} elseif {$y &gt; ([winfo vrooty $w]+[winfo vrootheight $w]-[winfo reqheight $w])} {</span>
+	    <span class="s0">set y [expr {[winfo vrooty $w]+[winfo vrootheight $w]-[winfo reqheight $w]}]</span>
+	<span class="s0">}</span>
+	<span class="s0">if {[tk windowingsystem] eq &quot;aqua&quot;} {</span>
+	    <span class="s0"># Avoid the native menu bar which sits on top of everything.</span>
+	    <span class="s0">if {$y &lt; 22} {</span>
+		<span class="s0">set y 22</span>
+	    <span class="s0">}</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+    <span class="s0">wm maxsize $w [winfo vrootwidth $w] [winfo vrootheight $w]</span>
+    <span class="s0">wm geometry $w +$x+$y</span>
+    <span class="s0">wm deiconify $w</span>
+<span class="s0">}</span>
+
+<span class="s0"># ::tk::SetFocusGrab --</span>
+<span class="s0">#   swap out current focus and grab temporarily (for dialogs)</span>
+<span class="s0"># Arguments:</span>
+<span class="s0">#   grab	new window to grab</span>
+<span class="s0">#   focus	window to give focus to</span>
+<span class="s0"># Results:</span>
+<span class="s0">#   Returns nothing</span>
+<span class="s0">#</span>
+<span class="s0">proc ::tk::SetFocusGrab {grab {focus {}}} {</span>
+    <span class="s0">set index &quot;$grab,$focus&quot;</span>
+    <span class="s0">upvar ::tk::FocusGrab($index) data</span>
+
+    <span class="s0">lappend data [focus]</span>
+    <span class="s0">set oldGrab [grab current $grab]</span>
+    <span class="s0">lappend data $oldGrab</span>
+    <span class="s0">if {[winfo exists $oldGrab]} {</span>
+	<span class="s0">lappend data [grab status $oldGrab]</span>
+    <span class="s0">}</span>
+    <span class="s0"># The &quot;grab&quot; command will fail if another application</span>
+    <span class="s0"># already holds the grab.  So catch it.</span>
+    <span class="s0">catch {grab $grab}</span>
+    <span class="s0">if {[winfo exists $focus]} {</span>
+	<span class="s0">focus $focus</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+
+<span class="s0"># ::tk::RestoreFocusGrab --</span>
+<span class="s0">#   restore old focus and grab (for dialogs)</span>
+<span class="s0"># Arguments:</span>
+<span class="s0">#   grab	window that had taken grab</span>
+<span class="s0">#   focus	window that had taken focus</span>
+<span class="s0">#   destroy	destroy|withdraw - how to handle the old grabbed window</span>
+<span class="s0"># Results:</span>
+<span class="s0">#   Returns nothing</span>
+<span class="s0">#</span>
+<span class="s0">proc ::tk::RestoreFocusGrab {grab focus {destroy destroy}} {</span>
+    <span class="s0">set index &quot;$grab,$focus&quot;</span>
+    <span class="s0">if {[info exists ::tk::FocusGrab($index)]} {</span>
+	<span class="s0">foreach {oldFocus oldGrab oldStatus} $::tk::FocusGrab($index) { break }</span>
+	<span class="s0">unset ::tk::FocusGrab($index)</span>
+    <span class="s0">} else {</span>
+	<span class="s0">set oldGrab &quot;&quot;</span>
+    <span class="s0">}</span>
+
+    <span class="s0">catch {focus $oldFocus}</span>
+    <span class="s0">grab release $grab</span>
+    <span class="s0">if {$destroy eq &quot;withdraw&quot;} {</span>
+	<span class="s0">wm withdraw $grab</span>
+    <span class="s0">} else {</span>
+	<span class="s0">destroy $grab</span>
+    <span class="s0">}</span>
+    <span class="s0">if {[winfo exists $oldGrab] &amp;&amp; [winfo ismapped $oldGrab]} {</span>
+	<span class="s0">if {$oldStatus eq &quot;global&quot;} {</span>
+	    <span class="s0">grab -global $oldGrab</span>
+	<span class="s0">} else {</span>
+	    <span class="s0">grab $oldGrab</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+
+<span class="s0"># ::tk::GetSelection --</span>
+<span class="s0">#   This tries to obtain the default selection.  On Unix, we first try</span>
+<span class="s0">#   and get a UTF8_STRING, a type supported by modern Unix apps for</span>
+<span class="s0">#   passing Unicode data safely.  We fall back on the default STRING</span>
+<span class="s0">#   type otherwise.  On Windows, only the STRING type is necessary.</span>
+<span class="s0"># Arguments:</span>
+<span class="s0">#   w	The widget for which the selection will be retrieved.</span>
+<span class="s0">#	Important for the -displayof property.</span>
+<span class="s0">#   sel	The source of the selection (PRIMARY or CLIPBOARD)</span>
+<span class="s0"># Results:</span>
+<span class="s0">#   Returns the selection, or an error if none could be found</span>
+<span class="s0">#</span>
+<span class="s0">if {[tk windowingsystem] ne &quot;win32&quot;} {</span>
+    <span class="s0">proc ::tk::GetSelection {w {sel PRIMARY}} {</span>
+	<span class="s0">if {[catch {</span>
+	    <span class="s0">selection get -displayof $w -selection $sel -type UTF8_STRING</span>
+	<span class="s0">} txt] &amp;&amp; [catch {</span>
+	    <span class="s0">selection get -displayof $w -selection $sel</span>
+	<span class="s0">} txt]} then {</span>
+	    <span class="s0">return -code error -errorcode {TK SELECTION NONE} \</span>
+		<span class="s0">&quot;could not find default selection&quot;</span>
+	<span class="s0">} else {</span>
+	    <span class="s0">return $txt</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+<span class="s0">} else {</span>
+    <span class="s0">proc ::tk::GetSelection {w {sel PRIMARY}} {</span>
+	<span class="s0">if {[catch {</span>
+	    <span class="s0">selection get -displayof $w -selection $sel</span>
+	<span class="s0">} txt]} then {</span>
+	    <span class="s0">return -code error -errorcode {TK SELECTION NONE} \</span>
+		<span class="s0">&quot;could not find default selection&quot;</span>
+	<span class="s0">} else {</span>
+	    <span class="s0">return $txt</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+
+<span class="s0"># ::tk::ScreenChanged --</span>
+<span class="s0"># This procedure is invoked by the binding mechanism whenever the</span>
+<span class="s0"># &quot;current&quot; screen is changing.  The procedure does two things.</span>
+<span class="s0"># First, it uses &quot;upvar&quot; to make variable &quot;::tk::Priv&quot; point at an</span>
+<span class="s0"># array variable that holds state for the current display.  Second,</span>
+<span class="s0"># it initializes the array if it didn't already exist.</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0"># screen -		The name of the new screen.</span>
+
+<span class="s0">proc ::tk::ScreenChanged screen {</span>
+    <span class="s0"># Extract the display name.</span>
+    <span class="s0">set disp [string range $screen 0 [string last . $screen]-1]</span>
+
+    <span class="s0"># Ensure that namespace separators never occur in the display name (as</span>
+    <span class="s0"># they cause problems in variable names). Double-colons exist in some VNC</span>
+    <span class="s0"># display names. [Bug 2912473]</span>
+    <span class="s0">set disp [string map {:: _doublecolon_} $disp]</span>
+
+    <span class="s0">uplevel #0 [list upvar #0 ::tk::Priv.$disp ::tk::Priv]</span>
+    <span class="s0">variable ::tk::Priv</span>
+
+    <span class="s0">if {[info exists Priv]} {</span>
+	<span class="s0">set Priv(screen) $screen</span>
+	<span class="s0">return</span>
+    <span class="s0">}</span>
+    <span class="s0">array set Priv {</span>
+	<span class="s0">activeMenu	{}</span>
+	<span class="s0">activeItem	{}</span>
+	<span class="s0">afterId		{}</span>
+	<span class="s0">buttons		0</span>
+	<span class="s0">buttonWindow	{}</span>
+	<span class="s0">dragging	0</span>
+	<span class="s0">focus		{}</span>
+	<span class="s0">grab		{}</span>
+	<span class="s0">initPos		{}</span>
+	<span class="s0">inMenubutton	{}</span>
+	<span class="s0">listboxPrev	{}</span>
+	<span class="s0">menuBar		{}</span>
+	<span class="s0">mouseMoved	0</span>
+	<span class="s0">oldGrab		{}</span>
+	<span class="s0">popup		{}</span>
+	<span class="s0">postedMb	{}</span>
+	<span class="s0">pressX		0</span>
+	<span class="s0">pressY		0</span>
+	<span class="s0">prevPos		0</span>
+	<span class="s0">selectMode	char</span>
+    <span class="s0">}</span>
+    <span class="s0">set Priv(screen) $screen</span>
+    <span class="s0">set Priv(tearoff) [string equal [tk windowingsystem] &quot;x11&quot;]</span>
+    <span class="s0">set Priv(window) {}</span>
+<span class="s0">}</span>
+
+<span class="s0"># Do initial setup for Priv, so that it is always bound to something</span>
+<span class="s0"># (otherwise, if someone references it, it may get set to a non-upvar-ed</span>
+<span class="s0"># value, which will cause trouble later).</span>
+
+<span class="s0">tk::ScreenChanged [winfo screen .]</span>
+
+<span class="s0"># ::tk::EventMotifBindings --</span>
+<span class="s0"># This procedure is invoked as a trace whenever ::tk_strictMotif is</span>
+<span class="s0"># changed.  It is used to turn on or turn off the motif virtual</span>
+<span class="s0"># bindings.</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0"># n1 - the name of the variable being changed (&quot;::tk_strictMotif&quot;).</span>
+
+<span class="s0">proc ::tk::EventMotifBindings {n1 dummy dummy} {</span>
+    <span class="s0">upvar $n1 name</span>
+
+    <span class="s0">if {$name} {</span>
+	<span class="s0">set op delete</span>
+    <span class="s0">} else {</span>
+	<span class="s0">set op add</span>
+    <span class="s0">}</span>
+
+    <span class="s0">event $op &lt;&lt;Cut&gt;&gt; &lt;Control-Key-w&gt; &lt;Control-Lock-Key-W&gt; &lt;Shift-Key-Delete&gt;</span>
+    <span class="s0">event $op &lt;&lt;Copy&gt;&gt; &lt;Meta-Key-w&gt; &lt;Meta-Lock-Key-W&gt; &lt;Control-Key-Insert&gt;</span>
+    <span class="s0">event $op &lt;&lt;Paste&gt;&gt; &lt;Control-Key-y&gt; &lt;Control-Lock-Key-Y&gt; &lt;Shift-Key-Insert&gt;</span>
+    <span class="s0">event $op &lt;&lt;PrevChar&gt;&gt; &lt;Control-Key-b&gt; &lt;Control-Lock-Key-B&gt;</span>
+    <span class="s0">event $op &lt;&lt;NextChar&gt;&gt; &lt;Control-Key-f&gt; &lt;Control-Lock-Key-F&gt;</span>
+    <span class="s0">event $op &lt;&lt;PrevLine&gt;&gt; &lt;Control-Key-p&gt; &lt;Control-Lock-Key-P&gt;</span>
+    <span class="s0">event $op &lt;&lt;NextLine&gt;&gt; &lt;Control-Key-n&gt; &lt;Control-Lock-Key-N&gt;</span>
+    <span class="s0">event $op &lt;&lt;LineStart&gt;&gt; &lt;Control-Key-a&gt; &lt;Control-Lock-Key-A&gt;</span>
+    <span class="s0">event $op &lt;&lt;LineEnd&gt;&gt; &lt;Control-Key-e&gt; &lt;Control-Lock-Key-E&gt;</span>
+    <span class="s0">event $op &lt;&lt;SelectPrevChar&gt;&gt; &lt;Control-Key-B&gt; &lt;Control-Lock-Key-b&gt;</span>
+    <span class="s0">event $op &lt;&lt;SelectNextChar&gt;&gt; &lt;Control-Key-F&gt; &lt;Control-Lock-Key-f&gt;</span>
+    <span class="s0">event $op &lt;&lt;SelectPrevLine&gt;&gt; &lt;Control-Key-P&gt; &lt;Control-Lock-Key-p&gt;</span>
+    <span class="s0">event $op &lt;&lt;SelectNextLine&gt;&gt; &lt;Control-Key-N&gt; &lt;Control-Lock-Key-n&gt;</span>
+    <span class="s0">event $op &lt;&lt;SelectLineStart&gt;&gt; &lt;Control-Key-A&gt; &lt;Control-Lock-Key-a&gt;</span>
+    <span class="s0">event $op &lt;&lt;SelectLineEnd&gt;&gt; &lt;Control-Key-E&gt; &lt;Control-Lock-Key-e&gt;</span>
+<span class="s0">}</span>
+
+<span class="s0">#----------------------------------------------------------------------</span>
+<span class="s0"># Define common dialogs on platforms where they are not implemented</span>
+<span class="s0"># using compiled code.</span>
+<span class="s0">#----------------------------------------------------------------------</span>
+
+<span class="s0">if {![llength [info commands tk_chooseColor]]} {</span>
+    <span class="s0">proc ::tk_chooseColor {args} {</span>
+	<span class="s0">return [::tk::dialog::color:: {*}$args]</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+<span class="s0">if {![llength [info commands tk_getOpenFile]]} {</span>
+    <span class="s0">proc ::tk_getOpenFile {args} {</span>
+	<span class="s0">if {$::tk_strictMotif} {</span>
+	    <span class="s0">return [::tk::MotifFDialog open {*}$args]</span>
+	<span class="s0">} else {</span>
+	    <span class="s0">return [::tk::dialog::file:: open {*}$args]</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+<span class="s0">if {![llength [info commands tk_getSaveFile]]} {</span>
+    <span class="s0">proc ::tk_getSaveFile {args} {</span>
+	<span class="s0">if {$::tk_strictMotif} {</span>
+	    <span class="s0">return [::tk::MotifFDialog save {*}$args]</span>
+	<span class="s0">} else {</span>
+	    <span class="s0">return [::tk::dialog::file:: save {*}$args]</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+<span class="s0">if {![llength [info commands tk_messageBox]]} {</span>
+    <span class="s0">proc ::tk_messageBox {args} {</span>
+	<span class="s0">return [::tk::MessageBox {*}$args]</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+<span class="s0">if {![llength [info command tk_chooseDirectory]]} {</span>
+    <span class="s0">proc ::tk_chooseDirectory {args} {</span>
+	<span class="s0">return [::tk::dialog::file::chooseDir:: {*}$args]</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+
+<span class="s0">#----------------------------------------------------------------------</span>
+<span class="s0"># Define the set of common virtual events.</span>
+<span class="s0">#----------------------------------------------------------------------</span>
+
+<span class="s0">switch -exact -- [tk windowingsystem] {</span>
+    <span class="s0">&quot;x11&quot; {</span>
+	<span class="s0">event add &lt;&lt;Cut&gt;&gt;		&lt;Control-Key-x&gt; &lt;Key-F20&gt; &lt;Control-Lock-Key-X&gt;</span>
+	<span class="s0">event add &lt;&lt;Copy&gt;&gt;		&lt;Control-Key-c&gt; &lt;Key-F16&gt; &lt;Control-Lock-Key-C&gt;</span>
+	<span class="s0">event add &lt;&lt;Paste&gt;&gt;		&lt;Control-Key-v&gt; &lt;Key-F18&gt; &lt;Control-Lock-Key-V&gt;</span>
+	<span class="s0">event add &lt;&lt;PasteSelection&gt;&gt;	&lt;ButtonRelease-2&gt;</span>
+	<span class="s0">event add &lt;&lt;Undo&gt;&gt;		&lt;Control-Key-z&gt; &lt;Control-Lock-Key-Z&gt;</span>
+	<span class="s0">event add &lt;&lt;Redo&gt;&gt;		&lt;Control-Key-Z&gt; &lt;Control-Lock-Key-z&gt;</span>
+	<span class="s0">event add &lt;&lt;ContextMenu&gt;&gt;	&lt;Button-3&gt;</span>
+	<span class="s0"># On Darwin/Aqua, buttons from left to right are 1,3,2.  On Darwin/X11 with recent</span>
+	<span class="s0"># XQuartz as the X server, they are 1,2,3; other X servers may differ.</span>
+
+	<span class="s0">event add &lt;&lt;SelectAll&gt;&gt;		&lt;Control-Key-slash&gt;</span>
+	<span class="s0">event add &lt;&lt;SelectNone&gt;&gt;	&lt;Control-Key-backslash&gt;</span>
+	<span class="s0">event add &lt;&lt;NextChar&gt;&gt;		&lt;Right&gt;</span>
+	<span class="s0">event add &lt;&lt;SelectNextChar&gt;&gt;	&lt;Shift-Right&gt;</span>
+	<span class="s0">event add &lt;&lt;PrevChar&gt;&gt;		&lt;Left&gt;</span>
+	<span class="s0">event add &lt;&lt;SelectPrevChar&gt;&gt;	&lt;Shift-Left&gt;</span>
+	<span class="s0">event add &lt;&lt;NextWord&gt;&gt;		&lt;Control-Right&gt;</span>
+	<span class="s0">event add &lt;&lt;SelectNextWord&gt;&gt;	&lt;Control-Shift-Right&gt;</span>
+	<span class="s0">event add &lt;&lt;PrevWord&gt;&gt;		&lt;Control-Left&gt;</span>
+	<span class="s0">event add &lt;&lt;SelectPrevWord&gt;&gt;	&lt;Control-Shift-Left&gt;</span>
+	<span class="s0">event add &lt;&lt;LineStart&gt;&gt;		&lt;Home&gt;</span>
+	<span class="s0">event add &lt;&lt;SelectLineStart&gt;&gt;	&lt;Shift-Home&gt;</span>
+	<span class="s0">event add &lt;&lt;LineEnd&gt;&gt;		&lt;End&gt;</span>
+	<span class="s0">event add &lt;&lt;SelectLineEnd&gt;&gt;	&lt;Shift-End&gt;</span>
+	<span class="s0">event add &lt;&lt;PrevLine&gt;&gt;		&lt;Up&gt;</span>
+	<span class="s0">event add &lt;&lt;NextLine&gt;&gt;		&lt;Down&gt;</span>
+	<span class="s0">event add &lt;&lt;SelectPrevLine&gt;&gt;	&lt;Shift-Up&gt;</span>
+	<span class="s0">event add &lt;&lt;SelectNextLine&gt;&gt;	&lt;Shift-Down&gt;</span>
+	<span class="s0">event add &lt;&lt;PrevPara&gt;&gt;		&lt;Control-Up&gt;</span>
+	<span class="s0">event add &lt;&lt;NextPara&gt;&gt;		&lt;Control-Down&gt;</span>
+	<span class="s0">event add &lt;&lt;SelectPrevPara&gt;&gt;	&lt;Control-Shift-Up&gt;</span>
+	<span class="s0">event add &lt;&lt;SelectNextPara&gt;&gt;	&lt;Control-Shift-Down&gt;</span>
+	<span class="s0">event add &lt;&lt;ToggleSelection&gt;&gt;	&lt;Control-ButtonPress-1&gt;</span>
+
+	<span class="s0"># Some OS's define a goofy (as in, not &lt;Shift-Tab&gt;) keysym that is</span>
+	<span class="s0"># returned when the user presses &lt;Shift-Tab&gt;. In order for tab</span>
+	<span class="s0"># traversal to work, we have to add these keysyms to the PrevWindow</span>
+	<span class="s0"># event. We use catch just in case the keysym isn't recognized.</span>
+
+	<span class="s0"># This is needed for XFree86 systems</span>
+	<span class="s0">catch { event add &lt;&lt;PrevWindow&gt;&gt; &lt;ISO_Left_Tab&gt; }</span>
+	<span class="s0"># This seems to be correct on *some* HP systems.</span>
+	<span class="s0">catch { event add &lt;&lt;PrevWindow&gt;&gt; &lt;hpBackTab&gt; }</span>
+
+	<span class="s0">trace add variable ::tk_strictMotif write ::tk::EventMotifBindings</span>
+	<span class="s0">set ::tk_strictMotif $::tk_strictMotif</span>
+	<span class="s0"># On unix, we want to always display entry/text selection,</span>
+	<span class="s0"># regardless of which window has focus</span>
+	<span class="s0">set ::tk::AlwaysShowSelection 1</span>
+    <span class="s0">}</span>
+    <span class="s0">&quot;win32&quot; {</span>
+	<span class="s0">event add &lt;&lt;Cut&gt;&gt;		&lt;Control-Key-x&gt; &lt;Shift-Key-Delete&gt; &lt;Control-Lock-Key-X&gt;</span>
+	<span class="s0">event add &lt;&lt;Copy&gt;&gt;		&lt;Control-Key-c&gt; &lt;Control-Key-Insert&gt; &lt;Control-Lock-Key-C&gt;</span>
+	<span class="s0">event add &lt;&lt;Paste&gt;&gt;		&lt;Control-Key-v&gt; &lt;Shift-Key-Insert&gt; &lt;Control-Lock-Key-V&gt;</span>
+	<span class="s0">event add &lt;&lt;PasteSelection&gt;&gt;	&lt;ButtonRelease-2&gt;</span>
+  	<span class="s0">event add &lt;&lt;Undo&gt;&gt;		&lt;Control-Key-z&gt; &lt;Control-Lock-Key-Z&gt;</span>
+	<span class="s0">event add &lt;&lt;Redo&gt;&gt;		&lt;Control-Key-y&gt; &lt;Control-Lock-Key-Y&gt;</span>
+	<span class="s0">event add &lt;&lt;ContextMenu&gt;&gt;	&lt;Button-3&gt;</span>
+
+	<span class="s0">event add &lt;&lt;SelectAll&gt;&gt;		&lt;Control-Key-slash&gt; &lt;Control-Key-a&gt; &lt;Control-Lock-Key-A&gt;</span>
+	<span class="s0">event add &lt;&lt;SelectNone&gt;&gt;	&lt;Control-Key-backslash&gt;</span>
+	<span class="s0">event add &lt;&lt;NextChar&gt;&gt;		&lt;Right&gt;</span>
+	<span class="s0">event add &lt;&lt;SelectNextChar&gt;&gt;	&lt;Shift-Right&gt;</span>
+	<span class="s0">event add &lt;&lt;PrevChar&gt;&gt;		&lt;Left&gt;</span>
+	<span class="s0">event add &lt;&lt;SelectPrevChar&gt;&gt;	&lt;Shift-Left&gt;</span>
+	<span class="s0">event add &lt;&lt;NextWord&gt;&gt;		&lt;Control-Right&gt;</span>
+	<span class="s0">event add &lt;&lt;SelectNextWord&gt;&gt;	&lt;Control-Shift-Right&gt;</span>
+	<span class="s0">event add &lt;&lt;PrevWord&gt;&gt;		&lt;Control-Left&gt;</span>
+	<span class="s0">event add &lt;&lt;SelectPrevWord&gt;&gt;	&lt;Control-Shift-Left&gt;</span>
+	<span class="s0">event add &lt;&lt;LineStart&gt;&gt;		&lt;Home&gt;</span>
+	<span class="s0">event add &lt;&lt;SelectLineStart&gt;&gt;	&lt;Shift-Home&gt;</span>
+	<span class="s0">event add &lt;&lt;LineEnd&gt;&gt;		&lt;End&gt;</span>
+	<span class="s0">event add &lt;&lt;SelectLineEnd&gt;&gt;	&lt;Shift-End&gt;</span>
+	<span class="s0">event add &lt;&lt;PrevLine&gt;&gt;		&lt;Up&gt;</span>
+	<span class="s0">event add &lt;&lt;NextLine&gt;&gt;		&lt;Down&gt;</span>
+	<span class="s0">event add &lt;&lt;SelectPrevLine&gt;&gt;	&lt;Shift-Up&gt;</span>
+	<span class="s0">event add &lt;&lt;SelectNextLine&gt;&gt;	&lt;Shift-Down&gt;</span>
+	<span class="s0">event add &lt;&lt;PrevPara&gt;&gt;		&lt;Control-Up&gt;</span>
+	<span class="s0">event add &lt;&lt;NextPara&gt;&gt;		&lt;Control-Down&gt;</span>
+	<span class="s0">event add &lt;&lt;SelectPrevPara&gt;&gt;	&lt;Control-Shift-Up&gt;</span>
+	<span class="s0">event add &lt;&lt;SelectNextPara&gt;&gt;	&lt;Control-Shift-Down&gt;</span>
+	<span class="s0">event add &lt;&lt;ToggleSelection&gt;&gt;	&lt;Control-ButtonPress-1&gt;</span>
+    <span class="s0">}</span>
+    <span class="s0">&quot;aqua&quot; {</span>
+	<span class="s0">event add &lt;&lt;Cut&gt;&gt;		&lt;Command-Key-x&gt; &lt;Key-F2&gt; &lt;Command-Lock-Key-X&gt;</span>
+	<span class="s0">event add &lt;&lt;Copy&gt;&gt;		&lt;Command-Key-c&gt; &lt;Key-F3&gt; &lt;Command-Lock-Key-C&gt;</span>
+	<span class="s0">event add &lt;&lt;Paste&gt;&gt;		&lt;Command-Key-v&gt; &lt;Key-F4&gt; &lt;Command-Lock-Key-V&gt;</span>
+	<span class="s0">event add &lt;&lt;PasteSelection&gt;&gt;	&lt;ButtonRelease-3&gt;</span>
+	<span class="s0">event add &lt;&lt;Clear&gt;&gt;		&lt;Clear&gt;</span>
+	<span class="s0">event add &lt;&lt;ContextMenu&gt;&gt;	&lt;Button-2&gt;</span>
+
+	<span class="s0"># Official bindings</span>
+	<span class="s0"># See http://support.apple.com/kb/HT1343</span>
+	<span class="s0">event add &lt;&lt;SelectAll&gt;&gt;		&lt;Command-Key-a&gt;</span>
+	<span class="s0">event add &lt;&lt;SelectNone&gt;&gt;	&lt;Option-Command-Key-a&gt;</span>
+	<span class="s0">event add &lt;&lt;Undo&gt;&gt;		&lt;Command-Key-z&gt; &lt;Command-Lock-Key-Z&gt;</span>
+	<span class="s0">event add &lt;&lt;Redo&gt;&gt;		&lt;Shift-Command-Key-z&gt; &lt;Shift-Command-Lock-Key-z&gt;</span>
+	<span class="s0">event add &lt;&lt;NextChar&gt;&gt;		&lt;Right&gt; &lt;Control-Key-f&gt; &lt;Control-Lock-Key-F&gt;</span>
+	<span class="s0">event add &lt;&lt;SelectNextChar&gt;&gt;	&lt;Shift-Right&gt; &lt;Shift-Control-Key-F&gt; &lt;Shift-Control-Lock-Key-F&gt;</span>
+	<span class="s0">event add &lt;&lt;PrevChar&gt;&gt;		&lt;Left&gt; &lt;Control-Key-b&gt; &lt;Control-Lock-Key-B&gt;</span>
+	<span class="s0">event add &lt;&lt;SelectPrevChar&gt;&gt;	&lt;Shift-Left&gt; &lt;Shift-Control-Key-B&gt; &lt;Shift-Control-Lock-Key-B&gt;</span>
+	<span class="s0">event add &lt;&lt;NextWord&gt;&gt;		&lt;Option-Right&gt;</span>
+	<span class="s0">event add &lt;&lt;SelectNextWord&gt;&gt;	&lt;Shift-Option-Right&gt;</span>
+	<span class="s0">event add &lt;&lt;PrevWord&gt;&gt;		&lt;Option-Left&gt;</span>
+	<span class="s0">event add &lt;&lt;SelectPrevWord&gt;&gt;	&lt;Shift-Option-Left&gt;</span>
+	<span class="s0">event add &lt;&lt;LineStart&gt;&gt;		&lt;Home&gt; &lt;Command-Left&gt; &lt;Control-Key-a&gt; &lt;Control-Lock-Key-A&gt;</span>
+	<span class="s0">event add &lt;&lt;SelectLineStart&gt;&gt;	&lt;Shift-Home&gt; &lt;Shift-Command-Left&gt; &lt;Shift-Control-Key-A&gt; &lt;Shift-Control-Lock-Key-A&gt;</span>
+	<span class="s0">event add &lt;&lt;LineEnd&gt;&gt;		&lt;End&gt; &lt;Command-Right&gt; &lt;Control-Key-e&gt; &lt;Control-Lock-Key-E&gt;</span>
+	<span class="s0">event add &lt;&lt;SelectLineEnd&gt;&gt;	&lt;Shift-End&gt; &lt;Shift-Command-Right&gt; &lt;Shift-Control-Key-E&gt; &lt;Shift-Control-Lock-Key-E&gt;</span>
+	<span class="s0">event add &lt;&lt;PrevLine&gt;&gt;		&lt;Up&gt; &lt;Control-Key-p&gt; &lt;Control-Lock-Key-P&gt;</span>
+	<span class="s0">event add &lt;&lt;SelectPrevLine&gt;&gt;	&lt;Shift-Up&gt; &lt;Shift-Control-Key-P&gt; &lt;Shift-Control-Lock-Key-P&gt;</span>
+	<span class="s0">event add &lt;&lt;NextLine&gt;&gt;		&lt;Down&gt; &lt;Control-Key-n&gt; &lt;Control-Lock-Key-N&gt;</span>
+	<span class="s0">event add &lt;&lt;SelectNextLine&gt;&gt;	&lt;Shift-Down&gt; &lt;Shift-Control-Key-N&gt; &lt;Shift-Control-Lock-Key-N&gt;</span>
+	<span class="s0"># Not official, but logical extensions of above. Also derived from</span>
+	<span class="s0"># bindings present in MS Word on OSX.</span>
+	<span class="s0">event add &lt;&lt;PrevPara&gt;&gt;		&lt;Option-Up&gt;</span>
+	<span class="s0">event add &lt;&lt;NextPara&gt;&gt;		&lt;Option-Down&gt;</span>
+	<span class="s0">event add &lt;&lt;SelectPrevPara&gt;&gt;	&lt;Shift-Option-Up&gt;</span>
+	<span class="s0">event add &lt;&lt;SelectNextPara&gt;&gt;	&lt;Shift-Option-Down&gt;</span>
+	<span class="s0">event add &lt;&lt;ToggleSelection&gt;&gt;	&lt;Command-ButtonPress-1&gt;</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+
+<span class="s0"># ----------------------------------------------------------------------</span>
+<span class="s0"># Read in files that define all of the class bindings.</span>
+<span class="s0"># ----------------------------------------------------------------------</span>
+
+<span class="s0">if {$::tk_library ne &quot;&quot;} {</span>
+    <span class="s0">proc ::tk::SourceLibFile {file} {</span>
+        <span class="s0">namespace eval :: [list source [file join $::tk_library $file.tcl]]</span>
+    <span class="s0">}</span>
+    <span class="s0">namespace eval ::tk {</span>
+	<span class="s0">SourceLibFile icons</span>
+	<span class="s0">SourceLibFile button</span>
+	<span class="s0">SourceLibFile entry</span>
+	<span class="s0">SourceLibFile listbox</span>
+	<span class="s0">SourceLibFile menu</span>
+	<span class="s0">SourceLibFile panedwindow</span>
+	<span class="s0">SourceLibFile scale</span>
+	<span class="s0">SourceLibFile scrlbar</span>
+	<span class="s0">SourceLibFile spinbox</span>
+	<span class="s0">SourceLibFile text</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+
+<span class="s0"># ----------------------------------------------------------------------</span>
+<span class="s0"># Default bindings for keyboard traversal.</span>
+<span class="s0"># ----------------------------------------------------------------------</span>
+
+<span class="s0">event add &lt;&lt;PrevWindow&gt;&gt; &lt;Shift-Tab&gt;</span>
+<span class="s0">event add &lt;&lt;NextWindow&gt;&gt; &lt;Tab&gt;</span>
+<span class="s0">bind all &lt;&lt;NextWindow&gt;&gt; {tk::TabToWindow [tk_focusNext %W]}</span>
+<span class="s0">bind all &lt;&lt;PrevWindow&gt;&gt; {tk::TabToWindow [tk_focusPrev %W]}</span>
+
+<span class="s0"># ::tk::CancelRepeat --</span>
+<span class="s0"># This procedure is invoked to cancel an auto-repeat action described</span>
+<span class="s0"># by ::tk::Priv(afterId).  It's used by several widgets to auto-scroll</span>
+<span class="s0"># the widget when the mouse is dragged out of the widget with a</span>
+<span class="s0"># button pressed.</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0"># None.</span>
+
+<span class="s0">proc ::tk::CancelRepeat {} {</span>
+    <span class="s0">variable ::tk::Priv</span>
+    <span class="s0">after cancel $Priv(afterId)</span>
+    <span class="s0">set Priv(afterId) {}</span>
+<span class="s0">}</span>
+
+<span class="s0"># ::tk::TabToWindow --</span>
+<span class="s0"># This procedure moves the focus to the given widget.</span>
+<span class="s0"># It sends a &lt;&lt;TraverseOut&gt;&gt; virtual event to the previous focus window,</span>
+<span class="s0"># if any, before changing the focus, and a &lt;&lt;TraverseIn&gt;&gt; event</span>
+<span class="s0"># to the new focus window afterwards.</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0"># w - Window to which focus should be set.</span>
+
+<span class="s0">proc ::tk::TabToWindow {w} {</span>
+    <span class="s0">set focus [focus]</span>
+    <span class="s0">if {$focus ne &quot;&quot;} {</span>
+	<span class="s0">event generate $focus &lt;&lt;TraverseOut&gt;&gt;</span>
+    <span class="s0">}</span>
+    <span class="s0">focus $w</span>
+    <span class="s0">event generate $w &lt;&lt;TraverseIn&gt;&gt;</span>
+<span class="s0">}</span>
+
+<span class="s0"># ::tk::UnderlineAmpersand --</span>
+<span class="s0">#	This procedure takes some text with ampersand and returns text w/o</span>
+<span class="s0">#	ampersand and position of the ampersand.  Double ampersands are</span>
+<span class="s0">#	converted to single ones.  Position returned is -1 when there is no</span>
+<span class="s0">#	ampersand.</span>
+<span class="s0">#</span>
+<span class="s0">proc ::tk::UnderlineAmpersand {text} {</span>
+    <span class="s0">set s [string map {&amp;&amp; &amp; &amp; \ufeff} $text]</span>
+    <span class="s0">set idx [string first \ufeff $s]</span>
+    <span class="s0">return [list [string map {\ufeff {}} $s] $idx]</span>
+<span class="s0">}</span>
+
+<span class="s0"># ::tk::SetAmpText --</span>
+<span class="s0">#	Given widget path and text with &quot;magic ampersands&quot;, sets -text and</span>
+<span class="s0">#	-underline options for the widget</span>
+<span class="s0">#</span>
+<span class="s0">proc ::tk::SetAmpText {widget text} {</span>
+    <span class="s0">lassign [UnderlineAmpersand $text] newtext under</span>
+    <span class="s0">$widget configure -text $newtext -underline $under</span>
+<span class="s0">}</span>
+
+<span class="s0"># ::tk::AmpWidget --</span>
+<span class="s0">#	Creates new widget, turning -text option into -text and -underline</span>
+<span class="s0">#	options, returned by ::tk::UnderlineAmpersand.</span>
+<span class="s0">#</span>
+<span class="s0">proc ::tk::AmpWidget {class path args} {</span>
+    <span class="s0">set options {}</span>
+    <span class="s0">foreach {opt val} $args {</span>
+	<span class="s0">if {$opt eq &quot;-text&quot;} {</span>
+	    <span class="s0">lassign [UnderlineAmpersand $val] newtext under</span>
+	    <span class="s0">lappend options -text $newtext -underline $under</span>
+	<span class="s0">} else {</span>
+	    <span class="s0">lappend options $opt $val</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+    <span class="s0">set result [$class $path {*}$options]</span>
+    <span class="s0">if {[string match &quot;*button&quot; $class]} {</span>
+	<span class="s0">bind $path &lt;&lt;AltUnderlined&gt;&gt; [list $path invoke]</span>
+    <span class="s0">}</span>
+    <span class="s0">return $result</span>
+<span class="s0">}</span>
+
+<span class="s0"># ::tk::AmpMenuArgs --</span>
+<span class="s0">#	Processes arguments for a menu entry, turning -label option into</span>
+<span class="s0">#	-label and -underline options, returned by ::tk::UnderlineAmpersand.</span>
+<span class="s0">#</span>
+<span class="s0">proc ::tk::AmpMenuArgs {widget add type args} {</span>
+    <span class="s0">set options {}</span>
+    <span class="s0">foreach {opt val} $args {</span>
+	<span class="s0">if {$opt eq &quot;-label&quot;} {</span>
+	    <span class="s0">lassign [UnderlineAmpersand $val] newlabel under</span>
+	    <span class="s0">lappend options -label $newlabel -underline $under</span>
+	<span class="s0">} else {</span>
+	    <span class="s0">lappend options $opt $val</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+    <span class="s0">$widget add $type {*}$options</span>
+<span class="s0">}</span>
+
+<span class="s0"># ::tk::FindAltKeyTarget --</span>
+<span class="s0">#	Search recursively through the hierarchy of visible widgets to find</span>
+<span class="s0">#	button or label which has $char as underlined character.</span>
+<span class="s0">#</span>
+<span class="s0">proc ::tk::FindAltKeyTarget {path char} {</span>
+    <span class="s0">set class [winfo class $path]</span>
+    <span class="s0">if {$class in {</span>
+	<span class="s0">Button Checkbutton Label Radiobutton</span>
+	<span class="s0">TButton TCheckbutton TLabel TRadiobutton</span>
+    <span class="s0">} &amp;&amp; [string equal -nocase $char \</span>
+	    <span class="s0">[string index [$path cget -text] [$path cget -underline]]]} {</span>
+	<span class="s0">return $path</span>
+    <span class="s0">}</span>
+    <span class="s0">set subwins [concat [grid slaves $path] [pack slaves $path] \</span>
+	    <span class="s0">[place slaves $path]]</span>
+    <span class="s0">if {$class eq &quot;Canvas&quot;} {</span>
+	<span class="s0">foreach item [$path find all] {</span>
+	    <span class="s0">if {[$path type $item] eq &quot;window&quot;} {</span>
+		<span class="s0">set w [$path itemcget $item -window]</span>
+		<span class="s0">if {$w ne &quot;&quot;} {lappend subwins $w}</span>
+	    <span class="s0">}</span>
+	<span class="s0">}</span>
+    <span class="s0">} elseif {$class eq &quot;Text&quot;} {</span>
+	<span class="s0">lappend subwins {*}[$path window names]</span>
+    <span class="s0">}</span>
+    <span class="s0">foreach child $subwins {</span>
+	<span class="s0">set target [FindAltKeyTarget $child $char]</span>
+	<span class="s0">if {$target ne &quot;&quot;} {</span>
+	    <span class="s0">return $target</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+
+<span class="s0"># ::tk::AltKeyInDialog --</span>
+<span class="s0">#	&lt;Alt-Key&gt; event handler for standard dialogs. Sends &lt;&lt;AltUnderlined&gt;&gt;</span>
+<span class="s0">#	to button or label which has appropriate underlined character.</span>
+<span class="s0">#</span>
+<span class="s0">proc ::tk::AltKeyInDialog {path key} {</span>
+    <span class="s0">set target [FindAltKeyTarget $path $key]</span>
+    <span class="s0">if {$target ne &quot;&quot;} {</span>
+	<span class="s0">event generate $target &lt;&lt;AltUnderlined&gt;&gt;</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+
+<span class="s0"># ::tk::mcmaxamp --</span>
+<span class="s0">#	Replacement for mcmax, used for texts with &quot;magic ampersand&quot; in it.</span>
+<span class="s0">#</span>
+
+<span class="s0">proc ::tk::mcmaxamp {args} {</span>
+    <span class="s0">set maxlen 0</span>
+    <span class="s0">foreach arg $args {</span>
+	<span class="s0"># Should we run [mc] in caller's namespace?</span>
+	<span class="s0">lassign [UnderlineAmpersand [mc $arg]] msg</span>
+	<span class="s0">set length [string length $msg]</span>
+	<span class="s0">if {$length &gt; $maxlen} {</span>
+	    <span class="s0">set maxlen $length</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+    <span class="s0">return $maxlen</span>
+<span class="s0">}</span>
+
+<span class="s0"># For now, turn off the custom mdef proc for the mac:</span>
+
+<span class="s0">if {[tk windowingsystem] eq &quot;aqua&quot;} {</span>
+    <span class="s0">namespace eval ::tk::mac {</span>
+	<span class="s0">set useCustomMDEF 0</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+
+<span class="s0"># Run the Ttk themed widget set initialization</span>
+<span class="s0">if {$::ttk::library ne &quot;&quot;} {</span>
+    <span class="s0">uplevel \#0 [list source $::ttk::library/ttk.tcl]</span>
+<span class="s0">}</span>
+
+<span class="s0"># Local Variables:</span>
+<span class="s0"># mode: tcl</span>
+<span class="s0"># fill-column: 78</span>
+<span class="s0"># End:</span>
+</pre>
+</body>
+</html>

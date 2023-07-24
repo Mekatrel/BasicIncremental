@@ -1,0 +1,349 @@
+<html>
+<head>
+<title>quoprimime.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #629755; font-style: italic;}
+.s3 { color: #cc7832;}
+.s4 { color: #6a8759;}
+.s5 { color: #6897bb;}
+.s6 { color: #a5c261;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+quoprimime.py</font>
+</center></td></tr></table>
+<pre><span class="s0"># Copyright (C) 2001-2006 Python Software Foundation</span>
+<span class="s0"># Author: Ben Gertzfield</span>
+<span class="s0"># Contact: email-sig@python.org</span>
+
+<span class="s2">&quot;&quot;&quot;Quoted-printable content transfer encoding per RFCs 2045-2047. 
+ 
+This module handles the content transfer encoding method defined in RFC 2045 
+to encode US ASCII-like 8-bit data called `quoted-printable'.  It is used to 
+safely encode text that is in a character set similar to the 7-bit US ASCII 
+character set, but that includes some 8-bit characters that are normally not 
+allowed in email bodies or headers. 
+ 
+Quoted-printable is very space-inefficient for encoding binary files; use the 
+email.base64mime module for that instead. 
+ 
+This module provides an interface to encode and decode both headers and bodies 
+with quoted-printable encoding. 
+ 
+RFC 2045 defines a method for including character set information in an 
+`encoded-word' in a header.  This method is commonly used for 8-bit real names 
+in To:/From:/Cc: etc. fields, as well as Subject: lines. 
+ 
+This module does not do the line wrapping or end-of-line character 
+conversion necessary for proper internationalized headers; it only 
+does dumb encoding and decoding.  To deal with the various line 
+wrapping issues, use the email.header module. 
+&quot;&quot;&quot;</span>
+<span class="s3">from </span><span class="s1">__future__ </span><span class="s3">import </span><span class="s1">unicode_literals</span>
+<span class="s3">from </span><span class="s1">__future__ </span><span class="s3">import </span><span class="s1">division</span>
+<span class="s3">from </span><span class="s1">__future__ </span><span class="s3">import </span><span class="s1">absolute_import</span>
+<span class="s3">from </span><span class="s1">future.builtins </span><span class="s3">import </span><span class="s1">bytes</span><span class="s3">, </span><span class="s1">chr</span><span class="s3">, </span><span class="s1">dict</span><span class="s3">, </span><span class="s1">int</span><span class="s3">, </span><span class="s1">range</span><span class="s3">, </span><span class="s1">super</span>
+
+<span class="s1">__all__ = [</span>
+    <span class="s4">'body_decode'</span><span class="s3">,</span>
+    <span class="s4">'body_encode'</span><span class="s3">,</span>
+    <span class="s4">'body_length'</span><span class="s3">,</span>
+    <span class="s4">'decode'</span><span class="s3">,</span>
+    <span class="s4">'decodestring'</span><span class="s3">,</span>
+    <span class="s4">'header_decode'</span><span class="s3">,</span>
+    <span class="s4">'header_encode'</span><span class="s3">,</span>
+    <span class="s4">'header_length'</span><span class="s3">,</span>
+    <span class="s4">'quote'</span><span class="s3">,</span>
+    <span class="s4">'unquote'</span><span class="s3">,</span>
+    <span class="s1">]</span>
+
+<span class="s3">import </span><span class="s1">re</span>
+<span class="s3">import </span><span class="s1">io</span>
+
+<span class="s3">from </span><span class="s1">string </span><span class="s3">import </span><span class="s1">ascii_letters</span><span class="s3">, </span><span class="s1">digits</span><span class="s3">, </span><span class="s1">hexdigits</span>
+
+<span class="s1">CRLF = </span><span class="s4">'</span><span class="s3">\r\n</span><span class="s4">'</span>
+<span class="s1">NL = </span><span class="s4">'</span><span class="s3">\n</span><span class="s4">'</span>
+<span class="s1">EMPTYSTRING = </span><span class="s4">''</span>
+
+<span class="s0"># Build a mapping of octets to the expansion of that octet.  Since we're only</span>
+<span class="s0"># going to have 256 of these things, this isn't terribly inefficient</span>
+<span class="s0"># space-wise.  Remember that headers and bodies have different sets of safe</span>
+<span class="s0"># characters.  Initialize both maps with the full expansion, and then override</span>
+<span class="s0"># the safe bytes with the more compact form.</span>
+<span class="s1">_QUOPRI_HEADER_MAP = dict((c</span><span class="s3">, </span><span class="s4">'=%02X' </span><span class="s1">% c) </span><span class="s3">for </span><span class="s1">c </span><span class="s3">in </span><span class="s1">range(</span><span class="s5">256</span><span class="s1">))</span>
+<span class="s1">_QUOPRI_BODY_MAP = _QUOPRI_HEADER_MAP.copy()</span>
+
+<span class="s0"># Safe header bytes which need no encoding.</span>
+<span class="s3">for </span><span class="s1">c </span><span class="s3">in </span><span class="s1">bytes(</span><span class="s6">b'-!*+/' </span><span class="s1">+ ascii_letters.encode(</span><span class="s4">'ascii'</span><span class="s1">) + digits.encode(</span><span class="s4">'ascii'</span><span class="s1">)):</span>
+    <span class="s1">_QUOPRI_HEADER_MAP[c] = chr(c)</span>
+<span class="s0"># Headers have one other special encoding; spaces become underscores.</span>
+<span class="s1">_QUOPRI_HEADER_MAP[ord(</span><span class="s4">' '</span><span class="s1">)] = </span><span class="s4">'_'</span>
+
+<span class="s0"># Safe body bytes which need no encoding.</span>
+<span class="s3">for </span><span class="s1">c </span><span class="s3">in </span><span class="s1">bytes(</span><span class="s6">b' !&quot;#$%&amp;</span><span class="s3">\'</span><span class="s6">()*+,-./0123456789:;&lt;&gt;'</span>
+               <span class="s6">b'?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[</span><span class="s3">\\</span><span class="s6">]^_`'</span>
+               <span class="s6">b'abcdefghijklmnopqrstuvwxyz{|}~</span><span class="s3">\t</span><span class="s6">'</span><span class="s1">):</span>
+    <span class="s1">_QUOPRI_BODY_MAP[c] = chr(c)</span>
+
+
+
+<span class="s0"># Helpers</span>
+<span class="s3">def </span><span class="s1">header_check(octet):</span>
+    <span class="s2">&quot;&quot;&quot;Return True if the octet should be escaped with header quopri.&quot;&quot;&quot;</span>
+    <span class="s3">return </span><span class="s1">chr(octet) != _QUOPRI_HEADER_MAP[octet]</span>
+
+
+<span class="s3">def </span><span class="s1">body_check(octet):</span>
+    <span class="s2">&quot;&quot;&quot;Return True if the octet should be escaped with body quopri.&quot;&quot;&quot;</span>
+    <span class="s3">return </span><span class="s1">chr(octet) != _QUOPRI_BODY_MAP[octet]</span>
+
+
+<span class="s3">def </span><span class="s1">header_length(bytearray):</span>
+    <span class="s2">&quot;&quot;&quot;Return a header quoted-printable encoding length. 
+ 
+    Note that this does not include any RFC 2047 chrome added by 
+    `header_encode()`. 
+ 
+    :param bytearray: An array of bytes (a.k.a. octets). 
+    :return: The length in bytes of the byte array when it is encoded with 
+        quoted-printable for headers. 
+    &quot;&quot;&quot;</span>
+    <span class="s3">return </span><span class="s1">sum(len(_QUOPRI_HEADER_MAP[octet]) </span><span class="s3">for </span><span class="s1">octet </span><span class="s3">in </span><span class="s1">bytearray)</span>
+
+
+<span class="s3">def </span><span class="s1">body_length(bytearray):</span>
+    <span class="s2">&quot;&quot;&quot;Return a body quoted-printable encoding length. 
+ 
+    :param bytearray: An array of bytes (a.k.a. octets). 
+    :return: The length in bytes of the byte array when it is encoded with 
+        quoted-printable for bodies. 
+    &quot;&quot;&quot;</span>
+    <span class="s3">return </span><span class="s1">sum(len(_QUOPRI_BODY_MAP[octet]) </span><span class="s3">for </span><span class="s1">octet </span><span class="s3">in </span><span class="s1">bytearray)</span>
+
+
+<span class="s3">def </span><span class="s1">_max_append(L</span><span class="s3">, </span><span class="s1">s</span><span class="s3">, </span><span class="s1">maxlen</span><span class="s3">, </span><span class="s1">extra=</span><span class="s4">''</span><span class="s1">):</span>
+    <span class="s3">if not </span><span class="s1">isinstance(s</span><span class="s3">, </span><span class="s1">str):</span>
+        <span class="s1">s = chr(s)</span>
+    <span class="s3">if not </span><span class="s1">L:</span>
+        <span class="s1">L.append(s.lstrip())</span>
+    <span class="s3">elif </span><span class="s1">len(L[-</span><span class="s5">1</span><span class="s1">]) + len(s) &lt;= maxlen:</span>
+        <span class="s1">L[-</span><span class="s5">1</span><span class="s1">] += extra + s</span>
+    <span class="s3">else</span><span class="s1">:</span>
+        <span class="s1">L.append(s.lstrip())</span>
+
+
+<span class="s3">def </span><span class="s1">unquote(s):</span>
+    <span class="s2">&quot;&quot;&quot;Turn a string in the form =AB to the ASCII character with value 0xab&quot;&quot;&quot;</span>
+    <span class="s3">return </span><span class="s1">chr(int(s[</span><span class="s5">1</span><span class="s1">:</span><span class="s5">3</span><span class="s1">]</span><span class="s3">, </span><span class="s5">16</span><span class="s1">))</span>
+
+
+<span class="s3">def </span><span class="s1">quote(c):</span>
+    <span class="s3">return </span><span class="s4">'=%02X' </span><span class="s1">% ord(c)</span>
+
+
+
+<span class="s3">def </span><span class="s1">header_encode(header_bytes</span><span class="s3">, </span><span class="s1">charset=</span><span class="s4">'iso-8859-1'</span><span class="s1">):</span>
+    <span class="s2">&quot;&quot;&quot;Encode a single header line with quoted-printable (like) encoding. 
+ 
+    Defined in RFC 2045, this `Q' encoding is similar to quoted-printable, but 
+    used specifically for email header fields to allow charsets with mostly 7 
+    bit characters (and some 8 bit) to remain more or less readable in non-RFC 
+    2045 aware mail clients. 
+ 
+    charset names the character set to use in the RFC 2046 header.  It 
+    defaults to iso-8859-1. 
+    &quot;&quot;&quot;</span>
+    <span class="s0"># Return empty headers as an empty string.</span>
+    <span class="s3">if not </span><span class="s1">header_bytes:</span>
+        <span class="s3">return </span><span class="s4">''</span>
+    <span class="s0"># Iterate over every byte, encoding if necessary.</span>
+    <span class="s1">encoded = []</span>
+    <span class="s3">for </span><span class="s1">octet </span><span class="s3">in </span><span class="s1">header_bytes:</span>
+        <span class="s1">encoded.append(_QUOPRI_HEADER_MAP[octet])</span>
+    <span class="s0"># Now add the RFC chrome to each encoded chunk and glue the chunks</span>
+    <span class="s0"># together.</span>
+    <span class="s3">return </span><span class="s4">'=?%s?q?%s?=' </span><span class="s1">% (charset</span><span class="s3">, </span><span class="s1">EMPTYSTRING.join(encoded))</span>
+
+
+<span class="s3">class </span><span class="s1">_body_accumulator(io.StringIO):</span>
+
+    <span class="s3">def </span><span class="s1">__init__(self</span><span class="s3">, </span><span class="s1">maxlinelen</span><span class="s3">, </span><span class="s1">eol</span><span class="s3">, </span><span class="s1">*args</span><span class="s3">, </span><span class="s1">**kw):</span>
+        <span class="s1">super().__init__(*args</span><span class="s3">, </span><span class="s1">**kw)</span>
+        <span class="s1">self.eol = eol</span>
+        <span class="s1">self.maxlinelen = self.room = maxlinelen</span>
+
+    <span class="s3">def </span><span class="s1">write_str(self</span><span class="s3">, </span><span class="s1">s):</span>
+        <span class="s2">&quot;&quot;&quot;Add string s to the accumulated body.&quot;&quot;&quot;</span>
+        <span class="s1">self.write(s)</span>
+        <span class="s1">self.room -= len(s)</span>
+
+    <span class="s3">def </span><span class="s1">newline(self):</span>
+        <span class="s2">&quot;&quot;&quot;Write eol, then start new line.&quot;&quot;&quot;</span>
+        <span class="s1">self.write_str(self.eol)</span>
+        <span class="s1">self.room = self.maxlinelen</span>
+
+    <span class="s3">def </span><span class="s1">write_soft_break(self):</span>
+        <span class="s2">&quot;&quot;&quot;Write a soft break, then start a new line.&quot;&quot;&quot;</span>
+        <span class="s1">self.write_str(</span><span class="s4">'='</span><span class="s1">)</span>
+        <span class="s1">self.newline()</span>
+
+    <span class="s3">def </span><span class="s1">write_wrapped(self</span><span class="s3">, </span><span class="s1">s</span><span class="s3">, </span><span class="s1">extra_room=</span><span class="s5">0</span><span class="s1">):</span>
+        <span class="s2">&quot;&quot;&quot;Add a soft line break if needed, then write s.&quot;&quot;&quot;</span>
+        <span class="s3">if </span><span class="s1">self.room &lt; len(s) + extra_room:</span>
+            <span class="s1">self.write_soft_break()</span>
+        <span class="s1">self.write_str(s)</span>
+
+    <span class="s3">def </span><span class="s1">write_char(self</span><span class="s3">, </span><span class="s1">c</span><span class="s3">, </span><span class="s1">is_last_char):</span>
+        <span class="s3">if not </span><span class="s1">is_last_char:</span>
+            <span class="s0"># Another character follows on this line, so we must leave</span>
+            <span class="s0"># extra room, either for it or a soft break, and whitespace</span>
+            <span class="s0"># need not be quoted.</span>
+            <span class="s1">self.write_wrapped(c</span><span class="s3">, </span><span class="s1">extra_room=</span><span class="s5">1</span><span class="s1">)</span>
+        <span class="s3">elif </span><span class="s1">c </span><span class="s3">not in </span><span class="s4">' </span><span class="s3">\t</span><span class="s4">'</span><span class="s1">:</span>
+            <span class="s0"># For this and remaining cases, no more characters follow,</span>
+            <span class="s0"># so there is no need to reserve extra room (since a hard</span>
+            <span class="s0"># break will immediately follow).</span>
+            <span class="s1">self.write_wrapped(c)</span>
+        <span class="s3">elif </span><span class="s1">self.room &gt;= </span><span class="s5">3</span><span class="s1">:</span>
+            <span class="s0"># It's a whitespace character at end-of-line, and we have room</span>
+            <span class="s0"># for the three-character quoted encoding.</span>
+            <span class="s1">self.write(quote(c))</span>
+        <span class="s3">elif </span><span class="s1">self.room == </span><span class="s5">2</span><span class="s1">:</span>
+            <span class="s0"># There's room for the whitespace character and a soft break.</span>
+            <span class="s1">self.write(c)</span>
+            <span class="s1">self.write_soft_break()</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s0"># There's room only for a soft break.  The quoted whitespace</span>
+            <span class="s0"># will be the only content on the subsequent line.</span>
+            <span class="s1">self.write_soft_break()</span>
+            <span class="s1">self.write(quote(c))</span>
+
+
+<span class="s3">def </span><span class="s1">body_encode(body</span><span class="s3">, </span><span class="s1">maxlinelen=</span><span class="s5">76</span><span class="s3">, </span><span class="s1">eol=NL):</span>
+    <span class="s2">&quot;&quot;&quot;Encode with quoted-printable, wrapping at maxlinelen characters. 
+ 
+    Each line of encoded text will end with eol, which defaults to &quot;\\n&quot;.  Set 
+    this to &quot;\\r\\n&quot; if you will be using the result of this function directly 
+    in an email. 
+ 
+    Each line will be wrapped at, at most, maxlinelen characters before the 
+    eol string (maxlinelen defaults to 76 characters, the maximum value 
+    permitted by RFC 2045).  Long lines will have the 'soft line break' 
+    quoted-printable character &quot;=&quot; appended to them, so the decoded text will 
+    be identical to the original text. 
+ 
+    The minimum maxlinelen is 4 to have room for a quoted character (&quot;=XX&quot;) 
+    followed by a soft line break.  Smaller values will generate a 
+    ValueError. 
+ 
+    &quot;&quot;&quot;</span>
+
+    <span class="s3">if </span><span class="s1">maxlinelen &lt; </span><span class="s5">4</span><span class="s1">:</span>
+        <span class="s3">raise </span><span class="s1">ValueError(</span><span class="s4">&quot;maxlinelen must be at least 4&quot;</span><span class="s1">)</span>
+    <span class="s3">if not </span><span class="s1">body:</span>
+        <span class="s3">return </span><span class="s1">body</span>
+
+    <span class="s0"># The last line may or may not end in eol, but all other lines do.</span>
+    <span class="s1">last_has_eol = (body[-</span><span class="s5">1</span><span class="s1">] </span><span class="s3">in </span><span class="s4">'</span><span class="s3">\r\n</span><span class="s4">'</span><span class="s1">)</span>
+
+    <span class="s0"># This accumulator will make it easier to build the encoded body.</span>
+    <span class="s1">encoded_body = _body_accumulator(maxlinelen</span><span class="s3">, </span><span class="s1">eol)</span>
+
+    <span class="s1">lines = body.splitlines()</span>
+    <span class="s1">last_line_no = len(lines) - </span><span class="s5">1</span>
+    <span class="s3">for </span><span class="s1">line_no</span><span class="s3">, </span><span class="s1">line </span><span class="s3">in </span><span class="s1">enumerate(lines):</span>
+        <span class="s1">last_char_index = len(line) - </span><span class="s5">1</span>
+        <span class="s3">for </span><span class="s1">i</span><span class="s3">, </span><span class="s1">c </span><span class="s3">in </span><span class="s1">enumerate(line):</span>
+            <span class="s3">if </span><span class="s1">body_check(ord(c)):</span>
+                <span class="s1">c = quote(c)</span>
+            <span class="s1">encoded_body.write_char(c</span><span class="s3">, </span><span class="s1">i==last_char_index)</span>
+        <span class="s0"># Add an eol if input line had eol.  All input lines have eol except</span>
+        <span class="s0"># possibly the last one.</span>
+        <span class="s3">if </span><span class="s1">line_no &lt; last_line_no </span><span class="s3">or </span><span class="s1">last_has_eol:</span>
+            <span class="s1">encoded_body.newline()</span>
+
+    <span class="s3">return </span><span class="s1">encoded_body.getvalue()</span>
+
+
+
+<span class="s0"># BAW: I'm not sure if the intent was for the signature of this function to be</span>
+<span class="s0"># the same as base64MIME.decode() or not...</span>
+<span class="s3">def </span><span class="s1">decode(encoded</span><span class="s3">, </span><span class="s1">eol=NL):</span>
+    <span class="s2">&quot;&quot;&quot;Decode a quoted-printable string. 
+ 
+    Lines are separated with eol, which defaults to \\n. 
+    &quot;&quot;&quot;</span>
+    <span class="s3">if not </span><span class="s1">encoded:</span>
+        <span class="s3">return </span><span class="s1">encoded</span>
+    <span class="s0"># BAW: see comment in encode() above.  Again, we're building up the</span>
+    <span class="s0"># decoded string with string concatenation, which could be done much more</span>
+    <span class="s0"># efficiently.</span>
+    <span class="s1">decoded = </span><span class="s4">''</span>
+
+    <span class="s3">for </span><span class="s1">line </span><span class="s3">in </span><span class="s1">encoded.splitlines():</span>
+        <span class="s1">line = line.rstrip()</span>
+        <span class="s3">if not </span><span class="s1">line:</span>
+            <span class="s1">decoded += eol</span>
+            <span class="s3">continue</span>
+
+        <span class="s1">i = </span><span class="s5">0</span>
+        <span class="s1">n = len(line)</span>
+        <span class="s3">while </span><span class="s1">i &lt; n:</span>
+            <span class="s1">c = line[i]</span>
+            <span class="s3">if </span><span class="s1">c != </span><span class="s4">'='</span><span class="s1">:</span>
+                <span class="s1">decoded += c</span>
+                <span class="s1">i += </span><span class="s5">1</span>
+            <span class="s0"># Otherwise, c == &quot;=&quot;.  Are we at the end of the line?  If so, add</span>
+            <span class="s0"># a soft line break.</span>
+            <span class="s3">elif </span><span class="s1">i+</span><span class="s5">1 </span><span class="s1">== n:</span>
+                <span class="s1">i += </span><span class="s5">1</span>
+                <span class="s3">continue</span>
+            <span class="s0"># Decode if in form =AB</span>
+            <span class="s3">elif </span><span class="s1">i+</span><span class="s5">2 </span><span class="s1">&lt; n </span><span class="s3">and </span><span class="s1">line[i+</span><span class="s5">1</span><span class="s1">] </span><span class="s3">in </span><span class="s1">hexdigits </span><span class="s3">and </span><span class="s1">line[i+</span><span class="s5">2</span><span class="s1">] </span><span class="s3">in </span><span class="s1">hexdigits:</span>
+                <span class="s1">decoded += unquote(line[i:i+</span><span class="s5">3</span><span class="s1">])</span>
+                <span class="s1">i += </span><span class="s5">3</span>
+            <span class="s0"># Otherwise, not in form =AB, pass literally</span>
+            <span class="s3">else</span><span class="s1">:</span>
+                <span class="s1">decoded += c</span>
+                <span class="s1">i += </span><span class="s5">1</span>
+
+            <span class="s3">if </span><span class="s1">i == n:</span>
+                <span class="s1">decoded += eol</span>
+    <span class="s0"># Special case if original string did not end with eol</span>
+    <span class="s3">if </span><span class="s1">encoded[-</span><span class="s5">1</span><span class="s1">] </span><span class="s3">not in </span><span class="s4">'</span><span class="s3">\r\n</span><span class="s4">' </span><span class="s3">and </span><span class="s1">decoded.endswith(eol):</span>
+        <span class="s1">decoded = decoded[:-</span><span class="s5">1</span><span class="s1">]</span>
+    <span class="s3">return </span><span class="s1">decoded</span>
+
+
+<span class="s0"># For convenience and backwards compatibility w/ standard base64 module</span>
+<span class="s1">body_decode = decode</span>
+<span class="s1">decodestring = decode</span>
+
+
+
+<span class="s3">def </span><span class="s1">_unquote_match(match):</span>
+    <span class="s2">&quot;&quot;&quot;Turn a match in the form =AB to the ASCII character with value 0xab&quot;&quot;&quot;</span>
+    <span class="s1">s = match.group(</span><span class="s5">0</span><span class="s1">)</span>
+    <span class="s3">return </span><span class="s1">unquote(s)</span>
+
+
+<span class="s0"># Header decoding is done a bit differently</span>
+<span class="s3">def </span><span class="s1">header_decode(s):</span>
+    <span class="s2">&quot;&quot;&quot;Decode a string encoded with RFC 2045 MIME header `Q' encoding. 
+ 
+    This function does not parse a full MIME header value encoded with 
+    quoted-printable (like =?iso-8895-1?q?Hello_World?=) -- please use 
+    the high level email.header class for that functionality. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">s = s.replace(</span><span class="s4">'_'</span><span class="s3">, </span><span class="s4">' '</span><span class="s1">)</span>
+    <span class="s3">return </span><span class="s1">re.sub(</span><span class="s4">r'=[a-fA-F0-9]{2}'</span><span class="s3">, </span><span class="s1">_unquote_match</span><span class="s3">, </span><span class="s1">s</span><span class="s3">, </span><span class="s1">re.ASCII)</span>
+</pre>
+</body>
+</html>

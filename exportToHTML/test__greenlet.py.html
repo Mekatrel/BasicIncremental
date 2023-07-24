@@ -1,0 +1,1047 @@
+<html>
+<head>
+<title>test__greenlet.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #cc7832;}
+.s3 { color: #6897bb;}
+.s4 { color: #6a8759;}
+.s5 { color: #629755; font-style: italic;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+test__greenlet.py</font>
+</center></td></tr></table>
+<pre><span class="s0"># Copyright (c) 2008-2009 AG Projects</span>
+<span class="s0"># Author: Denis Bilenko</span>
+<span class="s0">#</span>
+<span class="s0"># Permission is hereby granted, free of charge, to any person obtaining a copy</span>
+<span class="s0"># of this software and associated documentation files (the &quot;Software&quot;), to deal</span>
+<span class="s0"># in the Software without restriction, including without limitation the rights</span>
+<span class="s0"># to use, copy, modify, merge, publish, distribute, sublicense, and/or sell</span>
+<span class="s0"># copies of the Software, and to permit persons to whom the Software is</span>
+<span class="s0"># furnished to do so, subject to the following conditions:</span>
+<span class="s0">#</span>
+<span class="s0"># The above copyright notice and this permission notice shall be included in</span>
+<span class="s0"># all copies or substantial portions of the Software.</span>
+<span class="s0">#</span>
+<span class="s0"># THE SOFTWARE IS PROVIDED &quot;AS IS&quot;, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR</span>
+<span class="s0"># IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,</span>
+<span class="s0"># FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE</span>
+<span class="s0"># AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER</span>
+<span class="s0"># LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,</span>
+<span class="s0"># OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN</span>
+<span class="s0"># THE SOFTWARE.</span>
+<span class="s2">import </span><span class="s1">functools</span>
+<span class="s2">import </span><span class="s1">unittest</span>
+
+<span class="s2">import </span><span class="s1">gevent.testing </span><span class="s2">as </span><span class="s1">greentest</span>
+<span class="s2">import </span><span class="s1">gevent</span>
+
+<span class="s2">from </span><span class="s1">gevent </span><span class="s2">import </span><span class="s1">sleep</span><span class="s2">, </span><span class="s1">with_timeout</span><span class="s2">, </span><span class="s1">getcurrent</span>
+<span class="s2">from </span><span class="s1">gevent </span><span class="s2">import </span><span class="s1">greenlet</span>
+<span class="s2">from </span><span class="s1">gevent.event </span><span class="s2">import </span><span class="s1">AsyncResult</span>
+<span class="s2">from </span><span class="s1">gevent.queue </span><span class="s2">import </span><span class="s1">Queue</span><span class="s2">, </span><span class="s1">Channel</span>
+
+<span class="s2">from </span><span class="s1">gevent.testing.timing </span><span class="s2">import </span><span class="s1">AbstractGenericWaitTestCase</span>
+<span class="s2">from </span><span class="s1">gevent.testing.timing </span><span class="s2">import </span><span class="s1">AbstractGenericGetTestCase</span>
+<span class="s2">from </span><span class="s1">gevent.testing </span><span class="s2">import </span><span class="s1">timing</span>
+<span class="s2">from </span><span class="s1">gevent.testing </span><span class="s2">import </span><span class="s1">ignores_leakcheck</span>
+
+<span class="s1">DELAY = timing.SMALL_TICK</span>
+<span class="s1">greentest.TestCase.error_fatal = </span><span class="s2">False</span>
+
+
+<span class="s2">class </span><span class="s1">ExpectedError(greentest.ExpectedException):</span>
+    <span class="s2">pass</span>
+
+<span class="s2">class </span><span class="s1">ExpectedJoinError(ExpectedError):</span>
+    <span class="s2">pass</span>
+
+<span class="s2">class </span><span class="s1">SuiteExpectedException(ExpectedError):</span>
+    <span class="s2">pass</span>
+
+<span class="s2">class </span><span class="s1">GreenletRaisesJoin(gevent.Greenlet):</span>
+    <span class="s1">killed = </span><span class="s2">False</span>
+    <span class="s1">joined = </span><span class="s2">False</span>
+    <span class="s1">raise_on_join = </span><span class="s2">True</span>
+
+    <span class="s2">def </span><span class="s1">join(self</span><span class="s2">, </span><span class="s1">timeout=</span><span class="s2">None</span><span class="s1">):</span>
+        <span class="s1">self.joined += </span><span class="s3">1</span>
+        <span class="s2">if </span><span class="s1">self.raise_on_join:</span>
+            <span class="s2">raise </span><span class="s1">ExpectedJoinError</span>
+        <span class="s2">return </span><span class="s1">gevent.Greenlet.join(self</span><span class="s2">, </span><span class="s1">timeout)</span>
+
+    <span class="s2">def </span><span class="s1">kill(self</span><span class="s2">, </span><span class="s1">*args</span><span class="s2">, </span><span class="s1">**kwargs): </span><span class="s0"># pylint:disable=signature-differs</span>
+        <span class="s1">self.killed += </span><span class="s3">1</span>
+        <span class="s2">return </span><span class="s1">gevent.Greenlet.kill(self</span><span class="s2">, </span><span class="s1">*args</span><span class="s2">, </span><span class="s1">**kwargs)</span>
+
+<span class="s2">class </span><span class="s1">TestLink(greentest.TestCase):</span>
+
+    <span class="s2">def </span><span class="s1">test_link_to_asyncresult(self):</span>
+        <span class="s1">p = gevent.spawn(</span><span class="s2">lambda</span><span class="s1">: </span><span class="s3">100</span><span class="s1">)</span>
+        <span class="s1">event = AsyncResult()</span>
+        <span class="s1">p.link(event)</span>
+        <span class="s1">self.assertEqual(event.get()</span><span class="s2">, </span><span class="s3">100</span><span class="s1">)</span>
+
+        <span class="s2">for </span><span class="s1">_ </span><span class="s2">in </span><span class="s1">range(</span><span class="s3">3</span><span class="s1">):</span>
+            <span class="s1">event2 = AsyncResult()</span>
+            <span class="s1">p.link(event2)</span>
+            <span class="s1">self.assertEqual(event2.get()</span><span class="s2">, </span><span class="s3">100</span><span class="s1">)</span>
+
+    <span class="s2">def </span><span class="s1">test_link_to_asyncresult_exception(self):</span>
+        <span class="s1">err = ExpectedError(</span><span class="s4">'test_link_to_asyncresult_exception'</span><span class="s1">)</span>
+        <span class="s1">p = gevent.spawn(</span><span class="s2">lambda</span><span class="s1">: getcurrent().throw(err))</span>
+        <span class="s1">event = AsyncResult()</span>
+        <span class="s1">p.link(event)</span>
+        <span class="s2">with </span><span class="s1">self.assertRaises(ExpectedError) </span><span class="s2">as </span><span class="s1">exc:</span>
+            <span class="s1">event.get()</span>
+
+        <span class="s1">self.assertIs(exc.exception</span><span class="s2">, </span><span class="s1">err)</span>
+
+        <span class="s2">for </span><span class="s1">_ </span><span class="s2">in </span><span class="s1">range(</span><span class="s3">3</span><span class="s1">):</span>
+            <span class="s1">event2 = AsyncResult()</span>
+            <span class="s1">p.link(event2)</span>
+            <span class="s2">with </span><span class="s1">self.assertRaises(ExpectedError) </span><span class="s2">as </span><span class="s1">exc:</span>
+                <span class="s1">event2.get()</span>
+            <span class="s1">self.assertIs(exc.exception</span><span class="s2">, </span><span class="s1">err)</span>
+
+    <span class="s2">def </span><span class="s1">test_link_to_queue(self):</span>
+        <span class="s1">p = gevent.spawn(</span><span class="s2">lambda</span><span class="s1">: </span><span class="s3">100</span><span class="s1">)</span>
+        <span class="s1">q = Queue()</span>
+        <span class="s1">p.link(q.put)</span>
+        <span class="s1">self.assertEqual(q.get().get()</span><span class="s2">, </span><span class="s3">100</span><span class="s1">)</span>
+
+        <span class="s2">for </span><span class="s1">_ </span><span class="s2">in </span><span class="s1">range(</span><span class="s3">3</span><span class="s1">):</span>
+            <span class="s1">p.link(q.put)</span>
+            <span class="s1">self.assertEqual(q.get().get()</span><span class="s2">, </span><span class="s3">100</span><span class="s1">)</span>
+
+    <span class="s2">def </span><span class="s1">test_link_to_channel(self):</span>
+        <span class="s1">p1 = gevent.spawn(</span><span class="s2">lambda</span><span class="s1">: </span><span class="s3">101</span><span class="s1">)</span>
+        <span class="s1">p2 = gevent.spawn(</span><span class="s2">lambda</span><span class="s1">: </span><span class="s3">102</span><span class="s1">)</span>
+        <span class="s1">p3 = gevent.spawn(</span><span class="s2">lambda</span><span class="s1">: </span><span class="s3">103</span><span class="s1">)</span>
+        <span class="s1">q = Channel()</span>
+        <span class="s1">p1.link(q.put)</span>
+        <span class="s1">p2.link(q.put)</span>
+        <span class="s1">p3.link(q.put)</span>
+        <span class="s1">results = [q.get().get()</span><span class="s2">, </span><span class="s1">q.get().get()</span><span class="s2">, </span><span class="s1">q.get().get()]</span>
+        <span class="s1">self.assertEqual(sorted(results)</span><span class="s2">, </span><span class="s1">[</span><span class="s3">101</span><span class="s2">, </span><span class="s3">102</span><span class="s2">, </span><span class="s3">103</span><span class="s1">]</span><span class="s2">, </span><span class="s1">results)</span>
+
+
+<span class="s2">class </span><span class="s1">TestUnlink(greentest.TestCase):</span>
+    <span class="s1">switch_expected = </span><span class="s2">False</span>
+
+    <span class="s2">def </span><span class="s1">_test_func(self</span><span class="s2">, </span><span class="s1">p</span><span class="s2">, </span><span class="s1">link):</span>
+        <span class="s1">link(dummy_test_func)</span>
+        <span class="s1">self.assertEqual(</span><span class="s3">1</span><span class="s2">, </span><span class="s1">p.has_links())</span>
+
+        <span class="s1">p.unlink(dummy_test_func)</span>
+        <span class="s1">self.assertEqual(</span><span class="s3">0</span><span class="s2">, </span><span class="s1">p.has_links())</span>
+
+        <span class="s1">link(self.setUp)</span>
+        <span class="s1">self.assertEqual(</span><span class="s3">1</span><span class="s2">, </span><span class="s1">p.has_links())</span>
+
+        <span class="s1">p.unlink(self.setUp)</span>
+        <span class="s1">self.assertEqual(</span><span class="s3">0</span><span class="s2">, </span><span class="s1">p.has_links())</span>
+
+        <span class="s1">p.kill()</span>
+
+    <span class="s2">def </span><span class="s1">test_func_link(self):</span>
+        <span class="s1">p = gevent.spawn(dummy_test_func)</span>
+        <span class="s1">self._test_func(p</span><span class="s2">, </span><span class="s1">p.link)</span>
+
+    <span class="s2">def </span><span class="s1">test_func_link_value(self):</span>
+        <span class="s1">p = gevent.spawn(dummy_test_func)</span>
+        <span class="s1">self._test_func(p</span><span class="s2">, </span><span class="s1">p.link_value)</span>
+
+    <span class="s2">def </span><span class="s1">test_func_link_exception(self):</span>
+        <span class="s1">p = gevent.spawn(dummy_test_func)</span>
+        <span class="s1">self._test_func(p</span><span class="s2">, </span><span class="s1">p.link_exception)</span>
+
+
+<span class="s2">class </span><span class="s1">LinksTestCase(greentest.TestCase):</span>
+
+    <span class="s1">link_method = </span><span class="s2">None</span>
+
+    <span class="s2">def </span><span class="s1">link(self</span><span class="s2">, </span><span class="s1">p</span><span class="s2">, </span><span class="s1">listener=</span><span class="s2">None</span><span class="s1">):</span>
+        <span class="s1">getattr(p</span><span class="s2">, </span><span class="s1">self.link_method)(listener)</span>
+
+    <span class="s2">def </span><span class="s1">set_links(self</span><span class="s2">, </span><span class="s1">p):</span>
+        <span class="s1">event = AsyncResult()</span>
+        <span class="s1">self.link(p</span><span class="s2">, </span><span class="s1">event)</span>
+
+        <span class="s1">queue = Queue(</span><span class="s3">1</span><span class="s1">)</span>
+        <span class="s1">self.link(p</span><span class="s2">, </span><span class="s1">queue.put)</span>
+
+        <span class="s1">callback_flag = [</span><span class="s4">'initial'</span><span class="s1">]</span>
+        <span class="s1">self.link(p</span><span class="s2">, lambda </span><span class="s1">*args: callback_flag.remove(</span><span class="s4">'initial'</span><span class="s1">))</span>
+
+        <span class="s2">for </span><span class="s1">_ </span><span class="s2">in </span><span class="s1">range(</span><span class="s3">10</span><span class="s1">):</span>
+            <span class="s1">self.link(p</span><span class="s2">, </span><span class="s1">AsyncResult())</span>
+            <span class="s1">self.link(p</span><span class="s2">, </span><span class="s1">Queue(</span><span class="s3">1</span><span class="s1">).put)</span>
+
+        <span class="s2">return </span><span class="s1">event</span><span class="s2">, </span><span class="s1">queue</span><span class="s2">, </span><span class="s1">callback_flag</span>
+
+    <span class="s2">def </span><span class="s1">set_links_timeout(self</span><span class="s2">, </span><span class="s1">link):</span>
+        <span class="s0"># stuff that won't be touched</span>
+        <span class="s1">event = AsyncResult()</span>
+        <span class="s1">link(event)</span>
+
+        <span class="s1">queue = Channel()</span>
+        <span class="s1">link(queue.put)</span>
+        <span class="s2">return </span><span class="s1">event</span><span class="s2">, </span><span class="s1">queue</span>
+
+    <span class="s2">def </span><span class="s1">check_timed_out(self</span><span class="s2">, </span><span class="s1">event</span><span class="s2">, </span><span class="s1">queue):</span>
+        <span class="s1">got = with_timeout(DELAY</span><span class="s2">, </span><span class="s1">event.get</span><span class="s2">, </span><span class="s1">timeout_value=X)</span>
+        <span class="s1">self.assertIs(got</span><span class="s2">, </span><span class="s1">X)</span>
+        <span class="s1">got = with_timeout(DELAY</span><span class="s2">, </span><span class="s1">queue.get</span><span class="s2">, </span><span class="s1">timeout_value=X)</span>
+        <span class="s1">self.assertIs(got</span><span class="s2">, </span><span class="s1">X)</span>
+
+
+<span class="s2">def </span><span class="s1">return25():</span>
+    <span class="s2">return </span><span class="s3">25</span>
+
+
+
+<span class="s2">class </span><span class="s1">TestReturn_link(LinksTestCase):</span>
+    <span class="s1">link_method = </span><span class="s4">'link'</span>
+
+    <span class="s1">p = </span><span class="s2">None</span>
+
+    <span class="s2">def </span><span class="s1">cleanup(self):</span>
+        <span class="s1">self.p.unlink_all()</span>
+        <span class="s1">self.p = </span><span class="s2">None</span>
+
+    <span class="s2">def </span><span class="s1">test_return(self):</span>
+        <span class="s1">self.p = gevent.spawn(return25)</span>
+        <span class="s2">for </span><span class="s1">_ </span><span class="s2">in </span><span class="s1">range(</span><span class="s3">3</span><span class="s1">):</span>
+            <span class="s1">self._test_return(self.p</span><span class="s2">, </span><span class="s3">25</span><span class="s1">)</span>
+        <span class="s1">self.p.kill()</span>
+
+    <span class="s2">def </span><span class="s1">_test_return(self</span><span class="s2">, </span><span class="s1">p</span><span class="s2">, </span><span class="s1">result):</span>
+        <span class="s1">event</span><span class="s2">, </span><span class="s1">queue</span><span class="s2">, </span><span class="s1">callback_flag = self.set_links(p)</span>
+
+        <span class="s0"># stuff that will time out because there's no unhandled exception:</span>
+        <span class="s1">xxxxx = self.set_links_timeout(p.link_exception)</span>
+
+        <span class="s1">sleep(DELAY * </span><span class="s3">2</span><span class="s1">)</span>
+        <span class="s1">self.assertFalse(p)</span>
+
+        <span class="s1">self.assertEqual(event.get()</span><span class="s2">, </span><span class="s1">result)</span>
+        <span class="s1">self.assertEqual(queue.get().get()</span><span class="s2">, </span><span class="s1">result)</span>
+
+        <span class="s1">sleep(DELAY)</span>
+        <span class="s1">self.assertFalse(callback_flag)</span>
+
+        <span class="s1">self.check_timed_out(*xxxxx)</span>
+
+    <span class="s2">def </span><span class="s1">_test_kill(self</span><span class="s2">, </span><span class="s1">p):</span>
+        <span class="s1">event</span><span class="s2">, </span><span class="s1">queue</span><span class="s2">, </span><span class="s1">callback_flag = self.set_links(p)</span>
+        <span class="s1">xxxxx = self.set_links_timeout(p.link_exception)</span>
+
+        <span class="s1">p.kill()</span>
+        <span class="s1">sleep(DELAY)</span>
+        <span class="s1">self.assertFalse(p)</span>
+
+
+        <span class="s1">self.assertIsInstance(event.get()</span><span class="s2">, </span><span class="s1">gevent.GreenletExit)</span>
+        <span class="s1">self.assertIsInstance(queue.get().get()</span><span class="s2">, </span><span class="s1">gevent.GreenletExit)</span>
+
+        <span class="s1">sleep(DELAY)</span>
+        <span class="s1">self.assertFalse(callback_flag)</span>
+
+        <span class="s1">self.check_timed_out(*xxxxx)</span>
+
+    <span class="s2">def </span><span class="s1">test_kill(self):</span>
+        <span class="s1">p = self.p = gevent.spawn(sleep</span><span class="s2">, </span><span class="s1">DELAY)</span>
+        <span class="s2">for </span><span class="s1">_ </span><span class="s2">in </span><span class="s1">range(</span><span class="s3">3</span><span class="s1">):</span>
+            <span class="s1">self._test_kill(p)</span>
+
+
+<span class="s2">class </span><span class="s1">TestReturn_link_value(TestReturn_link):</span>
+    <span class="s1">link_method = </span><span class="s4">'link_value'</span>
+
+
+<span class="s2">class </span><span class="s1">TestRaise_link(LinksTestCase):</span>
+    <span class="s1">link_method = </span><span class="s4">'link'</span>
+
+    <span class="s2">def </span><span class="s1">_test_raise(self</span><span class="s2">, </span><span class="s1">p):</span>
+        <span class="s1">event</span><span class="s2">, </span><span class="s1">queue</span><span class="s2">, </span><span class="s1">callback_flag = self.set_links(p)</span>
+        <span class="s1">xxxxx = self.set_links_timeout(p.link_value)</span>
+
+        <span class="s1">sleep(DELAY)</span>
+        <span class="s1">self.assertFalse(p</span><span class="s2">, </span><span class="s1">p)</span>
+
+        <span class="s1">self.assertRaises(ExpectedError</span><span class="s2">, </span><span class="s1">event.get)</span>
+        <span class="s1">self.assertEqual(queue.get()</span><span class="s2">, </span><span class="s1">p)</span>
+        <span class="s1">sleep(DELAY)</span>
+        <span class="s1">self.assertFalse(callback_flag</span><span class="s2">, </span><span class="s1">callback_flag)</span>
+
+        <span class="s1">self.check_timed_out(*xxxxx)</span>
+
+    <span class="s2">def </span><span class="s1">test_raise(self):</span>
+        <span class="s1">p = gevent.spawn(</span><span class="s2">lambda</span><span class="s1">: getcurrent().throw(ExpectedError(</span><span class="s4">'test_raise'</span><span class="s1">)))</span>
+        <span class="s2">for </span><span class="s1">_ </span><span class="s2">in </span><span class="s1">range(</span><span class="s3">3</span><span class="s1">):</span>
+            <span class="s1">self._test_raise(p)</span>
+
+
+<span class="s2">class </span><span class="s1">TestRaise_link_exception(TestRaise_link):</span>
+    <span class="s1">link_method = </span><span class="s4">'link_exception'</span>
+
+
+<span class="s2">class </span><span class="s1">TestStuff(greentest.TestCase):</span>
+
+    <span class="s2">def </span><span class="s1">test_minimal_id(self):</span>
+        <span class="s1">g = gevent.spawn(</span><span class="s2">lambda</span><span class="s1">: </span><span class="s3">1</span><span class="s1">)</span>
+        <span class="s1">self.assertGreaterEqual(g.minimal_ident</span><span class="s2">, </span><span class="s3">0</span><span class="s1">)</span>
+        <span class="s1">self.assertGreaterEqual(g.parent.minimal_ident</span><span class="s2">, </span><span class="s3">0</span><span class="s1">)</span>
+        <span class="s1">g.join() </span><span class="s0"># don't leave dangling, breaks the leak checks</span>
+
+    <span class="s2">def </span><span class="s1">test_wait_noerrors(self):</span>
+        <span class="s1">x = gevent.spawn(</span><span class="s2">lambda</span><span class="s1">: </span><span class="s3">1</span><span class="s1">)</span>
+        <span class="s1">y = gevent.spawn(</span><span class="s2">lambda</span><span class="s1">: </span><span class="s3">2</span><span class="s1">)</span>
+        <span class="s1">z = gevent.spawn(</span><span class="s2">lambda</span><span class="s1">: </span><span class="s3">3</span><span class="s1">)</span>
+        <span class="s1">gevent.joinall([x</span><span class="s2">, </span><span class="s1">y</span><span class="s2">, </span><span class="s1">z]</span><span class="s2">, </span><span class="s1">raise_error=</span><span class="s2">True</span><span class="s1">)</span>
+        <span class="s1">self.assertEqual([x.value</span><span class="s2">, </span><span class="s1">y.value</span><span class="s2">, </span><span class="s1">z.value]</span><span class="s2">, </span><span class="s1">[</span><span class="s3">1</span><span class="s2">, </span><span class="s3">2</span><span class="s2">, </span><span class="s3">3</span><span class="s1">])</span>
+        <span class="s1">e = AsyncResult()</span>
+        <span class="s1">x.link(e)</span>
+        <span class="s1">self.assertEqual(e.get()</span><span class="s2">, </span><span class="s3">1</span><span class="s1">)</span>
+        <span class="s1">x.unlink(e)</span>
+        <span class="s1">e = AsyncResult()</span>
+        <span class="s1">x.link(e)</span>
+        <span class="s1">self.assertEqual(e.get()</span><span class="s2">, </span><span class="s3">1</span><span class="s1">)</span>
+
+    <span class="s1">@ignores_leakcheck</span>
+    <span class="s2">def </span><span class="s1">test_wait_error(self):</span>
+
+        <span class="s2">def </span><span class="s1">x():</span>
+            <span class="s1">sleep(DELAY)</span>
+            <span class="s2">return </span><span class="s3">1</span>
+        <span class="s1">x = gevent.spawn(x)</span>
+        <span class="s1">y = gevent.spawn(</span><span class="s2">lambda</span><span class="s1">: getcurrent().throw(ExpectedError(</span><span class="s4">'test_wait_error'</span><span class="s1">)))</span>
+        <span class="s1">self.assertRaises(ExpectedError</span><span class="s2">, </span><span class="s1">gevent.joinall</span><span class="s2">, </span><span class="s1">[x</span><span class="s2">, </span><span class="s1">y]</span><span class="s2">, </span><span class="s1">raise_error=</span><span class="s2">True</span><span class="s1">)</span>
+        <span class="s1">self.assertRaises(ExpectedError</span><span class="s2">, </span><span class="s1">gevent.joinall</span><span class="s2">, </span><span class="s1">[y]</span><span class="s2">, </span><span class="s1">raise_error=</span><span class="s2">True</span><span class="s1">)</span>
+        <span class="s1">x.join()</span>
+
+    <span class="s1">@ignores_leakcheck</span>
+    <span class="s2">def </span><span class="s1">test_joinall_exception_order(self):</span>
+        <span class="s0"># if there're several exceptions raised, the earliest one must be raised by joinall</span>
+        <span class="s2">def </span><span class="s1">first():</span>
+            <span class="s1">sleep(</span><span class="s3">0.1</span><span class="s1">)</span>
+            <span class="s2">raise </span><span class="s1">ExpectedError(</span><span class="s4">'first'</span><span class="s1">)</span>
+        <span class="s1">a = gevent.spawn(first)</span>
+        <span class="s1">b = gevent.spawn(</span><span class="s2">lambda</span><span class="s1">: getcurrent().throw(ExpectedError(</span><span class="s4">'second'</span><span class="s1">)))</span>
+        <span class="s2">with </span><span class="s1">self.assertRaisesRegex(ExpectedError</span><span class="s2">, </span><span class="s4">'second'</span><span class="s1">):</span>
+            <span class="s1">gevent.joinall([a</span><span class="s2">, </span><span class="s1">b]</span><span class="s2">, </span><span class="s1">raise_error=</span><span class="s2">True</span><span class="s1">)</span>
+
+        <span class="s1">gevent.joinall([a</span><span class="s2">, </span><span class="s1">b])</span>
+
+    <span class="s2">def </span><span class="s1">test_joinall_count_raise_error(self):</span>
+        <span class="s0"># When joinall is asked not to raise an error, the 'count' param still</span>
+        <span class="s0"># works.</span>
+        <span class="s2">def </span><span class="s1">raises_but_ignored():</span>
+            <span class="s2">raise </span><span class="s1">ExpectedError(</span><span class="s4">&quot;count&quot;</span><span class="s1">)</span>
+
+        <span class="s2">def </span><span class="s1">sleep_forever():</span>
+            <span class="s2">while True</span><span class="s1">:</span>
+                <span class="s1">sleep(</span><span class="s3">0.1</span><span class="s1">)</span>
+
+        <span class="s1">sleeper = gevent.spawn(sleep_forever)</span>
+        <span class="s1">raiser = gevent.spawn(raises_but_ignored)</span>
+
+        <span class="s1">gevent.joinall([sleeper</span><span class="s2">, </span><span class="s1">raiser]</span><span class="s2">, </span><span class="s1">raise_error=</span><span class="s2">False, </span><span class="s1">count=</span><span class="s3">1</span><span class="s1">)</span>
+        <span class="s1">self.assert_greenlet_ready(raiser)</span>
+        <span class="s1">self.assert_greenlet_not_ready(sleeper)</span>
+
+        <span class="s0"># Clean up our mess</span>
+        <span class="s1">sleeper.kill()</span>
+        <span class="s1">self.assert_greenlet_ready(sleeper)</span>
+
+    <span class="s2">def </span><span class="s1">test_multiple_listeners_error(self):</span>
+        <span class="s0"># if there was an error while calling a callback</span>
+        <span class="s0"># it should not prevent the other listeners from being called</span>
+        <span class="s0"># also, all of the errors should be logged, check the output</span>
+        <span class="s0"># manually that they are</span>
+        <span class="s1">p = gevent.spawn(</span><span class="s2">lambda</span><span class="s1">: </span><span class="s3">5</span><span class="s1">)</span>
+        <span class="s1">results = []</span>
+
+        <span class="s2">def </span><span class="s1">listener1(*_args):</span>
+            <span class="s1">results.append(</span><span class="s3">10</span><span class="s1">)</span>
+            <span class="s2">raise </span><span class="s1">ExpectedError(</span><span class="s4">'listener1'</span><span class="s1">)</span>
+
+        <span class="s2">def </span><span class="s1">listener2(*_args):</span>
+            <span class="s1">results.append(</span><span class="s3">20</span><span class="s1">)</span>
+            <span class="s2">raise </span><span class="s1">ExpectedError(</span><span class="s4">'listener2'</span><span class="s1">)</span>
+
+        <span class="s2">def </span><span class="s1">listener3(*_args):</span>
+            <span class="s2">raise </span><span class="s1">ExpectedError(</span><span class="s4">'listener3'</span><span class="s1">)</span>
+
+        <span class="s1">p.link(listener1)</span>
+        <span class="s1">p.link(listener2)</span>
+        <span class="s1">p.link(listener3)</span>
+        <span class="s1">sleep(DELAY * </span><span class="s3">10</span><span class="s1">)</span>
+        <span class="s1">self.assertIn(results</span><span class="s2">, </span><span class="s1">[[</span><span class="s3">10</span><span class="s2">, </span><span class="s3">20</span><span class="s1">]</span><span class="s2">, </span><span class="s1">[</span><span class="s3">20</span><span class="s2">, </span><span class="s3">10</span><span class="s1">]])</span>
+
+        <span class="s1">p = gevent.spawn(</span><span class="s2">lambda</span><span class="s1">: getcurrent().throw(ExpectedError(</span><span class="s4">'test_multiple_listeners_error'</span><span class="s1">)))</span>
+        <span class="s1">results = []</span>
+        <span class="s1">p.link(listener1)</span>
+        <span class="s1">p.link(listener2)</span>
+        <span class="s1">p.link(listener3)</span>
+        <span class="s1">sleep(DELAY * </span><span class="s3">10</span><span class="s1">)</span>
+        <span class="s1">self.assertIn(results</span><span class="s2">, </span><span class="s1">[[</span><span class="s3">10</span><span class="s2">, </span><span class="s3">20</span><span class="s1">]</span><span class="s2">, </span><span class="s1">[</span><span class="s3">20</span><span class="s2">, </span><span class="s3">10</span><span class="s1">]])</span>
+
+    <span class="s2">class </span><span class="s1">Results(object):</span>
+
+        <span class="s2">def </span><span class="s1">__init__(self):</span>
+            <span class="s1">self.results = []</span>
+
+        <span class="s2">def </span><span class="s1">listener1(self</span><span class="s2">, </span><span class="s1">p):</span>
+            <span class="s1">p.unlink(self.listener2)</span>
+            <span class="s1">self.results.append(</span><span class="s3">5</span><span class="s1">)</span>
+            <span class="s2">raise </span><span class="s1">ExpectedError(</span><span class="s4">'listener1'</span><span class="s1">)</span>
+
+        <span class="s2">def </span><span class="s1">listener2(self</span><span class="s2">, </span><span class="s1">p):</span>
+            <span class="s1">p.unlink(self.listener1)</span>
+            <span class="s1">self.results.append(</span><span class="s3">5</span><span class="s1">)</span>
+            <span class="s2">raise </span><span class="s1">ExpectedError(</span><span class="s4">'listener2'</span><span class="s1">)</span>
+
+        <span class="s2">def </span><span class="s1">listener3(self</span><span class="s2">, </span><span class="s1">_p):</span>
+            <span class="s2">raise </span><span class="s1">ExpectedError(</span><span class="s4">'listener3'</span><span class="s1">)</span>
+
+    <span class="s2">def </span><span class="s1">_test_multiple_listeners_error_unlink(self</span><span class="s2">, </span><span class="s1">_p</span><span class="s2">, </span><span class="s1">link):</span>
+        <span class="s0"># notification must not happen after unlink even</span>
+        <span class="s0"># though notification process has been already started</span>
+        <span class="s1">results = self.Results()</span>
+
+        <span class="s1">link(results.listener1)</span>
+        <span class="s1">link(results.listener2)</span>
+        <span class="s1">link(results.listener3)</span>
+        <span class="s1">sleep(DELAY * </span><span class="s3">10</span><span class="s1">)</span>
+        <span class="s1">self.assertEqual([</span><span class="s3">5</span><span class="s1">]</span><span class="s2">, </span><span class="s1">results.results)</span>
+
+
+    <span class="s2">def </span><span class="s1">test_multiple_listeners_error_unlink_Greenlet_link(self):</span>
+        <span class="s1">p = gevent.spawn(</span><span class="s2">lambda</span><span class="s1">: </span><span class="s3">5</span><span class="s1">)</span>
+        <span class="s1">self._test_multiple_listeners_error_unlink(p</span><span class="s2">, </span><span class="s1">p.link)</span>
+        <span class="s1">p.kill()</span>
+
+    <span class="s2">def </span><span class="s1">test_multiple_listeners_error_unlink_Greenlet_rawlink(self):</span>
+        <span class="s1">p = gevent.spawn(</span><span class="s2">lambda</span><span class="s1">: </span><span class="s3">5</span><span class="s1">)</span>
+        <span class="s1">self._test_multiple_listeners_error_unlink(p</span><span class="s2">, </span><span class="s1">p.rawlink)</span>
+
+    <span class="s2">def </span><span class="s1">test_multiple_listeners_error_unlink_AsyncResult_rawlink(self):</span>
+        <span class="s1">e = AsyncResult()</span>
+        <span class="s1">gevent.spawn(e.set</span><span class="s2">, </span><span class="s3">6</span><span class="s1">)</span>
+        <span class="s1">self._test_multiple_listeners_error_unlink(e</span><span class="s2">, </span><span class="s1">e.rawlink)</span>
+
+
+<span class="s2">def </span><span class="s1">dummy_test_func(*_args):</span>
+    <span class="s2">pass</span>
+
+
+<span class="s2">class </span><span class="s1">A(object):</span>
+
+    <span class="s2">def </span><span class="s1">method(self):</span>
+        <span class="s2">pass</span>
+
+<span class="s2">class </span><span class="s1">Subclass(gevent.Greenlet):</span>
+    <span class="s2">pass</span>
+
+<span class="s2">class </span><span class="s1">TestStr(greentest.TestCase):</span>
+
+    <span class="s2">def </span><span class="s1">test_function(self):</span>
+        <span class="s1">g = gevent.Greenlet.spawn(dummy_test_func)</span>
+        <span class="s1">self.assert_nstr_endswith(g</span><span class="s2">, </span><span class="s4">'at X: dummy_test_func&gt;'</span><span class="s1">)</span>
+        <span class="s1">self.assert_greenlet_not_ready(g)</span>
+        <span class="s1">g.join()</span>
+        <span class="s1">self.assert_greenlet_ready(g)</span>
+        <span class="s1">self.assert_nstr_endswith(g</span><span class="s2">, </span><span class="s4">'at X: dummy_test_func&gt;'</span><span class="s1">)</span>
+
+
+    <span class="s2">def </span><span class="s1">test_method(self):</span>
+        <span class="s1">g = gevent.Greenlet.spawn(A().method)</span>
+        <span class="s1">self.assert_nstr_startswith(g</span><span class="s2">, </span><span class="s4">'&lt;Greenlet at X:'</span><span class="s1">)</span>
+
+        <span class="s0"># Accessing the name to generate a minimal_ident will cause it to be included.</span>
+        <span class="s1">getattr(g</span><span class="s2">, </span><span class="s4">'name'</span><span class="s1">)</span>
+        <span class="s1">self.assert_nstr_startswith(g</span><span class="s2">, </span><span class="s4">'&lt;Greenlet &quot;Greenlet-'</span><span class="s1">)</span>
+
+        <span class="s0"># Assigning to the name changes it</span>
+        <span class="s1">g.name = </span><span class="s4">'Foo'</span>
+        <span class="s1">self.assert_nstr_startswith(g</span><span class="s2">, </span><span class="s4">'&lt;Greenlet &quot;Foo&quot;'</span><span class="s1">)</span>
+
+        <span class="s1">self.assert_nstr_endswith(g</span><span class="s2">, </span><span class="s4">'at X: &lt;bound method A.method of &lt;module.A object at X&gt;&gt;&gt;'</span><span class="s1">)</span>
+        <span class="s1">self.assert_greenlet_not_ready(g)</span>
+        <span class="s1">g.join()</span>
+        <span class="s1">self.assert_greenlet_ready(g)</span>
+        <span class="s1">self.assert_nstr_endswith(g</span><span class="s2">, </span><span class="s4">'at X: &lt;bound method A.method of &lt;module.A object at X&gt;&gt;&gt;'</span><span class="s1">)</span>
+
+    <span class="s2">def </span><span class="s1">test_subclass(self):</span>
+        <span class="s1">g = Subclass()</span>
+        <span class="s1">self.assert_nstr_startswith(g</span><span class="s2">, </span><span class="s4">'&lt;Subclass '</span><span class="s1">)</span>
+        <span class="s1">self.assert_nstr_endswith(g</span><span class="s2">, </span><span class="s4">'at X: _run&gt;'</span><span class="s1">)</span>
+
+        <span class="s1">g = Subclass(</span><span class="s2">None, </span><span class="s4">'question'</span><span class="s2">, </span><span class="s1">answer=</span><span class="s3">42</span><span class="s1">)</span>
+        <span class="s1">self.assert_nstr_endswith(g</span><span class="s2">, </span><span class="s4">&quot; at X: _run('question', answer=42)&gt;&quot;</span><span class="s1">)</span>
+
+
+<span class="s2">class </span><span class="s1">TestJoin(AbstractGenericWaitTestCase):</span>
+
+    <span class="s2">def </span><span class="s1">wait(self</span><span class="s2">, </span><span class="s1">timeout):</span>
+        <span class="s1">g = gevent.spawn(gevent.sleep</span><span class="s2">, </span><span class="s3">10</span><span class="s1">)</span>
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s2">return </span><span class="s1">g.join(timeout=timeout)</span>
+        <span class="s2">finally</span><span class="s1">:</span>
+            <span class="s1">g.kill()</span>
+
+
+<span class="s2">class </span><span class="s1">TestGet(AbstractGenericGetTestCase):</span>
+
+    <span class="s2">def </span><span class="s1">wait(self</span><span class="s2">, </span><span class="s1">timeout):</span>
+        <span class="s1">g = gevent.spawn(gevent.sleep</span><span class="s2">, </span><span class="s3">10</span><span class="s1">)</span>
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s2">return </span><span class="s1">g.get(timeout=timeout)</span>
+        <span class="s2">finally</span><span class="s1">:</span>
+            <span class="s1">g.kill()</span>
+
+
+<span class="s2">class </span><span class="s1">TestJoinAll0(AbstractGenericWaitTestCase):</span>
+
+    <span class="s1">g = gevent.Greenlet()</span>
+
+    <span class="s2">def </span><span class="s1">wait(self</span><span class="s2">, </span><span class="s1">timeout):</span>
+        <span class="s1">gevent.joinall([self.g]</span><span class="s2">, </span><span class="s1">timeout=timeout)</span>
+
+
+<span class="s2">class </span><span class="s1">TestJoinAll(AbstractGenericWaitTestCase):</span>
+
+    <span class="s2">def </span><span class="s1">wait(self</span><span class="s2">, </span><span class="s1">timeout):</span>
+        <span class="s1">g = gevent.spawn(gevent.sleep</span><span class="s2">, </span><span class="s3">10</span><span class="s1">)</span>
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s1">gevent.joinall([g]</span><span class="s2">, </span><span class="s1">timeout=timeout)</span>
+        <span class="s2">finally</span><span class="s1">:</span>
+            <span class="s1">g.kill()</span>
+
+
+<span class="s2">class </span><span class="s1">TestBasic(greentest.TestCase):</span>
+
+    <span class="s2">def </span><span class="s1">test_spawn_non_callable(self):</span>
+        <span class="s1">self.assertRaises(TypeError</span><span class="s2">, </span><span class="s1">gevent.spawn</span><span class="s2">, </span><span class="s3">1</span><span class="s1">)</span>
+        <span class="s1">self.assertRaises(TypeError</span><span class="s2">, </span><span class="s1">gevent.spawn_raw</span><span class="s2">, </span><span class="s3">1</span><span class="s1">)</span>
+
+        <span class="s0"># Not passing the run argument, just the seconds argument</span>
+        <span class="s1">self.assertRaises(TypeError</span><span class="s2">, </span><span class="s1">gevent.spawn_later</span><span class="s2">, </span><span class="s3">1</span><span class="s1">)</span>
+        <span class="s0"># Passing both, but not implemented</span>
+        <span class="s1">self.assertRaises(TypeError</span><span class="s2">, </span><span class="s1">gevent.spawn_later</span><span class="s2">, </span><span class="s3">1</span><span class="s2">, </span><span class="s3">1</span><span class="s1">)</span>
+
+    <span class="s2">def </span><span class="s1">test_spawn_raw_kwargs(self):</span>
+        <span class="s1">value = []</span>
+
+        <span class="s2">def </span><span class="s1">f(*args</span><span class="s2">, </span><span class="s1">**kwargs):</span>
+            <span class="s1">value.append(args)</span>
+            <span class="s1">value.append(kwargs)</span>
+
+        <span class="s1">g = gevent.spawn_raw(f</span><span class="s2">, </span><span class="s3">1</span><span class="s2">, </span><span class="s1">name=</span><span class="s4">'value'</span><span class="s1">)</span>
+        <span class="s1">gevent.sleep(</span><span class="s3">0.01</span><span class="s1">)</span>
+        <span class="s1">self.assertFalse(g)</span>
+        <span class="s1">self.assertEqual(value[</span><span class="s3">0</span><span class="s1">]</span><span class="s2">, </span><span class="s1">(</span><span class="s3">1</span><span class="s2">,</span><span class="s1">))</span>
+        <span class="s1">self.assertEqual(value[</span><span class="s3">1</span><span class="s1">]</span><span class="s2">, </span><span class="s1">{</span><span class="s4">'name'</span><span class="s1">: </span><span class="s4">'value'</span><span class="s1">})</span>
+
+    <span class="s2">def </span><span class="s1">test_simple_exit(self):</span>
+        <span class="s1">link_test = []</span>
+
+        <span class="s2">def </span><span class="s1">func(delay</span><span class="s2">, </span><span class="s1">return_value=</span><span class="s3">4</span><span class="s1">):</span>
+            <span class="s1">gevent.sleep(delay)</span>
+            <span class="s2">return </span><span class="s1">return_value</span>
+
+        <span class="s1">g = gevent.Greenlet(func</span><span class="s2">, </span><span class="s3">0.01</span><span class="s2">, </span><span class="s1">return_value=</span><span class="s3">5</span><span class="s1">)</span>
+        <span class="s1">g.rawlink(link_test.append) </span><span class="s0"># use rawlink to avoid timing issues on Appveyor/Travis (not always successful)</span>
+        <span class="s1">self.assertFalse(g</span><span class="s2">, </span><span class="s1">g)</span>
+        <span class="s1">self.assertFalse(g.dead</span><span class="s2">, </span><span class="s1">g)</span>
+        <span class="s1">self.assertFalse(g.started</span><span class="s2">, </span><span class="s1">g)</span>
+        <span class="s1">self.assertFalse(g.ready()</span><span class="s2">, </span><span class="s1">g)</span>
+        <span class="s1">self.assertFalse(g.successful()</span><span class="s2">, </span><span class="s1">g)</span>
+        <span class="s1">self.assertIsNone(g.value</span><span class="s2">, </span><span class="s1">g)</span>
+        <span class="s1">self.assertIsNone(g.exception</span><span class="s2">, </span><span class="s1">g)</span>
+
+        <span class="s1">g.start()</span>
+        <span class="s1">self.assertTrue(g</span><span class="s2">, </span><span class="s1">g) </span><span class="s0"># changed</span>
+        <span class="s1">self.assertFalse(g.dead</span><span class="s2">, </span><span class="s1">g)</span>
+        <span class="s1">self.assertTrue(g.started</span><span class="s2">, </span><span class="s1">g) </span><span class="s0"># changed</span>
+        <span class="s1">self.assertFalse(g.ready()</span><span class="s2">, </span><span class="s1">g)</span>
+        <span class="s1">self.assertFalse(g.successful()</span><span class="s2">, </span><span class="s1">g)</span>
+        <span class="s1">self.assertIsNone(g.value</span><span class="s2">, </span><span class="s1">g)</span>
+        <span class="s1">self.assertIsNone(g.exception</span><span class="s2">, </span><span class="s1">g)</span>
+
+        <span class="s1">gevent.sleep(</span><span class="s3">0.001</span><span class="s1">)</span>
+        <span class="s1">self.assertTrue(g)</span>
+        <span class="s1">self.assertFalse(g.dead</span><span class="s2">, </span><span class="s1">g)</span>
+        <span class="s1">self.assertTrue(g.started</span><span class="s2">, </span><span class="s1">g)</span>
+        <span class="s1">self.assertFalse(g.ready()</span><span class="s2">, </span><span class="s1">g)</span>
+        <span class="s1">self.assertFalse(g.successful()</span><span class="s2">, </span><span class="s1">g)</span>
+        <span class="s1">self.assertIsNone(g.value</span><span class="s2">, </span><span class="s1">g)</span>
+        <span class="s1">self.assertIsNone(g.exception</span><span class="s2">, </span><span class="s1">g)</span>
+        <span class="s1">self.assertFalse(link_test)</span>
+
+        <span class="s1">gevent.sleep(</span><span class="s3">0.02</span><span class="s1">)</span>
+        <span class="s1">self.assertFalse(g</span><span class="s2">, </span><span class="s1">g) </span><span class="s0"># changed</span>
+        <span class="s1">self.assertTrue(g.dead</span><span class="s2">, </span><span class="s1">g) </span><span class="s0"># changed</span>
+        <span class="s1">self.assertFalse(g.started</span><span class="s2">, </span><span class="s1">g) </span><span class="s0"># changed</span>
+        <span class="s1">self.assertTrue(g.ready()</span><span class="s2">, </span><span class="s1">g) </span><span class="s0"># changed</span>
+        <span class="s1">self.assertTrue(g.successful()</span><span class="s2">, </span><span class="s1">g) </span><span class="s0"># changed</span>
+        <span class="s1">self.assertEqual(g.value</span><span class="s2">, </span><span class="s3">5</span><span class="s1">) </span><span class="s0"># changed</span>
+        <span class="s1">self.assertIsNone(g.exception</span><span class="s2">, </span><span class="s1">g)</span>
+
+        <span class="s1">self._check_flaky_eq(link_test</span><span class="s2">, </span><span class="s1">g)</span>
+
+    <span class="s2">def </span><span class="s1">_check_flaky_eq(self</span><span class="s2">, </span><span class="s1">link_test</span><span class="s2">, </span><span class="s1">g):</span>
+        <span class="s2">if not </span><span class="s1">greentest.RUNNING_ON_CI:</span>
+            <span class="s0"># TODO: Change this to assertEqualFlakyRaceCondition and figure</span>
+            <span class="s0"># out what the CI issue is.</span>
+            <span class="s1">self.assertEqual(link_test</span><span class="s2">, </span><span class="s1">[g]) </span><span class="s0"># changed</span>
+
+    <span class="s2">def </span><span class="s1">test_error_exit(self):</span>
+        <span class="s1">link_test = []</span>
+
+        <span class="s2">def </span><span class="s1">func(delay</span><span class="s2">, </span><span class="s1">return_value=</span><span class="s3">4</span><span class="s1">):</span>
+            <span class="s1">gevent.sleep(delay)</span>
+            <span class="s1">error = ExpectedError(</span><span class="s4">'test_error_exit'</span><span class="s1">)</span>
+            <span class="s1">setattr(error</span><span class="s2">, </span><span class="s4">'myattr'</span><span class="s2">, </span><span class="s1">return_value)</span>
+            <span class="s2">raise </span><span class="s1">error</span>
+
+        <span class="s1">g = gevent.Greenlet(func</span><span class="s2">, </span><span class="s1">timing.SMALLEST_RELIABLE_DELAY</span><span class="s2">, </span><span class="s1">return_value=</span><span class="s3">5</span><span class="s1">)</span>
+        <span class="s0"># use rawlink to avoid timing issues on Appveyor (not always successful)</span>
+        <span class="s1">g.rawlink(link_test.append)</span>
+        <span class="s1">g.start()</span>
+        <span class="s1">gevent.sleep()</span>
+        <span class="s1">gevent.sleep(timing.LARGE_TICK)</span>
+        <span class="s1">self.assertFalse(g)</span>
+        <span class="s1">self.assertTrue(g.dead)</span>
+        <span class="s1">self.assertFalse(g.started)</span>
+        <span class="s1">self.assertTrue(g.ready())</span>
+        <span class="s1">self.assertFalse(g.successful())</span>
+        <span class="s1">self.assertIsNone(g.value) </span><span class="s0"># not changed</span>
+        <span class="s1">self.assertEqual(g.exception.myattr</span><span class="s2">, </span><span class="s3">5</span><span class="s1">)</span>
+        <span class="s1">self._check_flaky_eq(link_test</span><span class="s2">, </span><span class="s1">g)</span>
+
+    <span class="s2">def </span><span class="s1">test_exc_info_no_error(self):</span>
+        <span class="s0"># Before running</span>
+        <span class="s1">self.assertFalse(greenlet.Greenlet().exc_info)</span>
+        <span class="s1">g = greenlet.Greenlet(gevent.sleep)</span>
+        <span class="s1">g.start()</span>
+        <span class="s1">g.join()</span>
+        <span class="s1">self.assertFalse(g.exc_info)</span>
+
+    <span class="s1">@greentest.skipOnCI(</span>
+        <span class="s4">&quot;Started getting a Fatal Python error on &quot;</span>
+        <span class="s4">&quot;Github Actions on 2020-12-18, even with recursion limits &quot;</span>
+        <span class="s4">&quot;in place. It was fine before that.&quot;</span>
+    <span class="s1">)</span>
+    <span class="s2">def </span><span class="s1">test_recursion_error(self):</span>
+        <span class="s0"># https://github.com/gevent/gevent/issues/1704</span>
+        <span class="s0"># A RuntimeError: recursion depth exceeded</span>
+        <span class="s0"># does not break things.</span>
+        <span class="s0">#</span>
+        <span class="s0"># However, sometimes, on some interpreter versions on some</span>
+        <span class="s0"># systems, actually exhausting the stack results in &quot;Fatal</span>
+        <span class="s0"># Python error: Cannot recover from stack overflow.&quot;. So we</span>
+        <span class="s0"># need to use a low recursion limit so that doesn't happen.</span>
+        <span class="s0"># Doesn't seem to help though.</span>
+        <span class="s0"># See https://github.com/gevent/gevent/runs/1577692901?check_suite_focus=true#step:21:46</span>
+        <span class="s2">import </span><span class="s1">sys</span>
+        <span class="s1">limit = sys.getrecursionlimit()</span>
+        <span class="s1">self.addCleanup(sys.setrecursionlimit</span><span class="s2">, </span><span class="s1">limit)</span>
+        <span class="s1">sys.setrecursionlimit(limit // </span><span class="s3">4</span><span class="s1">)</span>
+        <span class="s2">def </span><span class="s1">recur():</span>
+            <span class="s1">recur() </span><span class="s0"># This is expected to raise RecursionError</span>
+
+        <span class="s1">errors = []</span>
+        <span class="s2">def </span><span class="s1">handle_error(glet</span><span class="s2">, </span><span class="s1">t</span><span class="s2">, </span><span class="s1">v</span><span class="s2">, </span><span class="s1">tb):</span>
+            <span class="s1">errors.append((glet</span><span class="s2">, </span><span class="s1">t</span><span class="s2">, </span><span class="s1">v</span><span class="s2">, </span><span class="s1">tb))</span>
+
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s1">gevent.get_hub().handle_error = handle_error</span>
+
+            <span class="s1">g = gevent.spawn(recur)</span>
+            <span class="s2">def </span><span class="s1">wait():</span>
+                <span class="s2">return </span><span class="s1">gevent.joinall([g])</span>
+
+            <span class="s1">g2 = gevent.spawn(wait)</span>
+
+            <span class="s1">gevent.joinall([g2])</span>
+        <span class="s2">finally</span><span class="s1">:</span>
+            <span class="s2">del </span><span class="s1">gevent.get_hub().handle_error</span>
+
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s1">expected_exc = RecursionError</span>
+        <span class="s2">except </span><span class="s1">NameError:</span>
+            <span class="s1">expected_exc = RuntimeError</span>
+        <span class="s2">with </span><span class="s1">self.assertRaises(expected_exc):</span>
+            <span class="s1">g.get()</span>
+
+        <span class="s1">self.assertFalse(g.successful())</span>
+        <span class="s1">self.assertTrue(g.dead)</span>
+
+        <span class="s1">self.assertTrue(errors)</span>
+        <span class="s1">self.assertEqual(</span><span class="s3">1</span><span class="s2">, </span><span class="s1">len(errors))</span>
+        <span class="s1">self.assertIs(errors[</span><span class="s3">0</span><span class="s1">][</span><span class="s3">0</span><span class="s1">]</span><span class="s2">, </span><span class="s1">g)</span>
+        <span class="s1">self.assertEqual(errors[</span><span class="s3">0</span><span class="s1">][</span><span class="s3">1</span><span class="s1">]</span><span class="s2">, </span><span class="s1">expected_exc)</span>
+        <span class="s2">del </span><span class="s1">errors[:]</span>
+
+
+    <span class="s2">def </span><span class="s1">test_tree_locals(self):</span>
+        <span class="s1">g = g2 = </span><span class="s2">None</span>
+        <span class="s2">def </span><span class="s1">func():</span>
+            <span class="s1">child = greenlet.Greenlet()</span>
+            <span class="s1">self.assertIs(child.spawn_tree_locals</span><span class="s2">, </span><span class="s1">getcurrent().spawn_tree_locals)</span>
+            <span class="s1">self.assertIs(child.spawning_greenlet()</span><span class="s2">, </span><span class="s1">getcurrent())</span>
+        <span class="s1">g = greenlet.Greenlet(func)</span>
+        <span class="s1">g2 = greenlet.Greenlet(func)</span>
+        <span class="s0"># Creating those greenlets did not give the main greenlet</span>
+        <span class="s0"># a locals dict.</span>
+        <span class="s1">self.assertFalse(hasattr(getcurrent()</span><span class="s2">, </span><span class="s4">'spawn_tree_locals'</span><span class="s1">)</span><span class="s2">,</span>
+                         <span class="s1">getcurrent())</span>
+        <span class="s1">self.assertIsNot(g.spawn_tree_locals</span><span class="s2">, </span><span class="s1">g2.spawn_tree_locals)</span>
+        <span class="s1">g.start()</span>
+        <span class="s1">g.join()</span>
+
+        <span class="s1">raw = gevent.spawn_raw(func)</span>
+        <span class="s1">self.assertIsNotNone(raw.spawn_tree_locals)</span>
+        <span class="s1">self.assertIsNot(raw.spawn_tree_locals</span><span class="s2">, </span><span class="s1">g.spawn_tree_locals)</span>
+        <span class="s1">self.assertIs(raw.spawning_greenlet()</span><span class="s2">, </span><span class="s1">getcurrent())</span>
+        <span class="s2">while not </span><span class="s1">raw.dead:</span>
+            <span class="s1">gevent.sleep(</span><span class="s3">0.01</span><span class="s1">)</span>
+
+    <span class="s2">def </span><span class="s1">test_add_spawn_callback(self):</span>
+        <span class="s1">called = {</span><span class="s4">'#'</span><span class="s1">: </span><span class="s3">0</span><span class="s1">}</span>
+
+        <span class="s2">def </span><span class="s1">cb(gr):</span>
+            <span class="s1">called[</span><span class="s4">'#'</span><span class="s1">] += </span><span class="s3">1</span>
+            <span class="s1">gr._called_test = </span><span class="s2">True</span>
+
+        <span class="s1">gevent.Greenlet.add_spawn_callback(cb)</span>
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s1">g = gevent.spawn(</span><span class="s2">lambda</span><span class="s1">: </span><span class="s2">None</span><span class="s1">)</span>
+            <span class="s1">self.assertTrue(hasattr(g</span><span class="s2">, </span><span class="s4">'_called_test'</span><span class="s1">))</span>
+            <span class="s1">g.join()</span>
+            <span class="s1">self.assertEqual(called[</span><span class="s4">'#'</span><span class="s1">]</span><span class="s2">, </span><span class="s3">1</span><span class="s1">)</span>
+
+            <span class="s1">g = gevent.spawn_later(</span><span class="s3">1e-5</span><span class="s2">, lambda</span><span class="s1">: </span><span class="s2">None</span><span class="s1">)</span>
+            <span class="s1">self.assertTrue(hasattr(g</span><span class="s2">, </span><span class="s4">'_called_test'</span><span class="s1">))</span>
+            <span class="s1">g.join()</span>
+            <span class="s1">self.assertEqual(called[</span><span class="s4">'#'</span><span class="s1">]</span><span class="s2">, </span><span class="s3">2</span><span class="s1">)</span>
+
+            <span class="s1">g = gevent.Greenlet(</span><span class="s2">lambda</span><span class="s1">: </span><span class="s2">None</span><span class="s1">)</span>
+            <span class="s1">g.start()</span>
+            <span class="s1">self.assertTrue(hasattr(g</span><span class="s2">, </span><span class="s4">'_called_test'</span><span class="s1">))</span>
+            <span class="s1">g.join()</span>
+            <span class="s1">self.assertEqual(called[</span><span class="s4">'#'</span><span class="s1">]</span><span class="s2">, </span><span class="s3">3</span><span class="s1">)</span>
+
+            <span class="s1">gevent.Greenlet.remove_spawn_callback(cb)</span>
+            <span class="s1">g = gevent.spawn(</span><span class="s2">lambda</span><span class="s1">: </span><span class="s2">None</span><span class="s1">)</span>
+            <span class="s1">self.assertFalse(hasattr(g</span><span class="s2">, </span><span class="s4">'_called_test'</span><span class="s1">))</span>
+            <span class="s1">g.join()</span>
+            <span class="s1">self.assertEqual(called[</span><span class="s4">'#'</span><span class="s1">]</span><span class="s2">, </span><span class="s3">3</span><span class="s1">)</span>
+        <span class="s2">finally</span><span class="s1">:</span>
+            <span class="s1">gevent.Greenlet.remove_spawn_callback(cb)</span>
+
+    <span class="s2">def </span><span class="s1">test_getframe_value_error(self):</span>
+        <span class="s2">def </span><span class="s1">get():</span>
+            <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s4">&quot;call stack is not deep enough&quot;</span><span class="s1">)</span>
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s1">ogf = greenlet.sys_getframe</span>
+        <span class="s2">except </span><span class="s1">AttributeError: </span><span class="s0"># pragma: no cover</span>
+            <span class="s0"># Must be running cython compiled</span>
+            <span class="s2">raise </span><span class="s1">unittest.SkipTest(</span><span class="s4">&quot;Cannot mock when Cython compiled&quot;</span><span class="s1">)</span>
+        <span class="s1">greenlet.sys_getframe = get</span>
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s1">child = greenlet.Greenlet()</span>
+            <span class="s1">self.assertIsNone(child.spawning_stack)</span>
+        <span class="s2">finally</span><span class="s1">:</span>
+            <span class="s1">greenlet.sys_getframe = ogf</span>
+
+    <span class="s2">def </span><span class="s1">test_minimal_ident_parent_not_hub(self):</span>
+
+        <span class="s1">g = gevent.spawn(</span><span class="s2">lambda</span><span class="s1">: </span><span class="s3">1</span><span class="s1">)</span>
+        <span class="s1">self.assertIs(g.parent</span><span class="s2">, </span><span class="s1">gevent.get_hub())</span>
+        <span class="s1">g.parent = getcurrent()</span>
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s1">self.assertIsNot(g.parent</span><span class="s2">, </span><span class="s1">gevent.get_hub())</span>
+
+            <span class="s2">with </span><span class="s1">self.assertRaisesRegex((TypeError</span><span class="s2">, </span><span class="s0"># Cython</span>
+                                         <span class="s1">AttributeError)</span><span class="s2">, </span><span class="s0"># PyPy</span>
+                                        <span class="s4">'Cannot convert|ident_registry'</span><span class="s1">):</span>
+                <span class="s1">getattr(g</span><span class="s2">, </span><span class="s4">'minimal_ident'</span><span class="s1">)</span>
+        <span class="s2">finally</span><span class="s1">:</span>
+            <span class="s0"># Attempting to switch into this later, when we next cycle the</span>
+            <span class="s0"># loop, would raise an InvalidSwitchError if we don't put</span>
+            <span class="s0"># things back the way they were (or kill the greenlet)</span>
+            <span class="s1">g.parent = gevent.get_hub()</span>
+            <span class="s1">g.kill()</span>
+
+
+<span class="s2">class </span><span class="s1">TestKill(greentest.TestCase):</span>
+
+    <span class="s2">def </span><span class="s1">__assertKilled(self</span><span class="s2">, </span><span class="s1">g</span><span class="s2">, </span><span class="s1">successful):</span>
+        <span class="s1">self.assertFalse(g)</span>
+        <span class="s1">self.assertTrue(g.dead)</span>
+        <span class="s1">self.assertFalse(g.started)</span>
+        <span class="s1">self.assertTrue(g.ready())</span>
+        <span class="s2">if </span><span class="s1">successful:</span>
+            <span class="s1">self.assertTrue(g.successful()</span><span class="s2">, </span><span class="s1">(repr(g)</span><span class="s2">, </span><span class="s1">g.value</span><span class="s2">, </span><span class="s1">g.exception))</span>
+            <span class="s1">self.assertIsInstance(g.value</span><span class="s2">, </span><span class="s1">gevent.GreenletExit)</span>
+            <span class="s1">self.assertIsNone(g.exception)</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">self.assertFalse(g.successful()</span><span class="s2">, </span><span class="s1">(repr(g)</span><span class="s2">, </span><span class="s1">g.value</span><span class="s2">, </span><span class="s1">g.exception))</span>
+            <span class="s1">self.assertNotIsInstance(g.value</span><span class="s2">, </span><span class="s1">gevent.GreenletExit)</span>
+            <span class="s1">self.assertIsNotNone(g.exception)</span>
+
+    <span class="s2">def </span><span class="s1">assertKilled(self</span><span class="s2">, </span><span class="s1">g</span><span class="s2">, </span><span class="s1">successful=</span><span class="s2">True</span><span class="s1">):</span>
+        <span class="s1">self.__assertKilled(g</span><span class="s2">, </span><span class="s1">successful)</span>
+        <span class="s1">gevent.sleep(</span><span class="s3">0.01</span><span class="s1">) </span><span class="s0"># spin the loop to make sure it doesn't run.</span>
+        <span class="s1">self.__assertKilled(g</span><span class="s2">, </span><span class="s1">successful)</span>
+
+    <span class="s2">def </span><span class="s1">__kill_greenlet(self</span><span class="s2">, </span><span class="s1">g</span><span class="s2">, </span><span class="s1">block</span><span class="s2">, </span><span class="s1">killall</span><span class="s2">, </span><span class="s1">exc=</span><span class="s2">None</span><span class="s1">):</span>
+        <span class="s2">if </span><span class="s1">exc </span><span class="s2">is None</span><span class="s1">:</span>
+            <span class="s1">exc = gevent.GreenletExit</span>
+        <span class="s2">if </span><span class="s1">killall:</span>
+            <span class="s1">killer = functools.partial(gevent.killall</span><span class="s2">, </span><span class="s1">[g]</span><span class="s2">,</span>
+                                       <span class="s1">exception=exc</span><span class="s2">, </span><span class="s1">block=block)</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">killer = functools.partial(g.kill</span><span class="s2">, </span><span class="s1">exception=exc</span><span class="s2">, </span><span class="s1">block=block)</span>
+        <span class="s1">killer()</span>
+        <span class="s2">if not </span><span class="s1">block:</span>
+            <span class="s0"># Must spin the loop to take effect (if it was scheduled)</span>
+            <span class="s1">gevent.sleep(timing.SMALLEST_RELIABLE_DELAY)</span>
+
+        <span class="s1">successful = exc </span><span class="s2">is None or </span><span class="s1">(isinstance(exc</span><span class="s2">, </span><span class="s1">type) </span><span class="s2">and </span><span class="s1">issubclass(exc</span><span class="s2">, </span><span class="s1">gevent.GreenletExit))</span>
+        <span class="s1">self.assertKilled(g</span><span class="s2">, </span><span class="s1">successful)</span>
+        <span class="s0"># kill second time must not hurt</span>
+        <span class="s1">killer()</span>
+        <span class="s1">self.assertKilled(g</span><span class="s2">, </span><span class="s1">successful)</span>
+
+    <span class="s1">@staticmethod</span>
+    <span class="s2">def </span><span class="s1">_run_in_greenlet(result_collector):</span>
+        <span class="s1">result_collector.append(</span><span class="s3">1</span><span class="s1">)</span>
+
+    <span class="s2">def </span><span class="s1">_start_greenlet(self</span><span class="s2">, </span><span class="s1">g):</span>
+        <span class="s5">&quot;&quot;&quot; 
+        Subclasses should override. This doesn't actually start a greenlet. 
+        &quot;&quot;&quot;</span>
+
+    <span class="s1">_after_kill_greenlet = _start_greenlet</span>
+
+
+    <span class="s2">def </span><span class="s1">_do_test(self</span><span class="s2">, </span><span class="s1">block</span><span class="s2">, </span><span class="s1">killall</span><span class="s2">, </span><span class="s1">exc=</span><span class="s2">None</span><span class="s1">):</span>
+        <span class="s1">link_test = []</span>
+        <span class="s1">result = []</span>
+        <span class="s1">g = gevent.Greenlet(self._run_in_greenlet</span><span class="s2">, </span><span class="s1">result)</span>
+        <span class="s1">g.link(link_test.append)</span>
+
+        <span class="s1">self._start_greenlet(g)</span>
+
+        <span class="s1">self.__kill_greenlet(g</span><span class="s2">, </span><span class="s1">block</span><span class="s2">, </span><span class="s1">killall</span><span class="s2">, </span><span class="s1">exc)</span>
+
+        <span class="s1">self._after_kill_greenlet(g)</span>
+
+        <span class="s1">self.assertFalse(result)</span>
+        <span class="s1">self.assertEqual(link_test</span><span class="s2">, </span><span class="s1">[g])</span>
+
+    <span class="s2">def </span><span class="s1">test_block(self):</span>
+        <span class="s1">self._do_test(block=</span><span class="s2">True, </span><span class="s1">killall=</span><span class="s2">False</span><span class="s1">)</span>
+
+    <span class="s2">def </span><span class="s1">test_non_block(self):</span>
+        <span class="s1">self._do_test(block=</span><span class="s2">False, </span><span class="s1">killall=</span><span class="s2">False</span><span class="s1">)</span>
+
+    <span class="s2">def </span><span class="s1">test_block_killall(self):</span>
+        <span class="s1">self._do_test(block=</span><span class="s2">True, </span><span class="s1">killall=</span><span class="s2">True</span><span class="s1">)</span>
+
+    <span class="s2">def </span><span class="s1">test_non_block_killal(self):</span>
+        <span class="s1">self._do_test(block=</span><span class="s2">False, </span><span class="s1">killall=</span><span class="s2">True</span><span class="s1">)</span>
+
+    <span class="s2">def </span><span class="s1">test_non_type_exception(self):</span>
+        <span class="s1">self._do_test(block=</span><span class="s2">True, </span><span class="s1">killall=</span><span class="s2">False, </span><span class="s1">exc=Exception())</span>
+
+    <span class="s2">def </span><span class="s1">test_non_type_exception_non_block(self):</span>
+        <span class="s1">self._do_test(block=</span><span class="s2">False, </span><span class="s1">killall=</span><span class="s2">False, </span><span class="s1">exc=Exception())</span>
+
+    <span class="s2">def </span><span class="s1">test_non_type_exception_killall(self):</span>
+        <span class="s1">self._do_test(block=</span><span class="s2">True, </span><span class="s1">killall=</span><span class="s2">True, </span><span class="s1">exc=Exception())</span>
+
+    <span class="s2">def </span><span class="s1">test_non_type_exception_killall_non_block(self):</span>
+        <span class="s1">self._do_test(block=</span><span class="s2">False, </span><span class="s1">killall=</span><span class="s2">True, </span><span class="s1">exc=Exception())</span>
+
+    <span class="s2">def </span><span class="s1">test_non_exc_exception(self):</span>
+        <span class="s1">self._do_test(block=</span><span class="s2">True, </span><span class="s1">killall=</span><span class="s2">False, </span><span class="s1">exc=</span><span class="s3">42</span><span class="s1">)</span>
+
+    <span class="s2">def </span><span class="s1">test_non_exc_exception_non_block(self):</span>
+        <span class="s1">self._do_test(block=</span><span class="s2">False, </span><span class="s1">killall=</span><span class="s2">False, </span><span class="s1">exc=</span><span class="s3">42</span><span class="s1">)</span>
+
+    <span class="s2">def </span><span class="s1">test_non_exc_exception_killall(self):</span>
+        <span class="s1">self._do_test(block=</span><span class="s2">True, </span><span class="s1">killall=</span><span class="s2">True, </span><span class="s1">exc=</span><span class="s3">42</span><span class="s1">)</span>
+
+    <span class="s2">def </span><span class="s1">test_non_exc_exception_killall_non_block(self):</span>
+        <span class="s1">self._do_test(block=</span><span class="s2">False, </span><span class="s1">killall=</span><span class="s2">True, </span><span class="s1">exc=</span><span class="s3">42</span><span class="s1">)</span>
+
+
+<span class="s2">class </span><span class="s1">TestKillAfterStart(TestKill):</span>
+
+    <span class="s2">def </span><span class="s1">_start_greenlet(self</span><span class="s2">, </span><span class="s1">g):</span>
+        <span class="s1">g.start()</span>
+
+<span class="s2">class </span><span class="s1">TestKillAfterStartLater(TestKill):</span>
+
+    <span class="s2">def </span><span class="s1">_start_greenlet(self</span><span class="s2">, </span><span class="s1">g):</span>
+        <span class="s1">g.start_later(timing.LARGE_TICK)</span>
+
+<span class="s2">class </span><span class="s1">TestKillWhileRunning(TestKill):</span>
+
+    <span class="s1">@staticmethod</span>
+    <span class="s2">def </span><span class="s1">_run_in_greenlet(result_collector):</span>
+        <span class="s1">gevent.sleep(</span><span class="s3">10</span><span class="s1">)</span>
+        <span class="s0"># The above should die with the GreenletExit exception,</span>
+        <span class="s0"># so this should never run</span>
+        <span class="s1">TestKill._run_in_greenlet(result_collector)</span>
+
+    <span class="s2">def </span><span class="s1">_after_kill_greenlet(self</span><span class="s2">, </span><span class="s1">g):</span>
+        <span class="s1">TestKill._after_kill_greenlet(self</span><span class="s2">, </span><span class="s1">g)</span>
+        <span class="s1">gevent.sleep(</span><span class="s3">0.01</span><span class="s1">)</span>
+
+<span class="s2">class </span><span class="s1">TestKillallRawGreenlet(greentest.TestCase):</span>
+
+    <span class="s2">def </span><span class="s1">test_killall_raw(self):</span>
+        <span class="s1">g = gevent.spawn_raw(</span><span class="s2">lambda</span><span class="s1">: </span><span class="s3">1</span><span class="s1">)</span>
+        <span class="s1">gevent.killall([g])</span>
+
+
+<span class="s2">class </span><span class="s1">TestContextManager(greentest.TestCase):</span>
+
+    <span class="s2">def </span><span class="s1">test_simple(self):</span>
+        <span class="s2">with </span><span class="s1">gevent.spawn(gevent.sleep</span><span class="s2">, </span><span class="s1">timing.SMALL_TICK) </span><span class="s2">as </span><span class="s1">g:</span>
+            <span class="s1">self.assert_greenlet_spawned(g)</span>
+        <span class="s0"># It is completed after the suite</span>
+        <span class="s1">self.assert_greenlet_finished(g)</span>
+
+    <span class="s2">def </span><span class="s1">test_wait_in_suite(self):</span>
+        <span class="s2">with </span><span class="s1">gevent.spawn(self._raise_exception) </span><span class="s2">as </span><span class="s1">g:</span>
+            <span class="s2">with </span><span class="s1">self.assertRaises(greentest.ExpectedException):</span>
+                <span class="s1">g.get()</span>
+        <span class="s1">self.assert_greenlet_finished(g)</span>
+
+    <span class="s1">@staticmethod</span>
+    <span class="s2">def </span><span class="s1">_raise_exception():</span>
+        <span class="s2">raise </span><span class="s1">greentest.ExpectedException</span>
+
+    <span class="s2">def </span><span class="s1">test_greenlet_raises(self):</span>
+        <span class="s2">with </span><span class="s1">gevent.spawn(self._raise_exception) </span><span class="s2">as </span><span class="s1">g:</span>
+            <span class="s2">pass</span>
+
+        <span class="s1">self.assert_greenlet_finished(g)</span>
+        <span class="s2">with </span><span class="s1">self.assertRaises(greentest.ExpectedException):</span>
+            <span class="s1">g.get()</span>
+
+    <span class="s2">def </span><span class="s1">test_join_raises(self):</span>
+        <span class="s1">suite_ran = </span><span class="s3">0</span>
+        <span class="s2">with </span><span class="s1">self.assertRaises(ExpectedJoinError):</span>
+            <span class="s2">with </span><span class="s1">GreenletRaisesJoin.spawn(gevent.sleep</span><span class="s2">, </span><span class="s1">timing.SMALL_TICK) </span><span class="s2">as </span><span class="s1">g:</span>
+                <span class="s1">self.assert_greenlet_spawned(g)</span>
+                <span class="s1">suite_ran = </span><span class="s3">1</span>
+
+        <span class="s1">self.assertTrue(suite_ran)</span>
+        <span class="s1">self.assert_greenlet_finished(g)</span>
+        <span class="s1">self.assertTrue(g.killed)</span>
+
+    <span class="s2">def </span><span class="s1">test_suite_body_raises(self</span><span class="s2">, </span><span class="s1">delay=</span><span class="s2">None</span><span class="s1">):</span>
+        <span class="s1">greenlet_sleep = timing.SMALL_TICK </span><span class="s2">if not </span><span class="s1">delay </span><span class="s2">else </span><span class="s1">timing.LARGE_TICK</span>
+        <span class="s2">with </span><span class="s1">self.assertRaises(SuiteExpectedException):</span>
+            <span class="s2">with </span><span class="s1">GreenletRaisesJoin.spawn(gevent.sleep</span><span class="s2">, </span><span class="s1">greenlet_sleep) </span><span class="s2">as </span><span class="s1">g:</span>
+                <span class="s1">self.assert_greenlet_spawned(g)</span>
+                <span class="s2">if </span><span class="s1">delay:</span>
+                    <span class="s1">g.raise_on_join = </span><span class="s2">False</span>
+                    <span class="s1">gevent.sleep(delay)</span>
+                <span class="s2">raise </span><span class="s1">SuiteExpectedException</span>
+
+        <span class="s1">self.assert_greenlet_finished(g)</span>
+        <span class="s1">self.assertTrue(g.killed)</span>
+        <span class="s2">if </span><span class="s1">delay:</span>
+            <span class="s1">self.assertTrue(g.joined)</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">self.assertFalse(g.joined)</span>
+        <span class="s1">self.assertFalse(g.successful())</span>
+
+        <span class="s2">with </span><span class="s1">self.assertRaises(SuiteExpectedException):</span>
+            <span class="s1">g.get()</span>
+
+    <span class="s2">def </span><span class="s1">test_suite_body_raises_with_delay(self):</span>
+        <span class="s1">self.test_suite_body_raises(delay=timing.SMALL_TICK)</span>
+
+<span class="s2">class </span><span class="s1">TestStart(greentest.TestCase):</span>
+
+    <span class="s2">def </span><span class="s1">test_start(self):</span>
+        <span class="s1">g = gevent.spawn(gevent.sleep</span><span class="s2">, </span><span class="s1">timing.SMALL_TICK)</span>
+        <span class="s1">self.assert_greenlet_spawned(g)</span>
+
+        <span class="s1">g.start()</span>
+        <span class="s1">self.assert_greenlet_started(g)</span>
+
+        <span class="s1">g.join()</span>
+        <span class="s1">self.assert_greenlet_finished(g)</span>
+
+        <span class="s0"># cannot start again</span>
+        <span class="s1">g.start()</span>
+        <span class="s1">self.assert_greenlet_finished(g)</span>
+
+
+<span class="s2">class </span><span class="s1">TestRef(greentest.TestCase):</span>
+
+    <span class="s2">def </span><span class="s1">test_init(self):</span>
+        <span class="s1">self.switch_expected = </span><span class="s2">False</span>
+        <span class="s0"># in python-dbg mode this will check that Greenlet() does not create any circular refs</span>
+        <span class="s1">gevent.Greenlet()</span>
+
+    <span class="s2">def </span><span class="s1">test_kill_scheduled(self):</span>
+        <span class="s1">gevent.spawn(gevent.sleep</span><span class="s2">, </span><span class="s1">timing.LARGE_TICK).kill()</span>
+
+    <span class="s2">def </span><span class="s1">test_kill_started(self):</span>
+        <span class="s1">g = gevent.spawn(gevent.sleep</span><span class="s2">, </span><span class="s1">timing.LARGE_TICK)</span>
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s1">gevent.sleep(timing.SMALLEST_RELIABLE_DELAY)</span>
+        <span class="s2">finally</span><span class="s1">:</span>
+            <span class="s1">g.kill()</span>
+
+
+<span class="s1">@greentest.skipOnPurePython(</span><span class="s4">&quot;Needs C extension&quot;</span><span class="s1">)</span>
+<span class="s2">class </span><span class="s1">TestCExt(greentest.TestCase): </span><span class="s0"># pragma: no cover (we only do coverage on pure-Python)</span>
+
+    <span class="s2">def </span><span class="s1">test_c_extension(self):</span>
+        <span class="s1">self.assertEqual(greenlet.Greenlet.__module__</span><span class="s2">,</span>
+                         <span class="s4">'gevent._gevent_cgreenlet'</span><span class="s1">)</span>
+        <span class="s1">self.assertEqual(greenlet.SpawnedLink.__module__</span><span class="s2">,</span>
+                         <span class="s4">'gevent._gevent_cgreenlet'</span><span class="s1">)</span>
+
+<span class="s1">@greentest.skipWithCExtensions(</span><span class="s4">&quot;Needs pure python&quot;</span><span class="s1">)</span>
+<span class="s2">class </span><span class="s1">TestPure(greentest.TestCase):</span>
+
+    <span class="s2">def </span><span class="s1">test_pure(self):</span>
+        <span class="s1">self.assertEqual(greenlet.Greenlet.__module__</span><span class="s2">,</span>
+                         <span class="s4">'gevent.greenlet'</span><span class="s1">)</span>
+        <span class="s1">self.assertEqual(greenlet.SpawnedLink.__module__</span><span class="s2">,</span>
+                         <span class="s4">'gevent.greenlet'</span><span class="s1">)</span>
+
+
+<span class="s1">X = object()</span>
+
+<span class="s2">del </span><span class="s1">AbstractGenericGetTestCase</span>
+<span class="s2">del </span><span class="s1">AbstractGenericWaitTestCase</span>
+
+
+<span class="s2">if </span><span class="s1">__name__ == </span><span class="s4">'__main__'</span><span class="s1">:</span>
+    <span class="s1">greentest.main()</span>
+</pre>
+</body>
+</html>

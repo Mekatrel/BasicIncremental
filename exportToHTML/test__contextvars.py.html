@@ -1,0 +1,1111 @@
+<html>
+<head>
+<title>test__contextvars.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #cc7832;}
+.s3 { color: #629755; font-style: italic;}
+.s4 { color: #6a8759;}
+.s5 { color: #6897bb;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+test__contextvars.py</font>
+</center></td></tr></table>
+<pre><span class="s0"># gevent: copied from 3.7 to test our monkey-patch.</span>
+<span class="s0"># Modified to work on all versions of Python.</span>
+<span class="s2">from </span><span class="s1">gevent </span><span class="s2">import </span><span class="s1">monkey</span>
+<span class="s1">monkey.patch_all()</span>
+
+<span class="s0"># pylint:disable=superfluous-parens,pointless-statement,not-callable</span>
+<span class="s0"># pylint:disable=unused-argument,too-many-public-methods,unused-variable</span>
+<span class="s0"># pylint:disable=too-many-branches,too-many-statements</span>
+
+<span class="s2">import </span><span class="s1">concurrent.futures</span>
+<span class="s2">try</span><span class="s1">:</span>
+    <span class="s2">import </span><span class="s1">contextvars</span>
+<span class="s2">except </span><span class="s1">ImportError:</span>
+    <span class="s2">from </span><span class="s1">gevent </span><span class="s2">import </span><span class="s1">contextvars</span>
+<span class="s2">import </span><span class="s1">functools</span>
+<span class="s0"># import gc</span>
+<span class="s2">import </span><span class="s1">random</span>
+<span class="s2">import </span><span class="s1">time</span>
+<span class="s2">import </span><span class="s1">unittest</span>
+<span class="s0"># import weakref</span>
+
+<span class="s0"># try:</span>
+<span class="s0">#     from _testcapi import hamt</span>
+<span class="s0"># except ImportError:</span>
+<span class="s0">#     hamt = None</span>
+<span class="s1">hamt = </span><span class="s2">None</span>
+
+<span class="s2">def </span><span class="s1">isolated_context(func):</span>
+    <span class="s3">&quot;&quot;&quot;Needed to make reftracking test mode work.&quot;&quot;&quot;</span>
+    <span class="s1">@functools.wraps(func)</span>
+    <span class="s2">def </span><span class="s1">wrapper(*args</span><span class="s2">, </span><span class="s1">**kwargs):</span>
+        <span class="s1">ctx = contextvars.Context()</span>
+        <span class="s2">return </span><span class="s1">ctx.run(func</span><span class="s2">, </span><span class="s1">*args</span><span class="s2">, </span><span class="s1">**kwargs)</span>
+    <span class="s2">return </span><span class="s1">wrapper</span>
+
+
+<span class="s2">class </span><span class="s1">ContextTest(unittest.TestCase):</span>
+
+    <span class="s2">if not </span><span class="s1">hasattr(unittest.TestCase</span><span class="s2">, </span><span class="s4">'assertRaisesRegex'</span><span class="s1">):</span>
+        <span class="s1">assertRaisesRegex = unittest.TestCase.assertRaisesRegexp</span>
+
+    <span class="s2">def </span><span class="s1">test_context_var_new_1(self):</span>
+        <span class="s2">with </span><span class="s1">self.assertRaises(TypeError):</span>
+            <span class="s1">contextvars.ContextVar()</span>
+
+        <span class="s0"># gevent: Doesn't raise</span>
+        <span class="s0"># with self.assertRaisesRegex(TypeError, 'must be a str'):</span>
+        <span class="s0">#     contextvars.ContextVar(1)</span>
+
+        <span class="s1">c = contextvars.ContextVar(</span><span class="s4">'aaa'</span><span class="s1">)</span>
+        <span class="s1">self.assertEqual(c.name</span><span class="s2">, </span><span class="s4">'aaa'</span><span class="s1">)</span>
+
+        <span class="s2">with </span><span class="s1">self.assertRaises(AttributeError):</span>
+            <span class="s1">c.name = </span><span class="s4">'bbb'</span>
+
+        <span class="s1">self.assertNotEqual(hash(c)</span><span class="s2">, </span><span class="s1">hash(</span><span class="s4">'aaa'</span><span class="s1">))</span>
+
+    <span class="s1">@isolated_context</span>
+    <span class="s2">def </span><span class="s1">test_context_var_repr_1(self):</span>
+        <span class="s1">c = contextvars.ContextVar(</span><span class="s4">'a'</span><span class="s1">)</span>
+        <span class="s1">self.assertIn(</span><span class="s4">'a'</span><span class="s2">, </span><span class="s1">repr(c))</span>
+
+        <span class="s1">c = contextvars.ContextVar(</span><span class="s4">'a'</span><span class="s2">, </span><span class="s1">default=</span><span class="s5">123</span><span class="s1">)</span>
+        <span class="s1">self.assertIn(</span><span class="s4">'123'</span><span class="s2">, </span><span class="s1">repr(c))</span>
+
+        <span class="s1">lst = []</span>
+        <span class="s1">c = contextvars.ContextVar(</span><span class="s4">'a'</span><span class="s2">, </span><span class="s1">default=lst)</span>
+        <span class="s1">lst.append(c)</span>
+        <span class="s1">self.assertIn(</span><span class="s4">'...'</span><span class="s2">, </span><span class="s1">repr(c))</span>
+        <span class="s1">self.assertIn(</span><span class="s4">'...'</span><span class="s2">, </span><span class="s1">repr(lst))</span>
+
+        <span class="s1">t = c.set(</span><span class="s5">1</span><span class="s1">)</span>
+        <span class="s1">self.assertIn(repr(c)</span><span class="s2">, </span><span class="s1">repr(t))</span>
+        <span class="s1">self.assertNotIn(</span><span class="s4">' used '</span><span class="s2">, </span><span class="s1">repr(t))</span>
+        <span class="s1">c.reset(t)</span>
+        <span class="s1">self.assertIn(</span><span class="s4">' used '</span><span class="s2">, </span><span class="s1">repr(t))</span>
+
+    <span class="s0"># gevent: Doesn't raise</span>
+    <span class="s0"># def test_context_subclassing_1(self):</span>
+    <span class="s0">#     with self.assertRaisesRegex(TypeError, 'not an acceptable base type'):</span>
+    <span class="s0">#         class MyContextVar(contextvars.ContextVar):</span>
+    <span class="s0">#             # Potentially we might want ContextVars to be subclassable.</span>
+    <span class="s0">#             pass</span>
+
+    <span class="s0">#     with self.assertRaisesRegex(TypeError, 'not an acceptable base type'):</span>
+    <span class="s0">#         class MyContext(contextvars.Context):</span>
+    <span class="s0">#             pass</span>
+
+    <span class="s0">#     with self.assertRaisesRegex(TypeError, 'not an acceptable base type'):</span>
+    <span class="s0">#         class MyToken(contextvars.Token):</span>
+    <span class="s0">#             pass</span>
+
+    <span class="s2">def </span><span class="s1">test_context_new_1(self):</span>
+        <span class="s2">with </span><span class="s1">self.assertRaises(TypeError):</span>
+            <span class="s1">contextvars.Context(</span><span class="s5">1</span><span class="s1">)</span>
+        <span class="s2">with </span><span class="s1">self.assertRaises(TypeError):</span>
+            <span class="s1">contextvars.Context(</span><span class="s5">1</span><span class="s2">, </span><span class="s1">a=</span><span class="s5">1</span><span class="s1">)</span>
+        <span class="s2">with </span><span class="s1">self.assertRaises(TypeError):</span>
+            <span class="s1">contextvars.Context(a=</span><span class="s5">1</span><span class="s1">)</span>
+        <span class="s1">contextvars.Context(**{})</span>
+
+    <span class="s2">def </span><span class="s1">test_context_typerrors_1(self):</span>
+        <span class="s1">ctx = contextvars.Context()</span>
+
+        <span class="s2">with </span><span class="s1">self.assertRaisesRegex(TypeError</span><span class="s2">, </span><span class="s4">'ContextVar key was expected'</span><span class="s1">):</span>
+            <span class="s1">ctx[</span><span class="s5">1</span><span class="s1">]</span>
+        <span class="s2">with </span><span class="s1">self.assertRaisesRegex(TypeError</span><span class="s2">, </span><span class="s4">'ContextVar key was expected'</span><span class="s1">):</span>
+            <span class="s5">1 </span><span class="s2">in </span><span class="s1">ctx</span>
+        <span class="s2">with </span><span class="s1">self.assertRaisesRegex(TypeError</span><span class="s2">, </span><span class="s4">'ContextVar key was expected'</span><span class="s1">):</span>
+            <span class="s1">ctx.get(</span><span class="s5">1</span><span class="s1">)</span>
+
+    <span class="s2">def </span><span class="s1">test_context_get_context_1(self):</span>
+        <span class="s1">ctx = contextvars.copy_context()</span>
+        <span class="s1">self.assertIsInstance(ctx</span><span class="s2">, </span><span class="s1">contextvars.Context)</span>
+
+    <span class="s0"># gevent: This doesn't raise</span>
+    <span class="s0"># def test_context_run_1(self):</span>
+    <span class="s0">#     ctx = contextvars.Context()</span>
+
+    <span class="s0">#     with self.assertRaisesRegex(TypeError, 'missing 1 required'):</span>
+    <span class="s0">#         ctx.run()</span>
+
+    <span class="s2">def </span><span class="s1">test_context_run_2(self):</span>
+        <span class="s1">ctx = contextvars.Context()</span>
+
+        <span class="s2">def </span><span class="s1">func(*args</span><span class="s2">, </span><span class="s1">**kwargs):</span>
+            <span class="s1">kwargs[</span><span class="s4">'spam'</span><span class="s1">] = </span><span class="s4">'foo'</span>
+            <span class="s1">args += (</span><span class="s4">'bar'</span><span class="s2">,</span><span class="s1">)</span>
+            <span class="s2">return </span><span class="s1">args</span><span class="s2">, </span><span class="s1">kwargs</span>
+
+        <span class="s2">for </span><span class="s1">f </span><span class="s2">in </span><span class="s1">(func</span><span class="s2">, </span><span class="s1">functools.partial(func)):</span>
+            <span class="s0"># partial doesn't support FASTCALL</span>
+
+            <span class="s1">self.assertEqual(ctx.run(f)</span><span class="s2">, </span><span class="s1">((</span><span class="s4">'bar'</span><span class="s2">,</span><span class="s1">)</span><span class="s2">, </span><span class="s1">{</span><span class="s4">'spam'</span><span class="s1">: </span><span class="s4">'foo'</span><span class="s1">}))</span>
+            <span class="s1">self.assertEqual(ctx.run(f</span><span class="s2">, </span><span class="s5">1</span><span class="s1">)</span><span class="s2">, </span><span class="s1">((</span><span class="s5">1</span><span class="s2">, </span><span class="s4">'bar'</span><span class="s1">)</span><span class="s2">, </span><span class="s1">{</span><span class="s4">'spam'</span><span class="s1">: </span><span class="s4">'foo'</span><span class="s1">}))</span>
+
+            <span class="s1">self.assertEqual(</span>
+                <span class="s1">ctx.run(f</span><span class="s2">, </span><span class="s1">a=</span><span class="s5">2</span><span class="s1">)</span><span class="s2">,</span>
+                <span class="s1">((</span><span class="s4">'bar'</span><span class="s2">,</span><span class="s1">)</span><span class="s2">, </span><span class="s1">{</span><span class="s4">'a'</span><span class="s1">: </span><span class="s5">2</span><span class="s2">, </span><span class="s4">'spam'</span><span class="s1">: </span><span class="s4">'foo'</span><span class="s1">}))</span>
+
+            <span class="s1">self.assertEqual(</span>
+                <span class="s1">ctx.run(f</span><span class="s2">, </span><span class="s5">11</span><span class="s2">, </span><span class="s1">a=</span><span class="s5">2</span><span class="s1">)</span><span class="s2">,</span>
+                <span class="s1">((</span><span class="s5">11</span><span class="s2">, </span><span class="s4">'bar'</span><span class="s1">)</span><span class="s2">, </span><span class="s1">{</span><span class="s4">'a'</span><span class="s1">: </span><span class="s5">2</span><span class="s2">, </span><span class="s4">'spam'</span><span class="s1">: </span><span class="s4">'foo'</span><span class="s1">}))</span>
+
+            <span class="s1">a = {}</span>
+            <span class="s1">self.assertEqual(</span>
+                <span class="s1">ctx.run(f</span><span class="s2">, </span><span class="s5">11</span><span class="s2">, </span><span class="s1">**a)</span><span class="s2">,</span>
+                <span class="s1">((</span><span class="s5">11</span><span class="s2">, </span><span class="s4">'bar'</span><span class="s1">)</span><span class="s2">, </span><span class="s1">{</span><span class="s4">'spam'</span><span class="s1">: </span><span class="s4">'foo'</span><span class="s1">}))</span>
+            <span class="s1">self.assertEqual(a</span><span class="s2">, </span><span class="s1">{})</span>
+
+    <span class="s2">def </span><span class="s1">test_context_run_3(self):</span>
+        <span class="s1">ctx = contextvars.Context()</span>
+
+        <span class="s2">def </span><span class="s1">func(*args</span><span class="s2">, </span><span class="s1">**kwargs):</span>
+            <span class="s5">1 </span><span class="s1">/ </span><span class="s5">0</span>
+
+        <span class="s2">with </span><span class="s1">self.assertRaises(ZeroDivisionError):</span>
+            <span class="s1">ctx.run(func)</span>
+        <span class="s2">with </span><span class="s1">self.assertRaises(ZeroDivisionError):</span>
+            <span class="s1">ctx.run(func</span><span class="s2">, </span><span class="s5">1</span><span class="s2">, </span><span class="s5">2</span><span class="s1">)</span>
+        <span class="s2">with </span><span class="s1">self.assertRaises(ZeroDivisionError):</span>
+            <span class="s1">ctx.run(func</span><span class="s2">, </span><span class="s5">1</span><span class="s2">, </span><span class="s5">2</span><span class="s2">, </span><span class="s1">a=</span><span class="s5">123</span><span class="s1">)</span>
+
+    <span class="s1">@isolated_context</span>
+    <span class="s2">def </span><span class="s1">test_context_run_4(self):</span>
+        <span class="s1">ctx1 = contextvars.Context()</span>
+        <span class="s1">ctx2 = contextvars.Context()</span>
+        <span class="s1">var = contextvars.ContextVar(</span><span class="s4">'var'</span><span class="s1">)</span>
+
+        <span class="s2">def </span><span class="s1">func2():</span>
+            <span class="s1">self.assertIsNone(var.get(</span><span class="s2">None</span><span class="s1">))</span>
+
+        <span class="s2">def </span><span class="s1">func1():</span>
+            <span class="s1">self.assertIsNone(var.get(</span><span class="s2">None</span><span class="s1">))</span>
+            <span class="s1">var.set(</span><span class="s4">'spam'</span><span class="s1">)</span>
+            <span class="s1">ctx2.run(func2)</span>
+            <span class="s1">self.assertEqual(var.get(</span><span class="s2">None</span><span class="s1">)</span><span class="s2">, </span><span class="s4">'spam'</span><span class="s1">)</span>
+
+            <span class="s1">cur = contextvars.copy_context()</span>
+            <span class="s1">self.assertEqual(len(cur)</span><span class="s2">, </span><span class="s5">1</span><span class="s1">)</span>
+            <span class="s1">self.assertEqual(cur[var]</span><span class="s2">, </span><span class="s4">'spam'</span><span class="s1">)</span>
+            <span class="s2">return </span><span class="s1">cur</span>
+
+        <span class="s1">returned_ctx = ctx1.run(func1)</span>
+        <span class="s1">self.assertEqual(ctx1</span><span class="s2">, </span><span class="s1">returned_ctx)</span>
+        <span class="s1">self.assertEqual(returned_ctx[var]</span><span class="s2">, </span><span class="s4">'spam'</span><span class="s1">)</span>
+        <span class="s1">self.assertIn(var</span><span class="s2">, </span><span class="s1">returned_ctx)</span>
+
+    <span class="s2">def </span><span class="s1">test_context_run_5(self):</span>
+        <span class="s1">ctx = contextvars.Context()</span>
+        <span class="s1">var = contextvars.ContextVar(</span><span class="s4">'var'</span><span class="s1">)</span>
+
+        <span class="s2">def </span><span class="s1">func():</span>
+            <span class="s1">self.assertIsNone(var.get(</span><span class="s2">None</span><span class="s1">))</span>
+            <span class="s1">var.set(</span><span class="s4">'spam'</span><span class="s1">)</span>
+            <span class="s5">1 </span><span class="s1">/ </span><span class="s5">0</span>
+
+        <span class="s2">with </span><span class="s1">self.assertRaises(ZeroDivisionError):</span>
+            <span class="s1">ctx.run(func)</span>
+
+        <span class="s1">self.assertIsNone(var.get(</span><span class="s2">None</span><span class="s1">))</span>
+
+    <span class="s2">def </span><span class="s1">test_context_run_6(self):</span>
+        <span class="s1">ctx = contextvars.Context()</span>
+        <span class="s1">c = contextvars.ContextVar(</span><span class="s4">'a'</span><span class="s2">, </span><span class="s1">default=</span><span class="s5">0</span><span class="s1">)</span>
+
+        <span class="s2">def </span><span class="s1">fun():</span>
+            <span class="s1">self.assertEqual(c.get()</span><span class="s2">, </span><span class="s5">0</span><span class="s1">)</span>
+            <span class="s1">self.assertIsNone(ctx.get(c))</span>
+
+            <span class="s1">c.set(</span><span class="s5">42</span><span class="s1">)</span>
+            <span class="s1">self.assertEqual(c.get()</span><span class="s2">, </span><span class="s5">42</span><span class="s1">)</span>
+            <span class="s1">self.assertEqual(ctx.get(c)</span><span class="s2">, </span><span class="s5">42</span><span class="s1">)</span>
+
+        <span class="s1">ctx.run(fun)</span>
+
+    <span class="s2">def </span><span class="s1">test_context_run_7(self):</span>
+        <span class="s1">ctx = contextvars.Context()</span>
+
+        <span class="s2">def </span><span class="s1">fun():</span>
+            <span class="s2">with </span><span class="s1">self.assertRaisesRegex(RuntimeError</span><span class="s2">, </span><span class="s4">'is already entered'</span><span class="s1">):</span>
+                <span class="s1">ctx.run(fun)</span>
+
+        <span class="s1">ctx.run(fun)</span>
+
+    <span class="s1">@isolated_context</span>
+    <span class="s2">def </span><span class="s1">test_context_getset_1(self):</span>
+        <span class="s1">c = contextvars.ContextVar(</span><span class="s4">'c'</span><span class="s1">)</span>
+        <span class="s2">with </span><span class="s1">self.assertRaises(LookupError):</span>
+            <span class="s1">c.get()</span>
+
+        <span class="s1">self.assertIsNone(c.get(</span><span class="s2">None</span><span class="s1">))</span>
+
+        <span class="s1">t0 = c.set(</span><span class="s5">42</span><span class="s1">)</span>
+        <span class="s1">self.assertEqual(c.get()</span><span class="s2">, </span><span class="s5">42</span><span class="s1">)</span>
+        <span class="s1">self.assertEqual(c.get(</span><span class="s2">None</span><span class="s1">)</span><span class="s2">, </span><span class="s5">42</span><span class="s1">)</span>
+        <span class="s1">self.assertIs(t0.old_value</span><span class="s2">, </span><span class="s1">t0.MISSING)</span>
+        <span class="s1">self.assertIs(t0.old_value</span><span class="s2">, </span><span class="s1">contextvars.Token.MISSING)</span>
+        <span class="s1">self.assertIs(t0.var</span><span class="s2">, </span><span class="s1">c)</span>
+
+        <span class="s1">t = c.set(</span><span class="s4">'spam'</span><span class="s1">)</span>
+        <span class="s1">self.assertEqual(c.get()</span><span class="s2">, </span><span class="s4">'spam'</span><span class="s1">)</span>
+        <span class="s1">self.assertEqual(c.get(</span><span class="s2">None</span><span class="s1">)</span><span class="s2">, </span><span class="s4">'spam'</span><span class="s1">)</span>
+        <span class="s1">self.assertEqual(t.old_value</span><span class="s2">, </span><span class="s5">42</span><span class="s1">)</span>
+        <span class="s1">c.reset(t)</span>
+
+        <span class="s1">self.assertEqual(c.get()</span><span class="s2">, </span><span class="s5">42</span><span class="s1">)</span>
+        <span class="s1">self.assertEqual(c.get(</span><span class="s2">None</span><span class="s1">)</span><span class="s2">, </span><span class="s5">42</span><span class="s1">)</span>
+
+        <span class="s1">c.set(</span><span class="s4">'spam2'</span><span class="s1">)</span>
+        <span class="s2">with </span><span class="s1">self.assertRaisesRegex(RuntimeError</span><span class="s2">, </span><span class="s4">'has already been used'</span><span class="s1">):</span>
+            <span class="s1">c.reset(t)</span>
+        <span class="s1">self.assertEqual(c.get()</span><span class="s2">, </span><span class="s4">'spam2'</span><span class="s1">)</span>
+
+        <span class="s1">ctx1 = contextvars.copy_context()</span>
+        <span class="s1">self.assertIn(c</span><span class="s2">, </span><span class="s1">ctx1)</span>
+
+        <span class="s1">c.reset(t0)</span>
+        <span class="s2">with </span><span class="s1">self.assertRaisesRegex(RuntimeError</span><span class="s2">, </span><span class="s4">'has already been used'</span><span class="s1">):</span>
+            <span class="s1">c.reset(t0)</span>
+        <span class="s1">self.assertIsNone(c.get(</span><span class="s2">None</span><span class="s1">))</span>
+
+        <span class="s1">self.assertIn(c</span><span class="s2">, </span><span class="s1">ctx1)</span>
+        <span class="s1">self.assertEqual(ctx1[c]</span><span class="s2">, </span><span class="s4">'spam2'</span><span class="s1">)</span>
+        <span class="s1">self.assertEqual(ctx1.get(c</span><span class="s2">, </span><span class="s4">'aa'</span><span class="s1">)</span><span class="s2">, </span><span class="s4">'spam2'</span><span class="s1">)</span>
+        <span class="s1">self.assertEqual(len(ctx1)</span><span class="s2">, </span><span class="s5">1</span><span class="s1">)</span>
+        <span class="s1">self.assertEqual(list(ctx1.items())</span><span class="s2">, </span><span class="s1">[(c</span><span class="s2">, </span><span class="s4">'spam2'</span><span class="s1">)])</span>
+        <span class="s1">self.assertEqual(list(ctx1.values())</span><span class="s2">, </span><span class="s1">[</span><span class="s4">'spam2'</span><span class="s1">])</span>
+        <span class="s1">self.assertEqual(list(ctx1.keys())</span><span class="s2">, </span><span class="s1">[c])</span>
+        <span class="s1">self.assertEqual(list(ctx1)</span><span class="s2">, </span><span class="s1">[c])</span>
+
+        <span class="s1">ctx2 = contextvars.copy_context()</span>
+        <span class="s1">self.assertNotIn(c</span><span class="s2">, </span><span class="s1">ctx2)</span>
+        <span class="s2">with </span><span class="s1">self.assertRaises(KeyError):</span>
+            <span class="s1">ctx2[c]</span>
+        <span class="s1">self.assertEqual(ctx2.get(c</span><span class="s2">, </span><span class="s4">'aa'</span><span class="s1">)</span><span class="s2">, </span><span class="s4">'aa'</span><span class="s1">)</span>
+        <span class="s1">self.assertEqual(len(ctx2)</span><span class="s2">, </span><span class="s5">0</span><span class="s1">)</span>
+        <span class="s1">self.assertEqual(list(ctx2)</span><span class="s2">, </span><span class="s1">[])</span>
+
+    <span class="s1">@isolated_context</span>
+    <span class="s2">def </span><span class="s1">test_context_getset_2(self):</span>
+        <span class="s1">v1 = contextvars.ContextVar(</span><span class="s4">'v1'</span><span class="s1">)</span>
+        <span class="s1">v2 = contextvars.ContextVar(</span><span class="s4">'v2'</span><span class="s1">)</span>
+
+        <span class="s1">t1 = v1.set(</span><span class="s5">42</span><span class="s1">)</span>
+        <span class="s2">with </span><span class="s1">self.assertRaisesRegex(ValueError</span><span class="s2">, </span><span class="s4">'by a different'</span><span class="s1">):</span>
+            <span class="s1">v2.reset(t1)</span>
+
+    <span class="s1">@isolated_context</span>
+    <span class="s2">def </span><span class="s1">test_context_getset_3(self):</span>
+        <span class="s1">c = contextvars.ContextVar(</span><span class="s4">'c'</span><span class="s2">, </span><span class="s1">default=</span><span class="s5">42</span><span class="s1">)</span>
+        <span class="s1">ctx = contextvars.Context()</span>
+
+        <span class="s2">def </span><span class="s1">fun():</span>
+            <span class="s1">self.assertEqual(c.get()</span><span class="s2">, </span><span class="s5">42</span><span class="s1">)</span>
+            <span class="s2">with </span><span class="s1">self.assertRaises(KeyError):</span>
+                <span class="s1">ctx[c]</span>
+            <span class="s1">self.assertIsNone(ctx.get(c))</span>
+            <span class="s1">self.assertEqual(ctx.get(c</span><span class="s2">, </span><span class="s4">'spam'</span><span class="s1">)</span><span class="s2">, </span><span class="s4">'spam'</span><span class="s1">)</span>
+            <span class="s1">self.assertNotIn(c</span><span class="s2">, </span><span class="s1">ctx)</span>
+            <span class="s1">self.assertEqual(list(ctx.keys())</span><span class="s2">, </span><span class="s1">[])</span>
+
+            <span class="s1">t = c.set(</span><span class="s5">1</span><span class="s1">)</span>
+            <span class="s1">self.assertEqual(list(ctx.keys())</span><span class="s2">, </span><span class="s1">[c])</span>
+            <span class="s1">self.assertEqual(ctx[c]</span><span class="s2">, </span><span class="s5">1</span><span class="s1">)</span>
+
+            <span class="s1">c.reset(t)</span>
+            <span class="s1">self.assertEqual(list(ctx.keys())</span><span class="s2">, </span><span class="s1">[])</span>
+            <span class="s2">with </span><span class="s1">self.assertRaises(KeyError):</span>
+                <span class="s1">ctx[c]</span>
+
+        <span class="s1">ctx.run(fun)</span>
+
+    <span class="s1">@isolated_context</span>
+    <span class="s2">def </span><span class="s1">test_context_getset_4(self):</span>
+        <span class="s1">c = contextvars.ContextVar(</span><span class="s4">'c'</span><span class="s2">, </span><span class="s1">default=</span><span class="s5">42</span><span class="s1">)</span>
+        <span class="s1">ctx = contextvars.Context()</span>
+
+        <span class="s1">tok = ctx.run(c.set</span><span class="s2">, </span><span class="s5">1</span><span class="s1">)</span>
+
+        <span class="s2">with </span><span class="s1">self.assertRaisesRegex(ValueError</span><span class="s2">, </span><span class="s4">'different Context'</span><span class="s1">):</span>
+            <span class="s1">c.reset(tok)</span>
+
+    <span class="s1">@isolated_context</span>
+    <span class="s2">def </span><span class="s1">test_context_getset_5(self):</span>
+        <span class="s1">c = contextvars.ContextVar(</span><span class="s4">'c'</span><span class="s2">, </span><span class="s1">default=</span><span class="s5">42</span><span class="s1">)</span>
+        <span class="s1">c.set([])</span>
+
+        <span class="s2">def </span><span class="s1">fun():</span>
+            <span class="s1">c.set([])</span>
+            <span class="s1">c.get().append(</span><span class="s5">42</span><span class="s1">)</span>
+            <span class="s1">self.assertEqual(c.get()</span><span class="s2">, </span><span class="s1">[</span><span class="s5">42</span><span class="s1">])</span>
+
+        <span class="s1">contextvars.copy_context().run(fun)</span>
+        <span class="s1">self.assertEqual(c.get()</span><span class="s2">, </span><span class="s1">[])</span>
+
+    <span class="s2">def </span><span class="s1">test_context_copy_1(self):</span>
+        <span class="s1">ctx1 = contextvars.Context()</span>
+        <span class="s1">c = contextvars.ContextVar(</span><span class="s4">'c'</span><span class="s2">, </span><span class="s1">default=</span><span class="s5">42</span><span class="s1">)</span>
+
+        <span class="s2">def </span><span class="s1">ctx1_fun():</span>
+            <span class="s1">c.set(</span><span class="s5">10</span><span class="s1">)</span>
+
+            <span class="s1">ctx2 = ctx1.copy()</span>
+            <span class="s1">self.assertEqual(ctx2[c]</span><span class="s2">, </span><span class="s5">10</span><span class="s1">)</span>
+
+            <span class="s1">c.set(</span><span class="s5">20</span><span class="s1">)</span>
+            <span class="s1">self.assertEqual(ctx1[c]</span><span class="s2">, </span><span class="s5">20</span><span class="s1">)</span>
+            <span class="s1">self.assertEqual(ctx2[c]</span><span class="s2">, </span><span class="s5">10</span><span class="s1">)</span>
+
+            <span class="s1">ctx2.run(ctx2_fun)</span>
+            <span class="s1">self.assertEqual(ctx1[c]</span><span class="s2">, </span><span class="s5">20</span><span class="s1">)</span>
+            <span class="s1">self.assertEqual(ctx2[c]</span><span class="s2">, </span><span class="s5">30</span><span class="s1">)</span>
+
+        <span class="s2">def </span><span class="s1">ctx2_fun():</span>
+            <span class="s1">self.assertEqual(c.get()</span><span class="s2">, </span><span class="s5">10</span><span class="s1">)</span>
+            <span class="s1">c.set(</span><span class="s5">30</span><span class="s1">)</span>
+            <span class="s1">self.assertEqual(c.get()</span><span class="s2">, </span><span class="s5">30</span><span class="s1">)</span>
+
+        <span class="s1">ctx1.run(ctx1_fun)</span>
+
+    <span class="s1">@isolated_context</span>
+    <span class="s2">def </span><span class="s1">test_context_threads_1(self):</span>
+        <span class="s1">cvar = contextvars.ContextVar(</span><span class="s4">'cvar'</span><span class="s1">)</span>
+
+        <span class="s2">def </span><span class="s1">sub(num):</span>
+            <span class="s2">for </span><span class="s1">i </span><span class="s2">in </span><span class="s1">range(</span><span class="s5">10</span><span class="s1">):</span>
+                <span class="s1">cvar.set(num + i)</span>
+                <span class="s1">time.sleep(random.uniform(</span><span class="s5">0.001</span><span class="s2">, </span><span class="s5">0.05</span><span class="s1">))</span>
+                <span class="s1">self.assertEqual(cvar.get()</span><span class="s2">, </span><span class="s1">num + i)</span>
+            <span class="s2">return </span><span class="s1">num</span>
+
+        <span class="s2">with </span><span class="s1">concurrent.futures.ThreadPoolExecutor(max_workers=</span><span class="s5">10</span><span class="s1">) </span><span class="s2">as </span><span class="s1">tp:</span>
+            <span class="s1">results = list(tp.map(sub</span><span class="s2">, </span><span class="s1">range(</span><span class="s5">10</span><span class="s1">)))</span>
+
+        <span class="s1">self.assertEqual(results</span><span class="s2">, </span><span class="s1">list(range(</span><span class="s5">10</span><span class="s1">)))</span>
+
+    <span class="s0"># gevent: clases's can't be subscripted on Python 3.6</span>
+    <span class="s0"># def test_contextvar_getitem(self):</span>
+    <span class="s0">#     clss = contextvars.ContextVar</span>
+    <span class="s0">#     self.assertEqual(clss[str], clss)</span>
+
+
+<span class="s0"># HAMT Tests</span>
+
+
+<span class="s0"># class HashKey:</span>
+<span class="s0">#     _crasher = None</span>
+
+<span class="s0">#     def __init__(self, hash, name, error_on_eq_to=None):</span>
+<span class="s0">#         assert hash != -1</span>
+<span class="s0">#         self.name = name</span>
+<span class="s0">#         self.hash = hash</span>
+<span class="s0">#         self.error_on_eq_to = error_on_eq_to</span>
+
+<span class="s0">#     # def __repr__(self):</span>
+<span class="s0">#     #     return f'&lt;Key name:{self.name} hash:{self.hash}&gt;'</span>
+
+<span class="s0">#     def __hash__(self):</span>
+<span class="s0">#         if self._crasher is not None and self._crasher.error_on_hash:</span>
+<span class="s0">#             raise HashingError</span>
+
+<span class="s0">#         return self.hash</span>
+
+<span class="s0">#     def __eq__(self, other):</span>
+<span class="s0">#         if not isinstance(other, HashKey):</span>
+<span class="s0">#             return NotImplemented</span>
+
+<span class="s0">#         if self._crasher is not None and self._crasher.error_on_eq:</span>
+<span class="s0">#             raise EqError</span>
+
+<span class="s0">#         if self.error_on_eq_to is not None and self.error_on_eq_to is other:</span>
+<span class="s0">#             raise ValueError#(f'cannot compare {self!r} to {other!r}')</span>
+<span class="s0">#         if other.error_on_eq_to is not None and other.error_on_eq_to is self:</span>
+<span class="s0">#             raise ValueError#(f'cannot compare {other!r} to {self!r}')</span>
+
+<span class="s0">#         return (self.name, self.hash) == (other.name, other.hash)</span>
+
+
+<span class="s0"># class KeyStr(str):</span>
+<span class="s0">#     def __hash__(self):</span>
+<span class="s0">#         if HashKey._crasher is not None and HashKey._crasher.error_on_hash:</span>
+<span class="s0">#             raise HashingError</span>
+<span class="s0">#         return super().__hash__()</span>
+
+<span class="s0">#     def __eq__(self, other):</span>
+<span class="s0">#         if HashKey._crasher is not None and HashKey._crasher.error_on_eq:</span>
+<span class="s0">#             raise EqError</span>
+<span class="s0">#         return super().__eq__(other)</span>
+
+
+<span class="s0"># class HaskKeyCrasher:</span>
+<span class="s0">#     def __init__(self, error_on_hash=False, error_on_eq=False):</span>
+<span class="s0">#         self.error_on_hash = error_on_hash</span>
+<span class="s0">#         self.error_on_eq = error_on_eq</span>
+
+<span class="s0">#     def __enter__(self):</span>
+<span class="s0">#         if HashKey._crasher is not None:</span>
+<span class="s0">#             raise RuntimeError('cannot nest crashers')</span>
+<span class="s0">#         HashKey._crasher = self</span>
+
+<span class="s0">#     def __exit__(self, *exc):</span>
+<span class="s0">#         HashKey._crasher = None</span>
+
+
+<span class="s0"># class HashingError(Exception):</span>
+<span class="s0">#     pass</span>
+
+
+<span class="s0"># class EqError(Exception):</span>
+<span class="s0">#     pass</span>
+
+
+<span class="s0"># @unittest.skipIf(hamt is None, '_testcapi lacks &quot;hamt()&quot; function')</span>
+<span class="s0"># class HamtTest(unittest.TestCase):</span>
+
+<span class="s0">#     def test_hashkey_helper_1(self):</span>
+<span class="s0">#         k1 = HashKey(10, 'aaa')</span>
+<span class="s0">#         k2 = HashKey(10, 'bbb')</span>
+
+<span class="s0">#         self.assertNotEqual(k1, k2)</span>
+<span class="s0">#         self.assertEqual(hash(k1), hash(k2))</span>
+
+<span class="s0">#         d = dict()</span>
+<span class="s0">#         d[k1] = 'a'</span>
+<span class="s0">#         d[k2] = 'b'</span>
+
+<span class="s0">#         self.assertEqual(d[k1], 'a')</span>
+<span class="s0">#         self.assertEqual(d[k2], 'b')</span>
+
+<span class="s0">#     def test_hamt_basics_1(self):</span>
+<span class="s0">#         h = hamt()</span>
+<span class="s0">#         h = None  # NoQA</span>
+
+<span class="s0">#     def test_hamt_basics_2(self):</span>
+<span class="s0">#         h = hamt()</span>
+<span class="s0">#         self.assertEqual(len(h), 0)</span>
+
+<span class="s0">#         h2 = h.set('a', 'b')</span>
+<span class="s0">#         self.assertIsNot(h, h2)</span>
+<span class="s0">#         self.assertEqual(len(h), 0)</span>
+<span class="s0">#         self.assertEqual(len(h2), 1)</span>
+
+<span class="s0">#         self.assertIsNone(h.get('a'))</span>
+<span class="s0">#         self.assertEqual(h.get('a', 42), 42)</span>
+
+<span class="s0">#         self.assertEqual(h2.get('a'), 'b')</span>
+
+<span class="s0">#         h3 = h2.set('b', 10)</span>
+<span class="s0">#         self.assertIsNot(h2, h3)</span>
+<span class="s0">#         self.assertEqual(len(h), 0)</span>
+<span class="s0">#         self.assertEqual(len(h2), 1)</span>
+<span class="s0">#         self.assertEqual(len(h3), 2)</span>
+<span class="s0">#         self.assertEqual(h3.get('a'), 'b')</span>
+<span class="s0">#         self.assertEqual(h3.get('b'), 10)</span>
+
+<span class="s0">#         self.assertIsNone(h.get('b'))</span>
+<span class="s0">#         self.assertIsNone(h2.get('b'))</span>
+
+<span class="s0">#         self.assertIsNone(h.get('a'))</span>
+<span class="s0">#         self.assertEqual(h2.get('a'), 'b')</span>
+
+<span class="s0">#         h = h2 = h3 = None</span>
+
+<span class="s0">#     def test_hamt_basics_3(self):</span>
+<span class="s0">#         h = hamt()</span>
+<span class="s0">#         o = object()</span>
+<span class="s0">#         h1 = h.set('1', o)</span>
+<span class="s0">#         h2 = h1.set('1', o)</span>
+<span class="s0">#         self.assertIs(h1, h2)</span>
+
+<span class="s0">#     def test_hamt_basics_4(self):</span>
+<span class="s0">#         h = hamt()</span>
+<span class="s0">#         h1 = h.set('key', [])</span>
+<span class="s0">#         h2 = h1.set('key', [])</span>
+<span class="s0">#         self.assertIsNot(h1, h2)</span>
+<span class="s0">#         self.assertEqual(len(h1), 1)</span>
+<span class="s0">#         self.assertEqual(len(h2), 1)</span>
+<span class="s0">#         self.assertIsNot(h1.get('key'), h2.get('key'))</span>
+
+<span class="s0">#     def test_hamt_collision_1(self):</span>
+<span class="s0">#         k1 = HashKey(10, 'aaa')</span>
+<span class="s0">#         k2 = HashKey(10, 'bbb')</span>
+<span class="s0">#         k3 = HashKey(10, 'ccc')</span>
+
+<span class="s0">#         h = hamt()</span>
+<span class="s0">#         h2 = h.set(k1, 'a')</span>
+<span class="s0">#         h3 = h2.set(k2, 'b')</span>
+
+<span class="s0">#         self.assertEqual(h.get(k1), None)</span>
+<span class="s0">#         self.assertEqual(h.get(k2), None)</span>
+
+<span class="s0">#         self.assertEqual(h2.get(k1), 'a')</span>
+<span class="s0">#         self.assertEqual(h2.get(k2), None)</span>
+
+<span class="s0">#         self.assertEqual(h3.get(k1), 'a')</span>
+<span class="s0">#         self.assertEqual(h3.get(k2), 'b')</span>
+
+<span class="s0">#         h4 = h3.set(k2, 'cc')</span>
+<span class="s0">#         h5 = h4.set(k3, 'aa')</span>
+
+<span class="s0">#         self.assertEqual(h3.get(k1), 'a')</span>
+<span class="s0">#         self.assertEqual(h3.get(k2), 'b')</span>
+<span class="s0">#         self.assertEqual(h4.get(k1), 'a')</span>
+<span class="s0">#         self.assertEqual(h4.get(k2), 'cc')</span>
+<span class="s0">#         self.assertEqual(h4.get(k3), None)</span>
+<span class="s0">#         self.assertEqual(h5.get(k1), 'a')</span>
+<span class="s0">#         self.assertEqual(h5.get(k2), 'cc')</span>
+<span class="s0">#         self.assertEqual(h5.get(k2), 'cc')</span>
+<span class="s0">#         self.assertEqual(h5.get(k3), 'aa')</span>
+
+<span class="s0">#         self.assertEqual(len(h), 0)</span>
+<span class="s0">#         self.assertEqual(len(h2), 1)</span>
+<span class="s0">#         self.assertEqual(len(h3), 2)</span>
+<span class="s0">#         self.assertEqual(len(h4), 2)</span>
+<span class="s0">#         self.assertEqual(len(h5), 3)</span>
+
+<span class="s0">#     def test_hamt_stress(self):</span>
+<span class="s0">#         COLLECTION_SIZE = 7000</span>
+<span class="s0">#         TEST_ITERS_EVERY = 647</span>
+<span class="s0">#         CRASH_HASH_EVERY = 97</span>
+<span class="s0">#         CRASH_EQ_EVERY = 11</span>
+<span class="s0">#         RUN_XTIMES = 3</span>
+
+<span class="s0">#         for _ in range(RUN_XTIMES):</span>
+<span class="s0">#             h = hamt()</span>
+<span class="s0">#             d = dict()</span>
+
+<span class="s0">#             for i in range(COLLECTION_SIZE):</span>
+<span class="s0">#                 key = KeyStr(i)</span>
+
+<span class="s0">#                 if not (i % CRASH_HASH_EVERY):</span>
+<span class="s0">#                     with HaskKeyCrasher(error_on_hash=True):</span>
+<span class="s0">#                         with self.assertRaises(HashingError):</span>
+<span class="s0">#                             h.set(key, i)</span>
+
+<span class="s0">#                 h = h.set(key, i)</span>
+
+<span class="s0">#                 if not (i % CRASH_EQ_EVERY):</span>
+<span class="s0">#                     with HaskKeyCrasher(error_on_eq=True):</span>
+<span class="s0">#                         with self.assertRaises(EqError):</span>
+<span class="s0">#                             h.get(KeyStr(i))  # really trigger __eq__</span>
+
+<span class="s0">#                 d[key] = i</span>
+<span class="s0">#                 self.assertEqual(len(d), len(h))</span>
+
+<span class="s0">#                 if not (i % TEST_ITERS_EVERY):</span>
+<span class="s0">#                     self.assertEqual(set(h.items()), set(d.items()))</span>
+<span class="s0">#                     self.assertEqual(len(h.items()), len(d.items()))</span>
+
+<span class="s0">#             self.assertEqual(len(h), COLLECTION_SIZE)</span>
+
+<span class="s0">#             for key in range(COLLECTION_SIZE):</span>
+<span class="s0">#                 self.assertEqual(h.get(KeyStr(key), 'not found'), key)</span>
+
+<span class="s0">#             keys_to_delete = list(range(COLLECTION_SIZE))</span>
+<span class="s0">#             random.shuffle(keys_to_delete)</span>
+<span class="s0">#             for iter_i, i in enumerate(keys_to_delete):</span>
+<span class="s0">#                 key = KeyStr(i)</span>
+
+<span class="s0">#                 if not (iter_i % CRASH_HASH_EVERY):</span>
+<span class="s0">#                     with HaskKeyCrasher(error_on_hash=True):</span>
+<span class="s0">#                         with self.assertRaises(HashingError):</span>
+<span class="s0">#                             h.delete(key)</span>
+
+<span class="s0">#                 if not (iter_i % CRASH_EQ_EVERY):</span>
+<span class="s0">#                     with HaskKeyCrasher(error_on_eq=True):</span>
+<span class="s0">#                         with self.assertRaises(EqError):</span>
+<span class="s0">#                             h.delete(KeyStr(i))</span>
+
+<span class="s0">#                 h = h.delete(key)</span>
+<span class="s0">#                 self.assertEqual(h.get(key, 'not found'), 'not found')</span>
+<span class="s0">#                 del d[key]</span>
+<span class="s0">#                 self.assertEqual(len(d), len(h))</span>
+
+<span class="s0">#                 if iter_i == COLLECTION_SIZE // 2:</span>
+<span class="s0">#                     hm = h</span>
+<span class="s0">#                     dm = d.copy()</span>
+
+<span class="s0">#                 if not (iter_i % TEST_ITERS_EVERY):</span>
+<span class="s0">#                     self.assertEqual(set(h.keys()), set(d.keys()))</span>
+<span class="s0">#                     self.assertEqual(len(h.keys()), len(d.keys()))</span>
+
+<span class="s0">#             self.assertEqual(len(d), 0)</span>
+<span class="s0">#             self.assertEqual(len(h), 0)</span>
+
+<span class="s0">#             # ============</span>
+
+<span class="s0">#             for key in dm:</span>
+<span class="s0">#                 self.assertEqual(hm.get(str(key)), dm[key])</span>
+<span class="s0">#             self.assertEqual(len(dm), len(hm))</span>
+
+<span class="s0">#             for i, key in enumerate(keys_to_delete):</span>
+<span class="s0">#                 hm = hm.delete(str(key))</span>
+<span class="s0">#                 self.assertEqual(hm.get(str(key), 'not found'), 'not found')</span>
+<span class="s0">#                 dm.pop(str(key), None)</span>
+<span class="s0">#                 self.assertEqual(len(d), len(h))</span>
+
+<span class="s0">#                 if not (i % TEST_ITERS_EVERY):</span>
+<span class="s0">#                     self.assertEqual(set(h.values()), set(d.values()))</span>
+<span class="s0">#                     self.assertEqual(len(h.values()), len(d.values()))</span>
+
+<span class="s0">#             self.assertEqual(len(d), 0)</span>
+<span class="s0">#             self.assertEqual(len(h), 0)</span>
+<span class="s0">#             self.assertEqual(list(h.items()), [])</span>
+
+<span class="s0">#     def test_hamt_delete_1(self):</span>
+<span class="s0">#         A = HashKey(100, 'A')</span>
+<span class="s0">#         B = HashKey(101, 'B')</span>
+<span class="s0">#         C = HashKey(102, 'C')</span>
+<span class="s0">#         D = HashKey(103, 'D')</span>
+<span class="s0">#         E = HashKey(104, 'E')</span>
+<span class="s0">#         Z = HashKey(-100, 'Z')</span>
+
+<span class="s0">#         Er = HashKey(103, 'Er', error_on_eq_to=D)</span>
+
+<span class="s0">#         h = hamt()</span>
+<span class="s0">#         h = h.set(A, 'a')</span>
+<span class="s0">#         h = h.set(B, 'b')</span>
+<span class="s0">#         h = h.set(C, 'c')</span>
+<span class="s0">#         h = h.set(D, 'd')</span>
+<span class="s0">#         h = h.set(E, 'e')</span>
+
+<span class="s0">#         orig_len = len(h)</span>
+
+<span class="s0">#         # BitmapNode(size=10 bitmap=0b111110000 id=0x10eadc618):</span>
+<span class="s0">#         #     &lt;Key name:A hash:100&gt;: 'a'</span>
+<span class="s0">#         #     &lt;Key name:B hash:101&gt;: 'b'</span>
+<span class="s0">#         #     &lt;Key name:C hash:102&gt;: 'c'</span>
+<span class="s0">#         #     &lt;Key name:D hash:103&gt;: 'd'</span>
+<span class="s0">#         #     &lt;Key name:E hash:104&gt;: 'e'</span>
+
+<span class="s0">#         h = h.delete(C)</span>
+<span class="s0">#         self.assertEqual(len(h), orig_len - 1)</span>
+
+<span class="s0">#         with self.assertRaisesRegex(ValueError, 'cannot compare'):</span>
+<span class="s0">#             h.delete(Er)</span>
+
+<span class="s0">#         h = h.delete(D)</span>
+<span class="s0">#         self.assertEqual(len(h), orig_len - 2)</span>
+
+<span class="s0">#         h2 = h.delete(Z)</span>
+<span class="s0">#         self.assertIs(h2, h)</span>
+
+<span class="s0">#         h = h.delete(A)</span>
+<span class="s0">#         self.assertEqual(len(h), orig_len - 3)</span>
+
+<span class="s0">#         self.assertEqual(h.get(A, 42), 42)</span>
+<span class="s0">#         self.assertEqual(h.get(B), 'b')</span>
+<span class="s0">#         self.assertEqual(h.get(E), 'e')</span>
+
+<span class="s0">#     def test_hamt_delete_2(self):</span>
+<span class="s0">#         A = HashKey(100, 'A')</span>
+<span class="s0">#         B = HashKey(201001, 'B')</span>
+<span class="s0">#         C = HashKey(101001, 'C')</span>
+<span class="s0">#         D = HashKey(103, 'D')</span>
+<span class="s0">#         E = HashKey(104, 'E')</span>
+<span class="s0">#         Z = HashKey(-100, 'Z')</span>
+
+<span class="s0">#         Er = HashKey(201001, 'Er', error_on_eq_to=B)</span>
+
+<span class="s0">#         h = hamt()</span>
+<span class="s0">#         h = h.set(A, 'a')</span>
+<span class="s0">#         h = h.set(B, 'b')</span>
+<span class="s0">#         h = h.set(C, 'c')</span>
+<span class="s0">#         h = h.set(D, 'd')</span>
+<span class="s0">#         h = h.set(E, 'e')</span>
+
+<span class="s0">#         orig_len = len(h)</span>
+
+<span class="s0">#         # BitmapNode(size=8 bitmap=0b1110010000):</span>
+<span class="s0">#         #     &lt;Key name:A hash:100&gt;: 'a'</span>
+<span class="s0">#         #     &lt;Key name:D hash:103&gt;: 'd'</span>
+<span class="s0">#         #     &lt;Key name:E hash:104&gt;: 'e'</span>
+<span class="s0">#         #     NULL:</span>
+<span class="s0">#         #         BitmapNode(size=4 bitmap=0b100000000001000000000):</span>
+<span class="s0">#         #             &lt;Key name:B hash:201001&gt;: 'b'</span>
+<span class="s0">#         #             &lt;Key name:C hash:101001&gt;: 'c'</span>
+
+<span class="s0">#         with self.assertRaisesRegex(ValueError, 'cannot compare'):</span>
+<span class="s0">#             h.delete(Er)</span>
+
+<span class="s0">#         h = h.delete(Z)</span>
+<span class="s0">#         self.assertEqual(len(h), orig_len)</span>
+
+<span class="s0">#         h = h.delete(C)</span>
+<span class="s0">#         self.assertEqual(len(h), orig_len - 1)</span>
+
+<span class="s0">#         h = h.delete(B)</span>
+<span class="s0">#         self.assertEqual(len(h), orig_len - 2)</span>
+
+<span class="s0">#         h = h.delete(A)</span>
+<span class="s0">#         self.assertEqual(len(h), orig_len - 3)</span>
+
+<span class="s0">#         self.assertEqual(h.get(D), 'd')</span>
+<span class="s0">#         self.assertEqual(h.get(E), 'e')</span>
+
+<span class="s0">#         h = h.delete(A)</span>
+<span class="s0">#         h = h.delete(B)</span>
+<span class="s0">#         h = h.delete(D)</span>
+<span class="s0">#         h = h.delete(E)</span>
+<span class="s0">#         self.assertEqual(len(h), 0)</span>
+
+<span class="s0">#     def test_hamt_delete_3(self):</span>
+<span class="s0">#         A = HashKey(100, 'A')</span>
+<span class="s0">#         B = HashKey(101, 'B')</span>
+<span class="s0">#         C = HashKey(100100, 'C')</span>
+<span class="s0">#         D = HashKey(100100, 'D')</span>
+<span class="s0">#         E = HashKey(104, 'E')</span>
+
+<span class="s0">#         h = hamt()</span>
+<span class="s0">#         h = h.set(A, 'a')</span>
+<span class="s0">#         h = h.set(B, 'b')</span>
+<span class="s0">#         h = h.set(C, 'c')</span>
+<span class="s0">#         h = h.set(D, 'd')</span>
+<span class="s0">#         h = h.set(E, 'e')</span>
+
+<span class="s0">#         orig_len = len(h)</span>
+
+<span class="s0">#         # BitmapNode(size=6 bitmap=0b100110000):</span>
+<span class="s0">#         #     NULL:</span>
+<span class="s0">#         #         BitmapNode(size=4 bitmap=0b1000000000000000000001000):</span>
+<span class="s0">#         #             &lt;Key name:A hash:100&gt;: 'a'</span>
+<span class="s0">#         #             NULL:</span>
+<span class="s0">#         #                 CollisionNode(size=4 id=0x108572410):</span>
+<span class="s0">#         #                     &lt;Key name:C hash:100100&gt;: 'c'</span>
+<span class="s0">#         #                     &lt;Key name:D hash:100100&gt;: 'd'</span>
+<span class="s0">#         #     &lt;Key name:B hash:101&gt;: 'b'</span>
+<span class="s0">#         #     &lt;Key name:E hash:104&gt;: 'e'</span>
+
+<span class="s0">#         h = h.delete(A)</span>
+<span class="s0">#         self.assertEqual(len(h), orig_len - 1)</span>
+
+<span class="s0">#         h = h.delete(E)</span>
+<span class="s0">#         self.assertEqual(len(h), orig_len - 2)</span>
+
+<span class="s0">#         self.assertEqual(h.get(C), 'c')</span>
+<span class="s0">#         self.assertEqual(h.get(B), 'b')</span>
+
+<span class="s0">#     def test_hamt_delete_4(self):</span>
+<span class="s0">#         A = HashKey(100, 'A')</span>
+<span class="s0">#         B = HashKey(101, 'B')</span>
+<span class="s0">#         C = HashKey(100100, 'C')</span>
+<span class="s0">#         D = HashKey(100100, 'D')</span>
+<span class="s0">#         E = HashKey(100100, 'E')</span>
+
+<span class="s0">#         h = hamt()</span>
+<span class="s0">#         h = h.set(A, 'a')</span>
+<span class="s0">#         h = h.set(B, 'b')</span>
+<span class="s0">#         h = h.set(C, 'c')</span>
+<span class="s0">#         h = h.set(D, 'd')</span>
+<span class="s0">#         h = h.set(E, 'e')</span>
+
+<span class="s0">#         orig_len = len(h)</span>
+
+<span class="s0">#         # BitmapNode(size=4 bitmap=0b110000):</span>
+<span class="s0">#         #     NULL:</span>
+<span class="s0">#         #         BitmapNode(size=4 bitmap=0b1000000000000000000001000):</span>
+<span class="s0">#         #             &lt;Key name:A hash:100&gt;: 'a'</span>
+<span class="s0">#         #             NULL:</span>
+<span class="s0">#         #                 CollisionNode(size=6 id=0x10515ef30):</span>
+<span class="s0">#         #                     &lt;Key name:C hash:100100&gt;: 'c'</span>
+<span class="s0">#         #                     &lt;Key name:D hash:100100&gt;: 'd'</span>
+<span class="s0">#         #                     &lt;Key name:E hash:100100&gt;: 'e'</span>
+<span class="s0">#         #     &lt;Key name:B hash:101&gt;: 'b'</span>
+
+<span class="s0">#         h = h.delete(D)</span>
+<span class="s0">#         self.assertEqual(len(h), orig_len - 1)</span>
+
+<span class="s0">#         h = h.delete(E)</span>
+<span class="s0">#         self.assertEqual(len(h), orig_len - 2)</span>
+
+<span class="s0">#         h = h.delete(C)</span>
+<span class="s0">#         self.assertEqual(len(h), orig_len - 3)</span>
+
+<span class="s0">#         h = h.delete(A)</span>
+<span class="s0">#         self.assertEqual(len(h), orig_len - 4)</span>
+
+<span class="s0">#         h = h.delete(B)</span>
+<span class="s0">#         self.assertEqual(len(h), 0)</span>
+
+<span class="s0">#     def test_hamt_delete_5(self):</span>
+<span class="s0">#         h = hamt()</span>
+
+<span class="s0">#         keys = []</span>
+<span class="s0">#         for i in range(17):</span>
+<span class="s0">#             key = HashKey(i, str(i))</span>
+<span class="s0">#             keys.append(key)</span>
+<span class="s0">#             h = h.set(key, 'val-{i}'.format(i=i))</span>
+
+<span class="s0">#         collision_key16 = HashKey(16, '18')</span>
+<span class="s0">#         h = h.set(collision_key16, 'collision')</span>
+
+<span class="s0">#         # ArrayNode(id=0x10f8b9318):</span>
+<span class="s0">#         #     0::</span>
+<span class="s0">#         #     BitmapNode(size=2 count=1 bitmap=0b1):</span>
+<span class="s0">#         #         &lt;Key name:0 hash:0&gt;: 'val-0'</span>
+<span class="s0">#         #</span>
+<span class="s0">#         # ... 14 more BitmapNodes ...</span>
+<span class="s0">#         #</span>
+<span class="s0">#         #     15::</span>
+<span class="s0">#         #     BitmapNode(size=2 count=1 bitmap=0b1):</span>
+<span class="s0">#         #         &lt;Key name:15 hash:15&gt;: 'val-15'</span>
+<span class="s0">#         #</span>
+<span class="s0">#         #     16::</span>
+<span class="s0">#         #     BitmapNode(size=2 count=1 bitmap=0b1):</span>
+<span class="s0">#         #         NULL:</span>
+<span class="s0">#         #             CollisionNode(size=4 id=0x10f2f5af8):</span>
+<span class="s0">#         #                 &lt;Key name:16 hash:16&gt;: 'val-16'</span>
+<span class="s0">#         #                 &lt;Key name:18 hash:16&gt;: 'collision'</span>
+
+<span class="s0">#         self.assertEqual(len(h), 18)</span>
+
+<span class="s0">#         h = h.delete(keys[2])</span>
+<span class="s0">#         self.assertEqual(len(h), 17)</span>
+
+<span class="s0">#         h = h.delete(collision_key16)</span>
+<span class="s0">#         self.assertEqual(len(h), 16)</span>
+<span class="s0">#         h = h.delete(keys[16])</span>
+<span class="s0">#         self.assertEqual(len(h), 15)</span>
+
+<span class="s0">#         h = h.delete(keys[1])</span>
+<span class="s0">#         self.assertEqual(len(h), 14)</span>
+<span class="s0">#         h = h.delete(keys[1])</span>
+<span class="s0">#         self.assertEqual(len(h), 14)</span>
+
+<span class="s0">#         for key in keys:</span>
+<span class="s0">#             h = h.delete(key)</span>
+<span class="s0">#         self.assertEqual(len(h), 0)</span>
+
+<span class="s0">#     def test_hamt_items_1(self):</span>
+<span class="s0">#         A = HashKey(100, 'A')</span>
+<span class="s0">#         B = HashKey(201001, 'B')</span>
+<span class="s0">#         C = HashKey(101001, 'C')</span>
+<span class="s0">#         D = HashKey(103, 'D')</span>
+<span class="s0">#         E = HashKey(104, 'E')</span>
+<span class="s0">#         F = HashKey(110, 'F')</span>
+
+<span class="s0">#         h = hamt()</span>
+<span class="s0">#         h = h.set(A, 'a')</span>
+<span class="s0">#         h = h.set(B, 'b')</span>
+<span class="s0">#         h = h.set(C, 'c')</span>
+<span class="s0">#         h = h.set(D, 'd')</span>
+<span class="s0">#         h = h.set(E, 'e')</span>
+<span class="s0">#         h = h.set(F, 'f')</span>
+
+<span class="s0">#         it = h.items()</span>
+<span class="s0">#         self.assertEqual(</span>
+<span class="s0">#             set(list(it)),</span>
+<span class="s0">#             {(A, 'a'), (B, 'b'), (C, 'c'), (D, 'd'), (E, 'e'), (F, 'f')})</span>
+
+<span class="s0">#     def test_hamt_items_2(self):</span>
+<span class="s0">#         A = HashKey(100, 'A')</span>
+<span class="s0">#         B = HashKey(101, 'B')</span>
+<span class="s0">#         C = HashKey(100100, 'C')</span>
+<span class="s0">#         D = HashKey(100100, 'D')</span>
+<span class="s0">#         E = HashKey(100100, 'E')</span>
+<span class="s0">#         F = HashKey(110, 'F')</span>
+
+<span class="s0">#         h = hamt()</span>
+<span class="s0">#         h = h.set(A, 'a')</span>
+<span class="s0">#         h = h.set(B, 'b')</span>
+<span class="s0">#         h = h.set(C, 'c')</span>
+<span class="s0">#         h = h.set(D, 'd')</span>
+<span class="s0">#         h = h.set(E, 'e')</span>
+<span class="s0">#         h = h.set(F, 'f')</span>
+
+<span class="s0">#         it = h.items()</span>
+<span class="s0">#         self.assertEqual(</span>
+<span class="s0">#             set(list(it)),</span>
+<span class="s0">#             {(A, 'a'), (B, 'b'), (C, 'c'), (D, 'd'), (E, 'e'), (F, 'f')})</span>
+
+<span class="s0">#     def test_hamt_keys_1(self):</span>
+<span class="s0">#         A = HashKey(100, 'A')</span>
+<span class="s0">#         B = HashKey(101, 'B')</span>
+<span class="s0">#         C = HashKey(100100, 'C')</span>
+<span class="s0">#         D = HashKey(100100, 'D')</span>
+<span class="s0">#         E = HashKey(100100, 'E')</span>
+<span class="s0">#         F = HashKey(110, 'F')</span>
+
+<span class="s0">#         h = hamt()</span>
+<span class="s0">#         h = h.set(A, 'a')</span>
+<span class="s0">#         h = h.set(B, 'b')</span>
+<span class="s0">#         h = h.set(C, 'c')</span>
+<span class="s0">#         h = h.set(D, 'd')</span>
+<span class="s0">#         h = h.set(E, 'e')</span>
+<span class="s0">#         h = h.set(F, 'f')</span>
+
+<span class="s0">#         self.assertEqual(set(list(h.keys())), {A, B, C, D, E, F})</span>
+<span class="s0">#         self.assertEqual(set(list(h)), {A, B, C, D, E, F})</span>
+
+<span class="s0">#     def test_hamt_items_3(self):</span>
+<span class="s0">#         h = hamt()</span>
+<span class="s0">#         self.assertEqual(len(h.items()), 0)</span>
+<span class="s0">#         self.assertEqual(list(h.items()), [])</span>
+
+<span class="s0">#     def test_hamt_eq_1(self):</span>
+<span class="s0">#         A = HashKey(100, 'A')</span>
+<span class="s0">#         B = HashKey(101, 'B')</span>
+<span class="s0">#         C = HashKey(100100, 'C')</span>
+<span class="s0">#         D = HashKey(100100, 'D')</span>
+<span class="s0">#         E = HashKey(120, 'E')</span>
+
+<span class="s0">#         h1 = hamt()</span>
+<span class="s0">#         h1 = h1.set(A, 'a')</span>
+<span class="s0">#         h1 = h1.set(B, 'b')</span>
+<span class="s0">#         h1 = h1.set(C, 'c')</span>
+<span class="s0">#         h1 = h1.set(D, 'd')</span>
+
+<span class="s0">#         h2 = hamt()</span>
+<span class="s0">#         h2 = h2.set(A, 'a')</span>
+
+<span class="s0">#         self.assertFalse(h1 == h2)</span>
+<span class="s0">#         self.assertTrue(h1 != h2)</span>
+
+<span class="s0">#         h2 = h2.set(B, 'b')</span>
+<span class="s0">#         self.assertFalse(h1 == h2)</span>
+<span class="s0">#         self.assertTrue(h1 != h2)</span>
+
+<span class="s0">#         h2 = h2.set(C, 'c')</span>
+<span class="s0">#         self.assertFalse(h1 == h2)</span>
+<span class="s0">#         self.assertTrue(h1 != h2)</span>
+
+<span class="s0">#         h2 = h2.set(D, 'd2')</span>
+<span class="s0">#         self.assertFalse(h1 == h2)</span>
+<span class="s0">#         self.assertTrue(h1 != h2)</span>
+
+<span class="s0">#         h2 = h2.set(D, 'd')</span>
+<span class="s0">#         self.assertTrue(h1 == h2)</span>
+<span class="s0">#         self.assertFalse(h1 != h2)</span>
+
+<span class="s0">#         h2 = h2.set(E, 'e')</span>
+<span class="s0">#         self.assertFalse(h1 == h2)</span>
+<span class="s0">#         self.assertTrue(h1 != h2)</span>
+
+<span class="s0">#         h2 = h2.delete(D)</span>
+<span class="s0">#         self.assertFalse(h1 == h2)</span>
+<span class="s0">#         self.assertTrue(h1 != h2)</span>
+
+<span class="s0">#         h2 = h2.set(E, 'd')</span>
+<span class="s0">#         self.assertFalse(h1 == h2)</span>
+<span class="s0">#         self.assertTrue(h1 != h2)</span>
+
+<span class="s0">#     def test_hamt_eq_2(self):</span>
+<span class="s0">#         A = HashKey(100, 'A')</span>
+<span class="s0">#         Er = HashKey(100, 'Er', error_on_eq_to=A)</span>
+
+<span class="s0">#         h1 = hamt()</span>
+<span class="s0">#         h1 = h1.set(A, 'a')</span>
+
+<span class="s0">#         h2 = hamt()</span>
+<span class="s0">#         h2 = h2.set(Er, 'a')</span>
+
+<span class="s0">#         with self.assertRaisesRegex(ValueError, 'cannot compare'):</span>
+<span class="s0">#             h1 == h2</span>
+
+<span class="s0">#         with self.assertRaisesRegex(ValueError, 'cannot compare'):</span>
+<span class="s0">#             h1 != h2</span>
+
+<span class="s0">#     def test_hamt_gc_1(self):</span>
+<span class="s0">#         A = HashKey(100, 'A')</span>
+
+<span class="s0">#         h = hamt()</span>
+<span class="s0">#         h = h.set(0, 0)  # empty HAMT node is memoized in hamt.c</span>
+<span class="s0">#         ref = weakref.ref(h)</span>
+
+<span class="s0">#         a = []</span>
+<span class="s0">#         a.append(a)</span>
+<span class="s0">#         a.append(h)</span>
+<span class="s0">#         b = []</span>
+<span class="s0">#         a.append(b)</span>
+<span class="s0">#         b.append(a)</span>
+<span class="s0">#         h = h.set(A, b)</span>
+
+<span class="s0">#         del h, a, b</span>
+
+<span class="s0">#         gc.collect()</span>
+<span class="s0">#         gc.collect()</span>
+<span class="s0">#         gc.collect()</span>
+
+<span class="s0">#         self.assertIsNone(ref())</span>
+
+<span class="s0">#     def test_hamt_gc_2(self):</span>
+<span class="s0">#         A = HashKey(100, 'A')</span>
+<span class="s0">#         B = HashKey(101, 'B')</span>
+
+<span class="s0">#         h = hamt()</span>
+<span class="s0">#         h = h.set(A, 'a')</span>
+<span class="s0">#         h = h.set(A, h)</span>
+
+<span class="s0">#         ref = weakref.ref(h)</span>
+<span class="s0">#         hi = h.items()</span>
+<span class="s0">#         next(hi)</span>
+
+<span class="s0">#         del h, hi</span>
+
+<span class="s0">#         gc.collect()</span>
+<span class="s0">#         gc.collect()</span>
+<span class="s0">#         gc.collect()</span>
+
+<span class="s0">#         self.assertIsNone(ref())</span>
+
+<span class="s0">#     def test_hamt_in_1(self):</span>
+<span class="s0">#         A = HashKey(100, 'A')</span>
+<span class="s0">#         AA = HashKey(100, 'A')</span>
+
+<span class="s0">#         B = HashKey(101, 'B')</span>
+
+<span class="s0">#         h = hamt()</span>
+<span class="s0">#         h = h.set(A, 1)</span>
+
+<span class="s0">#         self.assertTrue(A in h)</span>
+<span class="s0">#         self.assertFalse(B in h)</span>
+
+<span class="s0">#         with self.assertRaises(EqError):</span>
+<span class="s0">#             with HaskKeyCrasher(error_on_eq=True):</span>
+<span class="s0">#                 AA in h</span>
+
+<span class="s0">#         with self.assertRaises(HashingError):</span>
+<span class="s0">#             with HaskKeyCrasher(error_on_hash=True):</span>
+<span class="s0">#                 AA in h</span>
+
+<span class="s0">#     def test_hamt_getitem_1(self):</span>
+<span class="s0">#         A = HashKey(100, 'A')</span>
+<span class="s0">#         AA = HashKey(100, 'A')</span>
+
+<span class="s0">#         B = HashKey(101, 'B')</span>
+
+<span class="s0">#         h = hamt()</span>
+<span class="s0">#         h = h.set(A, 1)</span>
+
+<span class="s0">#         self.assertEqual(h[A], 1)</span>
+<span class="s0">#         self.assertEqual(h[AA], 1)</span>
+
+<span class="s0">#         with self.assertRaises(KeyError):</span>
+<span class="s0">#             h[B]</span>
+
+<span class="s0">#         with self.assertRaises(EqError):</span>
+<span class="s0">#             with HaskKeyCrasher(error_on_eq=True):</span>
+<span class="s0">#                 h[AA]</span>
+
+<span class="s0">#         with self.assertRaises(HashingError):</span>
+<span class="s0">#             with HaskKeyCrasher(error_on_hash=True):</span>
+<span class="s0">#                 h[AA]</span>
+
+
+<span class="s2">if </span><span class="s1">__name__ == </span><span class="s4">&quot;__main__&quot;</span><span class="s1">:</span>
+    <span class="s2">if not </span><span class="s1">monkey.PY37:</span>
+        <span class="s1">unittest.main()</span>
+</pre>
+</body>
+</html>

@@ -1,0 +1,136 @@
+<html>
+<head>
+<title>pyiboot01_bootstrap.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #cc7832;}
+.s3 { color: #6a8759;}
+.s4 { color: #6897bb;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+pyiboot01_bootstrap.py</font>
+</center></td></tr></table>
+<pre><span class="s0">#-----------------------------------------------------------------------------</span>
+<span class="s0"># Copyright (c) 2005-2021, PyInstaller Development Team.</span>
+<span class="s0">#</span>
+<span class="s0"># Distributed under the terms of the GNU General Public License (version 2</span>
+<span class="s0"># or later) with exception for distributing the bootloader.</span>
+<span class="s0">#</span>
+<span class="s0"># The full license is in the file COPYING.txt, distributed with this software.</span>
+<span class="s0">#</span>
+<span class="s0"># SPDX-License-Identifier: (GPL-2.0-or-later WITH Bootloader-exception)</span>
+<span class="s0">#-----------------------------------------------------------------------------</span>
+
+<span class="s0">#-- Start bootstrap process</span>
+<span class="s0"># Only python built-in modules can be used.</span>
+
+<span class="s2">import </span><span class="s1">sys</span>
+
+<span class="s2">import </span><span class="s1">pyimod03_importers</span>
+
+<span class="s0"># Extend Python import machinery by adding PEP302 importers to sys.meta_path.</span>
+<span class="s1">pyimod03_importers.install()</span>
+
+<span class="s0">#-- Bootstrap process is complete.</span>
+<span class="s0"># We can use other python modules (e.g. os)</span>
+
+<span class="s2">import </span><span class="s1">os  </span><span class="s0"># noqa: E402</span>
+
+<span class="s0"># Let other python modules know that the code is running in frozen mode.</span>
+<span class="s2">if not </span><span class="s1">hasattr(sys</span><span class="s2">, </span><span class="s3">'frozen'</span><span class="s1">):</span>
+    <span class="s1">sys.frozen = </span><span class="s2">True</span>
+
+<span class="s0"># sys._MEIPASS is now set in the bootloader. Hooray.</span>
+
+<span class="s0"># Python 3 C-API function Py_SetPath() resets sys.prefix to empty string. Python 2 was using PYTHONHOME for sys.prefix.</span>
+<span class="s0"># Let's do the same for Python 3.</span>
+<span class="s1">sys.prefix = sys._MEIPASS</span>
+<span class="s1">sys.exec_prefix = sys.prefix</span>
+
+<span class="s0"># Python 3.3+ defines also sys.base_prefix. Let's set them too.</span>
+<span class="s1">sys.base_prefix = sys.prefix</span>
+<span class="s1">sys.base_exec_prefix = sys.exec_prefix</span>
+
+<span class="s0"># Some packages behave differently when running inside virtual environment. E.g., IPython tries to append path</span>
+<span class="s0"># VIRTUAL_ENV to sys.path. For the frozen app we want to prevent this behavior.</span>
+<span class="s1">VIRTENV = </span><span class="s3">'VIRTUAL_ENV'</span>
+<span class="s2">if </span><span class="s1">VIRTENV </span><span class="s2">in </span><span class="s1">os.environ:</span>
+    <span class="s0"># On some platforms (e.g., AIX) 'os.unsetenv()' is unavailable and deleting the var from os.environ does not</span>
+    <span class="s0"># delete it from the environment.</span>
+    <span class="s1">os.environ[VIRTENV] = </span><span class="s3">''</span>
+    <span class="s2">del </span><span class="s1">os.environ[VIRTENV]</span>
+
+<span class="s0"># Ensure sys.path contains absolute paths. Otherwise, import of other python modules will fail when current working</span>
+<span class="s0"># directory is changed by the frozen application.</span>
+<span class="s1">python_path = []</span>
+<span class="s2">for </span><span class="s1">pth </span><span class="s2">in </span><span class="s1">sys.path:</span>
+    <span class="s1">python_path.append(os.path.abspath(pth))</span>
+    <span class="s1">sys.path = python_path</span>
+
+
+<span class="s0"># Implement workaround for prints in non-console mode. In non-console mode (with &quot;pythonw&quot;), print randomly fails with</span>
+<span class="s0"># &quot;[errno 9] Bad file descriptor&quot; when the printed text is flushed (e.g., buffer full); this is because the sys.stdout</span>
+<span class="s0"># object is bound to an invalid file descriptor.</span>
+<span class="s0"># Python 3000 has a fix for it (http://bugs.python.org/issue1415), but we feel that a workaround in PyInstaller is a</span>
+<span class="s0"># good thing, because most people first encounter this problem with PyInstaller as they do not usually run their code</span>
+<span class="s0"># with &quot;pythonw&quot; (and it is difficult to debug, anyway).</span>
+<span class="s2">class </span><span class="s1">NullWriter:</span>
+    <span class="s1">softspace = </span><span class="s4">0</span>
+    <span class="s1">encoding = </span><span class="s3">'UTF-8'</span>
+
+    <span class="s2">def </span><span class="s1">write(*args):</span>
+        <span class="s2">pass</span>
+
+    <span class="s2">def </span><span class="s1">flush(*args):</span>
+        <span class="s2">pass</span>
+
+    <span class="s0"># Some packages are checking if stdout/stderr is available (e.g., youtube-dl). For details, see #1883.</span>
+    <span class="s2">def </span><span class="s1">isatty(self):</span>
+        <span class="s2">return False</span>
+
+
+<span class="s0"># sys.stdout/err is None in GUI mode on Windows.</span>
+<span class="s2">if </span><span class="s1">sys.stdout </span><span class="s2">is None</span><span class="s1">:</span>
+    <span class="s1">sys.stdout = NullWriter()</span>
+<span class="s2">if </span><span class="s1">sys.stderr </span><span class="s2">is None</span><span class="s1">:</span>
+    <span class="s1">sys.stderr = NullWriter()</span>
+
+<span class="s0"># At least on Windows, Python seems to hook up the codecs on this import, so it is not enough to just package up all</span>
+<span class="s0"># the encodings.</span>
+<span class="s0">#</span>
+<span class="s0"># It was also reported that without 'encodings' module, the frozen executable fails to load in some configurations:</span>
+<span class="s0"># http://www.pyinstaller.org/ticket/651</span>
+<span class="s0">#</span>
+<span class="s0"># Importing 'encodings' module in a run-time hook is not enough, since some run-time hooks require this module, and the</span>
+<span class="s0"># order of running the code from the run-time hooks is not defined.</span>
+<span class="s2">try</span><span class="s1">:</span>
+    <span class="s2">import </span><span class="s1">encodings  </span><span class="s0"># noqa: F401</span>
+<span class="s2">except </span><span class="s1">ImportError:</span>
+    <span class="s2">pass</span>
+
+<span class="s0"># In the Python interpreter 'warnings' module is imported when 'sys.warnoptions' is not empty. Mimic this behavior.</span>
+<span class="s2">if </span><span class="s1">sys.warnoptions:</span>
+    <span class="s2">import </span><span class="s1">warnings  </span><span class="s0"># noqa: F401</span>
+
+<span class="s0"># Install the hooks for ctypes</span>
+<span class="s2">import </span><span class="s1">pyimod04_ctypes  </span><span class="s0"># noqa: E402</span>
+
+<span class="s1">pyimod04_ctypes.install()</span>
+
+<span class="s0"># Make .eggs and zipfiles available at runtime</span>
+<span class="s1">d = </span><span class="s3">&quot;eggs&quot;</span>
+<span class="s1">d = os.path.join(sys._MEIPASS</span><span class="s2">, </span><span class="s1">d)</span>
+<span class="s0"># Test if the 'eggs' directory exists. This allows us to opportunistically include this script into the packaged exe,</span>
+<span class="s0"># even if no eggs were found when packaging the program. (Which may be a use-case, see issue #653).</span>
+<span class="s2">if </span><span class="s1">os.path.isdir(d):</span>
+    <span class="s2">for </span><span class="s1">fn </span><span class="s2">in </span><span class="s1">os.listdir(d):</span>
+        <span class="s1">sys.path.append(os.path.join(d</span><span class="s2">, </span><span class="s1">fn))</span>
+</pre>
+</body>
+</html>

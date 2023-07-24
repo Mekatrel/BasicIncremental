@@ -1,0 +1,1335 @@
+<html>
+<head>
+<title>declarations.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #629755; font-style: italic;}
+.s3 { color: #6a8759;}
+.s4 { color: #cc7832;}
+.s5 { color: #6897bb;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+declarations.py</font>
+</center></td></tr></table>
+<pre><span class="s0">##############################################################################</span>
+<span class="s0"># Copyright (c) 2003 Zope Foundation and Contributors.</span>
+<span class="s0"># All Rights Reserved.</span>
+<span class="s0">#</span>
+<span class="s0"># This software is subject to the provisions of the Zope Public License,</span>
+<span class="s0"># Version 2.1 (ZPL).  A copy of the ZPL should accompany this distribution.</span>
+<span class="s0"># THIS SOFTWARE IS PROVIDED &quot;AS IS&quot; AND ANY AND ALL EXPRESS OR IMPLIED</span>
+<span class="s0"># WARRANTIES ARE DISCLAIMED, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED</span>
+<span class="s0"># WARRANTIES OF TITLE, MERCHANTABILITY, AGAINST INFRINGEMENT, AND FITNESS</span>
+<span class="s0"># FOR A PARTICULAR PURPOSE.</span>
+<span class="s0">##############################################################################</span>
+<span class="s2">&quot;&quot;&quot;Implementation of interface declarations 
+ 
+There are three flavors of declarations: 
+ 
+  - Declarations are used to simply name declared interfaces. 
+ 
+  - ImplementsDeclarations are used to express the interfaces that a 
+    class implements (that instances of the class provides). 
+ 
+    Implements specifications support inheriting interfaces. 
+ 
+  - ProvidesDeclarations are used to express interfaces directly 
+    provided by objects. 
+ 
+&quot;&quot;&quot;</span>
+<span class="s1">__docformat__ = </span><span class="s3">'restructuredtext'</span>
+
+<span class="s4">import </span><span class="s1">sys</span>
+<span class="s4">from </span><span class="s1">types </span><span class="s4">import </span><span class="s1">FunctionType</span>
+<span class="s4">from </span><span class="s1">types </span><span class="s4">import </span><span class="s1">MethodType</span>
+<span class="s4">from </span><span class="s1">types </span><span class="s4">import </span><span class="s1">ModuleType</span>
+<span class="s4">import </span><span class="s1">weakref</span>
+
+<span class="s4">from </span><span class="s1">zope.interface.advice </span><span class="s4">import </span><span class="s1">addClassAdvisor</span>
+<span class="s4">from </span><span class="s1">zope.interface.interface </span><span class="s4">import </span><span class="s1">Interface</span>
+<span class="s4">from </span><span class="s1">zope.interface.interface </span><span class="s4">import </span><span class="s1">InterfaceClass</span>
+<span class="s4">from </span><span class="s1">zope.interface.interface </span><span class="s4">import </span><span class="s1">SpecificationBase</span>
+<span class="s4">from </span><span class="s1">zope.interface.interface </span><span class="s4">import </span><span class="s1">Specification</span>
+<span class="s4">from </span><span class="s1">zope.interface.interface </span><span class="s4">import </span><span class="s1">NameAndModuleComparisonMixin</span>
+<span class="s4">from </span><span class="s1">zope.interface._compat </span><span class="s4">import </span><span class="s1">CLASS_TYPES </span><span class="s4">as </span><span class="s1">DescriptorAwareMetaClasses</span>
+<span class="s4">from </span><span class="s1">zope.interface._compat </span><span class="s4">import </span><span class="s1">PYTHON3</span>
+<span class="s4">from </span><span class="s1">zope.interface._compat </span><span class="s4">import </span><span class="s1">_use_c_impl</span>
+
+<span class="s1">__all__ = [</span>
+    <span class="s0"># None. The public APIs of this module are</span>
+    <span class="s0"># re-exported from zope.interface directly.</span>
+<span class="s1">]</span>
+
+<span class="s0"># pylint:disable=too-many-lines</span>
+
+<span class="s0"># Registry of class-implementation specifications</span>
+<span class="s1">BuiltinImplementationSpecifications = {}</span>
+
+<span class="s1">_ADVICE_ERROR = (</span><span class="s3">'Class advice impossible in Python3.  '</span>
+                 <span class="s3">'Use the @%s class decorator instead.'</span><span class="s1">)</span>
+
+<span class="s1">_ADVICE_WARNING = (</span><span class="s3">'The %s API is deprecated, and will not work in Python3  '</span>
+                   <span class="s3">'Use the @%s class decorator instead.'</span><span class="s1">)</span>
+
+<span class="s4">def </span><span class="s1">_next_super_class(ob):</span>
+    <span class="s0"># When ``ob`` is an instance of ``super``, return</span>
+    <span class="s0"># the next class in the MRO that we should actually be</span>
+    <span class="s0"># looking at. Watch out for diamond inheritance!</span>
+    <span class="s1">self_class = ob.__self_class__</span>
+    <span class="s1">class_that_invoked_super = ob.__thisclass__</span>
+    <span class="s1">complete_mro = self_class.__mro__</span>
+    <span class="s1">next_class = complete_mro[complete_mro.index(class_that_invoked_super) + </span><span class="s5">1</span><span class="s1">]</span>
+    <span class="s4">return </span><span class="s1">next_class</span>
+
+<span class="s4">class </span><span class="s1">named(object):</span>
+
+    <span class="s4">def </span><span class="s1">__init__(self</span><span class="s4">, </span><span class="s1">name):</span>
+        <span class="s1">self.name = name</span>
+
+    <span class="s4">def </span><span class="s1">__call__(self</span><span class="s4">, </span><span class="s1">ob):</span>
+        <span class="s1">ob.__component_name__ = self.name</span>
+        <span class="s4">return </span><span class="s1">ob</span>
+
+
+<span class="s4">class </span><span class="s1">Declaration(Specification):</span>
+    <span class="s2">&quot;&quot;&quot;Interface declarations&quot;&quot;&quot;</span>
+
+    <span class="s1">__slots__ = ()</span>
+
+    <span class="s4">def </span><span class="s1">__init__(self</span><span class="s4">, </span><span class="s1">*bases):</span>
+        <span class="s1">Specification.__init__(self</span><span class="s4">, </span><span class="s1">_normalizeargs(bases))</span>
+
+    <span class="s4">def </span><span class="s1">__contains__(self</span><span class="s4">, </span><span class="s1">interface):</span>
+        <span class="s2">&quot;&quot;&quot;Test whether an interface is in the specification 
+        &quot;&quot;&quot;</span>
+
+        <span class="s4">return </span><span class="s1">self.extends(interface) </span><span class="s4">and </span><span class="s1">interface </span><span class="s4">in </span><span class="s1">self.interfaces()</span>
+
+    <span class="s4">def </span><span class="s1">__iter__(self):</span>
+        <span class="s2">&quot;&quot;&quot;Return an iterator for the interfaces in the specification 
+        &quot;&quot;&quot;</span>
+        <span class="s4">return </span><span class="s1">self.interfaces()</span>
+
+    <span class="s4">def </span><span class="s1">flattened(self):</span>
+        <span class="s2">&quot;&quot;&quot;Return an iterator of all included and extended interfaces 
+        &quot;&quot;&quot;</span>
+        <span class="s4">return </span><span class="s1">iter(self.__iro__)</span>
+
+    <span class="s4">def </span><span class="s1">__sub__(self</span><span class="s4">, </span><span class="s1">other):</span>
+        <span class="s2">&quot;&quot;&quot;Remove interfaces from a specification 
+        &quot;&quot;&quot;</span>
+        <span class="s4">return </span><span class="s1">Declaration(*[</span>
+            <span class="s1">i </span><span class="s4">for </span><span class="s1">i </span><span class="s4">in </span><span class="s1">self.interfaces()</span>
+            <span class="s4">if not </span><span class="s1">[</span>
+                <span class="s1">j</span>
+                <span class="s4">for </span><span class="s1">j </span><span class="s4">in </span><span class="s1">other.interfaces()</span>
+                <span class="s4">if </span><span class="s1">i.extends(j</span><span class="s4">, </span><span class="s5">0</span><span class="s1">) </span><span class="s0"># non-strict extends</span>
+            <span class="s1">]</span>
+        <span class="s1">])</span>
+
+    <span class="s4">def </span><span class="s1">__add__(self</span><span class="s4">, </span><span class="s1">other):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Add two specifications or a specification and an interface 
+        and produce a new declaration. 
+ 
+        .. versionchanged:: 5.4.0 
+           Now tries to preserve a consistent resolution order. Interfaces 
+           being added to this object are added to the front of the resulting resolution 
+           order if they already extend an interface in this object. Previously, 
+           they were always added to the end of the order, which easily resulted in 
+           invalid orders. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">before = []</span>
+        <span class="s1">result = list(self.interfaces())</span>
+        <span class="s1">seen = set(result)</span>
+        <span class="s4">for </span><span class="s1">i </span><span class="s4">in </span><span class="s1">other.interfaces():</span>
+            <span class="s4">if </span><span class="s1">i </span><span class="s4">in </span><span class="s1">seen:</span>
+                <span class="s4">continue</span>
+            <span class="s1">seen.add(i)</span>
+            <span class="s4">if </span><span class="s1">any(i.extends(x) </span><span class="s4">for </span><span class="s1">x </span><span class="s4">in </span><span class="s1">result):</span>
+                <span class="s0"># It already extends us, e.g., is a subclass,</span>
+                <span class="s0"># so it needs to go at the front of the RO.</span>
+                <span class="s1">before.append(i)</span>
+            <span class="s4">else</span><span class="s1">:</span>
+                <span class="s1">result.append(i)</span>
+        <span class="s4">return </span><span class="s1">Declaration(*(before + result))</span>
+
+    <span class="s0"># XXX: Is __radd__ needed? No tests break if it's removed.</span>
+    <span class="s0"># If it is needed, does it need to handle the C3 ordering differently?</span>
+    <span class="s0"># I (JAM) don't *think* it does.</span>
+    <span class="s1">__radd__ = __add__</span>
+
+    <span class="s1">@staticmethod</span>
+    <span class="s4">def </span><span class="s1">_add_interfaces_to_cls(interfaces</span><span class="s4">, </span><span class="s1">cls):</span>
+        <span class="s0"># Strip redundant interfaces already provided</span>
+        <span class="s0"># by the cls so we don't produce invalid</span>
+        <span class="s0"># resolution orders.</span>
+        <span class="s1">implemented_by_cls = implementedBy(cls)</span>
+        <span class="s1">interfaces = tuple([</span>
+            <span class="s1">iface</span>
+            <span class="s4">for </span><span class="s1">iface </span><span class="s4">in </span><span class="s1">interfaces</span>
+            <span class="s4">if not </span><span class="s1">implemented_by_cls.isOrExtends(iface)</span>
+        <span class="s1">])</span>
+        <span class="s4">return </span><span class="s1">interfaces + (implemented_by_cls</span><span class="s4">,</span><span class="s1">)</span>
+
+    <span class="s1">@staticmethod</span>
+    <span class="s4">def </span><span class="s1">_argument_names_for_repr(interfaces):</span>
+        <span class="s0"># These don't actually have to be interfaces, they could be other</span>
+        <span class="s0"># Specification objects like Implements. Also, the first</span>
+        <span class="s0"># one is typically/nominally the cls.</span>
+        <span class="s1">ordered_names = []</span>
+        <span class="s1">names = set()</span>
+        <span class="s4">for </span><span class="s1">iface </span><span class="s4">in </span><span class="s1">interfaces:</span>
+            <span class="s1">duplicate_transform = repr</span>
+            <span class="s4">if </span><span class="s1">isinstance(iface</span><span class="s4">, </span><span class="s1">InterfaceClass):</span>
+                <span class="s0"># Special case to get 'foo.bar.IFace'</span>
+                <span class="s0"># instead of '&lt;InterfaceClass foo.bar.IFace&gt;'</span>
+                <span class="s1">this_name = iface.__name__</span>
+                <span class="s1">duplicate_transform = str</span>
+            <span class="s4">elif </span><span class="s1">isinstance(iface</span><span class="s4">, </span><span class="s1">type):</span>
+                <span class="s0"># Likewise for types. (Ignoring legacy old-style</span>
+                <span class="s0"># classes.)</span>
+                <span class="s1">this_name = iface.__name__</span>
+                <span class="s1">duplicate_transform = _implements_name</span>
+            <span class="s4">elif </span><span class="s1">(isinstance(iface</span><span class="s4">, </span><span class="s1">Implements)</span>
+                  <span class="s4">and not </span><span class="s1">iface.declared</span>
+                  <span class="s4">and </span><span class="s1">iface.inherit </span><span class="s4">in </span><span class="s1">interfaces):</span>
+                <span class="s0"># If nothing is declared, there's no need to even print this;</span>
+                <span class="s0"># it would just show as ``classImplements(Class)``, and the</span>
+                <span class="s0"># ``Class`` has typically already.</span>
+                <span class="s4">continue</span>
+            <span class="s4">else</span><span class="s1">:</span>
+                <span class="s1">this_name = repr(iface)</span>
+
+            <span class="s1">already_seen = this_name </span><span class="s4">in </span><span class="s1">names</span>
+            <span class="s1">names.add(this_name)</span>
+            <span class="s4">if </span><span class="s1">already_seen:</span>
+                <span class="s1">this_name = duplicate_transform(iface)</span>
+
+            <span class="s1">ordered_names.append(this_name)</span>
+        <span class="s4">return </span><span class="s3">', '</span><span class="s1">.join(ordered_names)</span>
+
+
+<span class="s4">class </span><span class="s1">_ImmutableDeclaration(Declaration):</span>
+    <span class="s0"># A Declaration that is immutable. Used as a singleton to</span>
+    <span class="s0"># return empty answers for things like ``implementedBy``.</span>
+    <span class="s0"># We have to define the actual singleton after normalizeargs</span>
+    <span class="s0"># is defined, and that in turn is defined after InterfaceClass and</span>
+    <span class="s0"># Implements.</span>
+
+    <span class="s1">__slots__ = ()</span>
+
+    <span class="s1">__instance = </span><span class="s4">None</span>
+
+    <span class="s4">def </span><span class="s1">__new__(cls):</span>
+        <span class="s4">if </span><span class="s1">_ImmutableDeclaration.__instance </span><span class="s4">is None</span><span class="s1">:</span>
+            <span class="s1">_ImmutableDeclaration.__instance = object.__new__(cls)</span>
+        <span class="s4">return </span><span class="s1">_ImmutableDeclaration.__instance</span>
+
+    <span class="s4">def </span><span class="s1">__reduce__(self):</span>
+        <span class="s4">return </span><span class="s3">&quot;_empty&quot;</span>
+
+    <span class="s1">@property</span>
+    <span class="s4">def </span><span class="s1">__bases__(self):</span>
+        <span class="s4">return </span><span class="s1">()</span>
+
+    <span class="s1">@__bases__.setter</span>
+    <span class="s4">def </span><span class="s1">__bases__(self</span><span class="s4">, </span><span class="s1">new_bases):</span>
+        <span class="s0"># We expect the superclass constructor to set ``self.__bases__ = ()``.</span>
+        <span class="s0"># Rather than attempt to special case that in the constructor and allow</span>
+        <span class="s0"># setting __bases__ only at that time, it's easier to just allow setting</span>
+        <span class="s0"># the empty tuple at any time. That makes ``x.__bases__ = x.__bases__`` a nice</span>
+        <span class="s0"># no-op too. (Skipping the superclass constructor altogether is a recipe</span>
+        <span class="s0"># for maintenance headaches.)</span>
+        <span class="s4">if </span><span class="s1">new_bases != ():</span>
+            <span class="s4">raise </span><span class="s1">TypeError(</span><span class="s3">&quot;Cannot set non-empty bases on shared empty Declaration.&quot;</span><span class="s1">)</span>
+
+    <span class="s0"># As the immutable empty declaration, we cannot be changed.</span>
+    <span class="s0"># This means there's no logical reason for us to have dependents</span>
+    <span class="s0"># or subscriptions: we'll never notify them. So there's no need for</span>
+    <span class="s0"># us to keep track of any of that.</span>
+    <span class="s1">@property</span>
+    <span class="s4">def </span><span class="s1">dependents(self):</span>
+        <span class="s4">return </span><span class="s1">{}</span>
+
+    <span class="s1">changed = subscribe = unsubscribe = </span><span class="s4">lambda </span><span class="s1">self</span><span class="s4">, </span><span class="s1">_ignored: </span><span class="s4">None</span>
+
+    <span class="s4">def </span><span class="s1">interfaces(self):</span>
+        <span class="s0"># An empty iterator</span>
+        <span class="s4">return </span><span class="s1">iter(())</span>
+
+    <span class="s4">def </span><span class="s1">extends(self</span><span class="s4">, </span><span class="s1">interface</span><span class="s4">, </span><span class="s1">strict=</span><span class="s4">True</span><span class="s1">):</span>
+        <span class="s4">return </span><span class="s1">interface </span><span class="s4">is </span><span class="s1">self._ROOT</span>
+
+    <span class="s4">def </span><span class="s1">get(self</span><span class="s4">, </span><span class="s1">name</span><span class="s4">, </span><span class="s1">default=</span><span class="s4">None</span><span class="s1">):</span>
+        <span class="s4">return </span><span class="s1">default</span>
+
+    <span class="s4">def </span><span class="s1">weakref(self</span><span class="s4">, </span><span class="s1">callback=</span><span class="s4">None</span><span class="s1">):</span>
+        <span class="s0"># We're a singleton, we never go away. So there's no need to return</span>
+        <span class="s0"># distinct weakref objects here; their callbacks will never</span>
+        <span class="s0"># be called. Instead, we only need to return a callable that</span>
+        <span class="s0"># returns ourself. The easiest one is to return _ImmutableDeclaration</span>
+        <span class="s0"># itself; testing on Python 3.8 shows that's faster than a function that</span>
+        <span class="s0"># returns _empty. (Remember, one goal is to avoid allocating any</span>
+        <span class="s0"># object, and that includes a method.)</span>
+        <span class="s4">return </span><span class="s1">_ImmutableDeclaration</span>
+
+    <span class="s1">@property</span>
+    <span class="s4">def </span><span class="s1">_v_attrs(self):</span>
+        <span class="s0"># _v_attrs is not a public, documented property, but some client</span>
+        <span class="s0"># code uses it anyway as a convenient place to cache things. To keep</span>
+        <span class="s0"># the empty declaration truly immutable, we must ignore that. That includes</span>
+        <span class="s0"># ignoring assignments as well.</span>
+        <span class="s4">return </span><span class="s1">{}</span>
+
+    <span class="s1">@_v_attrs.setter</span>
+    <span class="s4">def </span><span class="s1">_v_attrs(self</span><span class="s4">, </span><span class="s1">new_attrs):</span>
+        <span class="s4">pass</span>
+
+
+<span class="s0">##############################################################################</span>
+<span class="s0">#</span>
+<span class="s0"># Implementation specifications</span>
+<span class="s0">#</span>
+<span class="s0"># These specify interfaces implemented by instances of classes</span>
+
+<span class="s4">class </span><span class="s1">Implements(NameAndModuleComparisonMixin</span><span class="s4">,</span>
+                 <span class="s1">Declaration):</span>
+    <span class="s0"># Inherit from NameAndModuleComparisonMixin to be</span>
+    <span class="s0"># mutually comparable with InterfaceClass objects.</span>
+    <span class="s0"># (The two must be mutually comparable to be able to work in e.g., BTrees.)</span>
+    <span class="s0"># Instances of this class generally don't have a __module__ other than</span>
+    <span class="s0"># `zope.interface.declarations`, whereas they *do* have a __name__ that is the</span>
+    <span class="s0"># fully qualified name of the object they are representing.</span>
+
+    <span class="s0"># Note, though, that equality and hashing are still identity based. This</span>
+    <span class="s0"># accounts for things like nested objects that have the same name (typically</span>
+    <span class="s0"># only in tests) and is consistent with pickling. As far as comparisons to InterfaceClass</span>
+    <span class="s0"># goes, we'll never have equal name and module to those, so we're still consistent there.</span>
+    <span class="s0"># Instances of this class are essentially intended to be unique and are</span>
+    <span class="s0"># heavily cached (note how our __reduce__ handles this) so having identity</span>
+    <span class="s0"># based hash and eq should also work.</span>
+
+    <span class="s0"># We want equality and hashing to be based on identity. However, we can't actually</span>
+    <span class="s0"># implement __eq__/__ne__ to do this because sometimes we get wrapped in a proxy.</span>
+    <span class="s0"># We need to let the proxy types implement these methods so they can handle unwrapping</span>
+    <span class="s0"># and then rely on: (1) the interpreter automatically changing `implements == proxy` into</span>
+    <span class="s0"># `proxy == implements` (which will call proxy.__eq__ to do the unwrapping) and then</span>
+    <span class="s0"># (2) the default equality and hashing semantics being identity based.</span>
+
+    <span class="s0"># class whose specification should be used as additional base</span>
+    <span class="s1">inherit = </span><span class="s4">None</span>
+
+    <span class="s0"># interfaces actually declared for a class</span>
+    <span class="s1">declared = ()</span>
+
+    <span class="s0"># Weak cache of {class: &lt;implements&gt;} for super objects.</span>
+    <span class="s0"># Created on demand. These are rare, as of 5.0 anyway. Using a class</span>
+    <span class="s0"># level default doesn't take space in instances. Using _v_attrs would be</span>
+    <span class="s0"># another place to store this without taking space unless needed.</span>
+    <span class="s1">_super_cache = </span><span class="s4">None</span>
+
+    <span class="s1">__name__ = </span><span class="s3">'?'</span>
+
+    <span class="s1">@classmethod</span>
+    <span class="s4">def </span><span class="s1">named(cls</span><span class="s4">, </span><span class="s1">name</span><span class="s4">, </span><span class="s1">*bases):</span>
+        <span class="s0"># Implementation method: Produce an Implements interface with</span>
+        <span class="s0"># a fully fleshed out __name__ before calling the constructor, which</span>
+        <span class="s0"># sets bases to the given interfaces and which may pass this object to</span>
+        <span class="s0"># other objects (e.g., to adjust dependents). If they're sorting or comparing</span>
+        <span class="s0"># by name, this needs to be set.</span>
+        <span class="s1">inst = cls.__new__(cls)</span>
+        <span class="s1">inst.__name__ = name</span>
+        <span class="s1">inst.__init__(*bases)</span>
+        <span class="s4">return </span><span class="s1">inst</span>
+
+    <span class="s4">def </span><span class="s1">changed(self</span><span class="s4">, </span><span class="s1">originally_changed):</span>
+        <span class="s4">try</span><span class="s1">:</span>
+            <span class="s4">del </span><span class="s1">self._super_cache</span>
+        <span class="s4">except </span><span class="s1">AttributeError:</span>
+            <span class="s4">pass</span>
+        <span class="s4">return </span><span class="s1">super(Implements</span><span class="s4">, </span><span class="s1">self).changed(originally_changed)</span>
+
+    <span class="s4">def </span><span class="s1">__repr__(self):</span>
+        <span class="s4">if </span><span class="s1">self.inherit:</span>
+            <span class="s1">name = getattr(self.inherit</span><span class="s4">, </span><span class="s3">'__name__'</span><span class="s4">, None</span><span class="s1">) </span><span class="s4">or </span><span class="s1">_implements_name(self.inherit)</span>
+        <span class="s4">else</span><span class="s1">:</span>
+            <span class="s1">name = self.__name__</span>
+        <span class="s1">declared_names = self._argument_names_for_repr(self.declared)</span>
+        <span class="s4">if </span><span class="s1">declared_names:</span>
+            <span class="s1">declared_names = </span><span class="s3">', ' </span><span class="s1">+ declared_names</span>
+        <span class="s4">return </span><span class="s3">'classImplements(%s%s)' </span><span class="s1">% (name</span><span class="s4">, </span><span class="s1">declared_names)</span>
+
+    <span class="s4">def </span><span class="s1">__reduce__(self):</span>
+        <span class="s4">return </span><span class="s1">implementedBy</span><span class="s4">, </span><span class="s1">(self.inherit</span><span class="s4">, </span><span class="s1">)</span>
+
+
+<span class="s4">def </span><span class="s1">_implements_name(ob):</span>
+    <span class="s0"># Return the __name__ attribute to be used by its __implemented__</span>
+    <span class="s0"># property.</span>
+    <span class="s0"># This must be stable for the &quot;same&quot; object across processes</span>
+    <span class="s0"># because it is used for sorting. It needn't be unique, though, in cases</span>
+    <span class="s0"># like nested classes named Foo created by different functions, because</span>
+    <span class="s0"># equality and hashing is still based on identity.</span>
+    <span class="s0"># It might be nice to use __qualname__ on Python 3, but that would produce</span>
+    <span class="s0"># different values between Py2 and Py3.</span>
+    <span class="s4">return </span><span class="s1">(getattr(ob</span><span class="s4">, </span><span class="s3">'__module__'</span><span class="s4">, </span><span class="s3">'?'</span><span class="s1">) </span><span class="s4">or </span><span class="s3">'?'</span><span class="s1">) + \</span>
+        <span class="s3">'.' </span><span class="s1">+ (getattr(ob</span><span class="s4">, </span><span class="s3">'__name__'</span><span class="s4">, </span><span class="s3">'?'</span><span class="s1">) </span><span class="s4">or </span><span class="s3">'?'</span><span class="s1">)</span>
+
+
+<span class="s4">def </span><span class="s1">_implementedBy_super(sup):</span>
+    <span class="s0"># TODO: This is now simple enough we could probably implement</span>
+    <span class="s0"># in C if needed.</span>
+
+    <span class="s0"># If the class MRO is strictly linear, we could just</span>
+    <span class="s0"># follow the normal algorithm for the next class in the</span>
+    <span class="s0"># search order (e.g., just return</span>
+    <span class="s0"># ``implemented_by_next``). But when diamond inheritance</span>
+    <span class="s0"># or mixins + interface declarations are present, we have</span>
+    <span class="s0"># to consider the whole MRO and compute a new Implements</span>
+    <span class="s0"># that excludes the classes being skipped over but</span>
+    <span class="s0"># includes everything else.</span>
+    <span class="s1">implemented_by_self = implementedBy(sup.__self_class__)</span>
+    <span class="s1">cache = implemented_by_self._super_cache </span><span class="s0"># pylint:disable=protected-access</span>
+    <span class="s4">if </span><span class="s1">cache </span><span class="s4">is None</span><span class="s1">:</span>
+        <span class="s1">cache = implemented_by_self._super_cache = weakref.WeakKeyDictionary()</span>
+
+    <span class="s1">key = sup.__thisclass__</span>
+    <span class="s4">try</span><span class="s1">:</span>
+        <span class="s4">return </span><span class="s1">cache[key]</span>
+    <span class="s4">except </span><span class="s1">KeyError:</span>
+        <span class="s4">pass</span>
+
+    <span class="s1">next_cls = _next_super_class(sup)</span>
+    <span class="s0"># For ``implementedBy(cls)``:</span>
+    <span class="s0"># .__bases__ is .declared + [implementedBy(b) for b in cls.__bases__]</span>
+    <span class="s0"># .inherit is cls</span>
+
+    <span class="s1">implemented_by_next = implementedBy(next_cls)</span>
+    <span class="s1">mro = sup.__self_class__.__mro__</span>
+    <span class="s1">ix_next_cls = mro.index(next_cls)</span>
+    <span class="s1">classes_to_keep = mro[ix_next_cls:]</span>
+    <span class="s1">new_bases = [implementedBy(c) </span><span class="s4">for </span><span class="s1">c </span><span class="s4">in </span><span class="s1">classes_to_keep]</span>
+
+    <span class="s1">new = Implements.named(</span>
+        <span class="s1">implemented_by_self.__name__ + </span><span class="s3">':' </span><span class="s1">+ implemented_by_next.__name__</span><span class="s4">,</span>
+        <span class="s1">*new_bases</span>
+    <span class="s1">)</span>
+    <span class="s1">new.inherit = implemented_by_next.inherit</span>
+    <span class="s1">new.declared = implemented_by_next.declared</span>
+    <span class="s0"># I don't *think* that new needs to subscribe to ``implemented_by_self``;</span>
+    <span class="s0"># it auto-subscribed to its bases, and that should be good enough.</span>
+    <span class="s1">cache[key] = new</span>
+
+    <span class="s4">return </span><span class="s1">new</span>
+
+
+<span class="s1">@_use_c_impl</span>
+<span class="s4">def </span><span class="s1">implementedBy(cls): </span><span class="s0"># pylint:disable=too-many-return-statements,too-many-branches</span>
+    <span class="s2">&quot;&quot;&quot;Return the interfaces implemented for a class' instances 
+ 
+      The value returned is an `~zope.interface.interfaces.IDeclaration`. 
+    &quot;&quot;&quot;</span>
+    <span class="s4">try</span><span class="s1">:</span>
+        <span class="s4">if </span><span class="s1">isinstance(cls</span><span class="s4">, </span><span class="s1">super):</span>
+            <span class="s0"># Yes, this needs to be inside the try: block. Some objects</span>
+            <span class="s0"># like security proxies even break isinstance.</span>
+            <span class="s4">return </span><span class="s1">_implementedBy_super(cls)</span>
+
+        <span class="s1">spec = cls.__dict__.get(</span><span class="s3">'__implemented__'</span><span class="s1">)</span>
+    <span class="s4">except </span><span class="s1">AttributeError:</span>
+
+        <span class="s0"># we can't get the class dict. This is probably due to a</span>
+        <span class="s0"># security proxy.  If this is the case, then probably no</span>
+        <span class="s0"># descriptor was installed for the class.</span>
+
+        <span class="s0"># We don't want to depend directly on zope.security in</span>
+        <span class="s0"># zope.interface, but we'll try to make reasonable</span>
+        <span class="s0"># accommodations in an indirect way.</span>
+
+        <span class="s0"># We'll check to see if there's an implements:</span>
+
+        <span class="s1">spec = getattr(cls</span><span class="s4">, </span><span class="s3">'__implemented__'</span><span class="s4">, None</span><span class="s1">)</span>
+        <span class="s4">if </span><span class="s1">spec </span><span class="s4">is None</span><span class="s1">:</span>
+            <span class="s0"># There's no spec stred in the class. Maybe its a builtin:</span>
+            <span class="s1">spec = BuiltinImplementationSpecifications.get(cls)</span>
+            <span class="s4">if </span><span class="s1">spec </span><span class="s4">is not None</span><span class="s1">:</span>
+                <span class="s4">return </span><span class="s1">spec</span>
+            <span class="s4">return </span><span class="s1">_empty</span>
+
+        <span class="s4">if </span><span class="s1">spec.__class__ == Implements:</span>
+            <span class="s0"># we defaulted to _empty or there was a spec. Good enough.</span>
+            <span class="s0"># Return it.</span>
+            <span class="s4">return </span><span class="s1">spec</span>
+
+        <span class="s0"># TODO: need old style __implements__ compatibility?</span>
+        <span class="s0"># Hm, there's an __implemented__, but it's not a spec. Must be</span>
+        <span class="s0"># an old-style declaration. Just compute a spec for it</span>
+        <span class="s4">return </span><span class="s1">Declaration(*_normalizeargs((spec</span><span class="s4">, </span><span class="s1">)))</span>
+
+    <span class="s4">if </span><span class="s1">isinstance(spec</span><span class="s4">, </span><span class="s1">Implements):</span>
+        <span class="s4">return </span><span class="s1">spec</span>
+
+    <span class="s4">if </span><span class="s1">spec </span><span class="s4">is None</span><span class="s1">:</span>
+        <span class="s1">spec = BuiltinImplementationSpecifications.get(cls)</span>
+        <span class="s4">if </span><span class="s1">spec </span><span class="s4">is not None</span><span class="s1">:</span>
+            <span class="s4">return </span><span class="s1">spec</span>
+
+    <span class="s0"># TODO: need old style __implements__ compatibility?</span>
+    <span class="s1">spec_name = _implements_name(cls)</span>
+    <span class="s4">if </span><span class="s1">spec </span><span class="s4">is not None</span><span class="s1">:</span>
+        <span class="s0"># old-style __implemented__ = foo declaration</span>
+        <span class="s1">spec = (spec</span><span class="s4">, </span><span class="s1">) </span><span class="s0"># tuplefy, as it might be just an int</span>
+        <span class="s1">spec = Implements.named(spec_name</span><span class="s4">, </span><span class="s1">*_normalizeargs(spec))</span>
+        <span class="s1">spec.inherit = </span><span class="s4">None    </span><span class="s0"># old-style implies no inherit</span>
+        <span class="s4">del </span><span class="s1">cls.__implemented__ </span><span class="s0"># get rid of the old-style declaration</span>
+    <span class="s4">else</span><span class="s1">:</span>
+        <span class="s4">try</span><span class="s1">:</span>
+            <span class="s1">bases = cls.__bases__</span>
+        <span class="s4">except </span><span class="s1">AttributeError:</span>
+            <span class="s4">if not </span><span class="s1">callable(cls):</span>
+                <span class="s4">raise </span><span class="s1">TypeError(</span><span class="s3">&quot;ImplementedBy called for non-factory&quot;</span><span class="s4">, </span><span class="s1">cls)</span>
+            <span class="s1">bases = ()</span>
+
+        <span class="s1">spec = Implements.named(spec_name</span><span class="s4">, </span><span class="s1">*[implementedBy(c) </span><span class="s4">for </span><span class="s1">c </span><span class="s4">in </span><span class="s1">bases])</span>
+        <span class="s1">spec.inherit = cls</span>
+
+    <span class="s4">try</span><span class="s1">:</span>
+        <span class="s1">cls.__implemented__ = spec</span>
+        <span class="s4">if not </span><span class="s1">hasattr(cls</span><span class="s4">, </span><span class="s3">'__providedBy__'</span><span class="s1">):</span>
+            <span class="s1">cls.__providedBy__ = objectSpecificationDescriptor</span>
+
+        <span class="s4">if </span><span class="s1">(isinstance(cls</span><span class="s4">, </span><span class="s1">DescriptorAwareMetaClasses)</span>
+                <span class="s4">and </span><span class="s3">'__provides__' </span><span class="s4">not in </span><span class="s1">cls.__dict__):</span>
+            <span class="s0"># Make sure we get a __provides__ descriptor</span>
+            <span class="s1">cls.__provides__ = ClassProvides(</span>
+                <span class="s1">cls</span><span class="s4">,</span>
+                <span class="s1">getattr(cls</span><span class="s4">, </span><span class="s3">'__class__'</span><span class="s4">, </span><span class="s1">type(cls))</span><span class="s4">,</span>
+                <span class="s1">)</span>
+
+    <span class="s4">except </span><span class="s1">TypeError:</span>
+        <span class="s4">if not </span><span class="s1">isinstance(cls</span><span class="s4">, </span><span class="s1">type):</span>
+            <span class="s4">raise </span><span class="s1">TypeError(</span><span class="s3">&quot;ImplementedBy called for non-type&quot;</span><span class="s4">, </span><span class="s1">cls)</span>
+        <span class="s1">BuiltinImplementationSpecifications[cls] = spec</span>
+
+    <span class="s4">return </span><span class="s1">spec</span>
+
+
+<span class="s4">def </span><span class="s1">classImplementsOnly(cls</span><span class="s4">, </span><span class="s1">*interfaces):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Declare the only interfaces implemented by instances of a class 
+ 
+    The arguments after the class are one or more interfaces or interface 
+    specifications (`~zope.interface.interfaces.IDeclaration` objects). 
+ 
+    The interfaces given (including the interfaces in the specifications) 
+    replace any previous declarations, *including* inherited definitions. If you 
+    wish to preserve inherited declarations, you can pass ``implementedBy(cls)`` 
+    in *interfaces*. This can be used to alter the interface resolution order. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">spec = implementedBy(cls)</span>
+    <span class="s0"># Clear out everything inherited. It's important to</span>
+    <span class="s0"># also clear the bases right now so that we don't improperly discard</span>
+    <span class="s0"># interfaces that are already implemented by *old* bases that we're</span>
+    <span class="s0"># about to get rid of.</span>
+    <span class="s1">spec.declared = ()</span>
+    <span class="s1">spec.inherit = </span><span class="s4">None</span>
+    <span class="s1">spec.__bases__ = ()</span>
+    <span class="s1">_classImplements_ordered(spec</span><span class="s4">, </span><span class="s1">interfaces</span><span class="s4">, </span><span class="s1">())</span>
+
+
+<span class="s4">def </span><span class="s1">classImplements(cls</span><span class="s4">, </span><span class="s1">*interfaces):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Declare additional interfaces implemented for instances of a class 
+ 
+    The arguments after the class are one or more interfaces or 
+    interface specifications (`~zope.interface.interfaces.IDeclaration` objects). 
+ 
+    The interfaces given (including the interfaces in the specifications) 
+    are added to any interfaces previously declared. An effort is made to 
+    keep a consistent C3 resolution order, but this cannot be guaranteed. 
+ 
+    .. versionchanged:: 5.0.0 
+       Each individual interface in *interfaces* may be added to either the 
+       beginning or end of the list of interfaces declared for *cls*, 
+       based on inheritance, in order to try to maintain a consistent 
+       resolution order. Previously, all interfaces were added to the end. 
+    .. versionchanged:: 5.1.0 
+       If *cls* is already declared to implement an interface (or derived interface) 
+       in *interfaces* through inheritance, the interface is ignored. Previously, it 
+       would redundantly be made direct base of *cls*, which often produced inconsistent 
+       interface resolution orders. Now, the order will be consistent, but may change. 
+       Also, if the ``__bases__`` of the *cls* are later changed, the *cls* will no 
+       longer be considered to implement such an interface (changing the ``__bases__`` of *cls* 
+       has never been supported). 
+    &quot;&quot;&quot;</span>
+    <span class="s1">spec = implementedBy(cls)</span>
+    <span class="s1">interfaces = tuple(_normalizeargs(interfaces))</span>
+
+    <span class="s1">before = []</span>
+    <span class="s1">after = []</span>
+
+    <span class="s0"># Take steps to try to avoid producing an invalid resolution</span>
+    <span class="s0"># order, while still allowing for BWC (in the past, we always</span>
+    <span class="s0"># appended)</span>
+    <span class="s4">for </span><span class="s1">iface </span><span class="s4">in </span><span class="s1">interfaces:</span>
+        <span class="s4">for </span><span class="s1">b </span><span class="s4">in </span><span class="s1">spec.declared:</span>
+            <span class="s4">if </span><span class="s1">iface.extends(b):</span>
+                <span class="s1">before.append(iface)</span>
+                <span class="s4">break</span>
+        <span class="s4">else</span><span class="s1">:</span>
+            <span class="s1">after.append(iface)</span>
+    <span class="s1">_classImplements_ordered(spec</span><span class="s4">, </span><span class="s1">tuple(before)</span><span class="s4">, </span><span class="s1">tuple(after))</span>
+
+
+<span class="s4">def </span><span class="s1">classImplementsFirst(cls</span><span class="s4">, </span><span class="s1">iface):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Declare that instances of *cls* additionally provide *iface*. 
+ 
+    The second argument is an interface or interface specification. 
+    It is added as the highest priority (first in the IRO) interface; 
+    no attempt is made to keep a consistent resolution order. 
+ 
+    .. versionadded:: 5.0.0 
+    &quot;&quot;&quot;</span>
+    <span class="s1">spec = implementedBy(cls)</span>
+    <span class="s1">_classImplements_ordered(spec</span><span class="s4">, </span><span class="s1">(iface</span><span class="s4">,</span><span class="s1">)</span><span class="s4">, </span><span class="s1">())</span>
+
+
+<span class="s4">def </span><span class="s1">_classImplements_ordered(spec</span><span class="s4">, </span><span class="s1">before=()</span><span class="s4">, </span><span class="s1">after=()):</span>
+    <span class="s0"># Elide everything already inherited.</span>
+    <span class="s0"># Except, if it is the root, and we don't already declare anything else</span>
+    <span class="s0"># that would imply it, allow the root through. (TODO: When we disallow non-strict</span>
+    <span class="s0"># IRO, this part of the check can be removed because it's not possible to re-declare</span>
+    <span class="s0"># like that.)</span>
+    <span class="s1">before = [</span>
+        <span class="s1">x</span>
+        <span class="s4">for </span><span class="s1">x </span><span class="s4">in </span><span class="s1">before</span>
+        <span class="s4">if not </span><span class="s1">spec.isOrExtends(x) </span><span class="s4">or </span><span class="s1">(x </span><span class="s4">is </span><span class="s1">Interface </span><span class="s4">and not </span><span class="s1">spec.declared)</span>
+    <span class="s1">]</span>
+    <span class="s1">after = [</span>
+        <span class="s1">x</span>
+        <span class="s4">for </span><span class="s1">x </span><span class="s4">in </span><span class="s1">after</span>
+        <span class="s4">if not </span><span class="s1">spec.isOrExtends(x) </span><span class="s4">or </span><span class="s1">(x </span><span class="s4">is </span><span class="s1">Interface </span><span class="s4">and not </span><span class="s1">spec.declared)</span>
+    <span class="s1">]</span>
+
+    <span class="s0"># eliminate duplicates</span>
+    <span class="s1">new_declared = []</span>
+    <span class="s1">seen = set()</span>
+    <span class="s4">for </span><span class="s1">l </span><span class="s4">in </span><span class="s1">before</span><span class="s4">, </span><span class="s1">spec.declared</span><span class="s4">, </span><span class="s1">after:</span>
+        <span class="s4">for </span><span class="s1">b </span><span class="s4">in </span><span class="s1">l:</span>
+            <span class="s4">if </span><span class="s1">b </span><span class="s4">not in </span><span class="s1">seen:</span>
+                <span class="s1">new_declared.append(b)</span>
+                <span class="s1">seen.add(b)</span>
+
+    <span class="s1">spec.declared = tuple(new_declared)</span>
+
+    <span class="s0"># compute the bases</span>
+    <span class="s1">bases = new_declared </span><span class="s0"># guaranteed no dupes</span>
+
+    <span class="s4">if </span><span class="s1">spec.inherit </span><span class="s4">is not None</span><span class="s1">:</span>
+        <span class="s4">for </span><span class="s1">c </span><span class="s4">in </span><span class="s1">spec.inherit.__bases__:</span>
+            <span class="s1">b = implementedBy(c)</span>
+            <span class="s4">if </span><span class="s1">b </span><span class="s4">not in </span><span class="s1">seen:</span>
+                <span class="s1">seen.add(b)</span>
+                <span class="s1">bases.append(b)</span>
+
+    <span class="s1">spec.__bases__ = tuple(bases)</span>
+
+
+<span class="s4">def </span><span class="s1">_implements_advice(cls):</span>
+    <span class="s1">interfaces</span><span class="s4">, </span><span class="s1">do_classImplements = cls.__dict__[</span><span class="s3">'__implements_advice_data__'</span><span class="s1">]</span>
+    <span class="s4">del </span><span class="s1">cls.__implements_advice_data__</span>
+    <span class="s1">do_classImplements(cls</span><span class="s4">, </span><span class="s1">*interfaces)</span>
+    <span class="s4">return </span><span class="s1">cls</span>
+
+
+<span class="s4">class </span><span class="s1">implementer(object):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Declare the interfaces implemented by instances of a class. 
+ 
+    This function is called as a class decorator. 
+ 
+    The arguments are one or more interfaces or interface 
+    specifications (`~zope.interface.interfaces.IDeclaration` 
+    objects). 
+ 
+    The interfaces given (including the interfaces in the 
+    specifications) are added to any interfaces previously declared, 
+    unless the interface is already implemented. 
+ 
+    Previous declarations include declarations for base classes unless 
+    implementsOnly was used. 
+ 
+    This function is provided for convenience. It provides a more 
+    convenient way to call `classImplements`. For example:: 
+ 
+        @implementer(I1) 
+        class C(object): 
+            pass 
+ 
+    is equivalent to calling:: 
+ 
+        classImplements(C, I1) 
+ 
+    after the class has been created. 
+ 
+    .. seealso:: `classImplements` 
+       The change history provided there applies to this function too. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">__slots__ = (</span><span class="s3">'interfaces'</span><span class="s4">,</span><span class="s1">)</span>
+
+    <span class="s4">def </span><span class="s1">__init__(self</span><span class="s4">, </span><span class="s1">*interfaces):</span>
+        <span class="s1">self.interfaces = interfaces</span>
+
+    <span class="s4">def </span><span class="s1">__call__(self</span><span class="s4">, </span><span class="s1">ob):</span>
+        <span class="s4">if </span><span class="s1">isinstance(ob</span><span class="s4">, </span><span class="s1">DescriptorAwareMetaClasses):</span>
+            <span class="s0"># This is the common branch for new-style (object) and</span>
+            <span class="s0"># on Python 2 old-style classes.</span>
+            <span class="s1">classImplements(ob</span><span class="s4">, </span><span class="s1">*self.interfaces)</span>
+            <span class="s4">return </span><span class="s1">ob</span>
+
+        <span class="s1">spec_name = _implements_name(ob)</span>
+        <span class="s1">spec = Implements.named(spec_name</span><span class="s4">, </span><span class="s1">*self.interfaces)</span>
+        <span class="s4">try</span><span class="s1">:</span>
+            <span class="s1">ob.__implemented__ = spec</span>
+        <span class="s4">except </span><span class="s1">AttributeError:</span>
+            <span class="s4">raise </span><span class="s1">TypeError(</span><span class="s3">&quot;Can't declare implements&quot;</span><span class="s4">, </span><span class="s1">ob)</span>
+        <span class="s4">return </span><span class="s1">ob</span>
+
+<span class="s4">class </span><span class="s1">implementer_only(object):</span>
+    <span class="s2">&quot;&quot;&quot;Declare the only interfaces implemented by instances of a class 
+ 
+      This function is called as a class decorator. 
+ 
+      The arguments are one or more interfaces or interface 
+      specifications (`~zope.interface.interfaces.IDeclaration` objects). 
+ 
+      Previous declarations including declarations for base classes 
+      are overridden. 
+ 
+      This function is provided for convenience. It provides a more 
+      convenient way to call `classImplementsOnly`. For example:: 
+ 
+        @implementer_only(I1) 
+        class C(object): pass 
+ 
+      is equivalent to calling:: 
+ 
+        classImplementsOnly(I1) 
+ 
+      after the class has been created. 
+      &quot;&quot;&quot;</span>
+
+    <span class="s4">def </span><span class="s1">__init__(self</span><span class="s4">, </span><span class="s1">*interfaces):</span>
+        <span class="s1">self.interfaces = interfaces</span>
+
+    <span class="s4">def </span><span class="s1">__call__(self</span><span class="s4">, </span><span class="s1">ob):</span>
+        <span class="s4">if </span><span class="s1">isinstance(ob</span><span class="s4">, </span><span class="s1">(FunctionType</span><span class="s4">, </span><span class="s1">MethodType)):</span>
+            <span class="s0"># XXX Does this decorator make sense for anything but classes?</span>
+            <span class="s0"># I don't think so. There can be no inheritance of interfaces</span>
+            <span class="s0"># on a method or function....</span>
+            <span class="s4">raise </span><span class="s1">ValueError(</span><span class="s3">'The implementer_only decorator is not '</span>
+                             <span class="s3">'supported for methods or functions.'</span><span class="s1">)</span>
+
+        <span class="s0"># Assume it's a class:</span>
+        <span class="s1">classImplementsOnly(ob</span><span class="s4">, </span><span class="s1">*self.interfaces)</span>
+        <span class="s4">return </span><span class="s1">ob</span>
+
+<span class="s4">def </span><span class="s1">_implements(name</span><span class="s4">, </span><span class="s1">interfaces</span><span class="s4">, </span><span class="s1">do_classImplements):</span>
+    <span class="s0"># This entire approach is invalid under Py3K.  Don't even try to fix</span>
+    <span class="s0"># the coverage for this block there. :(</span>
+    <span class="s1">frame = sys._getframe(</span><span class="s5">2</span><span class="s1">) </span><span class="s0"># pylint:disable=protected-access</span>
+    <span class="s1">locals = frame.f_locals </span><span class="s0"># pylint:disable=redefined-builtin</span>
+
+    <span class="s0"># Try to make sure we were called from a class def. In 2.2.0 we can't</span>
+    <span class="s0"># check for __module__ since it doesn't seem to be added to the locals</span>
+    <span class="s0"># until later on.</span>
+    <span class="s4">if </span><span class="s1">locals </span><span class="s4">is </span><span class="s1">frame.f_globals </span><span class="s4">or </span><span class="s3">'__module__' </span><span class="s4">not in </span><span class="s1">locals:</span>
+        <span class="s4">raise </span><span class="s1">TypeError(name+</span><span class="s3">&quot; can be used only from a class definition.&quot;</span><span class="s1">)</span>
+
+    <span class="s4">if </span><span class="s3">'__implements_advice_data__' </span><span class="s4">in </span><span class="s1">locals:</span>
+        <span class="s4">raise </span><span class="s1">TypeError(name+</span><span class="s3">&quot; can be used only once in a class definition.&quot;</span><span class="s1">)</span>
+
+    <span class="s1">locals[</span><span class="s3">'__implements_advice_data__'</span><span class="s1">] = interfaces</span><span class="s4">, </span><span class="s1">do_classImplements</span>
+    <span class="s1">addClassAdvisor(_implements_advice</span><span class="s4">, </span><span class="s1">depth=</span><span class="s5">3</span><span class="s1">)</span>
+
+<span class="s4">def </span><span class="s1">implements(*interfaces):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Declare interfaces implemented by instances of a class. 
+ 
+    .. deprecated:: 5.0 
+        This only works for Python 2. The `implementer` decorator 
+        is preferred for all versions. 
+ 
+    This function is called in a class definition. 
+ 
+    The arguments are one or more interfaces or interface 
+    specifications (`~zope.interface.interfaces.IDeclaration` 
+    objects). 
+ 
+    The interfaces given (including the interfaces in the 
+    specifications) are added to any interfaces previously declared. 
+ 
+    Previous declarations include declarations for base classes unless 
+    `implementsOnly` was used. 
+ 
+    This function is provided for convenience. It provides a more 
+    convenient way to call `classImplements`. For example:: 
+ 
+        implements(I1) 
+ 
+    is equivalent to calling:: 
+ 
+        classImplements(C, I1) 
+ 
+    after the class has been created. 
+    &quot;&quot;&quot;</span>
+    <span class="s0"># This entire approach is invalid under Py3K.  Don't even try to fix</span>
+    <span class="s0"># the coverage for this block there. :(</span>
+    <span class="s4">if </span><span class="s1">PYTHON3:</span>
+        <span class="s4">raise </span><span class="s1">TypeError(_ADVICE_ERROR % </span><span class="s3">'implementer'</span><span class="s1">)</span>
+    <span class="s1">_implements(</span><span class="s3">&quot;implements&quot;</span><span class="s4">, </span><span class="s1">interfaces</span><span class="s4">, </span><span class="s1">classImplements)</span>
+
+<span class="s4">def </span><span class="s1">implementsOnly(*interfaces):</span>
+    <span class="s2">&quot;&quot;&quot;Declare the only interfaces implemented by instances of a class 
+ 
+      This function is called in a class definition. 
+ 
+      The arguments are one or more interfaces or interface 
+      specifications (`~zope.interface.interfaces.IDeclaration` objects). 
+ 
+      Previous declarations including declarations for base classes 
+      are overridden. 
+ 
+      This function is provided for convenience. It provides a more 
+      convenient way to call `classImplementsOnly`. For example:: 
+ 
+        implementsOnly(I1) 
+ 
+      is equivalent to calling:: 
+ 
+        classImplementsOnly(I1) 
+ 
+      after the class has been created. 
+    &quot;&quot;&quot;</span>
+    <span class="s0"># This entire approach is invalid under Py3K.  Don't even try to fix</span>
+    <span class="s0"># the coverage for this block there. :(</span>
+    <span class="s4">if </span><span class="s1">PYTHON3:</span>
+        <span class="s4">raise </span><span class="s1">TypeError(_ADVICE_ERROR % </span><span class="s3">'implementer_only'</span><span class="s1">)</span>
+    <span class="s1">_implements(</span><span class="s3">&quot;implementsOnly&quot;</span><span class="s4">, </span><span class="s1">interfaces</span><span class="s4">, </span><span class="s1">classImplementsOnly)</span>
+
+<span class="s0">##############################################################################</span>
+<span class="s0">#</span>
+<span class="s0"># Instance declarations</span>
+
+<span class="s4">class </span><span class="s1">Provides(Declaration):  </span><span class="s0"># Really named ProvidesClass</span>
+    <span class="s2">&quot;&quot;&quot;Implement ``__provides__``, the instance-specific specification 
+ 
+    When an object is pickled, we pickle the interfaces that it implements. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s4">def </span><span class="s1">__init__(self</span><span class="s4">, </span><span class="s1">cls</span><span class="s4">, </span><span class="s1">*interfaces):</span>
+        <span class="s1">self.__args = (cls</span><span class="s4">, </span><span class="s1">) + interfaces</span>
+        <span class="s1">self._cls = cls</span>
+        <span class="s1">Declaration.__init__(self</span><span class="s4">, </span><span class="s1">*self._add_interfaces_to_cls(interfaces</span><span class="s4">, </span><span class="s1">cls))</span>
+
+    <span class="s0"># Added to by ``moduleProvides``, et al</span>
+    <span class="s1">_v_module_names = ()</span>
+
+    <span class="s4">def </span><span class="s1">__repr__(self):</span>
+        <span class="s0"># The typical way to create instances of this</span>
+        <span class="s0"># object is via calling ``directlyProvides(...)`` or ``alsoProvides()``,</span>
+        <span class="s0"># but that's not the only way. Proxies, for example,</span>
+        <span class="s0"># directly use the ``Provides(...)`` function (which is the</span>
+        <span class="s0"># more generic method, and what we pickle as). We're after the most</span>
+        <span class="s0"># readable, useful repr in the common case, so we use the most</span>
+        <span class="s0"># common name.</span>
+        <span class="s0">#</span>
+        <span class="s0"># We also cooperate with ``moduleProvides`` to attempt to do the</span>
+        <span class="s0"># right thing for that API. See it for details.</span>
+        <span class="s1">function_name = </span><span class="s3">'directlyProvides'</span>
+        <span class="s4">if </span><span class="s1">self._cls </span><span class="s4">is </span><span class="s1">ModuleType </span><span class="s4">and </span><span class="s1">self._v_module_names:</span>
+            <span class="s0"># See notes in ``moduleProvides``/``directlyProvides``</span>
+            <span class="s1">providing_on_module = </span><span class="s4">True</span>
+            <span class="s1">interfaces = self.__args[</span><span class="s5">1</span><span class="s1">:]</span>
+        <span class="s4">else</span><span class="s1">:</span>
+            <span class="s1">providing_on_module = </span><span class="s4">False</span>
+            <span class="s1">interfaces = (self._cls</span><span class="s4">,</span><span class="s1">) + self.__bases__</span>
+        <span class="s1">ordered_names = self._argument_names_for_repr(interfaces)</span>
+        <span class="s4">if </span><span class="s1">providing_on_module:</span>
+            <span class="s1">mod_names = self._v_module_names</span>
+            <span class="s4">if </span><span class="s1">len(mod_names) == </span><span class="s5">1</span><span class="s1">:</span>
+                <span class="s1">mod_names = </span><span class="s3">&quot;sys.modules[%r]&quot; </span><span class="s1">% mod_names[</span><span class="s5">0</span><span class="s1">]</span>
+            <span class="s1">ordered_names = (</span>
+                <span class="s3">'%s, ' </span><span class="s1">% (mod_names</span><span class="s4">,</span><span class="s1">)</span>
+            <span class="s1">) + ordered_names</span>
+        <span class="s4">return </span><span class="s3">&quot;%s(%s)&quot; </span><span class="s1">% (</span>
+            <span class="s1">function_name</span><span class="s4">,</span>
+            <span class="s1">ordered_names</span><span class="s4">,</span>
+        <span class="s1">)</span>
+
+    <span class="s4">def </span><span class="s1">__reduce__(self):</span>
+        <span class="s0"># This reduces to the Provides *function*, not</span>
+        <span class="s0"># this class.</span>
+        <span class="s4">return </span><span class="s1">Provides</span><span class="s4">, </span><span class="s1">self.__args</span>
+
+    <span class="s1">__module__ = </span><span class="s3">'zope.interface'</span>
+
+    <span class="s4">def </span><span class="s1">__get__(self</span><span class="s4">, </span><span class="s1">inst</span><span class="s4">, </span><span class="s1">cls):</span>
+        <span class="s2">&quot;&quot;&quot;Make sure that a class __provides__ doesn't leak to an instance 
+        &quot;&quot;&quot;</span>
+        <span class="s4">if </span><span class="s1">inst </span><span class="s4">is None and </span><span class="s1">cls </span><span class="s4">is </span><span class="s1">self._cls:</span>
+            <span class="s0"># We were accessed through a class, so we are the class'</span>
+            <span class="s0"># provides spec. Just return this object, but only if we are</span>
+            <span class="s0"># being called on the same class that we were defined for:</span>
+            <span class="s4">return </span><span class="s1">self</span>
+
+        <span class="s4">raise </span><span class="s1">AttributeError(</span><span class="s3">'__provides__'</span><span class="s1">)</span>
+
+<span class="s1">ProvidesClass = Provides</span>
+
+<span class="s0"># Registry of instance declarations</span>
+<span class="s0"># This is a memory optimization to allow objects to share specifications.</span>
+<span class="s1">InstanceDeclarations = weakref.WeakValueDictionary()</span>
+
+<span class="s4">def </span><span class="s1">Provides(*interfaces): </span><span class="s0"># pylint:disable=function-redefined</span>
+    <span class="s2">&quot;&quot;&quot;Cache instance declarations 
+ 
+      Instance declarations are shared among instances that have the same 
+      declaration. The declarations are cached in a weak value dictionary. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">spec = InstanceDeclarations.get(interfaces)</span>
+    <span class="s4">if </span><span class="s1">spec </span><span class="s4">is None</span><span class="s1">:</span>
+        <span class="s1">spec = ProvidesClass(*interfaces)</span>
+        <span class="s1">InstanceDeclarations[interfaces] = spec</span>
+
+    <span class="s4">return </span><span class="s1">spec</span>
+
+<span class="s1">Provides.__safe_for_unpickling__ = </span><span class="s4">True</span>
+
+
+<span class="s4">def </span><span class="s1">directlyProvides(object</span><span class="s4">, </span><span class="s1">*interfaces): </span><span class="s0"># pylint:disable=redefined-builtin</span>
+    <span class="s2">&quot;&quot;&quot;Declare interfaces declared directly for an object 
+ 
+      The arguments after the object are one or more interfaces or interface 
+      specifications (`~zope.interface.interfaces.IDeclaration` objects). 
+ 
+      The interfaces given (including the interfaces in the specifications) 
+      replace interfaces previously declared for the object. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">cls = getattr(object</span><span class="s4">, </span><span class="s3">'__class__'</span><span class="s4">, None</span><span class="s1">)</span>
+    <span class="s4">if </span><span class="s1">cls </span><span class="s4">is not None and </span><span class="s1">getattr(cls</span><span class="s4">, </span><span class="s3">'__class__'</span><span class="s4">, None</span><span class="s1">) </span><span class="s4">is </span><span class="s1">cls:</span>
+        <span class="s0"># It's a meta class (well, at least it it could be an extension class)</span>
+        <span class="s0"># Note that we can't get here from Py3k tests:  there is no normal</span>
+        <span class="s0"># class which isn't descriptor aware.</span>
+        <span class="s4">if not </span><span class="s1">isinstance(object</span><span class="s4">,</span>
+                          <span class="s1">DescriptorAwareMetaClasses):</span>
+            <span class="s4">raise </span><span class="s1">TypeError(</span><span class="s3">&quot;Attempt to make an interface declaration on a &quot;</span>
+                            <span class="s3">&quot;non-descriptor-aware class&quot;</span><span class="s1">)</span>
+
+    <span class="s1">interfaces = _normalizeargs(interfaces)</span>
+    <span class="s4">if </span><span class="s1">cls </span><span class="s4">is None</span><span class="s1">:</span>
+        <span class="s1">cls = type(object)</span>
+
+    <span class="s1">issub = </span><span class="s4">False</span>
+    <span class="s4">for </span><span class="s1">damc </span><span class="s4">in </span><span class="s1">DescriptorAwareMetaClasses:</span>
+        <span class="s4">if </span><span class="s1">issubclass(cls</span><span class="s4">, </span><span class="s1">damc):</span>
+            <span class="s1">issub = </span><span class="s4">True</span>
+            <span class="s4">break</span>
+    <span class="s4">if </span><span class="s1">issub:</span>
+        <span class="s0"># we have a class or type.  We'll use a special descriptor</span>
+        <span class="s0"># that provides some extra caching</span>
+        <span class="s1">object.__provides__ = ClassProvides(object</span><span class="s4">, </span><span class="s1">cls</span><span class="s4">, </span><span class="s1">*interfaces)</span>
+    <span class="s4">else</span><span class="s1">:</span>
+        <span class="s1">provides = object.__provides__ = Provides(cls</span><span class="s4">, </span><span class="s1">*interfaces)</span>
+        <span class="s0"># See notes in ``moduleProvides``.</span>
+        <span class="s4">if </span><span class="s1">issubclass(cls</span><span class="s4">, </span><span class="s1">ModuleType) </span><span class="s4">and </span><span class="s1">hasattr(object</span><span class="s4">, </span><span class="s3">'__name__'</span><span class="s1">):</span>
+            <span class="s1">provides._v_module_names += (object.__name__</span><span class="s4">,</span><span class="s1">)</span>
+
+
+
+<span class="s4">def </span><span class="s1">alsoProvides(object</span><span class="s4">, </span><span class="s1">*interfaces): </span><span class="s0"># pylint:disable=redefined-builtin</span>
+    <span class="s2">&quot;&quot;&quot;Declare interfaces declared directly for an object 
+ 
+    The arguments after the object are one or more interfaces or interface 
+    specifications (`~zope.interface.interfaces.IDeclaration` objects). 
+ 
+    The interfaces given (including the interfaces in the specifications) are 
+    added to the interfaces previously declared for the object. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">directlyProvides(object</span><span class="s4">, </span><span class="s1">directlyProvidedBy(object)</span><span class="s4">, </span><span class="s1">*interfaces)</span>
+
+
+<span class="s4">def </span><span class="s1">noLongerProvides(object</span><span class="s4">, </span><span class="s1">interface): </span><span class="s0"># pylint:disable=redefined-builtin</span>
+    <span class="s2">&quot;&quot;&quot; Removes a directly provided interface from an object. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">directlyProvides(object</span><span class="s4">, </span><span class="s1">directlyProvidedBy(object) - interface)</span>
+    <span class="s4">if </span><span class="s1">interface.providedBy(object):</span>
+        <span class="s4">raise </span><span class="s1">ValueError(</span><span class="s3">&quot;Can only remove directly provided interfaces.&quot;</span><span class="s1">)</span>
+
+
+<span class="s1">@_use_c_impl</span>
+<span class="s4">class </span><span class="s1">ClassProvidesBase(SpecificationBase):</span>
+
+    <span class="s1">__slots__ = (</span>
+        <span class="s3">'_cls'</span><span class="s4">,</span>
+        <span class="s3">'_implements'</span><span class="s4">,</span>
+    <span class="s1">)</span>
+
+    <span class="s4">def </span><span class="s1">__get__(self</span><span class="s4">, </span><span class="s1">inst</span><span class="s4">, </span><span class="s1">cls):</span>
+        <span class="s0"># member slots are set by subclass</span>
+        <span class="s0"># pylint:disable=no-member</span>
+        <span class="s4">if </span><span class="s1">cls </span><span class="s4">is </span><span class="s1">self._cls:</span>
+            <span class="s0"># We only work if called on the class we were defined for</span>
+
+            <span class="s4">if </span><span class="s1">inst </span><span class="s4">is None</span><span class="s1">:</span>
+                <span class="s0"># We were accessed through a class, so we are the class'</span>
+                <span class="s0"># provides spec. Just return this object as is:</span>
+                <span class="s4">return </span><span class="s1">self</span>
+
+            <span class="s4">return </span><span class="s1">self._implements</span>
+
+        <span class="s4">raise </span><span class="s1">AttributeError(</span><span class="s3">'__provides__'</span><span class="s1">)</span>
+
+
+<span class="s4">class </span><span class="s1">ClassProvides(Declaration</span><span class="s4">, </span><span class="s1">ClassProvidesBase):</span>
+    <span class="s2">&quot;&quot;&quot;Special descriptor for class ``__provides__`` 
+ 
+    The descriptor caches the implementedBy info, so that 
+    we can get declarations for objects without instance-specific 
+    interfaces a bit quicker. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s1">__slots__ = (</span>
+        <span class="s3">'__args'</span><span class="s4">,</span>
+    <span class="s1">)</span>
+
+    <span class="s4">def </span><span class="s1">__init__(self</span><span class="s4">, </span><span class="s1">cls</span><span class="s4">, </span><span class="s1">metacls</span><span class="s4">, </span><span class="s1">*interfaces):</span>
+        <span class="s1">self._cls = cls</span>
+        <span class="s1">self._implements = implementedBy(cls)</span>
+        <span class="s1">self.__args = (cls</span><span class="s4">, </span><span class="s1">metacls</span><span class="s4">, </span><span class="s1">) + interfaces</span>
+        <span class="s1">Declaration.__init__(self</span><span class="s4">, </span><span class="s1">*self._add_interfaces_to_cls(interfaces</span><span class="s4">, </span><span class="s1">metacls))</span>
+
+    <span class="s4">def </span><span class="s1">__repr__(self):</span>
+        <span class="s0"># There are two common ways to get instances of this object:</span>
+        <span class="s0"># The most interesting way is calling ``@provider(..)`` as a decorator</span>
+        <span class="s0"># of a class; this is the same as calling ``directlyProvides(cls, ...)``.</span>
+        <span class="s0">#</span>
+        <span class="s0"># The other way is by default: anything that invokes ``implementedBy(x)``</span>
+        <span class="s0"># will wind up putting an instance in ``type(x).__provides__``; this includes</span>
+        <span class="s0"># the ``@implementer(...)`` decorator. Those instances won't have any</span>
+        <span class="s0"># interfaces.</span>
+        <span class="s0">#</span>
+        <span class="s0"># Thus, as our repr, we go with the ``directlyProvides()`` syntax.</span>
+        <span class="s1">interfaces = (self._cls</span><span class="s4">, </span><span class="s1">) + self.__args[</span><span class="s5">2</span><span class="s1">:]</span>
+        <span class="s1">ordered_names = self._argument_names_for_repr(interfaces)</span>
+        <span class="s4">return </span><span class="s3">&quot;directlyProvides(%s)&quot; </span><span class="s1">% (ordered_names</span><span class="s4">,</span><span class="s1">)</span>
+
+    <span class="s4">def </span><span class="s1">__reduce__(self):</span>
+        <span class="s4">return </span><span class="s1">self.__class__</span><span class="s4">, </span><span class="s1">self.__args</span>
+
+    <span class="s0"># Copy base-class method for speed</span>
+    <span class="s1">__get__ = ClassProvidesBase.__get__</span>
+
+
+<span class="s4">def </span><span class="s1">directlyProvidedBy(object): </span><span class="s0"># pylint:disable=redefined-builtin</span>
+    <span class="s2">&quot;&quot;&quot;Return the interfaces directly provided by the given object 
+ 
+    The value returned is an `~zope.interface.interfaces.IDeclaration`. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">provides = getattr(object</span><span class="s4">, </span><span class="s3">&quot;__provides__&quot;</span><span class="s4">, None</span><span class="s1">)</span>
+    <span class="s4">if </span><span class="s1">(</span>
+            <span class="s1">provides </span><span class="s4">is None </span><span class="s0"># no spec</span>
+            <span class="s0"># We might have gotten the implements spec, as an</span>
+            <span class="s0"># optimization. If so, it's like having only one base, that we</span>
+            <span class="s0"># lop off to exclude class-supplied declarations:</span>
+            <span class="s4">or </span><span class="s1">isinstance(provides</span><span class="s4">, </span><span class="s1">Implements)</span>
+    <span class="s1">):</span>
+        <span class="s4">return </span><span class="s1">_empty</span>
+
+    <span class="s0"># Strip off the class part of the spec:</span>
+    <span class="s4">return </span><span class="s1">Declaration(provides.__bases__[:-</span><span class="s5">1</span><span class="s1">])</span>
+
+
+<span class="s4">def </span><span class="s1">classProvides(*interfaces):</span>
+    <span class="s2">&quot;&quot;&quot;Declare interfaces provided directly by a class 
+ 
+      This function is called in a class definition. 
+ 
+      The arguments are one or more interfaces or interface specifications 
+      (`~zope.interface.interfaces.IDeclaration` objects). 
+ 
+      The given interfaces (including the interfaces in the specifications) 
+      are used to create the class's direct-object interface specification. 
+      An error will be raised if the module class has an direct interface 
+      specification. In other words, it is an error to call this function more 
+      than once in a class definition. 
+ 
+      Note that the given interfaces have nothing to do with the interfaces 
+      implemented by instances of the class. 
+ 
+      This function is provided for convenience. It provides a more convenient 
+      way to call `directlyProvides` for a class. For example:: 
+ 
+        classProvides(I1) 
+ 
+      is equivalent to calling:: 
+ 
+        directlyProvides(theclass, I1) 
+ 
+      after the class has been created. 
+    &quot;&quot;&quot;</span>
+    <span class="s0"># This entire approach is invalid under Py3K.  Don't even try to fix</span>
+    <span class="s0"># the coverage for this block there. :(</span>
+
+    <span class="s4">if </span><span class="s1">PYTHON3:</span>
+        <span class="s4">raise </span><span class="s1">TypeError(_ADVICE_ERROR % </span><span class="s3">'provider'</span><span class="s1">)</span>
+
+    <span class="s1">frame = sys._getframe(</span><span class="s5">1</span><span class="s1">) </span><span class="s0"># pylint:disable=protected-access</span>
+    <span class="s1">locals = frame.f_locals </span><span class="s0"># pylint:disable=redefined-builtin</span>
+
+    <span class="s0"># Try to make sure we were called from a class def</span>
+    <span class="s4">if </span><span class="s1">(locals </span><span class="s4">is </span><span class="s1">frame.f_globals) </span><span class="s4">or </span><span class="s1">(</span><span class="s3">'__module__' </span><span class="s4">not in </span><span class="s1">locals):</span>
+        <span class="s4">raise </span><span class="s1">TypeError(</span><span class="s3">&quot;classProvides can be used only from a &quot;</span>
+                        <span class="s3">&quot;class definition.&quot;</span><span class="s1">)</span>
+
+    <span class="s4">if </span><span class="s3">'__provides__' </span><span class="s4">in </span><span class="s1">locals:</span>
+        <span class="s4">raise </span><span class="s1">TypeError(</span>
+            <span class="s3">&quot;classProvides can only be used once in a class definition.&quot;</span><span class="s1">)</span>
+
+    <span class="s1">locals[</span><span class="s3">&quot;__provides__&quot;</span><span class="s1">] = _normalizeargs(interfaces)</span>
+
+    <span class="s1">addClassAdvisor(_classProvides_advice</span><span class="s4">, </span><span class="s1">depth=</span><span class="s5">2</span><span class="s1">)</span>
+
+<span class="s4">def </span><span class="s1">_classProvides_advice(cls):</span>
+    <span class="s0"># This entire approach is invalid under Py3K.  Don't even try to fix</span>
+    <span class="s0"># the coverage for this block there. :(</span>
+    <span class="s1">interfaces = cls.__dict__[</span><span class="s3">'__provides__'</span><span class="s1">]</span>
+    <span class="s4">del </span><span class="s1">cls.__provides__</span>
+    <span class="s1">directlyProvides(cls</span><span class="s4">, </span><span class="s1">*interfaces)</span>
+    <span class="s4">return </span><span class="s1">cls</span>
+
+
+<span class="s4">class </span><span class="s1">provider(object):</span>
+    <span class="s2">&quot;&quot;&quot;Class decorator version of classProvides&quot;&quot;&quot;</span>
+
+    <span class="s4">def </span><span class="s1">__init__(self</span><span class="s4">, </span><span class="s1">*interfaces):</span>
+        <span class="s1">self.interfaces = interfaces</span>
+
+    <span class="s4">def </span><span class="s1">__call__(self</span><span class="s4">, </span><span class="s1">ob):</span>
+        <span class="s1">directlyProvides(ob</span><span class="s4">, </span><span class="s1">*self.interfaces)</span>
+        <span class="s4">return </span><span class="s1">ob</span>
+
+
+<span class="s4">def </span><span class="s1">moduleProvides(*interfaces):</span>
+    <span class="s2">&quot;&quot;&quot;Declare interfaces provided by a module 
+ 
+    This function is used in a module definition. 
+ 
+    The arguments are one or more interfaces or interface specifications 
+    (`~zope.interface.interfaces.IDeclaration` objects). 
+ 
+    The given interfaces (including the interfaces in the specifications) are 
+    used to create the module's direct-object interface specification.  An 
+    error will be raised if the module already has an interface specification. 
+    In other words, it is an error to call this function more than once in a 
+    module definition. 
+ 
+    This function is provided for convenience. It provides a more convenient 
+    way to call directlyProvides. For example:: 
+ 
+      moduleProvides(I1) 
+ 
+    is equivalent to:: 
+ 
+      directlyProvides(sys.modules[__name__], I1) 
+    &quot;&quot;&quot;</span>
+    <span class="s1">frame = sys._getframe(</span><span class="s5">1</span><span class="s1">) </span><span class="s0"># pylint:disable=protected-access</span>
+    <span class="s1">locals = frame.f_locals </span><span class="s0"># pylint:disable=redefined-builtin</span>
+
+    <span class="s0"># Try to make sure we were called from a module body</span>
+    <span class="s4">if </span><span class="s1">(locals </span><span class="s4">is not </span><span class="s1">frame.f_globals) </span><span class="s4">or </span><span class="s1">(</span><span class="s3">'__name__' </span><span class="s4">not in </span><span class="s1">locals):</span>
+        <span class="s4">raise </span><span class="s1">TypeError(</span>
+            <span class="s3">&quot;moduleProvides can only be used from a module definition.&quot;</span><span class="s1">)</span>
+
+    <span class="s4">if </span><span class="s3">'__provides__' </span><span class="s4">in </span><span class="s1">locals:</span>
+        <span class="s4">raise </span><span class="s1">TypeError(</span>
+            <span class="s3">&quot;moduleProvides can only be used once in a module definition.&quot;</span><span class="s1">)</span>
+
+    <span class="s0"># Note: This is cached based on the key ``(ModuleType, *interfaces)``;</span>
+    <span class="s0"># One consequence is that any module that provides the same interfaces</span>
+    <span class="s0"># gets the same ``__repr__``, meaning that you can't tell what module</span>
+    <span class="s0"># such a declaration came from. Adding the module name to ``_v_module_names``</span>
+    <span class="s0"># attempts to correct for this; it works in some common situations, but fails</span>
+    <span class="s0"># (1) after pickling (the data is lost) and (2) if declarations are</span>
+    <span class="s0"># actually shared and (3) if the alternate spelling of ``directlyProvides()``</span>
+    <span class="s0"># is used. Problem (3)  is fixed by cooperating with ``directlyProvides``</span>
+    <span class="s0"># to maintain this information, and problem (2) is worked around by</span>
+    <span class="s0"># printing all the names, but (1) is unsolvable without introducing</span>
+    <span class="s0"># new classes or changing the stored data...but it doesn't actually matter,</span>
+    <span class="s0"># because ``ModuleType`` can't be pickled!</span>
+    <span class="s1">p = locals[</span><span class="s3">&quot;__provides__&quot;</span><span class="s1">] = Provides(ModuleType</span><span class="s4">,</span>
+                                          <span class="s1">*_normalizeargs(interfaces))</span>
+    <span class="s1">p._v_module_names += (locals[</span><span class="s3">'__name__'</span><span class="s1">]</span><span class="s4">,</span><span class="s1">)</span>
+
+
+<span class="s0">##############################################################################</span>
+<span class="s0">#</span>
+<span class="s0"># Declaration querying support</span>
+
+<span class="s0"># XXX:  is this a fossil?  Nobody calls it, no unit tests exercise it, no</span>
+<span class="s0">#       doctests import it, and the package __init__ doesn't import it.</span>
+<span class="s0">#       (Answer: Versions of zope.container prior to 4.4.0 called this,</span>
+<span class="s0">#        and zope.proxy.decorator up through at least 4.3.5 called this.)</span>
+<span class="s4">def </span><span class="s1">ObjectSpecification(direct</span><span class="s4">, </span><span class="s1">cls):</span>
+    <span class="s2">&quot;&quot;&quot;Provide object specifications 
+ 
+    These combine information for the object and for it's classes. 
+    &quot;&quot;&quot;</span>
+    <span class="s4">return </span><span class="s1">Provides(cls</span><span class="s4">, </span><span class="s1">direct) </span><span class="s0"># pragma: no cover fossil</span>
+
+<span class="s1">@_use_c_impl</span>
+<span class="s4">def </span><span class="s1">getObjectSpecification(ob):</span>
+    <span class="s4">try</span><span class="s1">:</span>
+        <span class="s1">provides = ob.__provides__</span>
+    <span class="s4">except </span><span class="s1">AttributeError:</span>
+        <span class="s1">provides = </span><span class="s4">None</span>
+
+    <span class="s4">if </span><span class="s1">provides </span><span class="s4">is not None</span><span class="s1">:</span>
+        <span class="s4">if </span><span class="s1">isinstance(provides</span><span class="s4">, </span><span class="s1">SpecificationBase):</span>
+            <span class="s4">return </span><span class="s1">provides</span>
+
+    <span class="s4">try</span><span class="s1">:</span>
+        <span class="s1">cls = ob.__class__</span>
+    <span class="s4">except </span><span class="s1">AttributeError:</span>
+        <span class="s0"># We can't get the class, so just consider provides</span>
+        <span class="s4">return </span><span class="s1">_empty</span>
+    <span class="s4">return </span><span class="s1">implementedBy(cls)</span>
+
+
+<span class="s1">@_use_c_impl</span>
+<span class="s4">def </span><span class="s1">providedBy(ob):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Return the interfaces provided by *ob*. 
+ 
+    If *ob* is a :class:`super` object, then only interfaces implemented 
+    by the remainder of the classes in the method resolution order are 
+    considered. Interfaces directly provided by the object underlying *ob* 
+    are not. 
+    &quot;&quot;&quot;</span>
+    <span class="s0"># Here we have either a special object, an old-style declaration</span>
+    <span class="s0"># or a descriptor</span>
+
+    <span class="s0"># Try to get __providedBy__</span>
+    <span class="s4">try</span><span class="s1">:</span>
+        <span class="s4">if </span><span class="s1">isinstance(ob</span><span class="s4">, </span><span class="s1">super): </span><span class="s0"># Some objects raise errors on isinstance()</span>
+            <span class="s4">return </span><span class="s1">implementedBy(ob)</span>
+
+        <span class="s1">r = ob.__providedBy__</span>
+    <span class="s4">except </span><span class="s1">AttributeError:</span>
+        <span class="s0"># Not set yet. Fall back to lower-level thing that computes it</span>
+        <span class="s4">return </span><span class="s1">getObjectSpecification(ob)</span>
+
+    <span class="s4">try</span><span class="s1">:</span>
+        <span class="s0"># We might have gotten a descriptor from an instance of a</span>
+        <span class="s0"># class (like an ExtensionClass) that doesn't support</span>
+        <span class="s0"># descriptors.  We'll make sure we got one by trying to get</span>
+        <span class="s0"># the only attribute, which all specs have.</span>
+        <span class="s1">r.extends</span>
+    <span class="s4">except </span><span class="s1">AttributeError:</span>
+
+        <span class="s0"># The object's class doesn't understand descriptors.</span>
+        <span class="s0"># Sigh. We need to get an object descriptor, but we have to be</span>
+        <span class="s0"># careful.  We want to use the instance's __provides__, if</span>
+        <span class="s0"># there is one, but only if it didn't come from the class.</span>
+
+        <span class="s4">try</span><span class="s1">:</span>
+            <span class="s1">r = ob.__provides__</span>
+        <span class="s4">except </span><span class="s1">AttributeError:</span>
+            <span class="s0"># No __provides__, so just fall back to implementedBy</span>
+            <span class="s4">return </span><span class="s1">implementedBy(ob.__class__)</span>
+
+        <span class="s0"># We need to make sure we got the __provides__ from the</span>
+        <span class="s0"># instance. We'll do this by making sure we don't get the same</span>
+        <span class="s0"># thing from the class:</span>
+
+        <span class="s4">try</span><span class="s1">:</span>
+            <span class="s1">cp = ob.__class__.__provides__</span>
+        <span class="s4">except </span><span class="s1">AttributeError:</span>
+            <span class="s0"># The ob doesn't have a class or the class has no</span>
+            <span class="s0"># provides, assume we're done:</span>
+            <span class="s4">return </span><span class="s1">r</span>
+
+        <span class="s4">if </span><span class="s1">r </span><span class="s4">is </span><span class="s1">cp:</span>
+            <span class="s0"># Oops, we got the provides from the class. This means</span>
+            <span class="s0"># the object doesn't have it's own. We should use implementedBy</span>
+            <span class="s4">return </span><span class="s1">implementedBy(ob.__class__)</span>
+
+    <span class="s4">return </span><span class="s1">r</span>
+
+
+<span class="s1">@_use_c_impl</span>
+<span class="s4">class </span><span class="s1">ObjectSpecificationDescriptor(object):</span>
+    <span class="s2">&quot;&quot;&quot;Implement the ``__providedBy__`` attribute 
+ 
+    The ``__providedBy__`` attribute computes the interfaces provided by 
+    an object. If an object has an ``__provides__`` attribute, that is returned. 
+    Otherwise, `implementedBy` the *cls* is returned. 
+ 
+    .. versionchanged:: 5.4.0 
+       Both the default (C) implementation and the Python implementation 
+       now let exceptions raised by accessing ``__provides__`` propagate. 
+       Previously, the C version ignored all exceptions. 
+    .. versionchanged:: 5.4.0 
+       The Python implementation now matches the C implementation and lets 
+       a ``__provides__`` of ``None`` override what the class is declared to 
+       implement. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s4">def </span><span class="s1">__get__(self</span><span class="s4">, </span><span class="s1">inst</span><span class="s4">, </span><span class="s1">cls):</span>
+        <span class="s2">&quot;&quot;&quot;Get an object specification for an object 
+        &quot;&quot;&quot;</span>
+        <span class="s4">if </span><span class="s1">inst </span><span class="s4">is None</span><span class="s1">:</span>
+            <span class="s4">return </span><span class="s1">getObjectSpecification(cls)</span>
+
+        <span class="s4">try</span><span class="s1">:</span>
+            <span class="s4">return </span><span class="s1">inst.__provides__</span>
+        <span class="s4">except </span><span class="s1">AttributeError:</span>
+            <span class="s4">return </span><span class="s1">implementedBy(cls)</span>
+
+
+<span class="s0">##############################################################################</span>
+
+<span class="s4">def </span><span class="s1">_normalizeargs(sequence</span><span class="s4">, </span><span class="s1">output=</span><span class="s4">None</span><span class="s1">):</span>
+    <span class="s2">&quot;&quot;&quot;Normalize declaration arguments 
+ 
+    Normalization arguments might contain Declarions, tuples, or single 
+    interfaces. 
+ 
+    Anything but individual interfaces or implements specs will be expanded. 
+    &quot;&quot;&quot;</span>
+    <span class="s4">if </span><span class="s1">output </span><span class="s4">is None</span><span class="s1">:</span>
+        <span class="s1">output = []</span>
+
+    <span class="s1">cls = sequence.__class__</span>
+    <span class="s4">if </span><span class="s1">InterfaceClass </span><span class="s4">in </span><span class="s1">cls.__mro__ </span><span class="s4">or </span><span class="s1">Implements </span><span class="s4">in </span><span class="s1">cls.__mro__:</span>
+        <span class="s1">output.append(sequence)</span>
+    <span class="s4">else</span><span class="s1">:</span>
+        <span class="s4">for </span><span class="s1">v </span><span class="s4">in </span><span class="s1">sequence:</span>
+            <span class="s1">_normalizeargs(v</span><span class="s4">, </span><span class="s1">output)</span>
+
+    <span class="s4">return </span><span class="s1">output</span>
+
+<span class="s1">_empty = _ImmutableDeclaration()</span>
+
+<span class="s1">objectSpecificationDescriptor = ObjectSpecificationDescriptor()</span>
+</pre>
+</body>
+</html>

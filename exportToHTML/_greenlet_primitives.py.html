@@ -1,0 +1,153 @@
+<html>
+<head>
+<title>_greenlet_primitives.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #629755; font-style: italic;}
+.s3 { color: #cc7832;}
+.s4 { color: #6a8759;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+_greenlet_primitives.py</font>
+</center></td></tr></table>
+<pre><span class="s0"># -*- coding: utf-8 -*-</span>
+<span class="s0"># copyright (c) 2018 gevent. See  LICENSE.</span>
+<span class="s0"># cython: auto_pickle=False,embedsignature=True,always_allow_keywords=False</span>
+<span class="s2">&quot;&quot;&quot; 
+A collection of primitives used by the hub, and suitable for 
+compilation with Cython because of their frequency of use. 
+ 
+&quot;&quot;&quot;</span>
+<span class="s3">from </span><span class="s1">__future__ </span><span class="s3">import </span><span class="s1">absolute_import</span>
+<span class="s3">from </span><span class="s1">__future__ </span><span class="s3">import </span><span class="s1">division</span>
+<span class="s3">from </span><span class="s1">__future__ </span><span class="s3">import </span><span class="s1">print_function</span>
+
+<span class="s3">from </span><span class="s1">weakref </span><span class="s3">import </span><span class="s1">ref </span><span class="s3">as </span><span class="s1">wref</span>
+<span class="s3">from </span><span class="s1">gc </span><span class="s3">import </span><span class="s1">get_objects</span>
+
+<span class="s3">from </span><span class="s1">greenlet </span><span class="s3">import </span><span class="s1">greenlet</span>
+
+<span class="s3">from </span><span class="s1">gevent.exceptions </span><span class="s3">import </span><span class="s1">BlockingSwitchOutError</span>
+
+
+<span class="s0"># In Cython, we define these as 'cdef inline' functions. The</span>
+<span class="s0"># compilation unit cannot have a direct assignment to them (import</span>
+<span class="s0"># is assignment) without generating a 'lvalue is not valid target'</span>
+<span class="s0"># error.</span>
+<span class="s1">locals()[</span><span class="s4">'getcurrent'</span><span class="s1">] = __import__(</span><span class="s4">'greenlet'</span><span class="s1">).getcurrent</span>
+<span class="s1">locals()[</span><span class="s4">'greenlet_init'</span><span class="s1">] = </span><span class="s3">lambda</span><span class="s1">: </span><span class="s3">None</span>
+<span class="s1">locals()[</span><span class="s4">'_greenlet_switch'</span><span class="s1">] = greenlet.switch</span>
+
+
+<span class="s1">__all__ = [</span>
+    <span class="s4">'TrackedRawGreenlet'</span><span class="s3">,</span>
+    <span class="s4">'SwitchOutGreenletWithLoop'</span><span class="s3">,</span>
+<span class="s1">]</span>
+
+<span class="s3">class </span><span class="s1">TrackedRawGreenlet(greenlet):</span>
+
+    <span class="s3">def </span><span class="s1">__init__(self</span><span class="s3">, </span><span class="s1">function</span><span class="s3">, </span><span class="s1">parent):</span>
+        <span class="s1">greenlet.__init__(self</span><span class="s3">, </span><span class="s1">function</span><span class="s3">, </span><span class="s1">parent)</span>
+        <span class="s0"># See greenlet.py's Greenlet class. We capture the cheap</span>
+        <span class="s0"># parts to maintain the tree structure, but we do not capture</span>
+        <span class="s0"># the stack because that's too expensive for 'spawn_raw'.</span>
+
+        <span class="s1">current = getcurrent() </span><span class="s0"># pylint:disable=undefined-variable</span>
+        <span class="s1">self.spawning_greenlet = wref(current)</span>
+        <span class="s0"># See Greenlet for how trees are maintained.</span>
+        <span class="s3">try</span><span class="s1">:</span>
+            <span class="s1">self.spawn_tree_locals = current.spawn_tree_locals</span>
+        <span class="s3">except </span><span class="s1">AttributeError:</span>
+            <span class="s1">self.spawn_tree_locals = {}</span>
+            <span class="s3">if </span><span class="s1">current.parent:</span>
+                <span class="s1">current.spawn_tree_locals = self.spawn_tree_locals</span>
+
+
+<span class="s3">class </span><span class="s1">SwitchOutGreenletWithLoop(TrackedRawGreenlet):</span>
+    <span class="s0"># Subclasses must define:</span>
+    <span class="s0"># - self.loop</span>
+
+    <span class="s0"># This class defines loop in its .pxd for Cython. This lets us avoid</span>
+    <span class="s0"># circular dependencies with the hub.</span>
+
+    <span class="s3">def </span><span class="s1">switch(self):</span>
+        <span class="s1">switch_out = getattr(getcurrent()</span><span class="s3">, </span><span class="s4">'switch_out'</span><span class="s3">, None</span><span class="s1">) </span><span class="s0"># pylint:disable=undefined-variable</span>
+        <span class="s3">if </span><span class="s1">switch_out </span><span class="s3">is not None</span><span class="s1">:</span>
+            <span class="s1">switch_out()</span>
+        <span class="s3">return </span><span class="s1">_greenlet_switch(self) </span><span class="s0"># pylint:disable=undefined-variable</span>
+
+    <span class="s3">def </span><span class="s1">switch_out(self):</span>
+        <span class="s3">raise </span><span class="s1">BlockingSwitchOutError(</span><span class="s4">'Impossible to call blocking function in the event loop callback'</span><span class="s1">)</span>
+
+
+<span class="s3">def </span><span class="s1">get_reachable_greenlets():</span>
+    <span class="s0"># We compile this loop with Cython so that it's faster, and so that</span>
+    <span class="s0"># the GIL isn't dropped at unpredictable times during the loop.</span>
+    <span class="s0"># Dropping the GIL could lead to accessing partly constructed objects</span>
+    <span class="s0"># in undefined states (particularly, tuples). This helps close a hole</span>
+    <span class="s0"># where a `SystemError: Objects/tupleobject.c bad argument to internal function`</span>
+    <span class="s0"># could get raised. (Note that this probably doesn't completely close the hole,</span>
+    <span class="s0"># if other threads have dropped the GIL, but hopefully the speed makes that</span>
+    <span class="s0"># more rare.) See https://github.com/gevent/gevent/issues/1302</span>
+    <span class="s3">return </span><span class="s1">[</span>
+        <span class="s1">x </span><span class="s3">for </span><span class="s1">x </span><span class="s3">in </span><span class="s1">get_objects()</span>
+        <span class="s3">if </span><span class="s1">isinstance(x</span><span class="s3">, </span><span class="s1">greenlet) </span><span class="s3">and not </span><span class="s1">getattr(x</span><span class="s3">, </span><span class="s4">'greenlet_tree_is_ignored'</span><span class="s3">, False</span><span class="s1">)</span>
+    <span class="s1">]</span>
+
+<span class="s0"># Cache the global memoryview so cython can optimize.</span>
+<span class="s1">_memoryview = memoryview</span>
+<span class="s3">try</span><span class="s1">:</span>
+    <span class="s3">if </span><span class="s1">isinstance(__builtins__</span><span class="s3">, </span><span class="s1">dict):</span>
+        <span class="s0"># Pure-python mode on CPython</span>
+        <span class="s1">_buffer = __builtins__[</span><span class="s4">'buffer'</span><span class="s1">]</span>
+    <span class="s3">else</span><span class="s1">:</span>
+        <span class="s0"># Cythonized mode, or PyPy</span>
+        <span class="s1">_buffer = __builtins__.buffer</span>
+<span class="s3">except </span><span class="s1">(AttributeError</span><span class="s3">, </span><span class="s1">KeyError):</span>
+    <span class="s0"># Python 3.</span>
+    <span class="s1">_buffer = memoryview</span>
+
+<span class="s3">def </span><span class="s1">get_memory(data):</span>
+    <span class="s0"># On Python 2, memoryview(memoryview()) can leak in some cases,</span>
+    <span class="s0"># notably when an io.BufferedWriter object produced the memoryview.</span>
+    <span class="s0"># So we need to check to see if we already have one before we convert.</span>
+    <span class="s0"># We do this in Cython to mitigate the performance cost (which turns out to be a</span>
+    <span class="s0"># net win.)</span>
+
+    <span class="s0"># We don't specifically test for this leak.</span>
+
+    <span class="s0"># https://github.com/gevent/gevent/issues/1318</span>
+    <span class="s3">try</span><span class="s1">:</span>
+        <span class="s1">mv = _memoryview(data) </span><span class="s3">if not </span><span class="s1">isinstance(data</span><span class="s3">, </span><span class="s1">_memoryview) </span><span class="s3">else </span><span class="s1">data</span>
+        <span class="s3">if </span><span class="s1">mv.shape:</span>
+            <span class="s3">return </span><span class="s1">mv</span>
+        <span class="s0"># No shape, probably working with a ctypes object,</span>
+        <span class="s0"># or something else exotic that supports the buffer interface</span>
+        <span class="s3">return </span><span class="s1">mv.tobytes()</span>
+    <span class="s3">except </span><span class="s1">TypeError:</span>
+        <span class="s0"># fixes &quot;python2.7 array.array doesn't support memoryview used in</span>
+        <span class="s0"># gevent.socket.send&quot; issue</span>
+        <span class="s0"># (http://code.google.com/p/gevent/issues/detail?id=94)</span>
+        <span class="s3">if </span><span class="s1">_buffer </span><span class="s3">is </span><span class="s1">_memoryview:</span>
+            <span class="s0"># Py3</span>
+            <span class="s3">raise</span>
+        <span class="s3">return </span><span class="s1">_buffer(data)</span>
+
+
+
+<span class="s3">def </span><span class="s1">_init():</span>
+    <span class="s1">greenlet_init() </span><span class="s0"># pylint:disable=undefined-variable</span>
+
+<span class="s1">_init()</span>
+
+<span class="s3">from </span><span class="s1">gevent._util </span><span class="s3">import </span><span class="s1">import_c_accel</span>
+<span class="s1">import_c_accel(globals()</span><span class="s3">, </span><span class="s4">'gevent.__greenlet_primitives'</span><span class="s1">)</span>
+</pre>
+</body>
+</html>

@@ -1,0 +1,1366 @@
+<html>
+<head>
+<title>menu.tcl</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #a9b7c6;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+menu.tcl</font>
+</center></td></tr></table>
+<pre><span class="s0"># menu.tcl --</span>
+<span class="s0">#</span>
+<span class="s0"># This file defines the default bindings for Tk menus and menubuttons.</span>
+<span class="s0"># It also implements keyboard traversal of menus and implements a few</span>
+<span class="s0"># other utility procedures related to menus.</span>
+<span class="s0">#</span>
+<span class="s0"># Copyright (c) 1992-1994 The Regents of the University of California.</span>
+<span class="s0"># Copyright (c) 1994-1997 Sun Microsystems, Inc.</span>
+<span class="s0"># Copyright (c) 1998-1999 by Scriptics Corporation.</span>
+<span class="s0"># Copyright (c) 2007 Daniel A. Steffen &lt;das@users.sourceforge.net&gt;</span>
+<span class="s0">#</span>
+<span class="s0"># See the file &quot;license.terms&quot; for information on usage and redistribution</span>
+<span class="s0"># of this file, and for a DISCLAIMER OF ALL WARRANTIES.</span>
+<span class="s0">#</span>
+
+<span class="s0">#-------------------------------------------------------------------------</span>
+<span class="s0"># Elements of tk::Priv that are used in this file:</span>
+<span class="s0">#</span>
+<span class="s0"># cursor -		Saves the -cursor option for the posted menubutton.</span>
+<span class="s0"># focus -		Saves the focus during a menu selection operation.</span>
+<span class="s0">#			Focus gets restored here when the menu is unposted.</span>
+<span class="s0"># grabGlobal -		Used in conjunction with tk::Priv(oldGrab):  if</span>
+<span class="s0">#			tk::Priv(oldGrab) is non-empty, then tk::Priv(grabGlobal)</span>
+<span class="s0">#			contains either an empty string or &quot;-global&quot; to</span>
+<span class="s0">#			indicate whether the old grab was a local one or</span>
+<span class="s0">#			a global one.</span>
+<span class="s0"># inMenubutton -	The name of the menubutton widget containing</span>
+<span class="s0">#			the mouse, or an empty string if the mouse is</span>
+<span class="s0">#			not over any menubutton.</span>
+<span class="s0"># menuBar -		The name of the menubar that is the root</span>
+<span class="s0">#			of the cascade hierarchy which is currently</span>
+<span class="s0">#			posted. This is null when there is no menu currently</span>
+<span class="s0">#			being pulled down from a menu bar.</span>
+<span class="s0"># oldGrab -		Window that had the grab before a menu was posted.</span>
+<span class="s0">#			Used to restore the grab state after the menu</span>
+<span class="s0">#			is unposted.  Empty string means there was no</span>
+<span class="s0">#			grab previously set.</span>
+<span class="s0"># popup -		If a menu has been popped up via tk_popup, this</span>
+<span class="s0">#			gives the name of the menu.  Otherwise this</span>
+<span class="s0">#			value is empty.</span>
+<span class="s0"># postedMb -		Name of the menubutton whose menu is currently</span>
+<span class="s0">#			posted, or an empty string if nothing is posted</span>
+<span class="s0">#			A grab is set on this widget.</span>
+<span class="s0"># relief -		Used to save the original relief of the current</span>
+<span class="s0">#			menubutton.</span>
+<span class="s0"># window -		When the mouse is over a menu, this holds the</span>
+<span class="s0">#			name of the menu;  it's cleared when the mouse</span>
+<span class="s0">#			leaves the menu.</span>
+<span class="s0"># tearoff -		Whether the last menu posted was a tearoff or not.</span>
+<span class="s0">#			This is true always for unix, for tearoffs for Mac</span>
+<span class="s0">#			and Windows.</span>
+<span class="s0"># activeMenu -		This is the last active menu for use</span>
+<span class="s0">#			with the &lt;&lt;MenuSelect&gt;&gt; virtual event.</span>
+<span class="s0"># activeItem -		This is the last active menu item for</span>
+<span class="s0">#			use with the &lt;&lt;MenuSelect&gt;&gt; virtual event.</span>
+<span class="s0">#-------------------------------------------------------------------------</span>
+
+<span class="s0">#-------------------------------------------------------------------------</span>
+<span class="s0"># Overall note:</span>
+<span class="s0"># This file is tricky because there are five different ways that menus</span>
+<span class="s0"># can be used:</span>
+<span class="s0">#</span>
+<span class="s0"># 1. As a pulldown from a menubutton. In this style, the variable</span>
+<span class="s0">#    tk::Priv(postedMb) identifies the posted menubutton.</span>
+<span class="s0"># 2. As a torn-off menu copied from some other menu.  In this style</span>
+<span class="s0">#    tk::Priv(postedMb) is empty, and menu's type is &quot;tearoff&quot;.</span>
+<span class="s0"># 3. As an option menu, triggered from an option menubutton.  In this</span>
+<span class="s0">#    style tk::Priv(postedMb) identifies the posted menubutton.</span>
+<span class="s0"># 4. As a popup menu.  In this style tk::Priv(postedMb) is empty and</span>
+<span class="s0">#    the top-level menu's type is &quot;normal&quot;.</span>
+<span class="s0"># 5. As a pulldown from a menubar. The variable tk::Priv(menubar) has</span>
+<span class="s0">#    the owning menubar, and the menu itself is of type &quot;normal&quot;.</span>
+<span class="s0">#</span>
+<span class="s0"># The various binding procedures use the  state described above to</span>
+<span class="s0"># distinguish the various cases and take different actions in each</span>
+<span class="s0"># case.</span>
+<span class="s0">#-------------------------------------------------------------------------</span>
+
+<span class="s0">#-------------------------------------------------------------------------</span>
+<span class="s0"># The code below creates the default class bindings for menus</span>
+<span class="s0"># and menubuttons.</span>
+<span class="s0">#-------------------------------------------------------------------------</span>
+
+<span class="s0">bind Menubutton &lt;FocusIn&gt; {}</span>
+<span class="s0">bind Menubutton &lt;Enter&gt; {</span>
+    <span class="s0">tk::MbEnter %W</span>
+<span class="s0">}</span>
+<span class="s0">bind Menubutton &lt;Leave&gt; {</span>
+    <span class="s0">tk::MbLeave %W</span>
+<span class="s0">}</span>
+<span class="s0">bind Menubutton &lt;1&gt; {</span>
+    <span class="s0">if {$tk::Priv(inMenubutton) ne &quot;&quot;} {</span>
+	<span class="s0">tk::MbPost $tk::Priv(inMenubutton) %X %Y</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+<span class="s0">bind Menubutton &lt;Motion&gt; {</span>
+    <span class="s0">tk::MbMotion %W up %X %Y</span>
+<span class="s0">}</span>
+<span class="s0">bind Menubutton &lt;B1-Motion&gt; {</span>
+    <span class="s0">tk::MbMotion %W down %X %Y</span>
+<span class="s0">}</span>
+<span class="s0">bind Menubutton &lt;ButtonRelease-1&gt; {</span>
+    <span class="s0">tk::MbButtonUp %W</span>
+<span class="s0">}</span>
+<span class="s0">bind Menubutton &lt;space&gt; {</span>
+    <span class="s0">tk::MbPost %W</span>
+    <span class="s0">tk::MenuFirstEntry [%W cget -menu]</span>
+<span class="s0">}</span>
+<span class="s0">bind Menubutton &lt;&lt;Invoke&gt;&gt; {</span>
+    <span class="s0">tk::MbPost %W</span>
+    <span class="s0">tk::MenuFirstEntry [%W cget -menu]</span>
+<span class="s0">}</span>
+
+<span class="s0"># Must set focus when mouse enters a menu, in order to allow</span>
+<span class="s0"># mixed-mode processing using both the mouse and the keyboard.</span>
+<span class="s0"># Don't set the focus if the event comes from a grab release,</span>
+<span class="s0"># though:  such an event can happen after as part of unposting</span>
+<span class="s0"># a cascaded chain of menus, after the focus has already been</span>
+<span class="s0"># restored to wherever it was before menu selection started.</span>
+
+<span class="s0">bind Menu &lt;FocusIn&gt; {}</span>
+
+<span class="s0">bind Menu &lt;Enter&gt; {</span>
+    <span class="s0">set tk::Priv(window) %W</span>
+    <span class="s0">if {[%W cget -type] eq &quot;tearoff&quot;} {</span>
+	<span class="s0">if {&quot;%m&quot; ne &quot;NotifyUngrab&quot;} {</span>
+	    <span class="s0">if {[tk windowingsystem] eq &quot;x11&quot;} {</span>
+		<span class="s0">tk_menuSetFocus %W</span>
+	    <span class="s0">}</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+    <span class="s0">tk::MenuMotion %W %x %y %s</span>
+<span class="s0">}</span>
+
+<span class="s0">bind Menu &lt;Leave&gt; {</span>
+    <span class="s0">tk::MenuLeave %W %X %Y %s</span>
+<span class="s0">}</span>
+<span class="s0">bind Menu &lt;Motion&gt; {</span>
+    <span class="s0">tk::MenuMotion %W %x %y %s</span>
+<span class="s0">}</span>
+<span class="s0">bind Menu &lt;ButtonPress&gt; {</span>
+    <span class="s0">tk::MenuButtonDown %W</span>
+<span class="s0">}</span>
+<span class="s0">bind Menu &lt;ButtonRelease&gt; {</span>
+   <span class="s0">tk::MenuInvoke %W 1</span>
+<span class="s0">}</span>
+<span class="s0">bind Menu &lt;space&gt; {</span>
+    <span class="s0">tk::MenuInvoke %W 0</span>
+<span class="s0">}</span>
+<span class="s0">bind Menu &lt;&lt;Invoke&gt;&gt; {</span>
+    <span class="s0">tk::MenuInvoke %W 0</span>
+<span class="s0">}</span>
+<span class="s0">bind Menu &lt;Return&gt; {</span>
+    <span class="s0">tk::MenuInvoke %W 0</span>
+<span class="s0">}</span>
+<span class="s0">bind Menu &lt;Escape&gt; {</span>
+    <span class="s0">tk::MenuEscape %W</span>
+<span class="s0">}</span>
+<span class="s0">bind Menu &lt;&lt;PrevChar&gt;&gt; {</span>
+    <span class="s0">tk::MenuLeftArrow %W</span>
+<span class="s0">}</span>
+<span class="s0">bind Menu &lt;&lt;NextChar&gt;&gt; {</span>
+    <span class="s0">tk::MenuRightArrow %W</span>
+<span class="s0">}</span>
+<span class="s0">bind Menu &lt;&lt;PrevLine&gt;&gt; {</span>
+    <span class="s0">tk::MenuUpArrow %W</span>
+<span class="s0">}</span>
+<span class="s0">bind Menu &lt;&lt;NextLine&gt;&gt; {</span>
+    <span class="s0">tk::MenuDownArrow %W</span>
+<span class="s0">}</span>
+<span class="s0">bind Menu &lt;KeyPress&gt; {</span>
+    <span class="s0">tk::TraverseWithinMenu %W %A</span>
+<span class="s0">}</span>
+
+<span class="s0"># The following bindings apply to all windows, and are used to</span>
+<span class="s0"># implement keyboard menu traversal.</span>
+
+<span class="s0">if {[tk windowingsystem] eq &quot;x11&quot;} {</span>
+    <span class="s0">bind all &lt;Alt-KeyPress&gt; {</span>
+	<span class="s0">tk::TraverseToMenu %W %A</span>
+    <span class="s0">}</span>
+
+    <span class="s0">bind all &lt;F10&gt; {</span>
+	<span class="s0">tk::FirstMenu %W</span>
+    <span class="s0">}</span>
+<span class="s0">} else {</span>
+    <span class="s0">bind Menubutton &lt;Alt-KeyPress&gt; {</span>
+	<span class="s0">tk::TraverseToMenu %W %A</span>
+    <span class="s0">}</span>
+
+    <span class="s0">bind Menubutton &lt;F10&gt; {</span>
+	<span class="s0">tk::FirstMenu %W</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+
+<span class="s0"># ::tk::MbEnter --</span>
+<span class="s0"># This procedure is invoked when the mouse enters a menubutton</span>
+<span class="s0"># widget.  It activates the widget unless it is disabled.  Note:</span>
+<span class="s0"># this procedure is only invoked when mouse button 1 is *not* down.</span>
+<span class="s0"># The procedure ::tk::MbB1Enter is invoked if the button is down.</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0"># w -			The  name of the widget.</span>
+
+<span class="s0">proc ::tk::MbEnter w {</span>
+    <span class="s0">variable ::tk::Priv</span>
+
+    <span class="s0">if {$Priv(inMenubutton) ne &quot;&quot;} {</span>
+	<span class="s0">MbLeave $Priv(inMenubutton)</span>
+    <span class="s0">}</span>
+    <span class="s0">set Priv(inMenubutton) $w</span>
+    <span class="s0">if {[$w cget -state] ne &quot;disabled&quot; &amp;&amp; [tk windowingsystem] ne &quot;aqua&quot;} {</span>
+	<span class="s0">$w configure -state active</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+
+<span class="s0"># ::tk::MbLeave --</span>
+<span class="s0"># This procedure is invoked when the mouse leaves a menubutton widget.</span>
+<span class="s0"># It de-activates the widget, if the widget still exists.</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0"># w -			The  name of the widget.</span>
+
+<span class="s0">proc ::tk::MbLeave w {</span>
+    <span class="s0">variable ::tk::Priv</span>
+
+    <span class="s0">set Priv(inMenubutton) {}</span>
+    <span class="s0">if {![winfo exists $w]} {</span>
+	<span class="s0">return</span>
+    <span class="s0">}</span>
+    <span class="s0">if {[$w cget -state] eq &quot;active&quot; &amp;&amp; [tk windowingsystem] ne &quot;aqua&quot;} {</span>
+	<span class="s0">$w configure -state normal</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+
+<span class="s0"># ::tk::MbPost --</span>
+<span class="s0"># Given a menubutton, this procedure does all the work of posting</span>
+<span class="s0"># its associated menu and unposting any other menu that is currently</span>
+<span class="s0"># posted.</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0"># w -			The name of the menubutton widget whose menu</span>
+<span class="s0">#			is to be posted.</span>
+<span class="s0"># x, y -		Root coordinates of cursor, used for positioning</span>
+<span class="s0">#			option menus.  If not specified, then the center</span>
+<span class="s0">#			of the menubutton is used for an option menu.</span>
+
+<span class="s0">proc ::tk::MbPost {w {x {}} {y {}}} {</span>
+    <span class="s0">global errorInfo</span>
+    <span class="s0">variable ::tk::Priv</span>
+
+    <span class="s0">if {[$w cget -state] eq &quot;disabled&quot; || $w eq $Priv(postedMb)} {</span>
+	<span class="s0">return</span>
+    <span class="s0">}</span>
+    <span class="s0">set menu [$w cget -menu]</span>
+    <span class="s0">if {$menu eq &quot;&quot;} {</span>
+	<span class="s0">return</span>
+    <span class="s0">}</span>
+    <span class="s0">set tearoff [expr {[tk windowingsystem] eq &quot;x11&quot; \</span>
+	    <span class="s0">|| [$menu cget -type] eq &quot;tearoff&quot;}]</span>
+    <span class="s0">if {[string first $w $menu] != 0} {</span>
+	<span class="s0">return -code error -errorcode {TK MENUBUTTON POST_NONCHILD} \</span>
+	    <span class="s0">&quot;can't post $menu: it isn't a descendant of $w&quot;</span>
+    <span class="s0">}</span>
+    <span class="s0">set cur $Priv(postedMb)</span>
+    <span class="s0">if {$cur ne &quot;&quot;} {</span>
+	<span class="s0">MenuUnpost {}</span>
+    <span class="s0">}</span>
+    <span class="s0">if {$::tk_strictMotif} {</span>
+        <span class="s0">set Priv(cursor) [$w cget -cursor]</span>
+        <span class="s0">$w configure -cursor arrow</span>
+    <span class="s0">}</span>
+    <span class="s0">if {[tk windowingsystem] ne &quot;aqua&quot;} {</span>
+	<span class="s0">set Priv(relief) [$w cget -relief]</span>
+	<span class="s0">$w configure -relief raised</span>
+    <span class="s0">} else {</span>
+	<span class="s0">$w configure -state active</span>
+    <span class="s0">}</span>
+
+    <span class="s0">set Priv(postedMb) $w</span>
+    <span class="s0">set Priv(focus) [focus]</span>
+    <span class="s0">$menu activate none</span>
+    <span class="s0">GenerateMenuSelect $menu</span>
+
+    <span class="s0"># If this looks like an option menubutton then post the menu so</span>
+    <span class="s0"># that the current entry is on top of the mouse.  Otherwise post</span>
+    <span class="s0"># the menu just below the menubutton, as for a pull-down.</span>
+
+    <span class="s0">update idletasks</span>
+    <span class="s0">if {[catch {</span>
+	<span class="s0">switch [$w cget -direction] {</span>
+	    <span class="s0">above {</span>
+		<span class="s0">set x [winfo rootx $w]</span>
+		<span class="s0">set y [expr {[winfo rooty $w] - [winfo reqheight $menu]}]</span>
+		<span class="s0"># if we go offscreen to the top, show as 'below'</span>
+		<span class="s0">if {$y &lt; [winfo vrooty $w]} {</span>
+		    <span class="s0">set y [expr {[winfo vrooty $w] + [winfo rooty $w] + [winfo reqheight $w]}]</span>
+		<span class="s0">}</span>
+		<span class="s0">PostOverPoint $menu $x $y</span>
+	    <span class="s0">}</span>
+	    <span class="s0">below {</span>
+		<span class="s0">set x [winfo rootx $w]</span>
+		<span class="s0">set y [expr {[winfo rooty $w] + [winfo height $w]}]</span>
+		<span class="s0"># if we go offscreen to the bottom, show as 'above'</span>
+		<span class="s0">set mh [winfo reqheight $menu]</span>
+		<span class="s0">if {($y + $mh) &gt; ([winfo vrooty $w] + [winfo vrootheight $w])} {</span>
+		    <span class="s0">set y [expr {[winfo vrooty $w] + [winfo vrootheight $w] + [winfo rooty $w] - $mh}]</span>
+		<span class="s0">}</span>
+		<span class="s0">PostOverPoint $menu $x $y</span>
+	    <span class="s0">}</span>
+	    <span class="s0">left {</span>
+		<span class="s0">set x [expr {[winfo rootx $w] - [winfo reqwidth $menu]}]</span>
+		<span class="s0">set y [expr {(2 * [winfo rooty $w] + [winfo height $w]) / 2}]</span>
+		<span class="s0">set entry [MenuFindName $menu [$w cget -text]]</span>
+		<span class="s0">if {$entry eq &quot;&quot;} {</span>
+                    <span class="s0">set entry 0</span>
+		<span class="s0">}</span>
+		<span class="s0">if {[$w cget -indicatoron]} {</span>
+		    <span class="s0">if {$entry == [$menu index last]} {</span>
+			<span class="s0">incr y [expr {-([$menu yposition $entry] \</span>
+				<span class="s0">+ [winfo reqheight $menu])/2}]</span>
+		    <span class="s0">} else {</span>
+			<span class="s0">incr y [expr {-([$menu yposition $entry] \</span>
+			        <span class="s0">+ [$menu yposition [expr {$entry+1}]])/2}]</span>
+		    <span class="s0">}</span>
+		<span class="s0">}</span>
+		<span class="s0">PostOverPoint $menu $x $y</span>
+		<span class="s0">if {$entry ne &quot;&quot; \</span>
+			<span class="s0">&amp;&amp; [$menu entrycget $entry -state] ne &quot;disabled&quot;} {</span>
+		    <span class="s0">$menu activate $entry</span>
+		    <span class="s0">GenerateMenuSelect $menu</span>
+		<span class="s0">}</span>
+	    <span class="s0">}</span>
+	    <span class="s0">right {</span>
+		<span class="s0">set x [expr {[winfo rootx $w] + [winfo width $w]}]</span>
+		<span class="s0">set y [expr {(2 * [winfo rooty $w] + [winfo height $w]) / 2}]</span>
+		<span class="s0">set entry [MenuFindName $menu [$w cget -text]]</span>
+		<span class="s0">if {$entry eq &quot;&quot;} {</span>
+                    <span class="s0">set entry 0</span>
+		<span class="s0">}</span>
+		<span class="s0">if {[$w cget -indicatoron]} {</span>
+		    <span class="s0">if {$entry == [$menu index last]} {</span>
+			<span class="s0">incr y [expr {-([$menu yposition $entry] \</span>
+				<span class="s0">+ [winfo reqheight $menu])/2}]</span>
+		    <span class="s0">} else {</span>
+			<span class="s0">incr y [expr {-([$menu yposition $entry] \</span>
+			        <span class="s0">+ [$menu yposition [expr {$entry+1}]])/2}]</span>
+		    <span class="s0">}</span>
+		<span class="s0">}</span>
+		<span class="s0">PostOverPoint $menu $x $y</span>
+		<span class="s0">if {$entry ne &quot;&quot; \</span>
+			<span class="s0">&amp;&amp; [$menu entrycget $entry -state] ne &quot;disabled&quot;} {</span>
+		    <span class="s0">$menu activate $entry</span>
+		    <span class="s0">GenerateMenuSelect $menu</span>
+		<span class="s0">}</span>
+	    <span class="s0">}</span>
+	    <span class="s0">default {</span>
+		<span class="s0">if {[$w cget -indicatoron]} {</span>
+		    <span class="s0">if {$y eq &quot;&quot;} {</span>
+			<span class="s0">set x [expr {[winfo rootx $w] + [winfo width $w]/2}]</span>
+			<span class="s0">set y [expr {[winfo rooty $w] + [winfo height $w]/2}]</span>
+		    <span class="s0">}</span>
+	            <span class="s0">PostOverPoint $menu $x $y [MenuFindName $menu [$w cget -text]]</span>
+		<span class="s0">} else {</span>
+		    <span class="s0">PostOverPoint $menu [winfo rootx $w] [expr {[winfo rooty $w]+[winfo height $w]}]</span>
+		<span class="s0">}</span>
+	    <span class="s0">}</span>
+	<span class="s0">}</span>
+    <span class="s0">} msg opt]} {</span>
+	<span class="s0"># Error posting menu (e.g. bogus -postcommand). Unpost it and</span>
+	<span class="s0"># reflect the error.</span>
+
+	<span class="s0">MenuUnpost {}</span>
+	<span class="s0">return -options $opt $msg</span>
+    <span class="s0">}</span>
+
+    <span class="s0">set Priv(tearoff) $tearoff</span>
+    <span class="s0">if {$tearoff != 0} {</span>
+	<span class="s0">focus $menu</span>
+	<span class="s0">if {[winfo viewable $w]} {</span>
+	    <span class="s0">SaveGrabInfo $w</span>
+	    <span class="s0">grab -global $w</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+
+<span class="s0"># ::tk::MenuUnpost --</span>
+<span class="s0"># This procedure unposts a given menu, plus all of its ancestors up</span>
+<span class="s0"># to (and including) a menubutton, if any.  It also restores various</span>
+<span class="s0"># values to what they were before the menu was posted, and releases</span>
+<span class="s0"># a grab if there's a menubutton involved.  Special notes:</span>
+<span class="s0"># 1. It's important to unpost all menus before releasing the grab, so</span>
+<span class="s0">#    that any Enter-Leave events (e.g. from menu back to main</span>
+<span class="s0">#    application) have mode NotifyGrab.</span>
+<span class="s0"># 2. Be sure to enclose various groups of commands in &quot;catch&quot; so that</span>
+<span class="s0">#    the procedure will complete even if the menubutton or the menu</span>
+<span class="s0">#    or the grab window has been deleted.</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0"># menu -		Name of a menu to unpost.  Ignored if there</span>
+<span class="s0">#			is a posted menubutton.</span>
+
+<span class="s0">proc ::tk::MenuUnpost menu {</span>
+    <span class="s0">variable ::tk::Priv</span>
+    <span class="s0">set mb $Priv(postedMb)</span>
+
+    <span class="s0"># Restore focus right away (otherwise X will take focus away when</span>
+    <span class="s0"># the menu is unmapped and under some window managers (e.g. olvwm)</span>
+    <span class="s0"># we'll lose the focus completely).</span>
+
+    <span class="s0">catch {focus $Priv(focus)}</span>
+    <span class="s0">set Priv(focus) &quot;&quot;</span>
+
+    <span class="s0"># Unpost menu(s) and restore some stuff that's dependent on</span>
+    <span class="s0"># what was posted.</span>
+
+    <span class="s0">after cancel [array get Priv menuActivatedTimer]</span>
+    <span class="s0">unset -nocomplain Priv(menuActivated)</span>
+    <span class="s0">after cancel [array get Priv menuDeactivatedTimer]</span>
+    <span class="s0">unset -nocomplain Priv(menuDeactivated)</span>
+
+    <span class="s0">catch {</span>
+	<span class="s0">if {$mb ne &quot;&quot;} {</span>
+	    <span class="s0">set menu [$mb cget -menu]</span>
+	    <span class="s0">$menu unpost</span>
+	    <span class="s0">set Priv(postedMb) {}</span>
+	    <span class="s0">if {$::tk_strictMotif} {</span>
+	        <span class="s0">$mb configure -cursor $Priv(cursor)</span>
+	    <span class="s0">}</span>
+	    <span class="s0">if {[tk windowingsystem] ne &quot;aqua&quot;} {</span>
+		<span class="s0">$mb configure -relief $Priv(relief)</span>
+	    <span class="s0">} else {</span>
+		<span class="s0">$mb configure -state normal</span>
+	    <span class="s0">}</span>
+	<span class="s0">} elseif {$Priv(popup) ne &quot;&quot;} {</span>
+	    <span class="s0">$Priv(popup) unpost</span>
+	    <span class="s0">set Priv(popup) {}</span>
+	<span class="s0">} elseif {[$menu cget -type] ne &quot;menubar&quot; &amp;&amp; [$menu cget -type] ne &quot;tearoff&quot;} {</span>
+	    <span class="s0"># We're in a cascaded sub-menu from a torn-off menu or popup.</span>
+	    <span class="s0"># Unpost all the menus up to the toplevel one (but not</span>
+	    <span class="s0"># including the top-level torn-off one) and deactivate the</span>
+	    <span class="s0"># top-level torn off menu if there is one.</span>
+
+	    <span class="s0">while {1} {</span>
+		<span class="s0">set parent [winfo parent $menu]</span>
+		<span class="s0">if {[winfo class $parent] ne &quot;Menu&quot; || ![winfo ismapped $parent]} {</span>
+		    <span class="s0">break</span>
+		<span class="s0">}</span>
+		<span class="s0">$parent activate none</span>
+		<span class="s0">$parent postcascade none</span>
+		<span class="s0">GenerateMenuSelect $parent</span>
+		<span class="s0">set type [$parent cget -type]</span>
+		<span class="s0">if {$type eq &quot;menubar&quot; || $type eq &quot;tearoff&quot;} {</span>
+		    <span class="s0">break</span>
+		<span class="s0">}</span>
+		<span class="s0">set menu $parent</span>
+	    <span class="s0">}</span>
+	    <span class="s0">if {[$menu cget -type] ne &quot;menubar&quot;} {</span>
+		<span class="s0">$menu unpost</span>
+	    <span class="s0">}</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+
+    <span class="s0">if {($Priv(tearoff) != 0) || $Priv(menuBar) ne &quot;&quot;} {</span>
+	<span class="s0"># Release grab, if any, and restore the previous grab, if there</span>
+	<span class="s0"># was one.</span>
+	<span class="s0">if {$menu ne &quot;&quot;} {</span>
+	    <span class="s0">set grab [grab current $menu]</span>
+	    <span class="s0">if {$grab ne &quot;&quot;} {</span>
+		<span class="s0">grab release $grab</span>
+	    <span class="s0">}</span>
+	<span class="s0">}</span>
+	<span class="s0">RestoreOldGrab</span>
+	<span class="s0">if {$Priv(menuBar) ne &quot;&quot;} {</span>
+	    <span class="s0">if {$::tk_strictMotif} {</span>
+		<span class="s0">$Priv(menuBar) configure -cursor $Priv(cursor)</span>
+	    <span class="s0">}</span>
+	    <span class="s0">set Priv(menuBar) {}</span>
+	<span class="s0">}</span>
+	<span class="s0">if {[tk windowingsystem] ne &quot;x11&quot;} {</span>
+	    <span class="s0">set Priv(tearoff) 0</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+
+<span class="s0"># ::tk::MbMotion --</span>
+<span class="s0"># This procedure handles mouse motion events inside menubuttons, and</span>
+<span class="s0"># also outside menubuttons when a menubutton has a grab (e.g. when a</span>
+<span class="s0"># menu selection operation is in progress).</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0"># w -			The name of the menubutton widget.</span>
+<span class="s0"># upDown - 		&quot;down&quot; means button 1 is pressed, &quot;up&quot; means</span>
+<span class="s0">#			it isn't.</span>
+<span class="s0"># rootx, rooty -	Coordinates of mouse, in (virtual?) root window.</span>
+
+<span class="s0">proc ::tk::MbMotion {w upDown rootx rooty} {</span>
+    <span class="s0">variable ::tk::Priv</span>
+
+    <span class="s0">if {$Priv(inMenubutton) eq $w} {</span>
+	<span class="s0">return</span>
+    <span class="s0">}</span>
+    <span class="s0">set new [winfo containing $rootx $rooty]</span>
+    <span class="s0">if {$new ne $Priv(inMenubutton) \</span>
+	    <span class="s0">&amp;&amp; ($new eq &quot;&quot; || [winfo toplevel $new] eq [winfo toplevel $w])} {</span>
+	<span class="s0">if {$Priv(inMenubutton) ne &quot;&quot;} {</span>
+	    <span class="s0">MbLeave $Priv(inMenubutton)</span>
+	<span class="s0">}</span>
+	<span class="s0">if {$new ne &quot;&quot; \</span>
+		<span class="s0">&amp;&amp; [winfo class $new] eq &quot;Menubutton&quot; \</span>
+		<span class="s0">&amp;&amp; ([$new cget -indicatoron] == 0) \</span>
+		<span class="s0">&amp;&amp; ([$w cget -indicatoron] == 0)} {</span>
+	    <span class="s0">if {$upDown eq &quot;down&quot;} {</span>
+		<span class="s0">MbPost $new $rootx $rooty</span>
+	    <span class="s0">} else {</span>
+		<span class="s0">MbEnter $new</span>
+	    <span class="s0">}</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+
+<span class="s0"># ::tk::MbButtonUp --</span>
+<span class="s0"># This procedure is invoked to handle button 1 releases for menubuttons.</span>
+<span class="s0"># If the release happens inside the menubutton then leave its menu</span>
+<span class="s0"># posted with element 0 activated.  Otherwise, unpost the menu.</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0"># w -			The name of the menubutton widget.</span>
+
+<span class="s0">proc ::tk::MbButtonUp w {</span>
+    <span class="s0">variable ::tk::Priv</span>
+
+    <span class="s0">set menu [$w cget -menu]</span>
+    <span class="s0">set tearoff [expr {[tk windowingsystem] eq &quot;x11&quot; || \</span>
+	    <span class="s0">($menu ne &quot;&quot; &amp;&amp; [$menu cget -type] eq &quot;tearoff&quot;)}]</span>
+    <span class="s0">if {($tearoff != 0) &amp;&amp; $Priv(postedMb) eq $w \</span>
+	    <span class="s0">&amp;&amp; $Priv(inMenubutton) eq $w} {</span>
+	<span class="s0">MenuFirstEntry [$Priv(postedMb) cget -menu]</span>
+    <span class="s0">} else {</span>
+	<span class="s0">MenuUnpost {}</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+
+<span class="s0"># ::tk::MenuMotion --</span>
+<span class="s0"># This procedure is called to handle mouse motion events for menus.</span>
+<span class="s0"># It does two things.  First, it resets the active element in the</span>
+<span class="s0"># menu, if the mouse is over the menu.  Second, if a mouse button</span>
+<span class="s0"># is down, it posts and unposts cascade entries to match the mouse</span>
+<span class="s0"># position.</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0"># menu -		The menu window.</span>
+<span class="s0"># x -			The x position of the mouse.</span>
+<span class="s0"># y -			The y position of the mouse.</span>
+<span class="s0"># state -		Modifier state (tells whether buttons are down).</span>
+
+<span class="s0">proc ::tk::MenuMotion {menu x y state} {</span>
+    <span class="s0">variable ::tk::Priv</span>
+    <span class="s0">if {$menu eq $Priv(window)} {</span>
+        <span class="s0">set activeindex [$menu index active]</span>
+	<span class="s0">if {[$menu cget -type] eq &quot;menubar&quot;} {</span>
+	    <span class="s0">if {[info exists Priv(focus)] &amp;&amp; $menu ne $Priv(focus)} {</span>
+		<span class="s0">$menu activate @$x,$y</span>
+		<span class="s0">GenerateMenuSelect $menu</span>
+	    <span class="s0">}</span>
+	<span class="s0">} else {</span>
+	    <span class="s0">$menu activate @$x,$y</span>
+	    <span class="s0">GenerateMenuSelect $menu</span>
+	<span class="s0">}</span>
+        <span class="s0">set index [$menu index @$x,$y]</span>
+        <span class="s0">if {[info exists Priv(menuActivated)] \</span>
+                <span class="s0">&amp;&amp; $index ne &quot;none&quot; \</span>
+                <span class="s0">&amp;&amp; $index ne $activeindex} {</span>
+            <span class="s0">set mode [option get $menu clickToFocus ClickToFocus]</span>
+            <span class="s0">if {[string is false $mode]} {</span>
+                <span class="s0">set delay [expr {[$menu cget -type] eq &quot;menubar&quot; ? 0 : 50}]</span>
+                <span class="s0">if {[$menu type $index] eq &quot;cascade&quot;} {</span>
+                    <span class="s0">set Priv(menuActivatedTimer) \</span>
+                        <span class="s0">[after $delay [list $menu postcascade active]]</span>
+                <span class="s0">} else {</span>
+                    <span class="s0">set Priv(menuDeactivatedTimer) \</span>
+                        <span class="s0">[after $delay [list $menu postcascade none]]</span>
+                <span class="s0">}</span>
+            <span class="s0">}</span>
+        <span class="s0">}</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+
+<span class="s0"># ::tk::MenuButtonDown --</span>
+<span class="s0"># Handles button presses in menus.  There are a couple of tricky things</span>
+<span class="s0"># here:</span>
+<span class="s0"># 1. Change the posted cascade entry (if any) to match the mouse position.</span>
+<span class="s0"># 2. If there is a posted menubutton, must grab to the menubutton;  this</span>
+<span class="s0">#    overrrides the implicit grab on button press, so that the menu</span>
+<span class="s0">#    button can track mouse motions over other menubuttons and change</span>
+<span class="s0">#    the posted menu.</span>
+<span class="s0"># 3. If there's no posted menubutton (e.g. because we're a torn-off menu</span>
+<span class="s0">#    or one of its descendants) must grab to the top-level menu so that</span>
+<span class="s0">#    we can track mouse motions across the entire menu hierarchy.</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0"># menu -		The menu window.</span>
+
+<span class="s0">proc ::tk::MenuButtonDown menu {</span>
+    <span class="s0">variable ::tk::Priv</span>
+
+    <span class="s0">if {![winfo viewable $menu]} {</span>
+        <span class="s0">return</span>
+    <span class="s0">}</span>
+    <span class="s0">$menu postcascade active</span>
+    <span class="s0">if {$Priv(postedMb) ne &quot;&quot; &amp;&amp; [winfo viewable $Priv(postedMb)]} {</span>
+	<span class="s0">grab -global $Priv(postedMb)</span>
+    <span class="s0">} else {</span>
+	<span class="s0">while {[$menu cget -type] eq &quot;normal&quot; \</span>
+		<span class="s0">&amp;&amp; [winfo class [winfo parent $menu]] eq &quot;Menu&quot; \</span>
+		<span class="s0">&amp;&amp; [winfo ismapped [winfo parent $menu]]} {</span>
+	    <span class="s0">set menu [winfo parent $menu]</span>
+	<span class="s0">}</span>
+
+	<span class="s0">if {$Priv(menuBar) eq {}} {</span>
+	    <span class="s0">set Priv(menuBar) $menu</span>
+	    <span class="s0">if {$::tk_strictMotif} {</span>
+		<span class="s0">set Priv(cursor) [$menu cget -cursor]</span>
+		<span class="s0">$menu configure -cursor arrow</span>
+	    <span class="s0">}</span>
+	    <span class="s0">if {[$menu type active] eq &quot;cascade&quot;} {</span>
+		<span class="s0">set Priv(menuActivated) 1</span>
+	    <span class="s0">}</span>
+        <span class="s0">}</span>
+
+	<span class="s0"># Don't update grab information if the grab window isn't changing.</span>
+	<span class="s0"># Otherwise, we'll get an error when we unpost the menus and</span>
+	<span class="s0"># restore the grab, since the old grab window will not be viewable</span>
+	<span class="s0"># anymore.</span>
+
+	<span class="s0">if {$menu ne [grab current $menu]} {</span>
+	    <span class="s0">SaveGrabInfo $menu</span>
+	<span class="s0">}</span>
+
+	<span class="s0"># Must re-grab even if the grab window hasn't changed, in order</span>
+	<span class="s0"># to release the implicit grab from the button press.</span>
+
+	<span class="s0">if {[tk windowingsystem] eq &quot;x11&quot;} {</span>
+	    <span class="s0">grab -global $menu</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+
+<span class="s0"># ::tk::MenuLeave --</span>
+<span class="s0"># This procedure is invoked to handle Leave events for a menu.  It</span>
+<span class="s0"># deactivates everything unless the active element is a cascade element</span>
+<span class="s0"># and the mouse is now over the submenu.</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0"># menu -		The menu window.</span>
+<span class="s0"># rootx, rooty -	Root coordinates of mouse.</span>
+<span class="s0"># state -		Modifier state.</span>
+
+<span class="s0">proc ::tk::MenuLeave {menu rootx rooty state} {</span>
+    <span class="s0">variable ::tk::Priv</span>
+    <span class="s0">set Priv(window) {}</span>
+    <span class="s0">if {[$menu index active] eq &quot;none&quot;} {</span>
+	<span class="s0">return</span>
+    <span class="s0">}</span>
+    <span class="s0">if {[$menu type active] eq &quot;cascade&quot; \</span>
+	    <span class="s0">&amp;&amp; [winfo containing $rootx $rooty] eq \</span>
+		<span class="s0">[$menu entrycget active -menu]} {</span>
+	<span class="s0">return</span>
+    <span class="s0">}</span>
+    <span class="s0">$menu activate none</span>
+    <span class="s0">GenerateMenuSelect $menu</span>
+<span class="s0">}</span>
+
+<span class="s0"># ::tk::MenuInvoke --</span>
+<span class="s0"># This procedure is invoked when button 1 is released over a menu.</span>
+<span class="s0"># It invokes the appropriate menu action and unposts the menu if</span>
+<span class="s0"># it came from a menubutton.</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0"># w -			Name of the menu widget.</span>
+<span class="s0"># buttonRelease -	1 means this procedure is called because of</span>
+<span class="s0">#			a button release;  0 means because of keystroke.</span>
+
+<span class="s0">proc ::tk::MenuInvoke {w buttonRelease} {</span>
+    <span class="s0">variable ::tk::Priv</span>
+
+    <span class="s0">if {$buttonRelease &amp;&amp; $Priv(window) eq &quot;&quot;} {</span>
+	<span class="s0"># Mouse was pressed over a menu without a menu button, then</span>
+	<span class="s0"># dragged off the menu (possibly with a cascade posted) and</span>
+	<span class="s0"># released.  Unpost everything and quit.</span>
+
+	<span class="s0">$w postcascade none</span>
+	<span class="s0">$w activate none</span>
+	<span class="s0">event generate $w &lt;&lt;MenuSelect&gt;&gt;</span>
+	<span class="s0">MenuUnpost $w</span>
+	<span class="s0">return</span>
+    <span class="s0">}</span>
+    <span class="s0">if {[$w type active] eq &quot;cascade&quot;} {</span>
+	<span class="s0">$w postcascade active</span>
+	<span class="s0">set menu [$w entrycget active -menu]</span>
+	<span class="s0">MenuFirstEntry $menu</span>
+    <span class="s0">} elseif {[$w type active] eq &quot;tearoff&quot;} {</span>
+	<span class="s0">::tk::TearOffMenu $w</span>
+	<span class="s0">MenuUnpost $w</span>
+    <span class="s0">} elseif {[$w cget -type] eq &quot;menubar&quot;} {</span>
+	<span class="s0">$w postcascade none</span>
+	<span class="s0">set active [$w index active]</span>
+	<span class="s0">set isCascade [string equal [$w type $active] &quot;cascade&quot;]</span>
+
+	<span class="s0"># Only de-activate the active item if it's a cascade; this prevents</span>
+	<span class="s0"># the annoying &quot;activation flicker&quot; you otherwise get with</span>
+	<span class="s0"># checkbuttons/commands/etc. on menubars</span>
+
+	<span class="s0">if { $isCascade } {</span>
+	    <span class="s0">$w activate none</span>
+	    <span class="s0">event generate $w &lt;&lt;MenuSelect&gt;&gt;</span>
+	<span class="s0">}</span>
+
+	<span class="s0">MenuUnpost $w</span>
+
+	<span class="s0"># If the active item is not a cascade, invoke it.  This enables</span>
+	<span class="s0"># the use of checkbuttons/commands/etc. on menubars (which is legal,</span>
+	<span class="s0"># but not recommended)</span>
+
+	<span class="s0">if { !$isCascade } {</span>
+	    <span class="s0">uplevel #0 [list $w invoke $active]</span>
+	<span class="s0">}</span>
+    <span class="s0">} else {</span>
+	<span class="s0">set active [$w index active]</span>
+	<span class="s0">if {$Priv(popup) eq &quot;&quot; || $active ne &quot;none&quot;} {</span>
+	    <span class="s0">MenuUnpost $w</span>
+	<span class="s0">}</span>
+	<span class="s0">uplevel #0 [list $w invoke active]</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+
+<span class="s0"># ::tk::MenuEscape --</span>
+<span class="s0"># This procedure is invoked for the Cancel (or Escape) key.  It unposts</span>
+<span class="s0"># the given menu and, if it is the top-level menu for a menu button,</span>
+<span class="s0"># unposts the menu button as well.</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0"># menu -		Name of the menu window.</span>
+
+<span class="s0">proc ::tk::MenuEscape menu {</span>
+    <span class="s0">set parent [winfo parent $menu]</span>
+    <span class="s0">if {[winfo class $parent] ne &quot;Menu&quot;} {</span>
+	<span class="s0">MenuUnpost $menu</span>
+    <span class="s0">} elseif {[$parent cget -type] eq &quot;menubar&quot;} {</span>
+	<span class="s0">MenuUnpost $menu</span>
+	<span class="s0">RestoreOldGrab</span>
+    <span class="s0">} else {</span>
+	<span class="s0">MenuNextMenu $menu left</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+
+<span class="s0"># The following routines handle arrow keys. Arrow keys behave</span>
+<span class="s0"># differently depending on whether the menu is a menu bar or not.</span>
+
+<span class="s0">proc ::tk::MenuUpArrow {menu} {</span>
+    <span class="s0">if {[$menu cget -type] eq &quot;menubar&quot;} {</span>
+	<span class="s0">MenuNextMenu $menu left</span>
+    <span class="s0">} else {</span>
+	<span class="s0">MenuNextEntry $menu -1</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+
+<span class="s0">proc ::tk::MenuDownArrow {menu} {</span>
+    <span class="s0">if {[$menu cget -type] eq &quot;menubar&quot;} {</span>
+	<span class="s0">MenuNextMenu $menu right</span>
+    <span class="s0">} else {</span>
+	<span class="s0">MenuNextEntry $menu 1</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+
+<span class="s0">proc ::tk::MenuLeftArrow {menu} {</span>
+    <span class="s0">if {[$menu cget -type] eq &quot;menubar&quot;} {</span>
+	<span class="s0">MenuNextEntry $menu -1</span>
+    <span class="s0">} else {</span>
+	<span class="s0">MenuNextMenu $menu left</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+
+<span class="s0">proc ::tk::MenuRightArrow {menu} {</span>
+    <span class="s0">if {[$menu cget -type] eq &quot;menubar&quot;} {</span>
+	<span class="s0">MenuNextEntry $menu 1</span>
+    <span class="s0">} else {</span>
+	<span class="s0">MenuNextMenu $menu right</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+
+<span class="s0"># ::tk::MenuNextMenu --</span>
+<span class="s0"># This procedure is invoked to handle &quot;left&quot; and &quot;right&quot; traversal</span>
+<span class="s0"># motions in menus.  It traverses to the next menu in a menu bar,</span>
+<span class="s0"># or into or out of a cascaded menu.</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0"># menu -		The menu that received the keyboard</span>
+<span class="s0">#			event.</span>
+<span class="s0"># direction -		Direction in which to move: &quot;left&quot; or &quot;right&quot;</span>
+
+<span class="s0">proc ::tk::MenuNextMenu {menu direction} {</span>
+    <span class="s0">variable ::tk::Priv</span>
+
+    <span class="s0"># First handle traversals into and out of cascaded menus.</span>
+
+    <span class="s0">if {$direction eq &quot;right&quot;} {</span>
+	<span class="s0">set count 1</span>
+	<span class="s0">set parent [winfo parent $menu]</span>
+	<span class="s0">set class [winfo class $parent]</span>
+	<span class="s0">if {[$menu type active] eq &quot;cascade&quot;} {</span>
+	    <span class="s0">$menu postcascade active</span>
+	    <span class="s0">set m2 [$menu entrycget active -menu]</span>
+	    <span class="s0">if {$m2 ne &quot;&quot;} {</span>
+		<span class="s0">MenuFirstEntry $m2</span>
+	    <span class="s0">}</span>
+	    <span class="s0">return</span>
+	<span class="s0">} else {</span>
+	    <span class="s0">set parent [winfo parent $menu]</span>
+	    <span class="s0">while {$parent ne &quot;.&quot;} {</span>
+		<span class="s0">if {[winfo class $parent] eq &quot;Menu&quot; \</span>
+			<span class="s0">&amp;&amp; [$parent cget -type] eq &quot;menubar&quot;} {</span>
+		    <span class="s0">tk_menuSetFocus $parent</span>
+		    <span class="s0">MenuNextEntry $parent 1</span>
+		    <span class="s0">return</span>
+		<span class="s0">}</span>
+		<span class="s0">set parent [winfo parent $parent]</span>
+	    <span class="s0">}</span>
+	<span class="s0">}</span>
+    <span class="s0">} else {</span>
+	<span class="s0">set count -1</span>
+	<span class="s0">set m2 [winfo parent $menu]</span>
+	<span class="s0">if {[winfo class $m2] eq &quot;Menu&quot;} {</span>
+	    <span class="s0">$menu activate none</span>
+	    <span class="s0">GenerateMenuSelect $menu</span>
+	    <span class="s0">tk_menuSetFocus $m2</span>
+
+	    <span class="s0">$m2 postcascade none</span>
+
+	    <span class="s0">if {[$m2 cget -type] ne &quot;menubar&quot;} {</span>
+		<span class="s0">return</span>
+	    <span class="s0">}</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+
+    <span class="s0"># Can't traverse into or out of a cascaded menu. Go to the next</span>
+    <span class="s0"># or previous menubutton, if that makes sense.</span>
+
+    <span class="s0">set m2 [winfo parent $menu]</span>
+    <span class="s0">if {[winfo class $m2] eq &quot;Menu&quot; &amp;&amp; [$m2 cget -type] eq &quot;menubar&quot;} {</span>
+	<span class="s0">tk_menuSetFocus $m2</span>
+	<span class="s0">MenuNextEntry $m2 -1</span>
+	<span class="s0">return</span>
+    <span class="s0">}</span>
+
+    <span class="s0">set w $Priv(postedMb)</span>
+    <span class="s0">if {$w eq &quot;&quot;} {</span>
+	<span class="s0">return</span>
+    <span class="s0">}</span>
+    <span class="s0">set buttons [winfo children [winfo parent $w]]</span>
+    <span class="s0">set length [llength $buttons]</span>
+    <span class="s0">set i [expr {[lsearch -exact $buttons $w] + $count}]</span>
+    <span class="s0">while {1} {</span>
+	<span class="s0">while {$i &lt; 0} {</span>
+	    <span class="s0">incr i $length</span>
+	<span class="s0">}</span>
+	<span class="s0">while {$i &gt;= $length} {</span>
+	    <span class="s0">incr i -$length</span>
+	<span class="s0">}</span>
+	<span class="s0">set mb [lindex $buttons $i]</span>
+	<span class="s0">if {[winfo class $mb] eq &quot;Menubutton&quot; \</span>
+		<span class="s0">&amp;&amp; [$mb cget -state] ne &quot;disabled&quot; \</span>
+		<span class="s0">&amp;&amp; [$mb cget -menu] ne &quot;&quot; \</span>
+		<span class="s0">&amp;&amp; [[$mb cget -menu] index last] ne &quot;none&quot;} {</span>
+	    <span class="s0">break</span>
+	<span class="s0">}</span>
+	<span class="s0">if {$mb eq $w} {</span>
+	    <span class="s0">return</span>
+	<span class="s0">}</span>
+	<span class="s0">incr i $count</span>
+    <span class="s0">}</span>
+    <span class="s0">MbPost $mb</span>
+    <span class="s0">MenuFirstEntry [$mb cget -menu]</span>
+<span class="s0">}</span>
+
+<span class="s0"># ::tk::MenuNextEntry --</span>
+<span class="s0"># Activate the next higher or lower entry in the posted menu,</span>
+<span class="s0"># wrapping around at the ends.  Disabled entries are skipped.</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0"># menu -			Menu window that received the keystroke.</span>
+<span class="s0"># count -			1 means go to the next lower entry,</span>
+<span class="s0">#				-1 means go to the next higher entry.</span>
+
+<span class="s0">proc ::tk::MenuNextEntry {menu count} {</span>
+    <span class="s0">if {[$menu index last] eq &quot;none&quot;} {</span>
+	<span class="s0">return</span>
+    <span class="s0">}</span>
+    <span class="s0">set length [expr {[$menu index last]+1}]</span>
+    <span class="s0">set quitAfter $length</span>
+    <span class="s0">set active [$menu index active]</span>
+    <span class="s0">if {$active eq &quot;none&quot;} {</span>
+	<span class="s0">set i 0</span>
+    <span class="s0">} else {</span>
+	<span class="s0">set i [expr {$active + $count}]</span>
+    <span class="s0">}</span>
+    <span class="s0">while {1} {</span>
+	<span class="s0">if {$quitAfter &lt;= 0} {</span>
+	    <span class="s0"># We've tried every entry in the menu.  Either there are</span>
+	    <span class="s0"># none, or they're all disabled.  Just give up.</span>
+
+	    <span class="s0">return</span>
+	<span class="s0">}</span>
+	<span class="s0">while {$i &lt; 0} {</span>
+	    <span class="s0">incr i $length</span>
+	<span class="s0">}</span>
+	<span class="s0">while {$i &gt;= $length} {</span>
+	    <span class="s0">incr i -$length</span>
+	<span class="s0">}</span>
+	<span class="s0">if {[catch {$menu entrycget $i -state} state] == 0} {</span>
+	    <span class="s0">if {$state ne &quot;disabled&quot; &amp;&amp; \</span>
+		    <span class="s0">($i!=0 || [$menu cget -type] ne &quot;tearoff&quot; \</span>
+		    <span class="s0">|| [$menu type 0] ne &quot;tearoff&quot;)} {</span>
+		<span class="s0">break</span>
+	    <span class="s0">}</span>
+	<span class="s0">}</span>
+	<span class="s0">if {$i == $active} {</span>
+	    <span class="s0">return</span>
+	<span class="s0">}</span>
+	<span class="s0">incr i $count</span>
+	<span class="s0">incr quitAfter -1</span>
+    <span class="s0">}</span>
+    <span class="s0">$menu activate $i</span>
+    <span class="s0">GenerateMenuSelect $menu</span>
+
+    <span class="s0">if {[$menu type $i] eq &quot;cascade&quot; &amp;&amp; [$menu cget -type] eq &quot;menubar&quot;} {</span>
+	<span class="s0">set cascade [$menu entrycget $i -menu]</span>
+	<span class="s0">if {$cascade ne &quot;&quot;} {</span>
+	    <span class="s0"># Here we auto-post a cascade.  This is necessary when</span>
+	    <span class="s0"># we traverse left/right in the menubar, but undesirable when</span>
+	    <span class="s0"># we traverse up/down in a menu.</span>
+	    <span class="s0">$menu postcascade $i</span>
+	    <span class="s0">MenuFirstEntry $cascade</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+
+<span class="s0"># ::tk::MenuFind --</span>
+<span class="s0"># This procedure searches the entire window hierarchy under w for</span>
+<span class="s0"># a menubutton that isn't disabled and whose underlined character</span>
+<span class="s0"># is &quot;char&quot; or an entry in a menubar that isn't disabled and whose</span>
+<span class="s0"># underlined character is &quot;char&quot;.</span>
+<span class="s0"># It returns the name of that window, if found, or an</span>
+<span class="s0"># empty string if no matching window was found.  If &quot;char&quot; is an</span>
+<span class="s0"># empty string then the procedure returns the name of the first</span>
+<span class="s0"># menubutton found that isn't disabled.</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0"># w -				Name of window where key was typed.</span>
+<span class="s0"># char -			Underlined character to search for;</span>
+<span class="s0">#				may be either upper or lower case, and</span>
+<span class="s0">#				will match either upper or lower case.</span>
+
+<span class="s0">proc ::tk::MenuFind {w char} {</span>
+    <span class="s0">set char [string tolower $char]</span>
+    <span class="s0">set windowlist [winfo child $w]</span>
+
+    <span class="s0">foreach child $windowlist {</span>
+	<span class="s0"># Don't descend into other toplevels.</span>
+        <span class="s0">if {[winfo toplevel $w] ne [winfo toplevel $child]} {</span>
+	    <span class="s0">continue</span>
+	<span class="s0">}</span>
+	<span class="s0">if {[winfo class $child] eq &quot;Menu&quot; &amp;&amp; \</span>
+		<span class="s0">[$child cget -type] eq &quot;menubar&quot;} {</span>
+	    <span class="s0">if {$char eq &quot;&quot;} {</span>
+		<span class="s0">return $child</span>
+	    <span class="s0">}</span>
+	    <span class="s0">set last [$child index last]</span>
+	    <span class="s0">for {set i [$child cget -tearoff]} {$i &lt;= $last} {incr i} {</span>
+		<span class="s0">if {[$child type $i] eq &quot;separator&quot;} {</span>
+		    <span class="s0">continue</span>
+		<span class="s0">}</span>
+		<span class="s0">set char2 [string index [$child entrycget $i -label] \</span>
+			<span class="s0">[$child entrycget $i -underline]]</span>
+		<span class="s0">if {$char eq [string tolower $char2] || $char eq &quot;&quot;} {</span>
+		    <span class="s0">if {[$child entrycget $i -state] ne &quot;disabled&quot;} {</span>
+			<span class="s0">return $child</span>
+		    <span class="s0">}</span>
+		<span class="s0">}</span>
+	    <span class="s0">}</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+
+    <span class="s0">foreach child $windowlist {</span>
+	<span class="s0"># Don't descend into other toplevels.</span>
+        <span class="s0">if {[winfo toplevel $w] ne [winfo toplevel $child]} {</span>
+	    <span class="s0">continue</span>
+	<span class="s0">}</span>
+	<span class="s0">switch -- [winfo class $child] {</span>
+	    <span class="s0">Menubutton {</span>
+		<span class="s0">set char2 [string index [$child cget -text] \</span>
+			<span class="s0">[$child cget -underline]]</span>
+		<span class="s0">if {$char eq [string tolower $char2] || $char eq &quot;&quot;} {</span>
+		    <span class="s0">if {[$child cget -state] ne &quot;disabled&quot;} {</span>
+			<span class="s0">return $child</span>
+		    <span class="s0">}</span>
+		<span class="s0">}</span>
+	    <span class="s0">}</span>
+
+	    <span class="s0">default {</span>
+		<span class="s0">set match [MenuFind $child $char]</span>
+		<span class="s0">if {$match ne &quot;&quot;} {</span>
+		    <span class="s0">return $match</span>
+		<span class="s0">}</span>
+	    <span class="s0">}</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+    <span class="s0">return {}</span>
+<span class="s0">}</span>
+
+<span class="s0"># ::tk::TraverseToMenu --</span>
+<span class="s0"># This procedure implements keyboard traversal of menus.  Given an</span>
+<span class="s0"># ASCII character &quot;char&quot;, it looks for a menubutton with that character</span>
+<span class="s0"># underlined.  If one is found, it posts the menubutton's menu</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0"># w -				Window in which the key was typed (selects</span>
+<span class="s0">#				a toplevel window).</span>
+<span class="s0"># char -			Character that selects a menu.  The case</span>
+<span class="s0">#				is ignored.  If an empty string, nothing</span>
+<span class="s0">#				happens.</span>
+
+<span class="s0">proc ::tk::TraverseToMenu {w char} {</span>
+    <span class="s0">variable ::tk::Priv</span>
+    <span class="s0">if {![winfo exists $w] || $char eq &quot;&quot;} {</span>
+	<span class="s0">return</span>
+    <span class="s0">}</span>
+    <span class="s0">while {[winfo class $w] eq &quot;Menu&quot;} {</span>
+	<span class="s0">if {[$w cget -type] eq &quot;menubar&quot;} {</span>
+	    <span class="s0">break</span>
+	<span class="s0">} elseif {$Priv(postedMb) eq &quot;&quot;} {</span>
+	    <span class="s0">return</span>
+	<span class="s0">}</span>
+	<span class="s0">set w [winfo parent $w]</span>
+    <span class="s0">}</span>
+    <span class="s0">set w [MenuFind [winfo toplevel $w] $char]</span>
+    <span class="s0">if {$w ne &quot;&quot;} {</span>
+	<span class="s0">if {[winfo class $w] eq &quot;Menu&quot;} {</span>
+	    <span class="s0">tk_menuSetFocus $w</span>
+	    <span class="s0">set Priv(window) $w</span>
+	    <span class="s0">SaveGrabInfo $w</span>
+	    <span class="s0">grab -global $w</span>
+	    <span class="s0">TraverseWithinMenu $w $char</span>
+	<span class="s0">} else {</span>
+	    <span class="s0">MbPost $w</span>
+	    <span class="s0">MenuFirstEntry [$w cget -menu]</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+
+<span class="s0"># ::tk::FirstMenu --</span>
+<span class="s0"># This procedure traverses to the first menubutton in the toplevel</span>
+<span class="s0"># for a given window, and posts that menubutton's menu.</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0"># w -				Name of a window.  Selects which toplevel</span>
+<span class="s0">#				to search for menubuttons.</span>
+
+<span class="s0">proc ::tk::FirstMenu w {</span>
+    <span class="s0">variable ::tk::Priv</span>
+    <span class="s0">set w [MenuFind [winfo toplevel $w] &quot;&quot;]</span>
+    <span class="s0">if {$w ne &quot;&quot;} {</span>
+	<span class="s0">if {[winfo class $w] eq &quot;Menu&quot;} {</span>
+	    <span class="s0">tk_menuSetFocus $w</span>
+	    <span class="s0">set Priv(window) $w</span>
+	    <span class="s0">SaveGrabInfo $w</span>
+	    <span class="s0">grab -global $w</span>
+	    <span class="s0">MenuFirstEntry $w</span>
+	<span class="s0">} else {</span>
+	    <span class="s0">MbPost $w</span>
+	    <span class="s0">MenuFirstEntry [$w cget -menu]</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+
+<span class="s0"># ::tk::TraverseWithinMenu</span>
+<span class="s0"># This procedure implements keyboard traversal within a menu.  It</span>
+<span class="s0"># searches for an entry in the menu that has &quot;char&quot; underlined.  If</span>
+<span class="s0"># such an entry is found, it is invoked and the menu is unposted.</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0"># w -				The name of the menu widget.</span>
+<span class="s0"># char -			The character to look for;  case is</span>
+<span class="s0">#				ignored.  If the string is empty then</span>
+<span class="s0">#				nothing happens.</span>
+
+<span class="s0">proc ::tk::TraverseWithinMenu {w char} {</span>
+    <span class="s0">if {$char eq &quot;&quot;} {</span>
+	<span class="s0">return</span>
+    <span class="s0">}</span>
+    <span class="s0">set char [string tolower $char]</span>
+    <span class="s0">set last [$w index last]</span>
+    <span class="s0">if {$last eq &quot;none&quot;} {</span>
+	<span class="s0">return</span>
+    <span class="s0">}</span>
+    <span class="s0">for {set i 0} {$i &lt;= $last} {incr i} {</span>
+	<span class="s0">if {[catch {set char2 [string index \</span>
+		<span class="s0">[$w entrycget $i -label] [$w entrycget $i -underline]]}]} {</span>
+	    <span class="s0">continue</span>
+	<span class="s0">}</span>
+	<span class="s0">if {$char eq [string tolower $char2]} {</span>
+	    <span class="s0">if {[$w type $i] eq &quot;cascade&quot;} {</span>
+		<span class="s0">$w activate $i</span>
+		<span class="s0">$w postcascade active</span>
+		<span class="s0">event generate $w &lt;&lt;MenuSelect&gt;&gt;</span>
+		<span class="s0">set m2 [$w entrycget $i -menu]</span>
+		<span class="s0">if {$m2 ne &quot;&quot;} {</span>
+		    <span class="s0">MenuFirstEntry $m2</span>
+		<span class="s0">}</span>
+	    <span class="s0">} else {</span>
+		<span class="s0">MenuUnpost $w</span>
+		<span class="s0">uplevel #0 [list $w invoke $i]</span>
+	    <span class="s0">}</span>
+	    <span class="s0">return</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+
+<span class="s0"># ::tk::MenuFirstEntry --</span>
+<span class="s0"># Given a menu, this procedure finds the first entry that isn't</span>
+<span class="s0"># disabled or a tear-off or separator, and activates that entry.</span>
+<span class="s0"># However, if there is already an active entry in the menu (e.g.,</span>
+<span class="s0"># because of a previous call to tk::PostOverPoint) then the active</span>
+<span class="s0"># entry isn't changed.  This procedure also sets the input focus</span>
+<span class="s0"># to the menu.</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0"># menu -		Name of the menu window (possibly empty).</span>
+
+<span class="s0">proc ::tk::MenuFirstEntry menu {</span>
+    <span class="s0">if {$menu eq &quot;&quot;} {</span>
+	<span class="s0">return</span>
+    <span class="s0">}</span>
+    <span class="s0">tk_menuSetFocus $menu</span>
+    <span class="s0">if {[$menu index active] ne &quot;none&quot;} {</span>
+	<span class="s0">return</span>
+    <span class="s0">}</span>
+    <span class="s0">set last [$menu index last]</span>
+    <span class="s0">if {$last eq &quot;none&quot;} {</span>
+	<span class="s0">return</span>
+    <span class="s0">}</span>
+    <span class="s0">for {set i 0} {$i &lt;= $last} {incr i} {</span>
+	<span class="s0">if {([catch {set state [$menu entrycget $i -state]}] == 0) \</span>
+		<span class="s0">&amp;&amp; $state ne &quot;disabled&quot; &amp;&amp; [$menu type $i] ne &quot;tearoff&quot;} {</span>
+	    <span class="s0">$menu activate $i</span>
+	    <span class="s0">GenerateMenuSelect $menu</span>
+	    <span class="s0"># Only post the cascade if the current menu is a menubar;</span>
+	    <span class="s0"># otherwise, if the first entry of the cascade is a cascade,</span>
+	    <span class="s0"># we can get an annoying cascading effect resulting in a bunch of</span>
+	    <span class="s0"># menus getting posted (bug 676)</span>
+	    <span class="s0">if {[$menu type $i] eq &quot;cascade&quot; &amp;&amp; [$menu cget -type] eq &quot;menubar&quot;} {</span>
+		<span class="s0">set cascade [$menu entrycget $i -menu]</span>
+		<span class="s0">if {$cascade ne &quot;&quot;} {</span>
+		    <span class="s0">$menu postcascade $i</span>
+		    <span class="s0">MenuFirstEntry $cascade</span>
+		<span class="s0">}</span>
+	    <span class="s0">}</span>
+	    <span class="s0">return</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+
+<span class="s0"># ::tk::MenuFindName --</span>
+<span class="s0"># Given a menu and a text string, return the index of the menu entry</span>
+<span class="s0"># that displays the string as its label.  If there is no such entry,</span>
+<span class="s0"># return an empty string.  This procedure is tricky because some names</span>
+<span class="s0"># like &quot;active&quot; have a special meaning in menu commands, so we can't</span>
+<span class="s0"># always use the &quot;index&quot; widget command.</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0"># menu -		Name of the menu widget.</span>
+<span class="s0"># s -			String to look for.</span>
+
+<span class="s0">proc ::tk::MenuFindName {menu s} {</span>
+    <span class="s0">set i &quot;&quot;</span>
+    <span class="s0">if {![regexp {^active$|^last$|^none$|^[0-9]|^@} $s]} {</span>
+	<span class="s0">catch {set i [$menu index $s]}</span>
+	<span class="s0">return $i</span>
+    <span class="s0">}</span>
+    <span class="s0">set last [$menu index last]</span>
+    <span class="s0">if {$last eq &quot;none&quot;} {</span>
+	<span class="s0">return</span>
+    <span class="s0">}</span>
+    <span class="s0">for {set i 0} {$i &lt;= $last} {incr i} {</span>
+	<span class="s0">if {![catch {$menu entrycget $i -label} label]} {</span>
+	    <span class="s0">if {$label eq $s} {</span>
+		<span class="s0">return $i</span>
+	    <span class="s0">}</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+    <span class="s0">return &quot;&quot;</span>
+<span class="s0">}</span>
+
+<span class="s0"># ::tk::PostOverPoint --</span>
+<span class="s0"># This procedure posts a given menu such that a given entry in the</span>
+<span class="s0"># menu is centered over a given point in the root window.  It also</span>
+<span class="s0"># activates the given entry.</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0"># menu -		Menu to post.</span>
+<span class="s0"># x, y -		Root coordinates of point.</span>
+<span class="s0"># entry -		Index of entry within menu to center over (x,y).</span>
+<span class="s0">#			If omitted or specified as {}, then the menu's</span>
+<span class="s0">#			upper-left corner goes at (x,y).</span>
+
+<span class="s0">proc ::tk::PostOverPoint {menu x y {entry {}}}  {</span>
+    <span class="s0">if {$entry ne &quot;&quot;} {</span>
+	<span class="s0">if {$entry == [$menu index last]} {</span>
+	    <span class="s0">incr y [expr {-([$menu yposition $entry] \</span>
+		    <span class="s0">+ [winfo reqheight $menu])/2}]</span>
+	<span class="s0">} else {</span>
+	    <span class="s0">incr y [expr {-([$menu yposition $entry] \</span>
+		    <span class="s0">+ [$menu yposition [expr {$entry+1}]])/2}]</span>
+	<span class="s0">}</span>
+	<span class="s0">incr x [expr {-[winfo reqwidth $menu]/2}]</span>
+    <span class="s0">}</span>
+
+    <span class="s0">if {[tk windowingsystem] eq &quot;win32&quot;} {</span>
+	<span class="s0"># osVersion is not available in safe interps</span>
+	<span class="s0">set ver 5</span>
+	<span class="s0">if {[info exists ::tcl_platform(osVersion)]} {</span>
+	    <span class="s0">scan $::tcl_platform(osVersion) %d ver</span>
+	<span class="s0">}</span>
+
+	<span class="s0"># We need to fix some problems with menu posting on Windows,</span>
+	<span class="s0"># where, if the menu would overlap top or bottom of screen,</span>
+	<span class="s0"># Windows puts it in the wrong place for us.  We must also</span>
+	<span class="s0"># subtract an extra amount for half the height of the current</span>
+	<span class="s0"># entry.  To be safe we subtract an extra 10.</span>
+	<span class="s0"># NOTE: this issue appears to have been resolved in the Window</span>
+	<span class="s0"># manager provided with Vista and Windows 7.</span>
+	<span class="s0">if {$ver &lt; 6} {</span>
+	    <span class="s0">set yoffset [expr {[winfo screenheight $menu] \</span>
+		    <span class="s0">- $y - [winfo reqheight $menu] - 10}]</span>
+	    <span class="s0">if {$yoffset &lt; [winfo vrooty $menu]} {</span>
+		<span class="s0"># The bottom of the menu is offscreen, so adjust upwards</span>
+		<span class="s0">incr y [expr {$yoffset - [winfo vrooty $menu]}]</span>
+	    <span class="s0">}</span>
+	    <span class="s0"># If we're off the top of the screen (either because we were</span>
+	    <span class="s0"># originally or because we just adjusted too far upwards),</span>
+	    <span class="s0"># then make the menu popup on the top edge.</span>
+	    <span class="s0">if {$y &lt; [winfo vrooty $menu]} {</span>
+		<span class="s0">set y [winfo vrooty $menu]</span>
+	    <span class="s0">}</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+    <span class="s0">$menu post $x $y</span>
+    <span class="s0">if {$entry ne &quot;&quot; &amp;&amp; [$menu entrycget $entry -state] ne &quot;disabled&quot;} {</span>
+	<span class="s0">$menu activate $entry</span>
+	<span class="s0">GenerateMenuSelect $menu</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+
+<span class="s0"># ::tk::SaveGrabInfo --</span>
+<span class="s0"># Sets the variables tk::Priv(oldGrab) and tk::Priv(grabStatus) to record</span>
+<span class="s0"># the state of any existing grab on the w's display.</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0"># w -			Name of a window;  used to select the display</span>
+<span class="s0">#			whose grab information is to be recorded.</span>
+
+<span class="s0">proc tk::SaveGrabInfo w {</span>
+    <span class="s0">variable ::tk::Priv</span>
+    <span class="s0">set Priv(oldGrab) [grab current $w]</span>
+    <span class="s0">if {$Priv(oldGrab) ne &quot;&quot;} {</span>
+	<span class="s0">set Priv(grabStatus) [grab status $Priv(oldGrab)]</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+
+<span class="s0"># ::tk::RestoreOldGrab --</span>
+<span class="s0"># Restores the grab to what it was before TkSaveGrabInfo was called.</span>
+<span class="s0">#</span>
+
+<span class="s0">proc ::tk::RestoreOldGrab {} {</span>
+    <span class="s0">variable ::tk::Priv</span>
+
+    <span class="s0">if {$Priv(oldGrab) ne &quot;&quot;} {</span>
+	<span class="s0"># Be careful restoring the old grab, since it's window may not</span>
+	<span class="s0"># be visible anymore.</span>
+
+	<span class="s0">catch {</span>
+	    <span class="s0">if {$Priv(grabStatus) eq &quot;global&quot;} {</span>
+		<span class="s0">grab set -global $Priv(oldGrab)</span>
+	    <span class="s0">} else {</span>
+		<span class="s0">grab set $Priv(oldGrab)</span>
+	    <span class="s0">}</span>
+	<span class="s0">}</span>
+	<span class="s0">set Priv(oldGrab) &quot;&quot;</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+
+<span class="s0">proc ::tk_menuSetFocus {menu} {</span>
+    <span class="s0">variable ::tk::Priv</span>
+    <span class="s0">if {![info exists Priv(focus)] || $Priv(focus) eq &quot;&quot;} {</span>
+	<span class="s0">set Priv(focus) [focus]</span>
+    <span class="s0">}</span>
+    <span class="s0">focus $menu</span>
+<span class="s0">}</span>
+
+<span class="s0">proc ::tk::GenerateMenuSelect {menu} {</span>
+    <span class="s0">variable ::tk::Priv</span>
+
+    <span class="s0">if {$Priv(activeMenu) eq $menu \</span>
+	    <span class="s0">&amp;&amp; $Priv(activeItem) eq [$menu index active]} {</span>
+	<span class="s0">return</span>
+    <span class="s0">}</span>
+
+    <span class="s0">set Priv(activeMenu) $menu</span>
+    <span class="s0">set Priv(activeItem) [$menu index active]</span>
+    <span class="s0">event generate $menu &lt;&lt;MenuSelect&gt;&gt;</span>
+<span class="s0">}</span>
+
+<span class="s0"># ::tk_popup --</span>
+<span class="s0"># This procedure pops up a menu and sets things up for traversing</span>
+<span class="s0"># the menu and its submenus.</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0"># menu -		Name of the menu to be popped up.</span>
+<span class="s0"># x, y -		Root coordinates at which to pop up the</span>
+<span class="s0">#			menu.</span>
+<span class="s0"># entry -		Index of a menu entry to center over (x,y).</span>
+<span class="s0">#			If omitted or specified as {}, then menu's</span>
+<span class="s0">#			upper-left corner goes at (x,y).</span>
+
+<span class="s0">proc ::tk_popup {menu x y {entry {}}} {</span>
+    <span class="s0">variable ::tk::Priv</span>
+    <span class="s0">if {$Priv(popup) ne &quot;&quot; || $Priv(postedMb) ne &quot;&quot;} {</span>
+	<span class="s0">tk::MenuUnpost {}</span>
+    <span class="s0">}</span>
+    <span class="s0">tk::PostOverPoint $menu $x $y $entry</span>
+    <span class="s0">if {[tk windowingsystem] eq &quot;x11&quot; &amp;&amp; [winfo viewable $menu]} {</span>
+        <span class="s0">tk::SaveGrabInfo $menu</span>
+	<span class="s0">grab -global $menu</span>
+	<span class="s0">set Priv(popup) $menu</span>
+	<span class="s0">set Priv(window) $menu</span>
+	<span class="s0">set Priv(menuActivated) 1</span>
+	<span class="s0">tk_menuSetFocus $menu</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+</pre>
+</body>
+</html>

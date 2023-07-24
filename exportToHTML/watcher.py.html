@@ -1,0 +1,782 @@
+<html>
+<head>
+<title>watcher.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #cc7832;}
+.s3 { color: #6a8759;}
+.s4 { color: #6897bb;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+watcher.py</font>
+</center></td></tr></table>
+<pre><span class="s0"># pylint: disable=too-many-lines, protected-access, redefined-outer-name, not-callable</span>
+<span class="s0"># pylint: disable=no-member</span>
+<span class="s2">from </span><span class="s1">__future__ </span><span class="s2">import </span><span class="s1">absolute_import</span><span class="s2">, </span><span class="s1">print_function</span>
+
+<span class="s2">import </span><span class="s1">functools</span>
+<span class="s2">import </span><span class="s1">sys</span>
+
+<span class="s2">from </span><span class="s1">gevent.libuv </span><span class="s2">import </span><span class="s1">_corecffi </span><span class="s0"># pylint:disable=no-name-in-module,import-error</span>
+
+<span class="s0"># Nothing public here</span>
+<span class="s1">__all__ = []</span>
+
+<span class="s1">ffi = _corecffi.ffi</span>
+<span class="s1">libuv = _corecffi.lib</span>
+
+<span class="s2">from </span><span class="s1">gevent._ffi </span><span class="s2">import </span><span class="s1">watcher </span><span class="s2">as </span><span class="s1">_base</span>
+<span class="s2">from </span><span class="s1">gevent._ffi </span><span class="s2">import </span><span class="s1">_dbg</span>
+
+<span class="s0"># A set of uv_handle_t* CFFI objects. Kept around</span>
+<span class="s0"># to keep the memory alive until libuv is done with them.</span>
+<span class="s2">class </span><span class="s1">_ClosingWatchers(dict):</span>
+    <span class="s1">__slots__ = ()</span>
+
+    <span class="s2">def </span><span class="s1">remove(self</span><span class="s2">, </span><span class="s1">obj):</span>
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s2">del </span><span class="s1">self[obj]</span>
+        <span class="s2">except </span><span class="s1">KeyError: </span><span class="s0"># pragma: no cover</span>
+            <span class="s0"># This has been seen to happen if the module is executed twice</span>
+            <span class="s0"># and so the callback doesn't match the storage seen by watcher objects.</span>
+            <span class="s1">print(</span>
+                <span class="s3">'gevent error: Unable to remove closing watcher from keepaliveset. '</span>
+                <span class="s3">'Has the module state been corrupted or executed more than once?'</span><span class="s2">,</span>
+                <span class="s1">file=sys.stderr</span>
+            <span class="s1">)</span>
+
+<span class="s1">_closing_watchers = _ClosingWatchers()</span>
+
+
+<span class="s0"># In debug mode, it would be nice to be able to clear the memory of</span>
+<span class="s0"># the watcher (its size determined by</span>
+<span class="s0"># libuv.uv_handle_size(ffi_watcher.type)) using memset so that if we</span>
+<span class="s0"># are using it after it's supposedly been closed and deleted, we'd</span>
+<span class="s0"># catch it sooner. BUT doing so breaks test__threadpool. We get errors</span>
+<span class="s0"># about `pthread_mutex_lock[3]: Invalid argument` (and sometimes we</span>
+<span class="s0"># crash) suggesting either that we're writing on memory that doesn't</span>
+<span class="s0"># belong to us, somehow, or that we haven't actually lost all</span>
+<span class="s0"># references...</span>
+<span class="s1">_uv_close_callback = ffi.def_extern(name=</span><span class="s3">'_uv_close_callback'</span><span class="s1">)(</span>
+    <span class="s1">_closing_watchers.remove</span>
+<span class="s1">)</span>
+
+
+<span class="s1">_events = [(libuv.UV_READABLE</span><span class="s2">, </span><span class="s3">&quot;READ&quot;</span><span class="s1">)</span><span class="s2">,</span>
+           <span class="s1">(libuv.UV_WRITABLE</span><span class="s2">, </span><span class="s3">&quot;WRITE&quot;</span><span class="s1">)]</span>
+
+<span class="s2">def </span><span class="s1">_events_to_str(events): </span><span class="s0"># export</span>
+    <span class="s2">return </span><span class="s1">_base.events_to_str(events</span><span class="s2">, </span><span class="s1">_events)</span>
+
+<span class="s2">class </span><span class="s1">UVFuncallError(ValueError):</span>
+    <span class="s2">pass</span>
+
+<span class="s2">class </span><span class="s1">libuv_error_wrapper(object):</span>
+    <span class="s0"># Makes sure that everything stored as a function</span>
+    <span class="s0"># on the wrapper instances (classes, actually,</span>
+    <span class="s0"># because this is used by the metaclass)</span>
+    <span class="s0"># checks its return value and raises an error.</span>
+    <span class="s0"># This expects that everything we call has an int</span>
+    <span class="s0"># or void return value and follows the conventions</span>
+    <span class="s0"># of error handling (that negative values are errors)</span>
+    <span class="s2">def </span><span class="s1">__init__(self</span><span class="s2">, </span><span class="s1">uv):</span>
+        <span class="s1">self._libuv = uv</span>
+
+    <span class="s2">def </span><span class="s1">__getattr__(self</span><span class="s2">, </span><span class="s1">name):</span>
+        <span class="s1">libuv_func = getattr(self._libuv</span><span class="s2">, </span><span class="s1">name)</span>
+
+        <span class="s1">@functools.wraps(libuv_func)</span>
+        <span class="s2">def </span><span class="s1">wrap(*args</span><span class="s2">, </span><span class="s1">**kwargs):</span>
+            <span class="s2">if </span><span class="s1">args </span><span class="s2">and </span><span class="s1">isinstance(args[</span><span class="s4">0</span><span class="s1">]</span><span class="s2">, </span><span class="s1">watcher):</span>
+                <span class="s1">args = args[</span><span class="s4">1</span><span class="s1">:]</span>
+            <span class="s1">res = libuv_func(*args</span><span class="s2">, </span><span class="s1">**kwargs)</span>
+            <span class="s2">if </span><span class="s1">res </span><span class="s2">is not None and </span><span class="s1">res &lt; </span><span class="s4">0</span><span class="s1">:</span>
+                <span class="s2">raise </span><span class="s1">UVFuncallError(</span>
+                    <span class="s1">str(ffi.string(libuv.uv_err_name(res)).decode(</span><span class="s3">'ascii'</span><span class="s1">)</span>
+                        <span class="s1">+ </span><span class="s3">' '</span>
+                        <span class="s1">+ ffi.string(libuv.uv_strerror(res)).decode(</span><span class="s3">'ascii'</span><span class="s1">))</span>
+                    <span class="s1">+ </span><span class="s3">&quot; Args: &quot; </span><span class="s1">+ repr(args) + </span><span class="s3">&quot; KWARGS: &quot; </span><span class="s1">+ repr(kwargs)</span>
+                <span class="s1">)</span>
+            <span class="s2">return </span><span class="s1">res</span>
+
+        <span class="s1">setattr(self</span><span class="s2">, </span><span class="s1">name</span><span class="s2">, </span><span class="s1">wrap)</span>
+
+        <span class="s2">return </span><span class="s1">wrap</span>
+
+
+<span class="s2">class </span><span class="s1">ffi_unwrapper(object):</span>
+    <span class="s0"># undoes the wrapping of libuv_error_wrapper for</span>
+    <span class="s0"># the methods used by the metaclass that care</span>
+
+    <span class="s2">def </span><span class="s1">__init__(self</span><span class="s2">, </span><span class="s1">ff):</span>
+        <span class="s1">self._ffi = ff</span>
+
+    <span class="s2">def </span><span class="s1">__getattr__(self</span><span class="s2">, </span><span class="s1">name):</span>
+        <span class="s2">return </span><span class="s1">getattr(self._ffi</span><span class="s2">, </span><span class="s1">name)</span>
+
+    <span class="s2">def </span><span class="s1">addressof(self</span><span class="s2">, </span><span class="s1">lib</span><span class="s2">, </span><span class="s1">name):</span>
+        <span class="s2">assert </span><span class="s1">isinstance(lib</span><span class="s2">, </span><span class="s1">libuv_error_wrapper)</span>
+        <span class="s2">return </span><span class="s1">self._ffi.addressof(libuv</span><span class="s2">, </span><span class="s1">name)</span>
+
+
+<span class="s2">class </span><span class="s1">watcher(_base.watcher):</span>
+    <span class="s1">_FFI = ffi_unwrapper(ffi)</span>
+    <span class="s1">_LIB = libuv_error_wrapper(libuv)</span>
+
+    <span class="s1">_watcher_prefix = </span><span class="s3">'uv'</span>
+    <span class="s1">_watcher_struct_pattern = </span><span class="s3">'%s_t'</span>
+
+    <span class="s1">@classmethod</span>
+    <span class="s2">def </span><span class="s1">_watcher_ffi_close(cls</span><span class="s2">, </span><span class="s1">ffi_watcher):</span>
+        <span class="s0"># Managing the lifetime of _watcher is tricky.</span>
+        <span class="s0"># They have to be uv_close()'d, but that only</span>
+        <span class="s0"># queues them to be closed in the *next* loop iteration.</span>
+        <span class="s0"># The memory must stay valid for at least that long,</span>
+        <span class="s0"># or assert errors are triggered. We can't use a ffi.gc()</span>
+        <span class="s0"># pointer to queue the uv_close, because by the time the</span>
+        <span class="s0"># destructor is called, there's no way to keep the memory alive</span>
+        <span class="s0"># and it could be re-used.</span>
+        <span class="s0"># So here we resort to resurrecting the pointer object out</span>
+        <span class="s0"># of our scope, keeping it alive past this object's lifetime.</span>
+        <span class="s0"># We then use the uv_close callback to handle removing that</span>
+        <span class="s0"># reference. There's no context passed to the close callback,</span>
+        <span class="s0"># so we have to do this globally.</span>
+
+        <span class="s0"># Sadly, doing this causes crashes if there were multiple</span>
+        <span class="s0"># watchers for a given FD, so we have to take special care</span>
+        <span class="s0"># about that. See https://github.com/gevent/gevent/issues/790#issuecomment-208076604</span>
+
+        <span class="s0"># Note that this cannot be a __del__ method, because we store</span>
+        <span class="s0"># the CFFI handle to self on self, which is a cycle, and</span>
+        <span class="s0"># objects with a __del__ method cannot be collected on CPython &lt; 3.4</span>
+
+        <span class="s0"># Instead, this is arranged as a callback to GC when the</span>
+        <span class="s0"># watcher class dies. Obviously it's important to keep the ffi</span>
+        <span class="s0"># watcher alive.</span>
+        <span class="s0"># We can pass in &quot;subclasses&quot; of uv_handle_t that line up at the C level,</span>
+        <span class="s0"># but that don't in CFFI without a cast. But be careful what we use the cast</span>
+        <span class="s0"># for, don't pass it back to C.</span>
+        <span class="s1">ffi_handle_watcher = cls._FFI.cast(</span><span class="s3">'uv_handle_t*'</span><span class="s2">, </span><span class="s1">ffi_watcher)</span>
+        <span class="s1">ffi_handle_watcher.data = ffi.NULL</span>
+
+        <span class="s2">if </span><span class="s1">ffi_handle_watcher.type </span><span class="s2">and not </span><span class="s1">libuv.uv_is_closing(ffi_watcher):</span>
+            <span class="s0"># If the type isn't set, we were never properly initialized,</span>
+            <span class="s0"># and trying to close it results in libuv terminating the process.</span>
+            <span class="s0"># Sigh. Same thing if it's already in the process of being</span>
+            <span class="s0"># closed.</span>
+            <span class="s1">_closing_watchers[ffi_handle_watcher] = ffi_watcher</span>
+            <span class="s1">libuv.uv_close(ffi_watcher</span><span class="s2">, </span><span class="s1">libuv._uv_close_callback)</span>
+
+    <span class="s2">def </span><span class="s1">_watcher_ffi_set_init_ref(self</span><span class="s2">, </span><span class="s1">ref):</span>
+        <span class="s1">self.ref = ref</span>
+
+    <span class="s2">def </span><span class="s1">_watcher_ffi_init(self</span><span class="s2">, </span><span class="s1">args):</span>
+        <span class="s0"># TODO: we could do a better job chokepointing this</span>
+        <span class="s2">return </span><span class="s1">self._watcher_init(self.loop.ptr</span><span class="s2">,</span>
+                                  <span class="s1">self._watcher</span><span class="s2">,</span>
+                                  <span class="s1">*args)</span>
+
+    <span class="s2">def </span><span class="s1">_watcher_ffi_start(self):</span>
+        <span class="s1">self._watcher_start(self._watcher</span><span class="s2">, </span><span class="s1">self._watcher_callback)</span>
+
+    <span class="s2">def </span><span class="s1">_watcher_ffi_stop(self):</span>
+        <span class="s2">if </span><span class="s1">self._watcher:</span>
+            <span class="s0"># The multiplexed io watcher deletes self._watcher</span>
+            <span class="s0"># when it closes down. If that's in the process of</span>
+            <span class="s0"># an error handler, AbstractCallbacks.unhandled_onerror</span>
+            <span class="s0"># will try to close us again.</span>
+            <span class="s1">self._watcher_stop(self._watcher)</span>
+
+    <span class="s1">@_base.only_if_watcher</span>
+    <span class="s2">def </span><span class="s1">_watcher_ffi_ref(self):</span>
+        <span class="s1">libuv.uv_ref(self._watcher)</span>
+
+    <span class="s1">@_base.only_if_watcher</span>
+    <span class="s2">def </span><span class="s1">_watcher_ffi_unref(self):</span>
+        <span class="s1">libuv.uv_unref(self._watcher)</span>
+
+    <span class="s2">def </span><span class="s1">_watcher_ffi_start_unref(self):</span>
+        <span class="s2">pass</span>
+
+    <span class="s2">def </span><span class="s1">_watcher_ffi_stop_ref(self):</span>
+        <span class="s2">pass</span>
+
+    <span class="s2">def </span><span class="s1">_get_ref(self):</span>
+        <span class="s0"># Convert 1/0 to True/False</span>
+        <span class="s2">if </span><span class="s1">self._watcher </span><span class="s2">is None</span><span class="s1">:</span>
+            <span class="s2">return None</span>
+        <span class="s2">return </span><span class="s1">bool(libuv.uv_has_ref(self._watcher))</span>
+
+    <span class="s2">def </span><span class="s1">_set_ref(self</span><span class="s2">, </span><span class="s1">value):</span>
+        <span class="s2">if </span><span class="s1">value:</span>
+            <span class="s1">self._watcher_ffi_ref()</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">self._watcher_ffi_unref()</span>
+
+    <span class="s1">ref = property(_get_ref</span><span class="s2">, </span><span class="s1">_set_ref)</span>
+
+    <span class="s2">def </span><span class="s1">feed(self</span><span class="s2">, </span><span class="s1">_revents</span><span class="s2">, </span><span class="s1">_callback</span><span class="s2">, </span><span class="s1">*_args):</span>
+        <span class="s2">raise </span><span class="s1">Exception(</span><span class="s3">&quot;Not implemented&quot;</span><span class="s1">)</span>
+
+<span class="s2">class </span><span class="s1">io(_base.IoMixin</span><span class="s2">, </span><span class="s1">watcher):</span>
+    <span class="s1">_watcher_type = </span><span class="s3">'poll'</span>
+    <span class="s1">_watcher_callback_name = </span><span class="s3">'_gevent_poll_callback2'</span>
+
+    <span class="s0"># On Windows is critical to be able to garbage collect these</span>
+    <span class="s0"># objects in a timely fashion so that they don't get reused</span>
+    <span class="s0"># for multiplexing completely different sockets. This is because</span>
+    <span class="s0"># uv_poll_init_socket does a lot of setup for the socket to make</span>
+    <span class="s0"># polling work. If get reused for another socket that has the same</span>
+    <span class="s0"># fileno, things break badly. (In theory this could be a problem</span>
+    <span class="s0"># on posix too, but in practice it isn't).</span>
+
+    <span class="s0"># TODO: We should probably generalize this to all</span>
+    <span class="s0"># ffi watchers. Avoiding GC cycles as much as possible</span>
+    <span class="s0"># is a good thing, and potentially allocating new handles</span>
+    <span class="s0"># as needed gets us better memory locality.</span>
+
+    <span class="s0"># Especially on Windows, we must also account for the case that a</span>
+    <span class="s0"># reference to this object has leaked (e.g., the socket object is</span>
+    <span class="s0"># still around), but the fileno has been closed and a new one</span>
+    <span class="s0"># opened. We must still get a new native watcher at that point. We</span>
+    <span class="s0"># handle this case by simply making sure that we don't even have</span>
+    <span class="s0"># a native watcher until the object is started, and we shut it down</span>
+    <span class="s0"># when the object is stopped.</span>
+
+    <span class="s0"># XXX: I was able to solve at least Windows test_ftplib.py issues</span>
+    <span class="s0"># with more of a careful use of io objects in socket.py, so</span>
+    <span class="s0"># delaying this entirely is at least temporarily on hold. Instead</span>
+    <span class="s0"># sticking with the _watcher_create function override for the</span>
+    <span class="s0"># moment.</span>
+
+    <span class="s0"># XXX: Note 2: Moving to a deterministic close model, which was necessary</span>
+    <span class="s0"># for PyPy, also seems to solve the Windows issues. So we're completely taking</span>
+    <span class="s0"># this object out of the loop's registration; we don't want GC callbacks and</span>
+    <span class="s0"># uv_close anywhere *near* this object.</span>
+
+    <span class="s1">_watcher_registers_with_loop_on_create = </span><span class="s2">False</span>
+
+    <span class="s1">EVENT_MASK = libuv.UV_READABLE | libuv.UV_WRITABLE | libuv.UV_DISCONNECT</span>
+
+    <span class="s1">_multiplex_watchers = ()</span>
+
+    <span class="s2">def </span><span class="s1">__init__(self</span><span class="s2">, </span><span class="s1">loop</span><span class="s2">, </span><span class="s1">fd</span><span class="s2">, </span><span class="s1">events</span><span class="s2">, </span><span class="s1">ref=</span><span class="s2">True, </span><span class="s1">priority=</span><span class="s2">None</span><span class="s1">):</span>
+        <span class="s1">super(io</span><span class="s2">, </span><span class="s1">self).__init__(loop</span><span class="s2">, </span><span class="s1">fd</span><span class="s2">, </span><span class="s1">events</span><span class="s2">, </span><span class="s1">ref=ref</span><span class="s2">, </span><span class="s1">priority=priority</span><span class="s2">, </span><span class="s1">_args=(fd</span><span class="s2">,</span><span class="s1">))</span>
+        <span class="s1">self._fd = fd</span>
+        <span class="s1">self._events = events</span>
+        <span class="s1">self._multiplex_watchers = []</span>
+
+    <span class="s2">def </span><span class="s1">_get_fd(self):</span>
+        <span class="s2">return </span><span class="s1">self._fd</span>
+
+    <span class="s1">@_base.not_while_active</span>
+    <span class="s2">def </span><span class="s1">_set_fd(self</span><span class="s2">, </span><span class="s1">fd):</span>
+        <span class="s1">self._fd = fd</span>
+        <span class="s1">self._watcher_ffi_init((fd</span><span class="s2">,</span><span class="s1">))</span>
+
+    <span class="s2">def </span><span class="s1">_get_events(self):</span>
+        <span class="s2">return </span><span class="s1">self._events</span>
+
+    <span class="s2">def </span><span class="s1">_set_events(self</span><span class="s2">, </span><span class="s1">events):</span>
+        <span class="s2">if </span><span class="s1">events == self._events:</span>
+            <span class="s2">return</span>
+        <span class="s1">self._events = events</span>
+        <span class="s2">if </span><span class="s1">self.active:</span>
+            <span class="s0"># We're running but libuv specifically says we can</span>
+            <span class="s0"># call start again to change our event mask.</span>
+            <span class="s2">assert </span><span class="s1">self._handle </span><span class="s2">is not None</span>
+            <span class="s1">self._watcher_start(self._watcher</span><span class="s2">, </span><span class="s1">self._events</span><span class="s2">, </span><span class="s1">self._watcher_callback)</span>
+
+    <span class="s1">events = property(_get_events</span><span class="s2">, </span><span class="s1">_set_events)</span>
+
+    <span class="s2">def </span><span class="s1">_watcher_ffi_start(self):</span>
+        <span class="s1">self._watcher_start(self._watcher</span><span class="s2">, </span><span class="s1">self._events</span><span class="s2">, </span><span class="s1">self._watcher_callback)</span>
+
+    <span class="s2">if </span><span class="s1">sys.platform.startswith(</span><span class="s3">'win32'</span><span class="s1">):</span>
+        <span class="s0"># uv_poll can only handle sockets on Windows, but the plain</span>
+        <span class="s0"># uv_poll_init we call on POSIX assumes that the fileno</span>
+        <span class="s0"># argument is already a C fileno, as created by</span>
+        <span class="s0"># _get_osfhandle. C filenos are limited resources, must be</span>
+        <span class="s0"># closed with _close. So there are lifetime issues with that:</span>
+        <span class="s0"># calling the C function _close to dispose of the fileno</span>
+        <span class="s0"># *also* closes the underlying win32 handle, possibly</span>
+        <span class="s0"># prematurely. (XXX: Maybe could do something with weak</span>
+        <span class="s0"># references? But to what?)</span>
+
+        <span class="s0"># All libuv wants to do with the fileno in uv_poll_init is</span>
+        <span class="s0"># turn it back into a Win32 SOCKET handle.</span>
+
+        <span class="s0"># Now, libuv provides uv_poll_init_socket, which instead of</span>
+        <span class="s0"># taking a C fileno takes the SOCKET, avoiding the need to dance with</span>
+        <span class="s0"># the C runtime.</span>
+
+        <span class="s0"># It turns out that SOCKET (win32 handles in general) can be</span>
+        <span class="s0"># represented with `intptr_t`. It further turns out that</span>
+        <span class="s0"># CPython *directly* exposes the SOCKET handle as the value of</span>
+        <span class="s0"># fileno (32-bit PyPy does some munging on it, which should</span>
+        <span class="s0"># rarely matter). So we can pass socket.fileno() through</span>
+        <span class="s0"># to uv_poll_init_socket.</span>
+
+        <span class="s0"># See _corecffi_build.</span>
+        <span class="s1">_watcher_init = watcher._LIB.uv_poll_init_socket</span>
+
+
+    <span class="s2">class </span><span class="s1">_multiplexwatcher(object):</span>
+
+        <span class="s1">callback = </span><span class="s2">None</span>
+        <span class="s1">args = ()</span>
+        <span class="s1">pass_events = </span><span class="s2">False</span>
+        <span class="s1">ref = </span><span class="s2">True</span>
+
+        <span class="s2">def </span><span class="s1">__init__(self</span><span class="s2">, </span><span class="s1">events</span><span class="s2">, </span><span class="s1">watcher):</span>
+            <span class="s1">self._events = events</span>
+
+            <span class="s0"># References:</span>
+            <span class="s0"># These objects must keep the original IO object alive;</span>
+            <span class="s0"># the IO object SHOULD NOT keep these alive to avoid cycles</span>
+            <span class="s0"># We MUST NOT rely on GC to clean up the IO objects, but the explicit</span>
+            <span class="s0"># calls to close(); see _multiplex_closed.</span>
+            <span class="s1">self._watcher_ref = watcher</span>
+
+        <span class="s1">events = property(</span>
+            <span class="s2">lambda </span><span class="s1">self: self._events</span><span class="s2">,</span>
+            <span class="s1">_base.not_while_active(</span><span class="s2">lambda </span><span class="s1">self</span><span class="s2">, </span><span class="s1">nv: setattr(self</span><span class="s2">, </span><span class="s3">'_events'</span><span class="s2">, </span><span class="s1">nv)))</span>
+
+        <span class="s2">def </span><span class="s1">start(self</span><span class="s2">, </span><span class="s1">callback</span><span class="s2">, </span><span class="s1">*args</span><span class="s2">, </span><span class="s1">**kwargs):</span>
+            <span class="s1">self.pass_events = kwargs.get(</span><span class="s3">&quot;pass_events&quot;</span><span class="s1">)</span>
+            <span class="s1">self.callback = callback</span>
+            <span class="s1">self.args = args</span>
+
+            <span class="s1">watcher = self._watcher_ref</span>
+            <span class="s2">if </span><span class="s1">watcher </span><span class="s2">is not None</span><span class="s1">:</span>
+                <span class="s2">if not </span><span class="s1">watcher.active:</span>
+                    <span class="s1">watcher._io_start()</span>
+                <span class="s2">else</span><span class="s1">:</span>
+                    <span class="s0"># Make sure we're in the event mask</span>
+                    <span class="s1">watcher._calc_and_update_events()</span>
+
+        <span class="s2">def </span><span class="s1">stop(self):</span>
+            <span class="s1">self.callback = </span><span class="s2">None</span>
+            <span class="s1">self.pass_events = </span><span class="s2">None</span>
+            <span class="s1">self.args = </span><span class="s2">None</span>
+            <span class="s1">watcher = self._watcher_ref</span>
+            <span class="s2">if </span><span class="s1">watcher </span><span class="s2">is not None</span><span class="s1">:</span>
+                <span class="s1">watcher._io_maybe_stop()</span>
+
+        <span class="s2">def </span><span class="s1">close(self):</span>
+            <span class="s2">if </span><span class="s1">self._watcher_ref </span><span class="s2">is not None</span><span class="s1">:</span>
+                <span class="s1">self._watcher_ref._multiplex_closed(self)</span>
+            <span class="s1">self._watcher_ref = </span><span class="s2">None</span>
+
+        <span class="s1">@property</span>
+        <span class="s2">def </span><span class="s1">active(self):</span>
+            <span class="s2">return </span><span class="s1">self.callback </span><span class="s2">is not None</span>
+
+        <span class="s1">@property</span>
+        <span class="s2">def </span><span class="s1">_watcher(self):</span>
+            <span class="s0"># For testing.</span>
+            <span class="s2">return </span><span class="s1">self._watcher_ref._watcher</span>
+
+        <span class="s0"># ares.pyx depends on this property,</span>
+        <span class="s0"># and test__core uses it too</span>
+        <span class="s1">fd = property(</span><span class="s2">lambda </span><span class="s1">self: getattr(self._watcher_ref</span><span class="s2">, </span><span class="s3">'_fd'</span><span class="s2">, </span><span class="s1">-</span><span class="s4">1</span><span class="s1">)</span><span class="s2">,</span>
+                      <span class="s2">lambda </span><span class="s1">self</span><span class="s2">, </span><span class="s1">nv: self._watcher_ref._set_fd(nv))</span>
+
+    <span class="s2">def </span><span class="s1">_io_maybe_stop(self):</span>
+        <span class="s1">self._calc_and_update_events()</span>
+        <span class="s2">for </span><span class="s1">w </span><span class="s2">in </span><span class="s1">self._multiplex_watchers:</span>
+            <span class="s2">if </span><span class="s1">w.callback </span><span class="s2">is not None</span><span class="s1">:</span>
+                <span class="s0"># There's still a reference to it, and it's started,</span>
+                <span class="s0"># so we can't stop.</span>
+                <span class="s2">return</span>
+        <span class="s0"># If we get here, nothing was started</span>
+        <span class="s0"># so we can take ourself out of the polling set</span>
+        <span class="s1">self.stop()</span>
+
+    <span class="s2">def </span><span class="s1">_io_start(self):</span>
+        <span class="s1">self._calc_and_update_events()</span>
+        <span class="s1">self.start(self._io_callback</span><span class="s2">, </span><span class="s1">pass_events=</span><span class="s2">True</span><span class="s1">)</span>
+
+    <span class="s2">def </span><span class="s1">_calc_and_update_events(self):</span>
+        <span class="s1">events = </span><span class="s4">0</span>
+        <span class="s2">for </span><span class="s1">watcher </span><span class="s2">in </span><span class="s1">self._multiplex_watchers:</span>
+            <span class="s2">if </span><span class="s1">watcher.callback </span><span class="s2">is not None</span><span class="s1">:</span>
+                <span class="s0"># Only ask for events that are active.</span>
+                <span class="s1">events |= watcher.events</span>
+        <span class="s1">self._set_events(events)</span>
+
+
+    <span class="s2">def </span><span class="s1">multiplex(self</span><span class="s2">, </span><span class="s1">events):</span>
+        <span class="s1">watcher = self._multiplexwatcher(events</span><span class="s2">, </span><span class="s1">self)</span>
+        <span class="s1">self._multiplex_watchers.append(watcher)</span>
+        <span class="s1">self._calc_and_update_events()</span>
+        <span class="s2">return </span><span class="s1">watcher</span>
+
+    <span class="s2">def </span><span class="s1">close(self):</span>
+        <span class="s1">super(io</span><span class="s2">, </span><span class="s1">self).close()</span>
+        <span class="s2">del </span><span class="s1">self._multiplex_watchers</span>
+
+    <span class="s2">def </span><span class="s1">_multiplex_closed(self</span><span class="s2">, </span><span class="s1">watcher):</span>
+        <span class="s1">self._multiplex_watchers.remove(watcher)</span>
+        <span class="s2">if not </span><span class="s1">self._multiplex_watchers:</span>
+            <span class="s1">self.stop() </span><span class="s0"># should already be stopped</span>
+            <span class="s1">self._no_more_watchers()</span>
+            <span class="s0"># It is absolutely critical that we control when the call</span>
+            <span class="s0"># to uv_close() gets made. uv_close() of a uv_poll_t</span>
+            <span class="s0"># handle winds up calling uv__platform_invalidate_fd,</span>
+            <span class="s0"># which, as the name implies, destroys any outstanding</span>
+            <span class="s0"># events for the *fd* that haven't been delivered yet, and also removes</span>
+            <span class="s0"># the *fd* from the poll set. So if this happens later, at some</span>
+            <span class="s0"># non-deterministic time when (cyclic or otherwise) GC runs,</span>
+            <span class="s0"># *and* we've opened a new watcher for the fd, that watcher will</span>
+            <span class="s0"># suddenly and mysteriously stop seeing events. So we do this now;</span>
+            <span class="s0"># this method is smart enough not to close the handle twice.</span>
+            <span class="s1">self.close()</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">self._calc_and_update_events()</span>
+
+    <span class="s2">def </span><span class="s1">_no_more_watchers(self):</span>
+        <span class="s0"># The loop sets this on an individual watcher to delete it from</span>
+        <span class="s0"># the active list where it keeps hard references.</span>
+        <span class="s2">pass</span>
+
+    <span class="s2">def </span><span class="s1">_io_callback(self</span><span class="s2">, </span><span class="s1">events):</span>
+        <span class="s2">if </span><span class="s1">events &lt; </span><span class="s4">0</span><span class="s1">:</span>
+            <span class="s0"># actually a status error code</span>
+            <span class="s1">_dbg(</span><span class="s3">&quot;Callback error on&quot;</span><span class="s2">, </span><span class="s1">self._fd</span><span class="s2">,</span>
+                 <span class="s1">ffi.string(libuv.uv_err_name(events))</span><span class="s2">,</span>
+                 <span class="s1">ffi.string(libuv.uv_strerror(events)))</span>
+            <span class="s0"># XXX: We've seen one half of a FileObjectPosix pair</span>
+            <span class="s0"># (the read side of a pipe) report errno 11 'bad file descriptor'</span>
+            <span class="s0"># after the write side was closed and its watcher removed. But</span>
+            <span class="s0"># we still need to attempt to read from it to clear out what's in</span>
+            <span class="s0"># its buffers--if we return with the watcher inactive before proceeding to wake up</span>
+            <span class="s0"># the reader, we get a LoopExit. So we can't return here and arguably shouldn't print it</span>
+            <span class="s0"># either. The negative events mask will match the watcher's mask.</span>
+            <span class="s0"># See test__fileobject.py:Test.test_newlines for an example.</span>
+
+            <span class="s0"># On Windows (at least with PyPy), we can get ENOTSOCK (socket operation on non-socket)</span>
+            <span class="s0"># if a socket gets closed. If we don't pass the events on, we hang.</span>
+            <span class="s0"># See test__makefile_ref.TestSSL for examples.</span>
+            <span class="s0"># return</span>
+
+        <span class="s2">for </span><span class="s1">watcher </span><span class="s2">in </span><span class="s1">self._multiplex_watchers:</span>
+            <span class="s2">if not </span><span class="s1">watcher.callback:</span>
+                <span class="s0"># Stopped</span>
+                <span class="s2">continue</span>
+            <span class="s2">assert </span><span class="s1">watcher._watcher_ref </span><span class="s2">is </span><span class="s1">self</span><span class="s2">, </span><span class="s1">(self</span><span class="s2">, </span><span class="s1">watcher._watcher_ref)</span>
+
+            <span class="s1">send_event = (events &amp; watcher.events) </span><span class="s2">or </span><span class="s1">events &lt; </span><span class="s4">0</span>
+            <span class="s2">if </span><span class="s1">send_event:</span>
+                <span class="s2">if not </span><span class="s1">watcher.pass_events:</span>
+                    <span class="s1">watcher.callback(*watcher.args)</span>
+                <span class="s2">else</span><span class="s1">:</span>
+                    <span class="s1">watcher.callback(events</span><span class="s2">, </span><span class="s1">*watcher.args)</span>
+
+<span class="s2">class </span><span class="s1">_SimulatedWithAsyncMixin(object):</span>
+    <span class="s1">_watcher_skip_ffi = </span><span class="s2">True</span>
+
+    <span class="s2">def </span><span class="s1">__init__(self</span><span class="s2">, </span><span class="s1">loop</span><span class="s2">, </span><span class="s1">*args</span><span class="s2">, </span><span class="s1">**kwargs):</span>
+        <span class="s1">self._async = loop.async_()</span>
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s1">super(_SimulatedWithAsyncMixin</span><span class="s2">, </span><span class="s1">self).__init__(loop</span><span class="s2">, </span><span class="s1">*args</span><span class="s2">, </span><span class="s1">**kwargs)</span>
+        <span class="s2">except</span><span class="s1">:</span>
+            <span class="s1">self._async.close()</span>
+            <span class="s2">raise</span>
+
+    <span class="s2">def </span><span class="s1">_watcher_create(self</span><span class="s2">, </span><span class="s1">_args):</span>
+        <span class="s2">return</span>
+
+    <span class="s1">@property</span>
+    <span class="s2">def </span><span class="s1">_watcher_handle(self):</span>
+        <span class="s2">return None</span>
+
+    <span class="s2">def </span><span class="s1">_watcher_ffi_init(self</span><span class="s2">, </span><span class="s1">_args):</span>
+        <span class="s2">return</span>
+
+    <span class="s2">def </span><span class="s1">_watcher_ffi_set_init_ref(self</span><span class="s2">, </span><span class="s1">ref):</span>
+        <span class="s1">self._async.ref = ref</span>
+
+    <span class="s1">@property</span>
+    <span class="s2">def </span><span class="s1">active(self):</span>
+        <span class="s2">return </span><span class="s1">self._async.active</span>
+
+    <span class="s2">def </span><span class="s1">start(self</span><span class="s2">, </span><span class="s1">cb</span><span class="s2">, </span><span class="s1">*args):</span>
+        <span class="s2">assert </span><span class="s1">self._async </span><span class="s2">is not None</span>
+        <span class="s1">self._register_loop_callback()</span>
+        <span class="s1">self.callback = cb</span>
+        <span class="s1">self.args = args</span>
+        <span class="s1">self._async.start(cb</span><span class="s2">, </span><span class="s1">*args)</span>
+
+    <span class="s2">def </span><span class="s1">stop(self):</span>
+        <span class="s1">self._unregister_loop_callback()</span>
+        <span class="s1">self.callback = </span><span class="s2">None</span>
+        <span class="s1">self.args = </span><span class="s2">None</span>
+        <span class="s2">if </span><span class="s1">self._async </span><span class="s2">is not None</span><span class="s1">:</span>
+            <span class="s0"># If we're stop() after close().</span>
+            <span class="s0"># That should be allowed.</span>
+            <span class="s1">self._async.stop()</span>
+
+    <span class="s2">def </span><span class="s1">close(self):</span>
+        <span class="s2">if </span><span class="s1">self._async </span><span class="s2">is not None</span><span class="s1">:</span>
+            <span class="s1">a = self._async</span>
+            <span class="s1">self._async = </span><span class="s2">None</span>
+            <span class="s1">a.close()</span>
+
+    <span class="s2">def </span><span class="s1">_register_loop_callback(self):</span>
+        <span class="s0"># called from start()</span>
+        <span class="s2">raise </span><span class="s1">NotImplementedError()</span>
+
+    <span class="s2">def </span><span class="s1">_unregister_loop_callback(self):</span>
+        <span class="s0"># called from stop</span>
+        <span class="s2">raise </span><span class="s1">NotImplementedError()</span>
+
+<span class="s2">class </span><span class="s1">fork(_SimulatedWithAsyncMixin</span><span class="s2">,</span>
+           <span class="s1">_base.ForkMixin</span><span class="s2">,</span>
+           <span class="s1">watcher):</span>
+    <span class="s0"># We'll have to implement this one completely manually.</span>
+    <span class="s1">_watcher_skip_ffi = </span><span class="s2">False</span>
+
+    <span class="s2">def </span><span class="s1">_register_loop_callback(self):</span>
+        <span class="s1">self.loop._fork_watchers.add(self)</span>
+
+    <span class="s2">def </span><span class="s1">_unregister_loop_callback(self):</span>
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s0"># stop() should be idempotent</span>
+            <span class="s1">self.loop._fork_watchers.remove(self)</span>
+        <span class="s2">except </span><span class="s1">KeyError:</span>
+            <span class="s2">pass</span>
+
+    <span class="s2">def </span><span class="s1">_on_fork(self):</span>
+        <span class="s1">self._async.send()</span>
+
+
+<span class="s2">class </span><span class="s1">child(_SimulatedWithAsyncMixin</span><span class="s2">,</span>
+            <span class="s1">_base.ChildMixin</span><span class="s2">,</span>
+            <span class="s1">watcher):</span>
+    <span class="s1">_watcher_skip_ffi = </span><span class="s2">True</span>
+    <span class="s0"># We'll have to implement this one completely manually.</span>
+    <span class="s0"># Our approach is to use a SIGCHLD handler and the original</span>
+    <span class="s0"># os.waitpid call.</span>
+
+    <span class="s0"># On Unix, libuv's uv_process_t and uv_spawn use SIGCHLD,</span>
+    <span class="s0"># just like libev does for its child watchers. So</span>
+    <span class="s0"># we're not adding any new SIGCHLD related issues not already</span>
+    <span class="s0"># present in libev.</span>
+
+
+    <span class="s2">def </span><span class="s1">_register_loop_callback(self):</span>
+        <span class="s1">self.loop._register_child_watcher(self)</span>
+
+    <span class="s2">def </span><span class="s1">_unregister_loop_callback(self):</span>
+        <span class="s1">self.loop._unregister_child_watcher(self)</span>
+
+    <span class="s2">def </span><span class="s1">_set_waitpid_status(self</span><span class="s2">, </span><span class="s1">pid</span><span class="s2">, </span><span class="s1">status):</span>
+        <span class="s1">self._rpid = pid</span>
+        <span class="s1">self._rstatus = status</span>
+        <span class="s1">self._async.send()</span>
+
+
+<span class="s2">class </span><span class="s1">async_(_base.AsyncMixin</span><span class="s2">, </span><span class="s1">watcher):</span>
+    <span class="s1">_watcher_callback_name = </span><span class="s3">'_gevent_async_callback0'</span>
+
+    <span class="s0"># libuv async watchers are different than all other watchers:</span>
+    <span class="s0"># They don't have a separate start/stop method (presumably</span>
+    <span class="s0"># because of race conditions). Simply initing them places them</span>
+    <span class="s0"># into the active queue.</span>
+    <span class="s0">#</span>
+    <span class="s0"># In the past, we sent a NULL C callback to the watcher, trusting</span>
+    <span class="s0"># that no one would call send() without actually starting us (or after</span>
+    <span class="s0"># closing us); doing so would crash. But we don't want to delay</span>
+    <span class="s0"># initing the struct because it will crash in uv_close() when we get GC'd,</span>
+    <span class="s0"># and send() will also crash. Plus that complicates our lifecycle (managing</span>
+    <span class="s0"># the memory).</span>
+    <span class="s0">#</span>
+    <span class="s0"># Now, we always init the correct C callback, and use a dummy</span>
+    <span class="s0"># Python callback that gets replaced when we are started and</span>
+    <span class="s0"># stopped. This prevents mistakes from being crashes.</span>
+    <span class="s1">_callback = </span><span class="s2">lambda</span><span class="s1">: </span><span class="s2">None</span>
+
+    <span class="s2">def </span><span class="s1">_watcher_ffi_init(self</span><span class="s2">, </span><span class="s1">args):</span>
+        <span class="s0"># NOTE: uv_async_init is NOT idempotent. Calling it more than</span>
+        <span class="s0"># once adds the uv_async_t to the internal queue multiple times,</span>
+        <span class="s0"># and uv_close only cleans up one of them, meaning that we tend to</span>
+        <span class="s0"># crash. Thus we have to be very careful not to allow that.</span>
+        <span class="s2">return </span><span class="s1">self._watcher_init(self.loop.ptr</span><span class="s2">, </span><span class="s1">self._watcher</span><span class="s2">,</span>
+                                  <span class="s1">self._watcher_callback)</span>
+
+    <span class="s2">def </span><span class="s1">_watcher_ffi_start(self):</span>
+        <span class="s2">pass</span>
+
+    <span class="s2">def </span><span class="s1">_watcher_ffi_stop(self):</span>
+        <span class="s2">pass</span>
+
+    <span class="s2">def </span><span class="s1">send(self):</span>
+        <span class="s2">assert </span><span class="s1">self._callback </span><span class="s2">is not </span><span class="s1">async_._callback</span><span class="s2">, </span><span class="s3">&quot;Sending to a closed watcher&quot;</span>
+        <span class="s2">if </span><span class="s1">libuv.uv_is_closing(self._watcher):</span>
+            <span class="s2">raise </span><span class="s1">Exception(</span><span class="s3">&quot;Closing handle&quot;</span><span class="s1">)</span>
+        <span class="s1">libuv.uv_async_send(self._watcher)</span>
+
+    <span class="s1">@property</span>
+    <span class="s2">def </span><span class="s1">pending(self):</span>
+        <span class="s2">return None</span>
+
+<span class="s1">locals()[</span><span class="s3">'async'</span><span class="s1">] = async_</span>
+
+<span class="s2">class </span><span class="s1">timer(_base.TimerMixin</span><span class="s2">, </span><span class="s1">watcher):</span>
+
+    <span class="s1">_watcher_callback_name = </span><span class="s3">'_gevent_timer_callback0'</span>
+
+    <span class="s0"># In libuv, timer callbacks continue running while any timer is</span>
+    <span class="s0"># expired, including newly added timers. Newly added non-zero</span>
+    <span class="s0"># timers (especially of small duration) can be seen to be expired</span>
+    <span class="s0"># if the loop time is updated while we are in a timer callback.</span>
+    <span class="s0"># This can lead to us being stuck running timers for a terribly</span>
+    <span class="s0"># long time, which is not good. So default to not updating the</span>
+    <span class="s0"># time.</span>
+
+    <span class="s0"># Also, newly-added timers of 0 duration can *also* stall the</span>
+    <span class="s0"># loop, because they'll be seen to be expired immediately.</span>
+    <span class="s0"># Updating the time can prevent that, *if* there was already a</span>
+    <span class="s0"># timer for a longer duration scheduled.</span>
+
+    <span class="s0"># To mitigate the above problems, our loop implementation turns</span>
+    <span class="s0"># zero duration timers into check watchers instead using OneShotCheck.</span>
+    <span class="s0"># This ensures the loop cycles. Of course, the 'again' method does</span>
+    <span class="s0"># nothing on them and doesn't exist. In practice that's not an issue.</span>
+
+    <span class="s1">_again = </span><span class="s2">False</span>
+
+    <span class="s2">def </span><span class="s1">_watcher_ffi_init(self</span><span class="s2">, </span><span class="s1">args):</span>
+        <span class="s1">self._watcher_init(self.loop.ptr</span><span class="s2">, </span><span class="s1">self._watcher)</span>
+        <span class="s1">self._after</span><span class="s2">, </span><span class="s1">self._repeat = args</span>
+        <span class="s2">if </span><span class="s1">self._after </span><span class="s2">and </span><span class="s1">self._after &lt; </span><span class="s4">0.001</span><span class="s1">:</span>
+            <span class="s2">import </span><span class="s1">warnings</span>
+            <span class="s0"># XXX: The stack level is hard to determine, could be getting here</span>
+            <span class="s0"># through a number of different ways.</span>
+            <span class="s1">warnings.warn(</span><span class="s3">&quot;libuv only supports millisecond timer resolution; &quot;</span>
+                          <span class="s3">&quot;all times less will be set to 1 ms&quot;</span><span class="s2">,</span>
+                          <span class="s1">stacklevel=</span><span class="s4">6</span><span class="s1">)</span>
+            <span class="s0"># The alternative is to effectively pass in int(0.1) == 0, which</span>
+            <span class="s0"># means no sleep at all, which leads to excessive wakeups</span>
+            <span class="s1">self._after = </span><span class="s4">0.001</span>
+        <span class="s2">if </span><span class="s1">self._repeat </span><span class="s2">and </span><span class="s1">self._repeat &lt; </span><span class="s4">0.001</span><span class="s1">:</span>
+            <span class="s2">import </span><span class="s1">warnings</span>
+            <span class="s1">warnings.warn(</span><span class="s3">&quot;libuv only supports millisecond timer resolution; &quot;</span>
+                          <span class="s3">&quot;all times less will be set to 1 ms&quot;</span><span class="s2">,</span>
+                          <span class="s1">stacklevel=</span><span class="s4">6</span><span class="s1">)</span>
+            <span class="s1">self._repeat = </span><span class="s4">0.001</span>
+
+    <span class="s2">def </span><span class="s1">_watcher_ffi_start(self):</span>
+        <span class="s2">if </span><span class="s1">self._again:</span>
+            <span class="s1">libuv.uv_timer_again(self._watcher)</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s2">try</span><span class="s1">:</span>
+                <span class="s1">self._watcher_start(self._watcher</span><span class="s2">, </span><span class="s1">self._watcher_callback</span><span class="s2">,</span>
+                                    <span class="s1">int(self._after * </span><span class="s4">1000</span><span class="s1">)</span><span class="s2">,</span>
+                                    <span class="s1">int(self._repeat * </span><span class="s4">1000</span><span class="s1">))</span>
+            <span class="s2">except </span><span class="s1">ValueError:</span>
+                <span class="s0"># in case of non-ints in _after/_repeat</span>
+                <span class="s2">raise </span><span class="s1">TypeError()</span>
+
+    <span class="s2">def </span><span class="s1">again(self</span><span class="s2">, </span><span class="s1">callback</span><span class="s2">, </span><span class="s1">*args</span><span class="s2">, </span><span class="s1">**kw):</span>
+        <span class="s2">if not </span><span class="s1">self.active:</span>
+            <span class="s0"># If we've never been started, this is the same as starting us.</span>
+            <span class="s0"># libuv makes the distinction, libev doesn't.</span>
+            <span class="s1">self.start(callback</span><span class="s2">, </span><span class="s1">*args</span><span class="s2">, </span><span class="s1">**kw)</span>
+            <span class="s2">return</span>
+
+        <span class="s1">self._again = </span><span class="s2">True</span>
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s1">self.start(callback</span><span class="s2">, </span><span class="s1">*args</span><span class="s2">, </span><span class="s1">**kw)</span>
+        <span class="s2">finally</span><span class="s1">:</span>
+            <span class="s2">del </span><span class="s1">self._again</span>
+
+
+<span class="s2">class </span><span class="s1">stat(_base.StatMixin</span><span class="s2">, </span><span class="s1">watcher):</span>
+    <span class="s1">_watcher_type = </span><span class="s3">'fs_poll'</span>
+    <span class="s1">_watcher_struct_name = </span><span class="s3">'gevent_fs_poll_t'</span>
+    <span class="s1">_watcher_callback_name = </span><span class="s3">'_gevent_fs_poll_callback3'</span>
+
+    <span class="s2">def </span><span class="s1">_watcher_set_data(self</span><span class="s2">, </span><span class="s1">the_watcher</span><span class="s2">, </span><span class="s1">data):</span>
+        <span class="s1">the_watcher.handle.data = data</span>
+        <span class="s2">return </span><span class="s1">data</span>
+
+    <span class="s2">def </span><span class="s1">_watcher_ffi_init(self</span><span class="s2">, </span><span class="s1">args):</span>
+        <span class="s2">return </span><span class="s1">self._watcher_init(self.loop.ptr</span><span class="s2">, </span><span class="s1">self._watcher)</span>
+
+    <span class="s1">MIN_STAT_INTERVAL = </span><span class="s4">0.1074891 </span><span class="s0"># match libev; 0.0 is default</span>
+
+    <span class="s2">def </span><span class="s1">_watcher_ffi_start(self):</span>
+        <span class="s0"># libev changes this when the watcher is started</span>
+        <span class="s2">if </span><span class="s1">self._interval &lt; self.MIN_STAT_INTERVAL:</span>
+            <span class="s1">self._interval = self.MIN_STAT_INTERVAL</span>
+        <span class="s1">self._watcher_start(self._watcher</span><span class="s2">, </span><span class="s1">self._watcher_callback</span><span class="s2">,</span>
+                            <span class="s1">self._cpath</span><span class="s2">,</span>
+                            <span class="s1">int(self._interval * </span><span class="s4">1000</span><span class="s1">))</span>
+
+    <span class="s1">@property</span>
+    <span class="s2">def </span><span class="s1">_watcher_handle(self):</span>
+        <span class="s2">return </span><span class="s1">self._watcher.handle.data</span>
+
+    <span class="s1">@property</span>
+    <span class="s2">def </span><span class="s1">attr(self):</span>
+        <span class="s2">if not </span><span class="s1">self._watcher.curr.st_nlink:</span>
+            <span class="s2">return</span>
+        <span class="s2">return </span><span class="s1">self._watcher.curr</span>
+
+    <span class="s1">@property</span>
+    <span class="s2">def </span><span class="s1">prev(self):</span>
+        <span class="s2">if not </span><span class="s1">self._watcher.prev.st_nlink:</span>
+            <span class="s2">return</span>
+        <span class="s2">return </span><span class="s1">self._watcher.prev</span>
+
+
+<span class="s2">class </span><span class="s1">signal(_base.SignalMixin</span><span class="s2">, </span><span class="s1">watcher):</span>
+    <span class="s1">_watcher_callback_name = </span><span class="s3">'_gevent_signal_callback1'</span>
+
+    <span class="s2">def </span><span class="s1">_watcher_ffi_init(self</span><span class="s2">, </span><span class="s1">args):</span>
+        <span class="s1">self._watcher_init(self.loop.ptr</span><span class="s2">, </span><span class="s1">self._watcher)</span>
+        <span class="s1">self.ref = </span><span class="s2">False </span><span class="s0"># libev doesn't ref these by default</span>
+
+
+    <span class="s2">def </span><span class="s1">_watcher_ffi_start(self):</span>
+        <span class="s1">self._watcher_start(self._watcher</span><span class="s2">, </span><span class="s1">self._watcher_callback</span><span class="s2">,</span>
+                            <span class="s1">self._signalnum)</span>
+
+
+<span class="s2">class </span><span class="s1">idle(_base.IdleMixin</span><span class="s2">, </span><span class="s1">watcher):</span>
+    <span class="s0"># Because libuv doesn't support priorities, idle watchers are</span>
+    <span class="s0"># potentially quite a bit different than under libev</span>
+    <span class="s1">_watcher_callback_name = </span><span class="s3">'_gevent_idle_callback0'</span>
+
+
+<span class="s2">class </span><span class="s1">check(_base.CheckMixin</span><span class="s2">, </span><span class="s1">watcher):</span>
+    <span class="s1">_watcher_callback_name = </span><span class="s3">'_gevent_check_callback0'</span>
+
+<span class="s2">class </span><span class="s1">OneShotCheck(check):</span>
+
+    <span class="s1">_watcher_skip_ffi = </span><span class="s2">True</span>
+
+    <span class="s2">def </span><span class="s1">__make_cb(self</span><span class="s2">, </span><span class="s1">func):</span>
+        <span class="s1">stop = self.stop</span>
+        <span class="s1">@functools.wraps(func)</span>
+        <span class="s2">def </span><span class="s1">cb(*args):</span>
+            <span class="s1">stop()</span>
+            <span class="s2">return </span><span class="s1">func(*args)</span>
+        <span class="s2">return </span><span class="s1">cb</span>
+
+    <span class="s2">def </span><span class="s1">start(self</span><span class="s2">, </span><span class="s1">callback</span><span class="s2">, </span><span class="s1">*args):</span>
+        <span class="s2">return </span><span class="s1">check.start(self</span><span class="s2">, </span><span class="s1">self.__make_cb(callback)</span><span class="s2">, </span><span class="s1">*args)</span>
+
+<span class="s2">class </span><span class="s1">prepare(_base.PrepareMixin</span><span class="s2">, </span><span class="s1">watcher):</span>
+    <span class="s1">_watcher_callback_name = </span><span class="s3">'_gevent_prepare_callback0'</span>
+</pre>
+</body>
+</html>

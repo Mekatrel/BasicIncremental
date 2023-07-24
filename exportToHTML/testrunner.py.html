@@ -1,0 +1,996 @@
+<html>
+<head>
+<title>testrunner.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #cc7832;}
+.s3 { color: #6a8759;}
+.s4 { color: #6897bb;}
+.s5 { color: #629755; font-style: italic;}
+.s6 { color: #a5c261;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+testrunner.py</font>
+</center></td></tr></table>
+<pre><span class="s0">#!/usr/bin/env python</span>
+<span class="s2">from </span><span class="s1">__future__ </span><span class="s2">import </span><span class="s1">print_function</span><span class="s2">, </span><span class="s1">absolute_import</span><span class="s2">, </span><span class="s1">division</span>
+
+<span class="s2">import </span><span class="s1">re</span>
+<span class="s2">import </span><span class="s1">sys</span>
+<span class="s2">import </span><span class="s1">os</span>
+<span class="s2">import </span><span class="s1">glob</span>
+<span class="s2">import </span><span class="s1">operator</span>
+<span class="s2">import </span><span class="s1">traceback</span>
+<span class="s2">import </span><span class="s1">importlib</span>
+
+<span class="s2">from </span><span class="s1">contextlib </span><span class="s2">import </span><span class="s1">contextmanager</span>
+<span class="s2">from </span><span class="s1">datetime </span><span class="s2">import </span><span class="s1">timedelta</span>
+<span class="s2">from </span><span class="s1">multiprocessing.pool </span><span class="s2">import </span><span class="s1">ThreadPool</span>
+<span class="s2">from </span><span class="s1">multiprocessing </span><span class="s2">import </span><span class="s1">cpu_count</span>
+
+<span class="s2">from </span><span class="s1">gevent._util </span><span class="s2">import </span><span class="s1">Lazy</span>
+
+<span class="s2">from </span><span class="s1">. </span><span class="s2">import </span><span class="s1">util</span>
+<span class="s2">from </span><span class="s1">.resources </span><span class="s2">import </span><span class="s1">parse_resources</span>
+<span class="s2">from </span><span class="s1">.resources </span><span class="s2">import </span><span class="s1">setup_resources</span>
+<span class="s2">from </span><span class="s1">.resources </span><span class="s2">import </span><span class="s1">unparse_resources</span>
+<span class="s2">from </span><span class="s1">.sysinfo </span><span class="s2">import </span><span class="s1">RUNNING_ON_CI</span>
+<span class="s2">from </span><span class="s1">.sysinfo </span><span class="s2">import </span><span class="s1">PYPY</span>
+<span class="s2">from </span><span class="s1">.sysinfo </span><span class="s2">import </span><span class="s1">PY2</span>
+<span class="s2">from </span><span class="s1">.sysinfo </span><span class="s2">import </span><span class="s1">RESOLVER_ARES</span>
+<span class="s2">from </span><span class="s1">.sysinfo </span><span class="s2">import </span><span class="s1">RUN_LEAKCHECKS</span>
+<span class="s2">from </span><span class="s1">.sysinfo </span><span class="s2">import </span><span class="s1">OSX</span>
+<span class="s2">from </span><span class="s1">. </span><span class="s2">import </span><span class="s1">six</span>
+<span class="s2">from </span><span class="s1">. </span><span class="s2">import </span><span class="s1">travis</span>
+
+<span class="s0"># Import this while we're probably single-threaded/single-processed</span>
+<span class="s0"># to try to avoid issues with PyPy 5.10.</span>
+<span class="s0"># See https://bitbucket.org/pypy/pypy/issues/2769/systemerror-unexpected-internal-exception</span>
+<span class="s2">try</span><span class="s1">:</span>
+    <span class="s1">__import__(</span><span class="s3">'_testcapi'</span><span class="s1">)</span>
+<span class="s2">except </span><span class="s1">(ImportError</span><span class="s2">, </span><span class="s1">OSError</span><span class="s2">, </span><span class="s1">IOError):</span>
+    <span class="s0"># This can raise a wide variety of errors</span>
+    <span class="s2">pass</span>
+
+<span class="s1">TIMEOUT = </span><span class="s4">100 </span><span class="s0"># seconds</span>
+<span class="s1">AVAIL_NWORKERS = cpu_count() - </span><span class="s4">1</span>
+<span class="s1">DEFAULT_NWORKERS = int(os.environ.get(</span><span class="s3">'NWORKERS'</span><span class="s1">) </span><span class="s2">or </span><span class="s1">max(AVAIL_NWORKERS</span><span class="s2">, </span><span class="s4">4</span><span class="s1">))</span>
+<span class="s2">if </span><span class="s1">DEFAULT_NWORKERS &gt; </span><span class="s4">15</span><span class="s1">:</span>
+    <span class="s1">DEFAULT_NWORKERS = </span><span class="s4">10</span>
+
+
+<span class="s2">if </span><span class="s1">RUN_LEAKCHECKS:</span>
+    <span class="s0"># Capturing the stats takes time, and we run each</span>
+    <span class="s0"># test at least twice</span>
+    <span class="s1">TIMEOUT = </span><span class="s4">200</span>
+
+<span class="s1">DEFAULT_RUN_OPTIONS = {</span>
+    <span class="s3">'timeout'</span><span class="s1">: TIMEOUT</span>
+<span class="s1">}</span>
+
+
+<span class="s2">if </span><span class="s1">RUNNING_ON_CI:</span>
+    <span class="s0"># Too many and we get spurious timeouts</span>
+    <span class="s1">DEFAULT_NWORKERS = </span><span class="s4">4 </span><span class="s2">if not </span><span class="s1">OSX </span><span class="s2">else </span><span class="s4">2</span>
+
+
+<span class="s2">def </span><span class="s1">_package_relative_filename(filename</span><span class="s2">, </span><span class="s1">package):</span>
+    <span class="s2">if not </span><span class="s1">os.path.isfile(filename) </span><span class="s2">and </span><span class="s1">package:</span>
+        <span class="s0"># Ok, try to locate it as a module in the package</span>
+        <span class="s1">package_dir = _dir_from_package_name(package)</span>
+        <span class="s2">return </span><span class="s1">os.path.join(package_dir</span><span class="s2">, </span><span class="s1">filename)</span>
+    <span class="s2">return </span><span class="s1">filename</span>
+
+<span class="s2">def </span><span class="s1">_dir_from_package_name(package):</span>
+    <span class="s1">package_mod = importlib.import_module(package)</span>
+    <span class="s1">package_dir = os.path.dirname(package_mod.__file__)</span>
+    <span class="s2">return </span><span class="s1">package_dir</span>
+
+
+<span class="s2">class </span><span class="s1">ResultCollector(object):</span>
+
+    <span class="s2">def </span><span class="s1">__init__(self):</span>
+        <span class="s1">self.total = </span><span class="s4">0</span>
+        <span class="s1">self.failed = {}</span>
+        <span class="s1">self.passed = {}</span>
+        <span class="s1">self.total_cases = </span><span class="s4">0</span>
+        <span class="s1">self.total_skipped = </span><span class="s4">0</span>
+        <span class="s0"># Every RunResult reported: failed, passed, rerun</span>
+        <span class="s1">self._all_results = []</span>
+        <span class="s1">self.reran = {}</span>
+
+    <span class="s2">def </span><span class="s1">__iadd__(self</span><span class="s2">, </span><span class="s1">result):</span>
+        <span class="s1">self._all_results.append(result)</span>
+
+        <span class="s2">if not </span><span class="s1">result:</span>
+            <span class="s1">self.failed[result.name] = result </span><span class="s0">#[cmd, kwargs]</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">self.passed[result.name] = </span><span class="s2">True</span>
+        <span class="s1">self.total_cases += result.run_count</span>
+        <span class="s1">self.total_skipped += result.skipped_count</span>
+        <span class="s2">return </span><span class="s1">self</span>
+
+    <span class="s2">def </span><span class="s1">__ilshift__(self</span><span class="s2">, </span><span class="s1">result):</span>
+        <span class="s5">&quot;&quot;&quot; 
+        collector &lt;&lt;= result 
+ 
+        Stores the result, but does not count it towards 
+        the number of cases run, skipped, passed or failed. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">self._all_results.append(result)</span>
+        <span class="s1">self.reran[result.name] = result</span>
+        <span class="s2">return </span><span class="s1">self</span>
+
+    <span class="s1">@property</span>
+    <span class="s2">def </span><span class="s1">longest_running_tests(self):</span>
+        <span class="s5">&quot;&quot;&quot; 
+        A new list of RunResult objects, sorted from longest running 
+        to shortest running. 
+        &quot;&quot;&quot;</span>
+        <span class="s2">return </span><span class="s1">sorted(self._all_results</span><span class="s2">,</span>
+                      <span class="s1">key=operator.attrgetter(</span><span class="s3">'run_duration'</span><span class="s1">)</span><span class="s2">,</span>
+                      <span class="s1">reverse=</span><span class="s2">True</span><span class="s1">)</span>
+
+
+<span class="s2">class </span><span class="s1">FailFast(Exception):</span>
+    <span class="s2">pass</span>
+
+<span class="s2">class </span><span class="s1">Runner(object):</span>
+
+    <span class="s1">TIME_WAIT_REAP = </span><span class="s4">0.1</span>
+    <span class="s1">TIME_WAIT_SPAWN = </span><span class="s4">0.05</span>
+
+    <span class="s2">def </span><span class="s1">__init__(self</span><span class="s2">,</span>
+                 <span class="s1">tests</span><span class="s2">,</span>
+                 <span class="s1">configured_failing_tests=()</span><span class="s2">,</span>
+                 <span class="s1">failfast=</span><span class="s2">False,</span>
+                 <span class="s1">quiet=</span><span class="s2">False,</span>
+                 <span class="s1">configured_run_alone_tests=()</span><span class="s2">,</span>
+                 <span class="s1">worker_count=DEFAULT_NWORKERS</span><span class="s2">,</span>
+                 <span class="s1">second_chance=</span><span class="s2">False</span><span class="s1">):</span>
+        <span class="s5">&quot;&quot;&quot; 
+        :keyword quiet: Set to True or False to explicitly choose. Set to 
+            `None` to use the default, which may come from the environment variable 
+            ``GEVENTTEST_QUIET``. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">self._tests = tests</span>
+        <span class="s1">self._configured_failing_tests = configured_failing_tests</span>
+        <span class="s1">self._quiet = quiet</span>
+        <span class="s1">self._configured_run_alone_tests = configured_run_alone_tests</span>
+
+        <span class="s2">assert not </span><span class="s1">(failfast </span><span class="s2">and </span><span class="s1">second_chance)</span>
+        <span class="s1">self._failfast = failfast</span>
+        <span class="s1">self._second_chance = second_chance</span>
+
+        <span class="s1">self.results = ResultCollector()</span>
+        <span class="s1">self.results.total = len(self._tests)</span>
+        <span class="s1">self._running_jobs = []</span>
+
+        <span class="s1">self._worker_count = min(len(tests)</span><span class="s2">, </span><span class="s1">worker_count) </span><span class="s2">or </span><span class="s4">1</span>
+
+    <span class="s2">def </span><span class="s1">_run_one(self</span><span class="s2">, </span><span class="s1">cmd</span><span class="s2">, </span><span class="s1">**kwargs):</span>
+        <span class="s2">if </span><span class="s1">self._quiet </span><span class="s2">is not None</span><span class="s1">:</span>
+            <span class="s1">kwargs[</span><span class="s3">'quiet'</span><span class="s1">] = self._quiet</span>
+        <span class="s1">result = util.run(cmd</span><span class="s2">, </span><span class="s1">**kwargs)</span>
+        <span class="s2">if not </span><span class="s1">result </span><span class="s2">and </span><span class="s1">self._second_chance:</span>
+            <span class="s1">self.results &lt;&lt;= result</span>
+            <span class="s1">util.log(</span><span class="s3">&quot;&gt; %s&quot;</span><span class="s2">, </span><span class="s1">result.name</span><span class="s2">, </span><span class="s1">color=</span><span class="s3">'warning'</span><span class="s1">)</span>
+            <span class="s1">result = util.run(cmd</span><span class="s2">, </span><span class="s1">**kwargs)</span>
+        <span class="s2">if not </span><span class="s1">result </span><span class="s2">and </span><span class="s1">self._failfast:</span>
+            <span class="s0"># Under Python 3.9 (maybe older versions?), raising the</span>
+            <span class="s0"># SystemExit here (a background thread belonging to the</span>
+            <span class="s0"># pool) doesn't seem to work well. It gets stuck waiting</span>
+            <span class="s0"># for a lock? The job never shows up as finished.</span>
+            <span class="s2">raise </span><span class="s1">FailFast(cmd)</span>
+        <span class="s1">self.results += result</span>
+
+    <span class="s2">def </span><span class="s1">_reap(self):</span>
+        <span class="s5">&quot;Clean up the list of running jobs, returning how many are still outstanding.&quot;</span>
+        <span class="s2">for </span><span class="s1">r </span><span class="s2">in </span><span class="s1">self._running_jobs[:]:</span>
+            <span class="s2">if not </span><span class="s1">r.ready():</span>
+                <span class="s2">continue</span>
+            <span class="s2">if </span><span class="s1">r.successful():</span>
+                <span class="s1">self._running_jobs.remove(r)</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s1">r.get()</span>
+                <span class="s1">sys.exit(</span><span class="s3">'Internal error in testrunner.py: %r' </span><span class="s1">% (r</span><span class="s2">, </span><span class="s1">))</span>
+        <span class="s2">return </span><span class="s1">len(self._running_jobs)</span>
+
+    <span class="s2">def </span><span class="s1">_reap_all(self):</span>
+        <span class="s1">util.log(</span><span class="s3">&quot;Reaping %d jobs&quot;</span><span class="s2">, </span><span class="s1">len(self._running_jobs)</span><span class="s2">, </span><span class="s1">color=</span><span class="s3">&quot;debug&quot;</span><span class="s1">)</span>
+        <span class="s2">while </span><span class="s1">self._running_jobs:</span>
+            <span class="s2">if not </span><span class="s1">self._reap():</span>
+                <span class="s2">break</span>
+            <span class="s1">util.sleep(self.TIME_WAIT_REAP)</span>
+
+    <span class="s2">def </span><span class="s1">_spawn(self</span><span class="s2">, </span><span class="s1">pool</span><span class="s2">, </span><span class="s1">cmd</span><span class="s2">, </span><span class="s1">options):</span>
+        <span class="s2">while True</span><span class="s1">:</span>
+            <span class="s2">if </span><span class="s1">self._reap() &lt; self._worker_count:</span>
+                <span class="s1">job = pool.apply_async(self._run_one</span><span class="s2">, </span><span class="s1">(cmd</span><span class="s2">, </span><span class="s1">)</span><span class="s2">, </span><span class="s1">options </span><span class="s2">or </span><span class="s1">{})</span>
+                <span class="s1">self._running_jobs.append(job)</span>
+                <span class="s2">return</span>
+
+            <span class="s1">util.sleep(self.TIME_WAIT_SPAWN)</span>
+
+    <span class="s2">def </span><span class="s1">__call__(self):</span>
+        <span class="s1">util.log(</span><span class="s3">&quot;Running tests in parallel with concurrency %s %s.&quot; </span><span class="s1">% (</span>
+            <span class="s1">self._worker_count</span><span class="s2">,</span>
+            <span class="s1">util._colorize(</span><span class="s3">'number'</span><span class="s2">, </span><span class="s3">'(concurrency available: %d)' </span><span class="s1">% AVAIL_NWORKERS)</span>
+        <span class="s1">)</span><span class="s2">,</span><span class="s1">)</span>
+        <span class="s0"># Setting global state, in theory we can be used multiple times.</span>
+        <span class="s0"># This is fine as long as we are single threaded and call these</span>
+        <span class="s0"># sequentially.</span>
+        <span class="s1">util.BUFFER_OUTPUT = self._worker_count &gt; </span><span class="s4">1 </span><span class="s2">or </span><span class="s1">self._quiet</span>
+
+        <span class="s1">start = util.perf_counter()</span>
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s1">self._run_tests()</span>
+        <span class="s2">except </span><span class="s1">KeyboardInterrupt:</span>
+            <span class="s1">self._report(util.perf_counter() - start</span><span class="s2">, </span><span class="s1">exit=</span><span class="s2">False</span><span class="s1">)</span>
+            <span class="s1">util.log(</span><span class="s3">'(partial results)</span><span class="s2">\n</span><span class="s3">'</span><span class="s1">)</span>
+            <span class="s2">raise</span>
+        <span class="s2">except</span><span class="s1">:</span>
+            <span class="s1">traceback.print_exc()</span>
+            <span class="s2">raise</span>
+
+        <span class="s1">self._reap_all()</span>
+        <span class="s1">self._report(util.perf_counter() - start</span><span class="s2">, </span><span class="s1">exit=</span><span class="s2">True</span><span class="s1">)</span>
+
+    <span class="s2">def </span><span class="s1">_run_tests(self):</span>
+        <span class="s5">&quot;Runs the tests, produces no report.&quot;</span>
+        <span class="s1">run_alone = []</span>
+
+        <span class="s1">tests = self._tests</span>
+        <span class="s1">pool = ThreadPool(self._worker_count)</span>
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s2">for </span><span class="s1">cmd</span><span class="s2">, </span><span class="s1">options </span><span class="s2">in </span><span class="s1">tests:</span>
+                <span class="s1">options = options </span><span class="s2">or </span><span class="s1">{}</span>
+                <span class="s2">if </span><span class="s1">matches(self._configured_run_alone_tests</span><span class="s2">, </span><span class="s1">cmd):</span>
+                    <span class="s1">run_alone.append((cmd</span><span class="s2">, </span><span class="s1">options))</span>
+                <span class="s2">else</span><span class="s1">:</span>
+                    <span class="s1">self._spawn(pool</span><span class="s2">, </span><span class="s1">cmd</span><span class="s2">, </span><span class="s1">options)</span>
+            <span class="s1">pool.close()</span>
+            <span class="s1">pool.join()</span>
+
+            <span class="s2">if </span><span class="s1">run_alone:</span>
+                <span class="s1">util.log(</span><span class="s3">&quot;Running tests marked standalone&quot;</span><span class="s1">)</span>
+                <span class="s2">for </span><span class="s1">cmd</span><span class="s2">, </span><span class="s1">options </span><span class="s2">in </span><span class="s1">run_alone:</span>
+                    <span class="s1">self._run_one(cmd</span><span class="s2">, </span><span class="s1">**options)</span>
+        <span class="s2">except </span><span class="s1">KeyboardInterrupt:</span>
+            <span class="s2">try</span><span class="s1">:</span>
+                <span class="s1">util.log(</span><span class="s3">'Waiting for currently running to finish...'</span><span class="s1">)</span>
+                <span class="s1">self._reap_all()</span>
+            <span class="s2">except </span><span class="s1">KeyboardInterrupt:</span>
+                <span class="s1">pool.terminate()</span>
+                <span class="s2">raise</span>
+        <span class="s2">except</span><span class="s1">:</span>
+            <span class="s1">pool.terminate()</span>
+            <span class="s2">raise</span>
+
+    <span class="s2">def </span><span class="s1">_report(self</span><span class="s2">, </span><span class="s1">elapsed_time</span><span class="s2">, </span><span class="s1">exit=</span><span class="s2">False</span><span class="s1">):</span>
+        <span class="s1">results = self.results</span>
+        <span class="s1">report(</span>
+            <span class="s1">results</span><span class="s2">,</span>
+            <span class="s1">exit=exit</span><span class="s2">,</span>
+            <span class="s1">took=elapsed_time</span><span class="s2">,</span>
+            <span class="s1">configured_failing_tests=self._configured_failing_tests</span><span class="s2">,</span>
+        <span class="s1">)</span>
+
+
+<span class="s2">class </span><span class="s1">TravisFoldingRunner(object):</span>
+
+    <span class="s2">def </span><span class="s1">__init__(self</span><span class="s2">, </span><span class="s1">runner</span><span class="s2">, </span><span class="s1">travis_fold_msg):</span>
+        <span class="s1">self._runner = runner</span>
+        <span class="s1">self._travis_fold_msg = travis_fold_msg</span>
+        <span class="s1">self._travis_fold_name = str(int(util.perf_counter()))</span>
+
+        <span class="s0"># A zope-style acquisition proxy would be convenient here.</span>
+        <span class="s1">run_tests = runner._run_tests</span>
+
+        <span class="s2">def </span><span class="s1">_run_tests():</span>
+            <span class="s1">self._begin_fold()</span>
+            <span class="s2">try</span><span class="s1">:</span>
+                <span class="s1">run_tests()</span>
+            <span class="s2">finally</span><span class="s1">:</span>
+                <span class="s1">self._end_fold()</span>
+
+        <span class="s1">runner._run_tests = _run_tests</span>
+
+    <span class="s2">def </span><span class="s1">_begin_fold(self):</span>
+        <span class="s1">travis.fold_start(self._travis_fold_name</span><span class="s2">,</span>
+                          <span class="s1">self._travis_fold_msg)</span>
+
+    <span class="s2">def </span><span class="s1">_end_fold(self):</span>
+        <span class="s1">travis.fold_end(self._travis_fold_name)</span>
+
+    <span class="s2">def </span><span class="s1">__call__(self):</span>
+        <span class="s2">return </span><span class="s1">self._runner()</span>
+
+
+<span class="s2">class </span><span class="s1">Discovery(object):</span>
+    <span class="s1">package_dir = </span><span class="s2">None</span>
+    <span class="s1">package = </span><span class="s2">None</span>
+
+    <span class="s2">def </span><span class="s1">__init__(</span>
+            <span class="s1">self</span><span class="s2">,</span>
+            <span class="s1">tests=</span><span class="s2">None,</span>
+            <span class="s1">ignore_files=</span><span class="s2">None,</span>
+            <span class="s1">ignored=()</span><span class="s2">,</span>
+            <span class="s1">coverage=</span><span class="s2">False,</span>
+            <span class="s1">package=</span><span class="s2">None,</span>
+            <span class="s1">config=</span><span class="s2">None,</span>
+            <span class="s1">allow_combine=</span><span class="s2">True,</span>
+    <span class="s1">):</span>
+        <span class="s1">self.config = config </span><span class="s2">or </span><span class="s1">{}</span>
+        <span class="s1">self.ignore = set(ignored </span><span class="s2">or </span><span class="s1">())</span>
+        <span class="s1">self.tests = tests</span>
+        <span class="s1">self.configured_test_options = config.get(</span><span class="s3">'TEST_FILE_OPTIONS'</span><span class="s2">, </span><span class="s1">set())</span>
+        <span class="s1">self.allow_combine = allow_combine</span>
+        <span class="s2">if </span><span class="s1">ignore_files:</span>
+            <span class="s1">ignore_files = ignore_files.split(</span><span class="s3">','</span><span class="s1">)</span>
+            <span class="s2">for </span><span class="s1">f </span><span class="s2">in </span><span class="s1">ignore_files:</span>
+                <span class="s1">self.ignore.update(set(load_list_from_file(f</span><span class="s2">, </span><span class="s1">package)))</span>
+
+        <span class="s2">if </span><span class="s1">coverage:</span>
+            <span class="s1">self.ignore.update(config.get(</span><span class="s3">'IGNORE_COVERAGE'</span><span class="s2">, </span><span class="s1">set()))</span>
+
+        <span class="s2">if </span><span class="s1">package:</span>
+            <span class="s1">self.package = package</span>
+            <span class="s1">self.package_dir = _dir_from_package_name(package)</span>
+
+    <span class="s2">class </span><span class="s1">Discovered(object):</span>
+        <span class="s2">def </span><span class="s1">__init__(self</span><span class="s2">, </span><span class="s1">package</span><span class="s2">, </span><span class="s1">configured_test_options</span><span class="s2">, </span><span class="s1">ignore</span><span class="s2">, </span><span class="s1">config</span><span class="s2">, </span><span class="s1">allow_combine):</span>
+            <span class="s1">self.orig_dir = os.getcwd()</span>
+            <span class="s1">self.configured_run_alone = config[</span><span class="s3">'RUN_ALONE'</span><span class="s1">]</span>
+            <span class="s1">self.configured_failing_tests = config[</span><span class="s3">'FAILING_TESTS'</span><span class="s1">]</span>
+            <span class="s1">self.package = package</span>
+            <span class="s1">self.configured_test_options = configured_test_options</span>
+            <span class="s1">self.allow_combine = allow_combine</span>
+            <span class="s1">self.ignore = ignore</span>
+
+            <span class="s1">self.to_import = []</span>
+            <span class="s1">self.std_monkey_patch_files = []</span>
+            <span class="s1">self.no_monkey_patch_files = []</span>
+
+            <span class="s1">self.commands = []</span>
+
+        <span class="s1">@staticmethod</span>
+        <span class="s2">def </span><span class="s1">__makes_simple_monkey_patch(</span>
+                <span class="s1">contents</span><span class="s2">,</span>
+                <span class="s1">_patch_present=re.compile(</span><span class="s6">br'[^#].*patch_all\(\)'</span><span class="s1">)</span><span class="s2">,</span>
+                <span class="s1">_patch_indented=re.compile(</span><span class="s6">br'    .*patch_all\(\)'</span><span class="s1">)</span>
+        <span class="s1">):</span>
+            <span class="s2">return </span><span class="s1">(</span>
+                <span class="s0"># A non-commented patch_all() call is present</span>
+                <span class="s1">bool(_patch_present.search(contents))</span>
+                <span class="s0"># that is not indented (because that implies its not at the top-level,</span>
+                <span class="s0"># so some preconditions are being set)</span>
+                <span class="s2">and not </span><span class="s1">_patch_indented.search(contents)</span>
+            <span class="s1">)</span>
+
+        <span class="s1">@staticmethod</span>
+        <span class="s2">def </span><span class="s1">__file_allows_monkey_combine(contents):</span>
+            <span class="s2">return </span><span class="s6">b'testrunner-no-monkey-combine' </span><span class="s2">not in </span><span class="s1">contents</span>
+
+        <span class="s1">@staticmethod</span>
+        <span class="s2">def </span><span class="s1">__file_allows_combine(contents):</span>
+            <span class="s2">return </span><span class="s6">b'testrunner-no-combine' </span><span class="s2">not in </span><span class="s1">contents</span>
+
+        <span class="s1">@staticmethod</span>
+        <span class="s2">def </span><span class="s1">__calls_unittest_main_toplevel(</span>
+                <span class="s1">contents</span><span class="s2">,</span>
+                <span class="s1">_greentest_main=re.compile(</span><span class="s6">br'    greentest.main\(\)'</span><span class="s1">)</span><span class="s2">,</span>
+                <span class="s1">_unittest_main=re.compile(</span><span class="s6">br'    unittest.main\(\)'</span><span class="s1">)</span><span class="s2">,</span>
+                <span class="s1">_import_main=re.compile(</span><span class="s6">br'from gevent.testing import.*main'</span><span class="s1">)</span><span class="s2">,</span>
+                <span class="s1">_main=re.compile(</span><span class="s6">br'    main\(\)'</span><span class="s1">)</span><span class="s2">,</span>
+        <span class="s1">):</span>
+            <span class="s0"># TODO: Add a check that this comes in a line directly after</span>
+            <span class="s0"># if __name__ == __main__.</span>
+            <span class="s2">return </span><span class="s1">(</span>
+                <span class="s1">_greentest_main.search(contents)</span>
+                <span class="s2">or </span><span class="s1">_unittest_main.search(contents)</span>
+                <span class="s2">or </span><span class="s1">(_import_main.search(contents) </span><span class="s2">and </span><span class="s1">_main.search(contents))</span>
+            <span class="s1">)</span>
+
+        <span class="s2">def </span><span class="s1">__has_config(self</span><span class="s2">, </span><span class="s1">filename):</span>
+            <span class="s2">return </span><span class="s1">(</span>
+                <span class="s1">RUN_LEAKCHECKS</span>
+                <span class="s2">or </span><span class="s1">filename </span><span class="s2">in </span><span class="s1">self.configured_test_options</span>
+                <span class="s2">or </span><span class="s1">filename </span><span class="s2">in </span><span class="s1">self.configured_run_alone</span>
+                <span class="s2">or </span><span class="s1">matches(self.configured_failing_tests</span><span class="s2">, </span><span class="s1">filename)</span>
+            <span class="s1">)</span>
+
+        <span class="s2">def </span><span class="s1">__can_monkey_combine(self</span><span class="s2">, </span><span class="s1">filename</span><span class="s2">, </span><span class="s1">contents):</span>
+            <span class="s2">return </span><span class="s1">(</span>
+                <span class="s1">self.allow_combine</span>
+                <span class="s2">and not </span><span class="s1">self.__has_config(filename)</span>
+                <span class="s2">and </span><span class="s1">self.__makes_simple_monkey_patch(contents)</span>
+                <span class="s2">and </span><span class="s1">self.__file_allows_monkey_combine(contents)</span>
+                <span class="s2">and </span><span class="s1">self.__file_allows_combine(contents)</span>
+                <span class="s2">and </span><span class="s1">self.__calls_unittest_main_toplevel(contents)</span>
+            <span class="s1">)</span>
+
+        <span class="s1">@staticmethod</span>
+        <span class="s2">def </span><span class="s1">__makes_no_monkey_patch(contents</span><span class="s2">, </span><span class="s1">_patch_present=re.compile(</span><span class="s6">br'[^#].*patch_\w*\('</span><span class="s1">)):</span>
+            <span class="s2">return not </span><span class="s1">_patch_present.search(contents)</span>
+
+        <span class="s2">def </span><span class="s1">__can_nonmonkey_combine(self</span><span class="s2">, </span><span class="s1">filename</span><span class="s2">, </span><span class="s1">contents):</span>
+            <span class="s2">return </span><span class="s1">(</span>
+                <span class="s1">self.allow_combine</span>
+                <span class="s2">and not </span><span class="s1">self.__has_config(filename)</span>
+                <span class="s2">and </span><span class="s1">self.__makes_no_monkey_patch(contents)</span>
+                <span class="s2">and </span><span class="s1">self.__file_allows_combine(contents)</span>
+                <span class="s2">and </span><span class="s1">self.__calls_unittest_main_toplevel(contents)</span>
+            <span class="s1">)</span>
+
+        <span class="s2">def </span><span class="s1">__begin_command(self):</span>
+            <span class="s1">cmd = [sys.executable</span><span class="s2">, </span><span class="s3">'-u'</span><span class="s1">]</span>
+            <span class="s0"># XXX: -X track-resources is broken. This happened when I updated to</span>
+            <span class="s0"># PyPy 7.3.2. It started failing to even start inside the virtual environment</span>
+            <span class="s0"># with</span>
+            <span class="s0">#</span>
+            <span class="s0"># debug: OperationError:</span>
+            <span class="s0"># debug:  operror-type: ImportError</span>
+            <span class="s0"># debug:  operror-value: No module named traceback</span>
+            <span class="s0">#</span>
+            <span class="s0"># I don't know if this is PyPy's problem or a problem in virtualenv:</span>
+            <span class="s0">#</span>
+            <span class="s0"># virtualenv==20.0.35</span>
+            <span class="s0"># virtualenv-clone==0.5.4</span>
+            <span class="s0"># virtualenvwrapper==4.8.4</span>
+            <span class="s0">#</span>
+            <span class="s0"># Deferring investigation until I need this...</span>
+
+            <span class="s0"># if PYPY and PY2:</span>
+            <span class="s0">#     # Doesn't seem to be an env var for this.</span>
+            <span class="s0">#     # XXX: track-resources is broken in virtual environments</span>
+            <span class="s0">#     # on 7.3.2.</span>
+            <span class="s0">#     cmd.extend(('-X', 'track-resources'))</span>
+            <span class="s2">return </span><span class="s1">cmd</span>
+
+
+        <span class="s2">def </span><span class="s1">__add_test(self</span><span class="s2">, </span><span class="s1">qualified_name</span><span class="s2">, </span><span class="s1">filename</span><span class="s2">, </span><span class="s1">contents):</span>
+            <span class="s2">if </span><span class="s6">b'TESTRUNNER' </span><span class="s2">in </span><span class="s1">contents: </span><span class="s0"># test__monkey_patching.py</span>
+                <span class="s0"># XXX: Rework this to avoid importing.</span>
+                <span class="s0"># XXX: Rework this to allow test combining (it could write the files out and return</span>
+                <span class="s0"># them directly; we would use 'python -m gevent.monkey --module unittest ...)</span>
+                <span class="s1">self.to_import.append(qualified_name)</span>
+            <span class="s2">elif </span><span class="s1">self.__can_monkey_combine(filename</span><span class="s2">, </span><span class="s1">contents):</span>
+                <span class="s1">self.std_monkey_patch_files.append(qualified_name </span><span class="s2">if </span><span class="s1">self.package </span><span class="s2">else </span><span class="s1">filename)</span>
+            <span class="s2">elif </span><span class="s1">self.__can_nonmonkey_combine(filename</span><span class="s2">, </span><span class="s1">contents):</span>
+                <span class="s1">self.no_monkey_patch_files.append(qualified_name </span><span class="s2">if </span><span class="s1">self.package </span><span class="s2">else </span><span class="s1">filename)</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s0"># XXX: For simple python module tests, try this with</span>
+                <span class="s0"># `runpy.run_module`, very similar to the way we run</span>
+                <span class="s0"># things for monkey patching. The idea here is that we</span>
+                <span class="s0"># can perform setup ahead of time (e.g.,</span>
+                <span class="s0"># setup_resources()) in each test without having to do</span>
+                <span class="s0"># it manually or force calls or modifications to those</span>
+                <span class="s0"># tests.</span>
+                <span class="s1">cmd = self.__begin_command()</span>
+                <span class="s2">if </span><span class="s1">self.package:</span>
+                    <span class="s0"># Using a package is the best way to work with coverage 5</span>
+                    <span class="s0"># when we specify 'source = &lt;package&gt;'</span>
+                    <span class="s1">cmd.append(</span><span class="s3">'-m' </span><span class="s1">+ qualified_name)</span>
+                <span class="s2">else</span><span class="s1">:</span>
+                    <span class="s1">cmd.append(filename)</span>
+
+                <span class="s1">options = DEFAULT_RUN_OPTIONS.copy()</span>
+                <span class="s1">options.update(self.configured_test_options.get(filename</span><span class="s2">, </span><span class="s1">{}))</span>
+                <span class="s1">self.commands.append((cmd</span><span class="s2">, </span><span class="s1">options))</span>
+
+        <span class="s1">@staticmethod</span>
+        <span class="s2">def </span><span class="s1">__remove_options(lst):</span>
+            <span class="s2">return </span><span class="s1">[x </span><span class="s2">for </span><span class="s1">x </span><span class="s2">in </span><span class="s1">lst </span><span class="s2">if </span><span class="s1">x </span><span class="s2">and not </span><span class="s1">x.startswith(</span><span class="s3">'-'</span><span class="s1">)]</span>
+
+        <span class="s2">def </span><span class="s1">__expand_imports(self):</span>
+            <span class="s2">for </span><span class="s1">qualified_name </span><span class="s2">in </span><span class="s1">self.to_import:</span>
+                <span class="s1">module = importlib.import_module(qualified_name)</span>
+                <span class="s2">for </span><span class="s1">cmd</span><span class="s2">, </span><span class="s1">options </span><span class="s2">in </span><span class="s1">module.TESTRUNNER():</span>
+                    <span class="s2">if </span><span class="s1">self.__remove_options(cmd)[-</span><span class="s4">1</span><span class="s1">] </span><span class="s2">in </span><span class="s1">self.ignore:</span>
+                        <span class="s2">continue</span>
+                    <span class="s1">self.commands.append((cmd</span><span class="s2">, </span><span class="s1">options))</span>
+            <span class="s2">del </span><span class="s1">self.to_import[:]</span>
+
+        <span class="s2">def </span><span class="s1">__combine_commands(self</span><span class="s2">, </span><span class="s1">files</span><span class="s2">, </span><span class="s1">group_size=</span><span class="s4">5</span><span class="s1">):</span>
+            <span class="s2">if not </span><span class="s1">files:</span>
+                <span class="s2">return</span>
+
+            <span class="s2">from </span><span class="s1">itertools </span><span class="s2">import </span><span class="s1">groupby</span>
+            <span class="s1">cnt = [</span><span class="s4">0</span><span class="s2">, </span><span class="s4">0</span><span class="s1">]</span>
+            <span class="s2">def </span><span class="s1">make_group(_):</span>
+                <span class="s2">if </span><span class="s1">cnt[</span><span class="s4">0</span><span class="s1">] &gt; group_size:</span>
+                    <span class="s1">cnt[</span><span class="s4">0</span><span class="s1">] = </span><span class="s4">0</span>
+                    <span class="s1">cnt[</span><span class="s4">1</span><span class="s1">] += </span><span class="s4">1</span>
+                <span class="s1">cnt[</span><span class="s4">0</span><span class="s1">] += </span><span class="s4">1</span>
+                <span class="s2">return </span><span class="s1">cnt[</span><span class="s4">1</span><span class="s1">]</span>
+
+            <span class="s2">for </span><span class="s1">_</span><span class="s2">, </span><span class="s1">group </span><span class="s2">in </span><span class="s1">groupby(files</span><span class="s2">, </span><span class="s1">make_group):</span>
+
+                <span class="s1">cmd = self.__begin_command()</span>
+                <span class="s1">cmd.append(</span><span class="s3">'-m'</span><span class="s1">)</span>
+                <span class="s1">cmd.append(</span><span class="s3">'unittest'</span><span class="s1">)</span>
+                <span class="s0"># cmd.append('-v')</span>
+                <span class="s2">for </span><span class="s1">name </span><span class="s2">in </span><span class="s1">group:</span>
+                    <span class="s1">cmd.append(name)</span>
+                <span class="s1">self.commands.insert(</span><span class="s4">0</span><span class="s2">, </span><span class="s1">(cmd</span><span class="s2">, </span><span class="s1">DEFAULT_RUN_OPTIONS.copy()))</span>
+
+            <span class="s2">del </span><span class="s1">files[:]</span>
+
+
+        <span class="s2">def </span><span class="s1">visit_file(self</span><span class="s2">, </span><span class="s1">filename):</span>
+            <span class="s0"># Support either 'gevent.tests.foo' or 'gevent/tests/foo.py'</span>
+            <span class="s2">if </span><span class="s1">filename.startswith(</span><span class="s3">'gevent.tests'</span><span class="s1">):</span>
+                <span class="s0"># XXX: How does this interact with 'package'? Probably not well</span>
+                <span class="s1">qualified_name = module_name = filename</span>
+                <span class="s1">filename = filename[len(</span><span class="s3">'gevent.tests'</span><span class="s1">) + </span><span class="s4">1</span><span class="s1">:]</span>
+                <span class="s1">filename = filename.replace(</span><span class="s3">'.'</span><span class="s2">, </span><span class="s1">os.sep) + </span><span class="s3">'.py'</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s1">module_name = os.path.splitext(filename)[</span><span class="s4">0</span><span class="s1">]</span>
+                <span class="s1">qualified_name = self.package + </span><span class="s3">'.' </span><span class="s1">+ module_name </span><span class="s2">if </span><span class="s1">self.package </span><span class="s2">else </span><span class="s1">module_name</span>
+
+            <span class="s0"># Also allow just 'foo' as a shortcut for 'gevent.tests.foo'</span>
+            <span class="s1">abs_filename = os.path.abspath(filename)</span>
+            <span class="s2">if </span><span class="s1">(</span>
+                    <span class="s2">not </span><span class="s1">os.path.exists(abs_filename)</span>
+                    <span class="s2">and not </span><span class="s1">filename.endswith(</span><span class="s3">'.py'</span><span class="s1">)</span>
+                    <span class="s2">and </span><span class="s1">os.path.exists(abs_filename + </span><span class="s3">'.py'</span><span class="s1">) ):</span>
+                <span class="s1">abs_filename = abs_filename + </span><span class="s3">'.py'</span>
+
+            <span class="s2">with </span><span class="s1">open(abs_filename</span><span class="s2">, </span><span class="s3">'rb'</span><span class="s1">) </span><span class="s2">as </span><span class="s1">f:</span>
+                <span class="s0"># Some of the test files (e.g., test__socket_dns) are</span>
+                <span class="s0"># UTF8 encoded. Depending on the environment, Python 3 may</span>
+                <span class="s0"># try to decode those as ASCII, which fails with UnicodeDecodeError.</span>
+                <span class="s0"># Thus, be sure to open and compare in binary mode.</span>
+                <span class="s0"># Open the absolute path to make errors more clear,</span>
+                <span class="s0"># but we can't store the absolute path, our configuration is based on</span>
+                <span class="s0"># relative file names.</span>
+                <span class="s1">contents = f.read()</span>
+
+            <span class="s1">self.__add_test(qualified_name</span><span class="s2">, </span><span class="s1">filename</span><span class="s2">, </span><span class="s1">contents)</span>
+
+        <span class="s2">def </span><span class="s1">visit_files(self</span><span class="s2">, </span><span class="s1">filenames):</span>
+            <span class="s2">for </span><span class="s1">filename </span><span class="s2">in </span><span class="s1">filenames:</span>
+                <span class="s1">self.visit_file(filename)</span>
+            <span class="s2">with </span><span class="s1">Discovery._in_dir(self.orig_dir):</span>
+                <span class="s1">self.__expand_imports()</span>
+            <span class="s1">self.__combine_commands(self.std_monkey_patch_files)</span>
+            <span class="s1">self.__combine_commands(self.no_monkey_patch_files)</span>
+
+    <span class="s1">@staticmethod</span>
+    <span class="s1">@contextmanager</span>
+    <span class="s2">def </span><span class="s1">_in_dir(package_dir):</span>
+        <span class="s1">olddir = os.getcwd()</span>
+        <span class="s2">if </span><span class="s1">package_dir:</span>
+            <span class="s1">os.chdir(package_dir)</span>
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s2">yield</span>
+        <span class="s2">finally</span><span class="s1">:</span>
+            <span class="s1">os.chdir(olddir)</span>
+
+    <span class="s1">@Lazy</span>
+    <span class="s2">def </span><span class="s1">discovered(self):</span>
+        <span class="s1">tests = self.tests</span>
+        <span class="s1">discovered = self.Discovered(self.package</span><span class="s2">, </span><span class="s1">self.configured_test_options</span><span class="s2">,</span>
+                                     <span class="s1">self.ignore</span><span class="s2">, </span><span class="s1">self.config</span><span class="s2">, </span><span class="s1">self.allow_combine)</span>
+
+        <span class="s0"># We need to glob relative names, our config is based on filenames still</span>
+        <span class="s2">with </span><span class="s1">self._in_dir(self.package_dir):</span>
+            <span class="s2">if not </span><span class="s1">tests:</span>
+                <span class="s1">tests = set(glob.glob(</span><span class="s3">'test_*.py'</span><span class="s1">)) - set([</span><span class="s3">'test_support.py'</span><span class="s1">])</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s1">tests = set(tests)</span>
+
+            <span class="s2">if </span><span class="s1">self.ignore:</span>
+                <span class="s0"># Always ignore the designated list, even if tests</span>
+                <span class="s0"># were specified on the command line. This fixes a</span>
+                <span class="s0"># nasty interaction with</span>
+                <span class="s0"># test__threading_vs_settrace.py being run under</span>
+                <span class="s0"># coverage when 'grep -l subprocess test*py' is used</span>
+                <span class="s0"># to list the tests to run.</span>
+                <span class="s1">tests -= self.ignore</span>
+            <span class="s1">tests = sorted(tests)</span>
+            <span class="s1">discovered.visit_files(tests)</span>
+
+        <span class="s2">return </span><span class="s1">discovered</span>
+
+    <span class="s2">def </span><span class="s1">__iter__(self):</span>
+        <span class="s2">return </span><span class="s1">iter(self.discovered.commands) </span><span class="s0"># pylint:disable=no-member</span>
+
+    <span class="s2">def </span><span class="s1">__len__(self):</span>
+        <span class="s2">return </span><span class="s1">len(self.discovered.commands) </span><span class="s0"># pylint:disable=no-member</span>
+
+<span class="s2">def </span><span class="s1">load_list_from_file(filename</span><span class="s2">, </span><span class="s1">package):</span>
+    <span class="s1">result = []</span>
+    <span class="s2">if </span><span class="s1">filename:</span>
+        <span class="s0"># pylint:disable=unspecified-encoding</span>
+        <span class="s2">with </span><span class="s1">open(_package_relative_filename(filename</span><span class="s2">, </span><span class="s1">package)) </span><span class="s2">as </span><span class="s1">f:</span>
+            <span class="s2">for </span><span class="s1">x </span><span class="s2">in </span><span class="s1">f:</span>
+                <span class="s1">x = x.split(</span><span class="s3">'#'</span><span class="s2">, </span><span class="s4">1</span><span class="s1">)[</span><span class="s4">0</span><span class="s1">].strip()</span>
+                <span class="s2">if </span><span class="s1">x:</span>
+                    <span class="s1">result.append(x)</span>
+    <span class="s2">return </span><span class="s1">result</span>
+
+
+<span class="s2">def </span><span class="s1">matches(possibilities</span><span class="s2">, </span><span class="s1">command</span><span class="s2">, </span><span class="s1">include_flaky=</span><span class="s2">True</span><span class="s1">):</span>
+    <span class="s2">if </span><span class="s1">isinstance(command</span><span class="s2">, </span><span class="s1">list):</span>
+        <span class="s1">command = </span><span class="s3">' '</span><span class="s1">.join(command)</span>
+    <span class="s2">for </span><span class="s1">line </span><span class="s2">in </span><span class="s1">possibilities:</span>
+        <span class="s2">if not </span><span class="s1">include_flaky </span><span class="s2">and </span><span class="s1">line.startswith(</span><span class="s3">'FLAKY '</span><span class="s1">):</span>
+            <span class="s2">continue</span>
+        <span class="s1">line = line.replace(</span><span class="s3">'FLAKY '</span><span class="s2">, </span><span class="s3">''</span><span class="s1">)</span>
+        <span class="s0"># Our configs are still mostly written in terms of file names,</span>
+        <span class="s0"># but the non-monkey tests are now using package names.</span>
+        <span class="s0"># Strip off '.py' from filenames to see if we match a module.</span>
+        <span class="s0"># XXX: This could be much better. Our command needs better structure.</span>
+        <span class="s2">if </span><span class="s1">command.endswith(</span><span class="s3">' ' </span><span class="s1">+ line) </span><span class="s2">or </span><span class="s1">command.endswith(line.replace(</span><span class="s3">&quot;.py&quot;</span><span class="s2">, </span><span class="s3">''</span><span class="s1">)):</span>
+            <span class="s2">return True</span>
+        <span class="s2">if </span><span class="s3">' '  </span><span class="s2">not in </span><span class="s1">command </span><span class="s2">and </span><span class="s1">command == line:</span>
+            <span class="s2">return True</span>
+    <span class="s2">return False</span>
+
+
+<span class="s2">def </span><span class="s1">format_seconds(seconds):</span>
+    <span class="s2">if </span><span class="s1">seconds &lt; </span><span class="s4">20</span><span class="s1">:</span>
+        <span class="s2">return </span><span class="s3">'%.1fs' </span><span class="s1">% seconds</span>
+    <span class="s1">seconds = str(timedelta(seconds=round(seconds)))</span>
+    <span class="s2">if </span><span class="s1">seconds.startswith(</span><span class="s3">'0:'</span><span class="s1">):</span>
+        <span class="s1">seconds = seconds[</span><span class="s4">2</span><span class="s1">:]</span>
+    <span class="s2">return </span><span class="s1">seconds</span>
+
+
+<span class="s2">def </span><span class="s1">_show_longest_running(result_collector</span><span class="s2">, </span><span class="s1">how_many=</span><span class="s4">5</span><span class="s1">):</span>
+    <span class="s1">longest_running_tests = result_collector.longest_running_tests</span>
+    <span class="s2">if not </span><span class="s1">longest_running_tests:</span>
+        <span class="s2">return</span>
+    <span class="s0"># The only tricky part is handling repeats. we want to show them,</span>
+    <span class="s0"># but not count them as a distinct entry.</span>
+
+    <span class="s1">util.log(</span><span class="s3">'</span><span class="s2">\n</span><span class="s3">Longest-running tests:'</span><span class="s1">)</span>
+    <span class="s1">length_of_longest_formatted_decimal = len(</span><span class="s3">'%.1f' </span><span class="s1">% longest_running_tests[</span><span class="s4">0</span><span class="s1">].run_duration)</span>
+
+    <span class="s1">frmt = </span><span class="s3">'%' </span><span class="s1">+ str(length_of_longest_formatted_decimal) + </span><span class="s3">'.1f seconds: %s'</span>
+    <span class="s1">seen_names = set()</span>
+    <span class="s2">for </span><span class="s1">result </span><span class="s2">in </span><span class="s1">longest_running_tests:</span>
+        <span class="s1">util.log(frmt</span><span class="s2">, </span><span class="s1">result.run_duration</span><span class="s2">, </span><span class="s1">result.name)</span>
+        <span class="s1">seen_names.add(result.name)</span>
+        <span class="s2">if </span><span class="s1">len(seen_names) &gt;= how_many:</span>
+            <span class="s2">break</span>
+
+
+
+<span class="s2">def </span><span class="s1">report(result_collector</span><span class="s2">, </span><span class="s0"># type: ResultCollector</span>
+           <span class="s1">exit=</span><span class="s2">True, </span><span class="s1">took=</span><span class="s2">None,</span>
+           <span class="s1">configured_failing_tests=()):</span>
+    <span class="s0"># pylint:disable=redefined-builtin,too-many-branches,too-many-locals</span>
+    <span class="s1">total = result_collector.total</span>
+    <span class="s1">failed = result_collector.failed</span>
+    <span class="s1">passed = result_collector.passed</span>
+    <span class="s1">total_cases = result_collector.total_cases</span>
+    <span class="s1">total_skipped = result_collector.total_skipped</span>
+
+    <span class="s1">_show_longest_running(result_collector)</span>
+
+    <span class="s2">if </span><span class="s1">took:</span>
+        <span class="s1">took = </span><span class="s3">' in %s' </span><span class="s1">% format_seconds(took)</span>
+    <span class="s2">else</span><span class="s1">:</span>
+        <span class="s1">took = </span><span class="s3">''</span>
+
+    <span class="s1">failed_expected = []</span>
+    <span class="s1">failed_unexpected = []</span>
+    <span class="s1">passed_unexpected = []</span>
+
+    <span class="s2">for </span><span class="s1">name </span><span class="s2">in </span><span class="s1">passed:</span>
+        <span class="s2">if </span><span class="s1">matches(configured_failing_tests</span><span class="s2">, </span><span class="s1">name</span><span class="s2">, </span><span class="s1">include_flaky=</span><span class="s2">False</span><span class="s1">):</span>
+            <span class="s1">passed_unexpected.append(name)</span>
+
+    <span class="s2">if </span><span class="s1">passed_unexpected:</span>
+        <span class="s1">util.log(</span><span class="s3">'</span><span class="s2">\n</span><span class="s3">%s/%s unexpected passes'</span><span class="s2">, </span><span class="s1">len(passed_unexpected)</span><span class="s2">, </span><span class="s1">total</span><span class="s2">, </span><span class="s1">color=</span><span class="s3">'error'</span><span class="s1">)</span>
+        <span class="s1">print_list(passed_unexpected)</span>
+
+    <span class="s2">if </span><span class="s1">result_collector.reran:</span>
+        <span class="s1">util.log(</span><span class="s3">'</span><span class="s2">\n</span><span class="s3">%s/%s tests rerun'</span><span class="s2">, </span><span class="s1">len(result_collector.reran)</span><span class="s2">, </span><span class="s1">total</span><span class="s2">, </span><span class="s1">color=</span><span class="s3">'warning'</span><span class="s1">)</span>
+        <span class="s1">print_list(result_collector.reran)</span>
+
+    <span class="s2">if </span><span class="s1">failed:</span>
+        <span class="s1">util.log(</span><span class="s3">'</span><span class="s2">\n</span><span class="s3">%s/%s tests failed%s'</span><span class="s2">, </span><span class="s1">len(failed)</span><span class="s2">, </span><span class="s1">total</span><span class="s2">, </span><span class="s1">took</span><span class="s2">, </span><span class="s1">color=</span><span class="s3">'warning'</span><span class="s1">)</span>
+
+        <span class="s2">for </span><span class="s1">name </span><span class="s2">in </span><span class="s1">failed:</span>
+            <span class="s2">if </span><span class="s1">matches(configured_failing_tests</span><span class="s2">, </span><span class="s1">name</span><span class="s2">, </span><span class="s1">include_flaky=</span><span class="s2">True</span><span class="s1">):</span>
+                <span class="s1">failed_expected.append(name)</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s1">failed_unexpected.append(name)</span>
+
+        <span class="s2">if </span><span class="s1">failed_expected:</span>
+            <span class="s1">util.log(</span><span class="s3">'</span><span class="s2">\n</span><span class="s3">%s/%s expected failures'</span><span class="s2">, </span><span class="s1">len(failed_expected)</span><span class="s2">, </span><span class="s1">total</span><span class="s2">, </span><span class="s1">color=</span><span class="s3">'warning'</span><span class="s1">)</span>
+            <span class="s1">print_list(failed_expected)</span>
+
+        <span class="s2">if </span><span class="s1">failed_unexpected:</span>
+            <span class="s1">util.log(</span><span class="s3">'</span><span class="s2">\n</span><span class="s3">%s/%s unexpected failures'</span><span class="s2">, </span><span class="s1">len(failed_unexpected)</span><span class="s2">, </span><span class="s1">total</span><span class="s2">, </span><span class="s1">color=</span><span class="s3">'error'</span><span class="s1">)</span>
+            <span class="s1">print_list(failed_unexpected)</span>
+
+    <span class="s1">util.log(</span>
+        <span class="s3">'</span><span class="s2">\n</span><span class="s3">Ran %s tests%s in %s files%s'</span><span class="s2">,</span>
+        <span class="s1">total_cases</span><span class="s2">,</span>
+        <span class="s1">util._colorize(</span><span class="s3">'skipped'</span><span class="s2">, </span><span class="s3">&quot; (skipped=%d)&quot; </span><span class="s1">% total_skipped) </span><span class="s2">if </span><span class="s1">total_skipped </span><span class="s2">else </span><span class="s3">''</span><span class="s2">,</span>
+        <span class="s1">total</span><span class="s2">,</span>
+        <span class="s1">took</span><span class="s2">,</span>
+    <span class="s1">)</span>
+
+    <span class="s2">if </span><span class="s1">exit:</span>
+        <span class="s2">if </span><span class="s1">failed_unexpected:</span>
+            <span class="s1">sys.exit(min(</span><span class="s4">100</span><span class="s2">, </span><span class="s1">len(failed_unexpected)))</span>
+        <span class="s2">if </span><span class="s1">passed_unexpected:</span>
+            <span class="s1">sys.exit(</span><span class="s4">101</span><span class="s1">)</span>
+        <span class="s2">if </span><span class="s1">total &lt;= </span><span class="s4">0</span><span class="s1">:</span>
+            <span class="s1">sys.exit(</span><span class="s3">'No tests found.'</span><span class="s1">)</span>
+
+
+<span class="s2">def </span><span class="s1">print_list(lst):</span>
+    <span class="s2">for </span><span class="s1">name </span><span class="s2">in </span><span class="s1">lst:</span>
+        <span class="s1">util.log(</span><span class="s3">' - %s'</span><span class="s2">, </span><span class="s1">name)</span>
+
+<span class="s2">def </span><span class="s1">_setup_environ(debug=</span><span class="s2">False</span><span class="s1">):</span>
+    <span class="s2">def </span><span class="s1">not_set(key):</span>
+        <span class="s2">return not </span><span class="s1">bool(os.environ.get(key))</span>
+
+    <span class="s2">if </span><span class="s1">(not_set(</span><span class="s3">'PYTHONWARNINGS'</span><span class="s1">)</span>
+            <span class="s2">and </span><span class="s1">(</span><span class="s2">not </span><span class="s1">sys.warnoptions</span>
+                 <span class="s0"># Python 3.7 goes from [] to ['default'] for nothing</span>
+                 <span class="s2">or </span><span class="s1">sys.warnoptions == [</span><span class="s3">'default'</span><span class="s1">])):</span>
+        <span class="s0"># action:message:category:module:line</span>
+
+        <span class="s0"># - when a warning matches</span>
+        <span class="s0">#   more than one option, the action for the last matching</span>
+        <span class="s0">#   option is performed.</span>
+        <span class="s0"># - action is one of : ignore, default, all, module, once, error</span>
+
+        <span class="s0"># Enable default warnings such as ResourceWarning.</span>
+        <span class="s0"># ResourceWarning doesn't exist on Py2, so don't put it</span>
+        <span class="s0"># in there to avoid a warnnig.</span>
+        <span class="s1">defaults = [</span>
+            <span class="s3">'default'</span><span class="s2">,</span>
+            <span class="s3">'default::DeprecationWarning'</span><span class="s2">,</span>
+        <span class="s1">]</span>
+        <span class="s2">if not </span><span class="s1">PY2:</span>
+            <span class="s1">defaults.append(</span><span class="s3">'default::ResourceWarning'</span><span class="s1">)</span>
+
+        <span class="s1">os.environ[</span><span class="s3">'PYTHONWARNINGS'</span><span class="s1">] = </span><span class="s3">','</span><span class="s1">.join(defaults + [</span>
+            <span class="s0"># On Python 3[.6], the system site.py module has</span>
+            <span class="s0"># &quot;open(fullname, 'rU')&quot; which produces the warning that</span>
+            <span class="s0"># 'U' is deprecated, so ignore warnings from site.py</span>
+            <span class="s3">'ignore:::site:'</span><span class="s2">,</span>
+            <span class="s0"># pkgutil on Python 2 complains about missing __init__.py</span>
+            <span class="s3">'ignore:::pkgutil:'</span><span class="s2">,</span>
+            <span class="s0"># importlib/_bootstrap.py likes to spit out &quot;ImportWarning:</span>
+            <span class="s0"># can't resolve package from __spec__ or __package__, falling</span>
+            <span class="s0"># back on __name__ and __path__&quot;. I have no idea what that means, but it seems harmless</span>
+            <span class="s0"># and is annoying.</span>
+            <span class="s3">'ignore:::importlib._bootstrap:'</span><span class="s2">,</span>
+            <span class="s3">'ignore:::importlib._bootstrap_external:'</span><span class="s2">,</span>
+            <span class="s0"># importing ABCs from collections, not collections.abc</span>
+            <span class="s3">'ignore:::pkg_resources._vendor.pyparsing:'</span><span class="s2">,</span>
+            <span class="s3">'ignore:::dns.namedict:'</span><span class="s2">,</span>
+            <span class="s0"># dns.hash itself is being deprecated, importing it raises the warning;</span>
+            <span class="s0"># we don't import it, but dnspython still does</span>
+            <span class="s3">'ignore:::dns.hash:'</span><span class="s2">,</span>
+            <span class="s0"># dns.zone uses some raw regular expressions</span>
+            <span class="s0"># without the r'' syntax, leading to DeprecationWarning: invalid</span>
+            <span class="s0"># escape sequence. This is fixed in 2.0 (Python 3 only).</span>
+            <span class="s3">'ignore:::dns.zone:'</span><span class="s2">,</span>
+        <span class="s1">])</span>
+
+    <span class="s2">if </span><span class="s1">not_set(</span><span class="s3">'PYTHONFAULTHANDLER'</span><span class="s1">):</span>
+        <span class="s1">os.environ[</span><span class="s3">'PYTHONFAULTHANDLER'</span><span class="s1">] = </span><span class="s3">'true'</span>
+
+    <span class="s2">if </span><span class="s1">not_set(</span><span class="s3">'GEVENT_DEBUG'</span><span class="s1">) </span><span class="s2">and </span><span class="s1">debug:</span>
+        <span class="s1">os.environ[</span><span class="s3">'GEVENT_DEBUG'</span><span class="s1">] = </span><span class="s3">'debug'</span>
+
+    <span class="s2">if </span><span class="s1">not_set(</span><span class="s3">'PYTHONTRACEMALLOC'</span><span class="s1">) </span><span class="s2">and </span><span class="s1">debug:</span>
+        <span class="s0"># This slows the tests down quite a bit. Reserve</span>
+        <span class="s0"># for debugging.</span>
+        <span class="s1">os.environ[</span><span class="s3">'PYTHONTRACEMALLOC'</span><span class="s1">] = </span><span class="s3">'10'</span>
+
+    <span class="s2">if </span><span class="s1">not_set(</span><span class="s3">'PYTHONDEVMODE'</span><span class="s1">):</span>
+        <span class="s0"># Python 3.7 and above.</span>
+        <span class="s1">os.environ[</span><span class="s3">'PYTHONDEVMODE'</span><span class="s1">] = </span><span class="s3">'1'</span>
+
+    <span class="s2">if </span><span class="s1">not_set(</span><span class="s3">'PYTHONMALLOC'</span><span class="s1">) </span><span class="s2">and </span><span class="s1">debug:</span>
+        <span class="s0"># Python 3.6 and above.</span>
+        <span class="s0"># This slows the tests down some, but</span>
+        <span class="s0"># can detect memory corruption. Unfortunately</span>
+        <span class="s0"># it can also be flaky, especially in pre-release</span>
+        <span class="s0"># versions of Python (e.g., lots of crashes on Python 3.8b4).</span>
+        <span class="s1">os.environ[</span><span class="s3">'PYTHONMALLOC'</span><span class="s1">] = </span><span class="s3">'debug'</span>
+
+    <span class="s2">if </span><span class="s1">sys.version_info.releaselevel != </span><span class="s3">'final' </span><span class="s2">and not </span><span class="s1">debug:</span>
+        <span class="s1">os.environ[</span><span class="s3">'PYTHONMALLOC'</span><span class="s1">] = </span><span class="s3">'default'</span>
+        <span class="s1">os.environ[</span><span class="s3">'PYTHONDEVMODE'</span><span class="s1">] = </span><span class="s3">''</span>
+
+    <span class="s1">interesting_envs = {</span>
+        <span class="s1">k: os.environ[k]</span>
+        <span class="s2">for </span><span class="s1">k </span><span class="s2">in </span><span class="s1">os.environ</span>
+        <span class="s2">if </span><span class="s1">k.startswith((</span><span class="s3">'PYTHON'</span><span class="s2">, </span><span class="s3">'GEVENT'</span><span class="s1">))</span>
+    <span class="s1">}</span>
+    <span class="s1">widest_k = max(len(k) </span><span class="s2">for </span><span class="s1">k </span><span class="s2">in </span><span class="s1">interesting_envs)</span>
+    <span class="s2">for </span><span class="s1">k</span><span class="s2">, </span><span class="s1">v </span><span class="s2">in </span><span class="s1">sorted(interesting_envs.items()):</span>
+        <span class="s1">util.log(</span><span class="s3">'%*s</span><span class="s2">\t</span><span class="s3">=</span><span class="s2">\t</span><span class="s3">%s'</span><span class="s2">, </span><span class="s1">widest_k</span><span class="s2">, </span><span class="s1">k</span><span class="s2">, </span><span class="s1">v</span><span class="s2">, </span><span class="s1">color=</span><span class="s3">&quot;debug&quot;</span><span class="s1">)</span>
+
+
+<span class="s2">def </span><span class="s1">main():</span>
+    <span class="s0"># pylint:disable=too-many-locals,too-many-statements</span>
+    <span class="s2">import </span><span class="s1">argparse</span>
+    <span class="s1">parser = argparse.ArgumentParser()</span>
+    <span class="s1">parser.add_argument(</span><span class="s3">'--ignore'</span><span class="s1">)</span>
+    <span class="s1">parser.add_argument(</span>
+        <span class="s3">'--discover'</span><span class="s2">, </span><span class="s1">action=</span><span class="s3">'store_true'</span><span class="s2">,</span>
+        <span class="s1">help=</span><span class="s3">&quot;Only print the tests found.&quot;</span>
+    <span class="s1">)</span>
+    <span class="s1">parser.add_argument(</span>
+        <span class="s3">'--config'</span><span class="s2">, </span><span class="s1">default=</span><span class="s3">'known_failures.py'</span><span class="s2">,</span>
+        <span class="s1">help=</span><span class="s3">&quot;The path to the config file containing &quot;</span>
+        <span class="s3">&quot;FAILING_TESTS, IGNORED_TESTS and RUN_ALONE. &quot;</span>
+        <span class="s3">&quot;Defaults to %(default)s.&quot;</span>
+    <span class="s1">)</span>
+    <span class="s1">parser.add_argument(</span>
+        <span class="s3">&quot;--coverage&quot;</span><span class="s2">, </span><span class="s1">action=</span><span class="s3">&quot;store_true&quot;</span><span class="s2">,</span>
+        <span class="s1">help=</span><span class="s3">&quot;Enable coverage recording with coverage.py.&quot;</span>
+    <span class="s1">)</span>
+    <span class="s0"># TODO: Quiet and verbose should be mutually exclusive</span>
+    <span class="s1">parser.add_argument(</span>
+        <span class="s3">&quot;--quiet&quot;</span><span class="s2">, </span><span class="s1">action=</span><span class="s3">&quot;store_true&quot;</span><span class="s2">, </span><span class="s1">default=</span><span class="s2">True,</span>
+        <span class="s1">help=</span><span class="s3">&quot;Be quiet. Defaults to %(default)s. Also the &quot;</span>
+        <span class="s3">&quot;GEVENTTEST_QUIET environment variable.&quot;</span>
+    <span class="s1">)</span>
+    <span class="s1">parser.add_argument(</span><span class="s3">&quot;--verbose&quot;</span><span class="s2">, </span><span class="s1">action=</span><span class="s3">&quot;store_false&quot;</span><span class="s2">, </span><span class="s1">dest=</span><span class="s3">'quiet'</span><span class="s1">)</span>
+
+    <span class="s1">parser.add_argument(</span>
+        <span class="s3">&quot;--debug&quot;</span><span class="s2">, </span><span class="s1">action=</span><span class="s3">&quot;store_true&quot;</span><span class="s2">, </span><span class="s1">default=</span><span class="s2">False,</span>
+        <span class="s1">help=</span><span class="s3">&quot;Enable debug settings. If the GEVENT_DEBUG environment variable is not set, &quot;</span>
+        <span class="s3">&quot;this sets it to 'debug'. This can also enable PYTHONTRACEMALLOC and the debug PYTHONMALLOC &quot;</span>
+        <span class="s3">&quot;allocators, if not already set. Defaults to %(default)s.&quot;</span>
+     <span class="s1">)</span>
+
+    <span class="s1">parser.add_argument(</span>
+        <span class="s3">&quot;--package&quot;</span><span class="s2">, </span><span class="s1">default=</span><span class="s3">&quot;gevent.tests&quot;</span><span class="s2">,</span>
+        <span class="s1">help=</span><span class="s3">&quot;Load tests from the given package. Defaults to %(default)s.&quot;</span>
+    <span class="s1">)</span>
+    <span class="s1">parser.add_argument(</span>
+        <span class="s3">&quot;--processes&quot;</span><span class="s2">, </span><span class="s3">&quot;-j&quot;</span><span class="s2">, </span><span class="s1">default=DEFAULT_NWORKERS</span><span class="s2">, </span><span class="s1">type=int</span><span class="s2">,</span>
+        <span class="s1">help=</span><span class="s3">&quot;Use up to the given number of parallel processes to execute tests. &quot;</span>
+        <span class="s3">&quot;Defaults to %(default)s.&quot;</span>
+    <span class="s1">)</span>
+    <span class="s1">parser.add_argument(</span>
+        <span class="s3">'--no-combine'</span><span class="s2">, </span><span class="s1">default=</span><span class="s2">True, </span><span class="s1">action=</span><span class="s3">'store_false'</span><span class="s2">,</span>
+        <span class="s1">help=</span><span class="s3">&quot;Do not combine tests into process groups.&quot;</span>
+    <span class="s1">)</span>
+    <span class="s1">parser.add_argument(</span><span class="s3">'-u'</span><span class="s2">, </span><span class="s3">'--use'</span><span class="s2">, </span><span class="s1">metavar=</span><span class="s3">'RES1,RES2,...'</span><span class="s2">,</span>
+                        <span class="s1">action=</span><span class="s3">'store'</span><span class="s2">, </span><span class="s1">type=parse_resources</span><span class="s2">,</span>
+                        <span class="s1">help=</span><span class="s3">'specify which special resource intensive tests '</span>
+                        <span class="s3">'to run. &quot;all&quot; is the default; &quot;none&quot; may also be used. '</span>
+                        <span class="s3">'Disable individual resources with a leading -.'</span>
+                        <span class="s3">'For example, &quot;-u-network&quot;. GEVENTTEST_USE_RESOURCES is used '</span>
+                        <span class="s3">'if no argument is given. To only use one resources, specify '</span>
+                        <span class="s3">'&quot;-unone,resource&quot;.'</span><span class="s1">)</span>
+    <span class="s1">parser.add_argument(</span><span class="s3">&quot;--travis-fold&quot;</span><span class="s2">, </span><span class="s1">metavar=</span><span class="s3">&quot;MSG&quot;</span><span class="s2">,</span>
+                        <span class="s1">help=</span><span class="s3">&quot;Emit Travis CI log fold markers around the output.&quot;</span><span class="s1">)</span>
+
+    <span class="s1">fail_parser = parser.add_mutually_exclusive_group()</span>
+    <span class="s1">fail_parser.add_argument(</span>
+        <span class="s3">&quot;--second-chance&quot;</span><span class="s2">, </span><span class="s1">action=</span><span class="s3">&quot;store_true&quot;</span><span class="s2">, </span><span class="s1">default=</span><span class="s2">False,</span>
+        <span class="s1">help=</span><span class="s3">&quot;Give failed tests a second chance.&quot;</span><span class="s1">)</span>
+    <span class="s1">fail_parser.add_argument(</span>
+        <span class="s3">'--failfast'</span><span class="s2">, </span><span class="s3">'-x'</span><span class="s2">, </span><span class="s1">action=</span><span class="s3">'store_true'</span><span class="s2">, </span><span class="s1">default=</span><span class="s2">False,</span>
+        <span class="s1">help=</span><span class="s3">&quot;Stop running after the first failure.&quot;</span><span class="s1">)</span>
+
+    <span class="s1">parser.add_argument(</span><span class="s3">'tests'</span><span class="s2">, </span><span class="s1">nargs=</span><span class="s3">'*'</span><span class="s1">)</span>
+    <span class="s1">options = parser.parse_args()</span>
+    <span class="s0"># options.use will be either None for not given, or a list</span>
+    <span class="s0"># of the last specified -u argument.</span>
+    <span class="s0"># If not given, use the default, which we'll take from the environment, if set.</span>
+    <span class="s1">options.use = list(set(parse_resources() </span><span class="s2">if </span><span class="s1">options.use </span><span class="s2">is None else </span><span class="s1">options.use))</span>
+
+    <span class="s0"># Whether or not it came from the environment, put it in the</span>
+    <span class="s0"># environment now.</span>
+    <span class="s1">os.environ[</span><span class="s3">'GEVENTTEST_USE_RESOURCES'</span><span class="s1">] = unparse_resources(options.use)</span>
+    <span class="s1">setup_resources(options.use)</span>
+
+
+    <span class="s0"># Set this before any test imports in case of 'from .util import QUIET';</span>
+    <span class="s0"># not that this matters much because we spawn tests in subprocesses,</span>
+    <span class="s0"># it's the environment setting that matters</span>
+    <span class="s1">util.QUIET = options.quiet</span>
+    <span class="s2">if </span><span class="s3">'GEVENTTEST_QUIET' </span><span class="s2">not in </span><span class="s1">os.environ:</span>
+        <span class="s1">os.environ[</span><span class="s3">'GEVENTTEST_QUIET'</span><span class="s1">] = str(options.quiet)</span>
+
+    <span class="s1">FAILING_TESTS = []</span>
+    <span class="s1">IGNORED_TESTS = []</span>
+    <span class="s1">RUN_ALONE = []</span>
+
+    <span class="s1">coverage = </span><span class="s2">False</span>
+    <span class="s2">if </span><span class="s1">options.coverage </span><span class="s2">or </span><span class="s1">os.environ.get(</span><span class="s3">&quot;GEVENTTEST_COVERAGE&quot;</span><span class="s1">):</span>
+        <span class="s2">if </span><span class="s1">PYPY </span><span class="s2">and </span><span class="s1">RUNNING_ON_CI:</span>
+            <span class="s1">print(</span><span class="s3">&quot;Ignoring coverage option on PyPy on CI; slow&quot;</span><span class="s1">)</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">coverage = </span><span class="s2">True</span>
+            <span class="s1">cov_config = os.environ[</span><span class="s3">'COVERAGE_PROCESS_START'</span><span class="s1">] = os.path.abspath(</span><span class="s3">&quot;.coveragerc&quot;</span><span class="s1">)</span>
+            <span class="s2">if </span><span class="s1">PYPY:</span>
+                <span class="s1">cov_config = os.environ[</span><span class="s3">'COVERAGE_PROCESS_START'</span><span class="s1">] = os.path.abspath(</span><span class="s3">&quot;.coveragerc-pypy&quot;</span><span class="s1">)</span>
+
+            <span class="s1">this_dir = os.path.dirname(__file__)</span>
+            <span class="s1">site_dir = os.path.join(this_dir</span><span class="s2">, </span><span class="s3">'coveragesite'</span><span class="s1">)</span>
+            <span class="s1">site_dir = os.path.abspath(site_dir)</span>
+            <span class="s1">os.environ[</span><span class="s3">'PYTHONPATH'</span><span class="s1">] = site_dir + os.pathsep + os.environ.get(</span><span class="s3">&quot;PYTHONPATH&quot;</span><span class="s2">, </span><span class="s3">&quot;&quot;</span><span class="s1">)</span>
+            <span class="s0"># We change directory often, use an absolute path to keep all the</span>
+            <span class="s0"># coverage files (which will have distinct suffixes because of parallel=true in .coveragerc</span>
+            <span class="s0"># in this directory; makes them easier to combine and use with coverage report)</span>
+            <span class="s1">os.environ[</span><span class="s3">'COVERAGE_FILE'</span><span class="s1">] = os.path.abspath(</span><span class="s3">&quot;.&quot;</span><span class="s1">) + os.sep + </span><span class="s3">&quot;.coverage&quot;</span>
+            <span class="s0"># XXX: Log this with color. Right now, it interferes (buffering) with other early</span>
+            <span class="s0"># output.</span>
+            <span class="s1">print(</span><span class="s3">&quot;Enabling coverage to&quot;</span><span class="s2">, </span><span class="s1">os.environ[</span><span class="s3">'COVERAGE_FILE'</span><span class="s1">]</span><span class="s2">,</span>
+                  <span class="s3">&quot;with site&quot;</span><span class="s2">, </span><span class="s1">site_dir</span><span class="s2">,</span>
+                  <span class="s3">&quot;and configuration file&quot;</span><span class="s2">, </span><span class="s1">cov_config)</span>
+            <span class="s2">assert </span><span class="s1">os.path.exists(cov_config)</span>
+            <span class="s2">assert </span><span class="s1">os.path.exists(os.path.join(site_dir</span><span class="s2">, </span><span class="s3">'sitecustomize.py'</span><span class="s1">))</span>
+
+    <span class="s1">_setup_environ(debug=options.debug)</span>
+
+    <span class="s2">if </span><span class="s1">options.config:</span>
+        <span class="s1">config = {}</span>
+        <span class="s1">options.config = _package_relative_filename(options.config</span><span class="s2">, </span><span class="s1">options.package)</span>
+        <span class="s2">with </span><span class="s1">open(options.config) </span><span class="s2">as </span><span class="s1">f: </span><span class="s0"># pylint:disable=unspecified-encoding</span>
+            <span class="s1">config_data = f.read()</span>
+        <span class="s1">six.exec_(config_data</span><span class="s2">, </span><span class="s1">config)</span>
+        <span class="s1">FAILING_TESTS = config[</span><span class="s3">'FAILING_TESTS'</span><span class="s1">]</span>
+        <span class="s1">IGNORED_TESTS = config[</span><span class="s3">'IGNORED_TESTS'</span><span class="s1">]</span>
+        <span class="s1">RUN_ALONE = config[</span><span class="s3">'RUN_ALONE'</span><span class="s1">]</span>
+
+    <span class="s1">tests = Discovery(</span>
+        <span class="s1">options.tests</span><span class="s2">,</span>
+        <span class="s1">ignore_files=options.ignore</span><span class="s2">,</span>
+        <span class="s1">ignored=IGNORED_TESTS</span><span class="s2">,</span>
+        <span class="s1">coverage=coverage</span><span class="s2">,</span>
+        <span class="s1">package=options.package</span><span class="s2">,</span>
+        <span class="s1">config=config</span><span class="s2">,</span>
+        <span class="s1">allow_combine=options.no_combine</span><span class="s2">,</span>
+    <span class="s1">)</span>
+    <span class="s2">if </span><span class="s1">options.discover:</span>
+        <span class="s2">for </span><span class="s1">cmd</span><span class="s2">, </span><span class="s1">options </span><span class="s2">in </span><span class="s1">tests:</span>
+            <span class="s1">print(util.getname(cmd</span><span class="s2">, </span><span class="s1">env=options.get(</span><span class="s3">'env'</span><span class="s1">)</span><span class="s2">, </span><span class="s1">setenv=options.get(</span><span class="s3">'setenv'</span><span class="s1">)))</span>
+        <span class="s1">print(</span><span class="s3">'%s tests found.' </span><span class="s1">% len(tests))</span>
+    <span class="s2">else</span><span class="s1">:</span>
+        <span class="s2">if </span><span class="s1">PYPY </span><span class="s2">and </span><span class="s1">RESOLVER_ARES:</span>
+            <span class="s0"># XXX: Add a way to force these.</span>
+            <span class="s1">print(</span><span class="s3">&quot;Not running tests on pypy with c-ares; not a supported configuration&quot;</span><span class="s1">)</span>
+            <span class="s2">return</span>
+        <span class="s2">if </span><span class="s1">options.package:</span>
+            <span class="s0"># Put this directory on the path so relative imports work.</span>
+            <span class="s1">package_dir = _dir_from_package_name(options.package)</span>
+            <span class="s1">os.environ[</span><span class="s3">'PYTHONPATH'</span><span class="s1">] = os.environ.get(</span><span class="s3">'PYTHONPATH'</span><span class="s2">, </span><span class="s3">&quot;&quot;</span><span class="s1">) + os.pathsep + package_dir</span>
+        <span class="s1">runner = Runner(</span>
+            <span class="s1">tests</span><span class="s2">,</span>
+            <span class="s1">configured_failing_tests=FAILING_TESTS</span><span class="s2">,</span>
+            <span class="s1">failfast=options.failfast</span><span class="s2">,</span>
+            <span class="s1">quiet=options.quiet</span><span class="s2">,</span>
+            <span class="s1">configured_run_alone_tests=RUN_ALONE</span><span class="s2">,</span>
+            <span class="s1">worker_count=options.processes</span><span class="s2">,</span>
+            <span class="s1">second_chance=options.second_chance</span><span class="s2">,</span>
+        <span class="s1">)</span>
+
+        <span class="s2">if </span><span class="s1">options.travis_fold:</span>
+            <span class="s1">runner = TravisFoldingRunner(runner</span><span class="s2">, </span><span class="s1">options.travis_fold)</span>
+
+        <span class="s1">runner()</span>
+
+
+<span class="s2">if </span><span class="s1">__name__ == </span><span class="s3">'__main__'</span><span class="s1">:</span>
+    <span class="s1">main()</span>
+</pre>
+</body>
+</html>

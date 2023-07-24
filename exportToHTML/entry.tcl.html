@@ -1,0 +1,624 @@
+<html>
+<head>
+<title>entry.tcl</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #a9b7c6;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+entry.tcl</font>
+</center></td></tr></table>
+<pre><span class="s0">#</span>
+<span class="s0"># DERIVED FROM: tk/library/entry.tcl r1.22</span>
+<span class="s0">#</span>
+<span class="s0"># Copyright (c) 1992-1994 The Regents of the University of California.</span>
+<span class="s0"># Copyright (c) 1994-1997 Sun Microsystems, Inc.</span>
+<span class="s0"># Copyright (c) 2004, Joe English</span>
+<span class="s0">#</span>
+<span class="s0"># See the file &quot;license.terms&quot; for information on usage and redistribution</span>
+<span class="s0"># of this file, and for a DISCLAIMER OF ALL WARRANTIES.</span>
+<span class="s0">#</span>
+
+<span class="s0">namespace eval ttk {</span>
+    <span class="s0">namespace eval entry {</span>
+	<span class="s0">variable State</span>
+
+	<span class="s0">set State(x) 0</span>
+	<span class="s0">set State(selectMode) none</span>
+	<span class="s0">set State(anchor) 0</span>
+	<span class="s0">set State(scanX) 0</span>
+	<span class="s0">set State(scanIndex) 0</span>
+	<span class="s0">set State(scanMoved) 0</span>
+
+	<span class="s0"># Button-2 scan speed is (scanNum/scanDen) characters</span>
+	<span class="s0"># per pixel of mouse movement.</span>
+	<span class="s0"># The standard Tk entry widget uses the equivalent of</span>
+	<span class="s0"># scanNum = 10, scanDen = average character width.</span>
+	<span class="s0"># I don't know why that was chosen.</span>
+	<span class="s0">#</span>
+	<span class="s0">set State(scanNum) 1</span>
+	<span class="s0">set State(scanDen) 1</span>
+	<span class="s0">set State(deadband) 3	;# #pixels for mouse-moved deadband.</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+
+<span class="s0">### Option database settings.</span>
+<span class="s0">#</span>
+<span class="s0">option add *TEntry.cursor [ttk::cursor text]</span>
+
+<span class="s0">### Bindings.</span>
+<span class="s0">#</span>
+<span class="s0"># Removed the following standard Tk bindings:</span>
+<span class="s0">#</span>
+<span class="s0"># &lt;Control-Key-space&gt;, &lt;Control-Shift-Key-space&gt;,</span>
+<span class="s0"># &lt;Key-Select&gt;,  &lt;Shift-Key-Select&gt;:</span>
+<span class="s0">#	Ttk entry widget doesn't use selection anchor.</span>
+<span class="s0"># &lt;Key-Insert&gt;:</span>
+<span class="s0">#	Inserts PRIMARY selection (on non-Windows platforms).</span>
+<span class="s0">#	This is inconsistent with typical platform bindings.</span>
+<span class="s0"># &lt;Double-Shift-ButtonPress-1&gt;, &lt;Triple-Shift-ButtonPress-1&gt;:</span>
+<span class="s0">#	These don't do the right thing to start with.</span>
+<span class="s0"># &lt;Meta-Key-b&gt;, &lt;Meta-Key-d&gt;, &lt;Meta-Key-f&gt;,</span>
+<span class="s0"># &lt;Meta-Key-BackSpace&gt;, &lt;Meta-Key-Delete&gt;:</span>
+<span class="s0">#	Judgment call.  If &lt;Meta&gt; happens to be assigned to the Alt key,</span>
+<span class="s0">#	these could conflict with application accelerators.</span>
+<span class="s0">#	(Plus, who has a Meta key these days?)</span>
+<span class="s0"># &lt;Control-Key-t&gt;:</span>
+<span class="s0">#	Another judgment call.  If anyone misses this, let me know</span>
+<span class="s0">#	and I'll put it back.</span>
+<span class="s0">#</span>
+
+<span class="s0">## Clipboard events:</span>
+<span class="s0">#</span>
+<span class="s0">bind TEntry &lt;&lt;Cut&gt;&gt; 			{ ttk::entry::Cut %W }</span>
+<span class="s0">bind TEntry &lt;&lt;Copy&gt;&gt; 			{ ttk::entry::Copy %W }</span>
+<span class="s0">bind TEntry &lt;&lt;Paste&gt;&gt; 			{ ttk::entry::Paste %W }</span>
+<span class="s0">bind TEntry &lt;&lt;Clear&gt;&gt; 			{ ttk::entry::Clear %W }</span>
+
+<span class="s0">## Button1 bindings:</span>
+<span class="s0">#	Used for selection and navigation.</span>
+<span class="s0">#</span>
+<span class="s0">bind TEntry &lt;ButtonPress-1&gt; 		{ ttk::entry::Press %W %x }</span>
+<span class="s0">bind TEntry &lt;Shift-ButtonPress-1&gt;	{ ttk::entry::Shift-Press %W %x }</span>
+<span class="s0">bind TEntry &lt;Double-ButtonPress-1&gt; 	{ ttk::entry::Select %W %x word }</span>
+<span class="s0">bind TEntry &lt;Triple-ButtonPress-1&gt; 	{ ttk::entry::Select %W %x line }</span>
+<span class="s0">bind TEntry &lt;B1-Motion&gt;			{ ttk::entry::Drag %W %x }</span>
+
+<span class="s0">bind TEntry &lt;B1-Leave&gt; 		{ ttk::entry::DragOut %W %m }</span>
+<span class="s0">bind TEntry &lt;B1-Enter&gt;		{ ttk::entry::DragIn %W }</span>
+<span class="s0">bind TEntry &lt;ButtonRelease-1&gt;	{ ttk::entry::Release %W }</span>
+
+<span class="s0">bind TEntry &lt;&lt;ToggleSelection&gt;&gt; {</span>
+    <span class="s0">%W instate {!readonly !disabled} { %W icursor @%x ; focus %W }</span>
+<span class="s0">}</span>
+
+<span class="s0">## Button2 bindings:</span>
+<span class="s0">#	Used for scanning and primary transfer.</span>
+<span class="s0">#	Note: ButtonRelease-2 is mapped to &lt;&lt;PasteSelection&gt;&gt; in tk.tcl.</span>
+<span class="s0">#</span>
+<span class="s0">bind TEntry &lt;ButtonPress-2&gt; 		{ ttk::entry::ScanMark %W %x }</span>
+<span class="s0">bind TEntry &lt;B2-Motion&gt; 		{ ttk::entry::ScanDrag %W %x }</span>
+<span class="s0">bind TEntry &lt;ButtonRelease-2&gt;		{ ttk::entry::ScanRelease %W %x }</span>
+<span class="s0">bind TEntry &lt;&lt;PasteSelection&gt;&gt;		{ ttk::entry::ScanRelease %W %x }</span>
+
+<span class="s0">## Keyboard navigation bindings:</span>
+<span class="s0">#</span>
+<span class="s0">bind TEntry &lt;&lt;PrevChar&gt;&gt;		{ ttk::entry::Move %W prevchar }</span>
+<span class="s0">bind TEntry &lt;&lt;NextChar&gt;&gt; 		{ ttk::entry::Move %W nextchar }</span>
+<span class="s0">bind TEntry &lt;&lt;PrevWord&gt;&gt;		{ ttk::entry::Move %W prevword }</span>
+<span class="s0">bind TEntry &lt;&lt;NextWord&gt;&gt;		{ ttk::entry::Move %W nextword }</span>
+<span class="s0">bind TEntry &lt;&lt;LineStart&gt;&gt;		{ ttk::entry::Move %W home }</span>
+<span class="s0">bind TEntry &lt;&lt;LineEnd&gt;&gt;			{ ttk::entry::Move %W end }</span>
+
+<span class="s0">bind TEntry &lt;&lt;SelectPrevChar&gt;&gt; 		{ ttk::entry::Extend %W prevchar }</span>
+<span class="s0">bind TEntry &lt;&lt;SelectNextChar&gt;&gt;		{ ttk::entry::Extend %W nextchar }</span>
+<span class="s0">bind TEntry &lt;&lt;SelectPrevWord&gt;&gt;		{ ttk::entry::Extend %W prevword }</span>
+<span class="s0">bind TEntry &lt;&lt;SelectNextWord&gt;&gt;		{ ttk::entry::Extend %W nextword }</span>
+<span class="s0">bind TEntry &lt;&lt;SelectLineStart&gt;&gt;		{ ttk::entry::Extend %W home }</span>
+<span class="s0">bind TEntry &lt;&lt;SelectLineEnd&gt;&gt;		{ ttk::entry::Extend %W end }</span>
+
+<span class="s0">bind TEntry &lt;&lt;SelectAll&gt;&gt; 		{ %W selection range 0 end }</span>
+<span class="s0">bind TEntry &lt;&lt;SelectNone&gt;&gt; 		{ %W selection clear }</span>
+
+<span class="s0">bind TEntry &lt;&lt;TraverseIn&gt;&gt; 	{ %W selection range 0 end; %W icursor end }</span>
+
+<span class="s0">## Edit bindings:</span>
+<span class="s0">#</span>
+<span class="s0">bind TEntry &lt;KeyPress&gt; 			{ ttk::entry::Insert %W %A }</span>
+<span class="s0">bind TEntry &lt;Key-Delete&gt;		{ ttk::entry::Delete %W }</span>
+<span class="s0">bind TEntry &lt;Key-BackSpace&gt; 		{ ttk::entry::Backspace %W }</span>
+
+<span class="s0"># Ignore all Alt, Meta, and Control keypresses unless explicitly bound.</span>
+<span class="s0"># Otherwise, the &lt;KeyPress&gt; class binding will fire and insert the character.</span>
+<span class="s0"># Ditto for Escape, Return, and Tab.</span>
+<span class="s0">#</span>
+<span class="s0">bind TEntry &lt;Alt-KeyPress&gt;		{# nothing}</span>
+<span class="s0">bind TEntry &lt;Meta-KeyPress&gt;		{# nothing}</span>
+<span class="s0">bind TEntry &lt;Control-KeyPress&gt; 		{# nothing}</span>
+<span class="s0">bind TEntry &lt;Key-Escape&gt; 		{# nothing}</span>
+<span class="s0">bind TEntry &lt;Key-Return&gt; 		{# nothing}</span>
+<span class="s0">bind TEntry &lt;Key-KP_Enter&gt; 		{# nothing}</span>
+<span class="s0">bind TEntry &lt;Key-Tab&gt; 			{# nothing}</span>
+
+<span class="s0"># Argh.  Apparently on Windows, the NumLock modifier is interpreted</span>
+<span class="s0"># as a Command modifier.</span>
+<span class="s0">if {[tk windowingsystem] eq &quot;aqua&quot;} {</span>
+    <span class="s0">bind TEntry &lt;Command-KeyPress&gt;	{# nothing}</span>
+<span class="s0">}</span>
+<span class="s0"># Tk-on-Cocoa generates characters for these two keys. [Bug 2971663]</span>
+<span class="s0">bind TEntry &lt;&lt;PrevLine&gt;&gt;		{# nothing}</span>
+<span class="s0">bind TEntry &lt;&lt;NextLine&gt;&gt;		{# nothing}</span>
+
+<span class="s0">## Additional emacs-like bindings:</span>
+<span class="s0">#</span>
+<span class="s0">bind TEntry &lt;Control-Key-d&gt;		{ ttk::entry::Delete %W }</span>
+<span class="s0">bind TEntry &lt;Control-Key-h&gt;		{ ttk::entry::Backspace %W }</span>
+<span class="s0">bind TEntry &lt;Control-Key-k&gt;		{ %W delete insert end }</span>
+
+<span class="s0">### Clipboard procedures.</span>
+<span class="s0">#</span>
+
+<span class="s0">## EntrySelection -- Return the selected text of the entry.</span>
+<span class="s0">#	Raises an error if there is no selection.</span>
+<span class="s0">#</span>
+<span class="s0">proc ttk::entry::EntrySelection {w} {</span>
+    <span class="s0">set entryString [string range [$w get] [$w index sel.first] \</span>
+	    <span class="s0">[expr {[$w index sel.last] - 1}]]</span>
+    <span class="s0">if {[$w cget -show] ne &quot;&quot;} {</span>
+	<span class="s0">return [string repeat [string index [$w cget -show] 0] \</span>
+		<span class="s0">[string length $entryString]]</span>
+    <span class="s0">}</span>
+    <span class="s0">return $entryString</span>
+<span class="s0">}</span>
+
+<span class="s0">## Paste -- Insert clipboard contents at current insert point.</span>
+<span class="s0">#</span>
+<span class="s0">proc ttk::entry::Paste {w} {</span>
+    <span class="s0">catch {</span>
+	<span class="s0">set clipboard [::tk::GetSelection $w CLIPBOARD]</span>
+	<span class="s0">PendingDelete $w</span>
+	<span class="s0">$w insert insert $clipboard</span>
+	<span class="s0">See $w insert</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+
+<span class="s0">## Copy -- Copy selection to clipboard.</span>
+<span class="s0">#</span>
+<span class="s0">proc ttk::entry::Copy {w} {</span>
+    <span class="s0">if {![catch {EntrySelection $w} selection]} {</span>
+	<span class="s0">clipboard clear -displayof $w</span>
+	<span class="s0">clipboard append -displayof $w $selection</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+
+<span class="s0">## Clear -- Delete the selection.</span>
+<span class="s0">#</span>
+<span class="s0">proc ttk::entry::Clear {w} {</span>
+    <span class="s0">catch { $w delete sel.first sel.last }</span>
+<span class="s0">}</span>
+
+<span class="s0">## Cut -- Copy selection to clipboard then delete it.</span>
+<span class="s0">#</span>
+<span class="s0">proc ttk::entry::Cut {w} {</span>
+    <span class="s0">Copy $w; Clear $w</span>
+<span class="s0">}</span>
+
+<span class="s0">### Navigation procedures.</span>
+<span class="s0">#</span>
+
+<span class="s0">## ClosestGap -- Find closest boundary between characters.</span>
+<span class="s0"># 	Returns the index of the character just after the boundary.</span>
+<span class="s0">#</span>
+<span class="s0">proc ttk::entry::ClosestGap {w x} {</span>
+    <span class="s0">set pos [$w index @$x]</span>
+    <span class="s0">set bbox [$w bbox $pos]</span>
+    <span class="s0">if {$x - [lindex $bbox 0] &gt; [lindex $bbox 2]/2} {</span>
+	<span class="s0">incr pos</span>
+    <span class="s0">}</span>
+    <span class="s0">return $pos</span>
+<span class="s0">}</span>
+
+<span class="s0">## See $index -- Make sure that the character at $index is visible.</span>
+<span class="s0">#</span>
+<span class="s0">proc ttk::entry::See {w {index insert}} {</span>
+    <span class="s0">update idletasks	;# ensure scroll data up-to-date</span>
+    <span class="s0">set c [$w index $index]</span>
+    <span class="s0"># @@@ OR: check [$w index left] / [$w index right]</span>
+    <span class="s0">if {$c &lt; [$w index @0] || $c &gt;= [$w index @[winfo width $w]]} {</span>
+	<span class="s0">$w xview $c</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+
+<span class="s0">## NextWord -- Find the next word position.</span>
+<span class="s0">#	Note: The &quot;next word position&quot; follows platform conventions:</span>
+<span class="s0">#	either the next end-of-word position, or the start-of-word</span>
+<span class="s0">#	position following the next end-of-word position.</span>
+<span class="s0">#</span>
+<span class="s0">set ::ttk::entry::State(startNext) \</span>
+	<span class="s0">[string equal [tk windowingsystem] &quot;win32&quot;]</span>
+
+<span class="s0">proc ttk::entry::NextWord {w start} {</span>
+    <span class="s0">variable State</span>
+    <span class="s0">set pos [tcl_endOfWord [$w get] [$w index $start]]</span>
+    <span class="s0">if {$pos &gt;= 0 &amp;&amp; $State(startNext)} {</span>
+	<span class="s0">set pos [tcl_startOfNextWord [$w get] $pos]</span>
+    <span class="s0">}</span>
+    <span class="s0">if {$pos &lt; 0} {</span>
+	<span class="s0">return end</span>
+    <span class="s0">}</span>
+    <span class="s0">return $pos</span>
+<span class="s0">}</span>
+
+<span class="s0">## PrevWord -- Find the previous word position.</span>
+<span class="s0">#</span>
+<span class="s0">proc ttk::entry::PrevWord {w start} {</span>
+    <span class="s0">set pos [tcl_startOfPreviousWord [$w get] [$w index $start]]</span>
+    <span class="s0">if {$pos &lt; 0} {</span>
+	<span class="s0">return 0</span>
+    <span class="s0">}</span>
+    <span class="s0">return $pos</span>
+<span class="s0">}</span>
+
+<span class="s0">## RelIndex -- Compute character/word/line-relative index.</span>
+<span class="s0">#</span>
+<span class="s0">proc ttk::entry::RelIndex {w where {index insert}} {</span>
+    <span class="s0">switch -- $where {</span>
+	<span class="s0">prevchar	{ expr {[$w index $index] - 1} }</span>
+    	<span class="s0">nextchar	{ expr {[$w index $index] + 1} }</span>
+	<span class="s0">prevword	{ PrevWord $w $index }</span>
+	<span class="s0">nextword	{ NextWord $w $index }</span>
+	<span class="s0">home		{ return 0 }</span>
+	<span class="s0">end		{ $w index end }</span>
+	<span class="s0">default		{ error &quot;Bad relative index $index&quot; }</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+
+<span class="s0">## Move -- Move insert cursor to relative location.</span>
+<span class="s0">#	Also clears the selection, if any, and makes sure</span>
+<span class="s0">#	that the insert cursor is visible.</span>
+<span class="s0">#</span>
+<span class="s0">proc ttk::entry::Move {w where} {</span>
+    <span class="s0">$w icursor [RelIndex $w $where]</span>
+    <span class="s0">$w selection clear</span>
+    <span class="s0">See $w insert</span>
+<span class="s0">}</span>
+
+<span class="s0">### Selection procedures.</span>
+<span class="s0">#</span>
+
+<span class="s0">## ExtendTo -- Extend the selection to the specified index.</span>
+<span class="s0">#</span>
+<span class="s0"># The other end of the selection (the anchor) is determined as follows:</span>
+<span class="s0">#</span>
+<span class="s0"># (1) if there is no selection, the anchor is the insert cursor;</span>
+<span class="s0"># (2) if the index is outside the selection, grow the selection;</span>
+<span class="s0"># (3) if the insert cursor is at one end of the selection, anchor the other end</span>
+<span class="s0"># (4) otherwise anchor the start of the selection</span>
+<span class="s0">#</span>
+<span class="s0"># The insert cursor is placed at the new end of the selection.</span>
+<span class="s0">#</span>
+<span class="s0"># Returns: selection anchor.</span>
+<span class="s0">#</span>
+<span class="s0">proc ttk::entry::ExtendTo {w index} {</span>
+    <span class="s0">set index [$w index $index]</span>
+    <span class="s0">set insert [$w index insert]</span>
+
+    <span class="s0"># Figure out selection anchor:</span>
+    <span class="s0">if {![$w selection present]} {</span>
+    	<span class="s0">set anchor $insert</span>
+    <span class="s0">} else {</span>
+    	<span class="s0">set selfirst [$w index sel.first]</span>
+	<span class="s0">set sellast  [$w index sel.last]</span>
+
+	<span class="s0">if {   ($index &lt; $selfirst)</span>
+	    <span class="s0">|| ($insert == $selfirst &amp;&amp; $index &lt;= $sellast)</span>
+	<span class="s0">} {</span>
+	    <span class="s0">set anchor $sellast</span>
+	<span class="s0">} else {</span>
+	    <span class="s0">set anchor $selfirst</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+
+    <span class="s0"># Extend selection:</span>
+    <span class="s0">if {$anchor &lt; $index} {</span>
+	<span class="s0">$w selection range $anchor $index</span>
+    <span class="s0">} else {</span>
+    	<span class="s0">$w selection range $index $anchor</span>
+    <span class="s0">}</span>
+
+    <span class="s0">$w icursor $index</span>
+    <span class="s0">return $anchor</span>
+<span class="s0">}</span>
+
+<span class="s0">## Extend -- Extend the selection to a relative position, show insert cursor</span>
+<span class="s0">#</span>
+<span class="s0">proc ttk::entry::Extend {w where} {</span>
+    <span class="s0">ExtendTo $w [RelIndex $w $where]</span>
+    <span class="s0">See $w</span>
+<span class="s0">}</span>
+
+<span class="s0">### Button 1 binding procedures.</span>
+<span class="s0">#</span>
+<span class="s0"># Double-clicking followed by a drag enters &quot;word-select&quot; mode.</span>
+<span class="s0"># Triple-clicking enters &quot;line-select&quot; mode.</span>
+<span class="s0">#</span>
+
+<span class="s0">## Press -- ButtonPress-1 binding.</span>
+<span class="s0">#	Set the insertion cursor, claim the input focus, set up for</span>
+<span class="s0">#	future drag operations.</span>
+<span class="s0">#</span>
+<span class="s0">proc ttk::entry::Press {w x} {</span>
+    <span class="s0">variable State</span>
+
+    <span class="s0">$w icursor [ClosestGap $w $x]</span>
+    <span class="s0">$w selection clear</span>
+    <span class="s0">$w instate !disabled { focus $w }</span>
+
+    <span class="s0"># Set up for future drag, double-click, or triple-click.</span>
+    <span class="s0">set State(x) $x</span>
+    <span class="s0">set State(selectMode) char</span>
+    <span class="s0">set State(anchor) [$w index insert]</span>
+<span class="s0">}</span>
+
+<span class="s0">## Shift-Press -- Shift-ButtonPress-1 binding.</span>
+<span class="s0">#	Extends the selection, sets anchor for future drag operations.</span>
+<span class="s0">#</span>
+<span class="s0">proc ttk::entry::Shift-Press {w x} {</span>
+    <span class="s0">variable State</span>
+
+    <span class="s0">focus $w</span>
+    <span class="s0">set anchor [ExtendTo $w @$x]</span>
+
+    <span class="s0">set State(x) $x</span>
+    <span class="s0">set State(selectMode) char</span>
+    <span class="s0">set State(anchor) $anchor</span>
+<span class="s0">}</span>
+
+<span class="s0">## Select $w $x $mode -- Binding for double- and triple- clicks.</span>
+<span class="s0">#	Selects a word or line (according to mode),</span>
+<span class="s0">#	and sets the selection mode for subsequent drag operations.</span>
+<span class="s0">#</span>
+<span class="s0">proc ttk::entry::Select {w x mode} {</span>
+    <span class="s0">variable State</span>
+    <span class="s0">set cur [ClosestGap $w $x]</span>
+
+    <span class="s0">switch -- $mode {</span>
+    	<span class="s0">word	{ WordSelect $w $cur $cur }</span>
+    	<span class="s0">line	{ LineSelect $w $cur $cur }</span>
+	<span class="s0">char	{ # no-op }</span>
+    <span class="s0">}</span>
+
+    <span class="s0">set State(anchor) $cur</span>
+    <span class="s0">set State(selectMode) $mode</span>
+<span class="s0">}</span>
+
+<span class="s0">## Drag -- Button1 motion binding.</span>
+<span class="s0">#</span>
+<span class="s0">proc ttk::entry::Drag {w x} {</span>
+    <span class="s0">variable State</span>
+    <span class="s0">set State(x) $x</span>
+    <span class="s0">DragTo $w $x</span>
+<span class="s0">}</span>
+
+<span class="s0">## DragTo $w $x -- Extend selection to $x based on current selection mode.</span>
+<span class="s0">#</span>
+<span class="s0">proc ttk::entry::DragTo {w x} {</span>
+    <span class="s0">variable State</span>
+
+    <span class="s0">set cur [ClosestGap $w $x]</span>
+    <span class="s0">switch $State(selectMode) {</span>
+	<span class="s0">char { CharSelect $w $State(anchor) $cur }</span>
+	<span class="s0">word { WordSelect $w $State(anchor) $cur }</span>
+	<span class="s0">line { LineSelect $w $State(anchor) $cur }</span>
+	<span class="s0">none { # no-op }</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+
+<span class="s0">## &lt;B1-Leave&gt; binding:</span>
+<span class="s0">#	Begin autoscroll.</span>
+<span class="s0">#</span>
+<span class="s0">proc ttk::entry::DragOut {w mode} {</span>
+    <span class="s0">variable State</span>
+    <span class="s0">if {$State(selectMode) ne &quot;none&quot; &amp;&amp; $mode eq &quot;NotifyNormal&quot;} {</span>
+	<span class="s0">ttk::Repeatedly ttk::entry::AutoScroll $w</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+
+<span class="s0">## &lt;B1-Enter&gt; binding</span>
+<span class="s0"># 	Suspend autoscroll.</span>
+<span class="s0">#</span>
+<span class="s0">proc ttk::entry::DragIn {w} {</span>
+    <span class="s0">ttk::CancelRepeat </span>
+<span class="s0">}</span>
+
+<span class="s0">## &lt;ButtonRelease-1&gt; binding</span>
+<span class="s0">#</span>
+<span class="s0">proc ttk::entry::Release {w} {</span>
+    <span class="s0">variable State</span>
+    <span class="s0">set State(selectMode) none</span>
+    <span class="s0">ttk::CancelRepeat 	;# suspend autoscroll</span>
+<span class="s0">}</span>
+
+<span class="s0">## AutoScroll</span>
+<span class="s0">#	Called repeatedly when the mouse is outside an entry window</span>
+<span class="s0">#	with Button 1 down.  Scroll the window left or right,</span>
+<span class="s0">#	depending on where the mouse left the window, and extend </span>
+<span class="s0">#	the selection according to the current selection mode.</span>
+<span class="s0">#</span>
+<span class="s0"># TODO: AutoScroll should repeat faster (50ms) than normal autorepeat.</span>
+<span class="s0"># TODO: Need a way for Repeat scripts to cancel themselves.</span>
+<span class="s0">#</span>
+<span class="s0">proc ttk::entry::AutoScroll {w} {</span>
+    <span class="s0">variable State</span>
+    <span class="s0">if {![winfo exists $w]} return</span>
+    <span class="s0">set x $State(x)</span>
+    <span class="s0">if {$x &gt; [winfo width $w]} {</span>
+	<span class="s0">$w xview scroll 2 units</span>
+	<span class="s0">DragTo $w $x</span>
+    <span class="s0">} elseif {$x &lt; 0} {</span>
+	<span class="s0">$w xview scroll -2 units</span>
+	<span class="s0">DragTo $w $x</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+
+<span class="s0">## CharSelect -- select characters between index $from and $to</span>
+<span class="s0">#</span>
+<span class="s0">proc ttk::entry::CharSelect {w from to} {</span>
+    <span class="s0">if {$to &lt;= $from} {</span>
+	<span class="s0">$w selection range $to $from</span>
+    <span class="s0">} else {</span>
+	<span class="s0">$w selection range $from $to</span>
+    <span class="s0">}</span>
+    <span class="s0">$w icursor $to</span>
+<span class="s0">}</span>
+
+<span class="s0">## WordSelect -- Select whole words between index $from and $to</span>
+<span class="s0">#</span>
+<span class="s0">proc ttk::entry::WordSelect {w from to} {</span>
+    <span class="s0">if {$to &lt; $from} {</span>
+	<span class="s0">set first [WordBack [$w get] $to]</span>
+	<span class="s0">set last [WordForward [$w get] $from]</span>
+	<span class="s0">$w icursor $first</span>
+    <span class="s0">} else {</span>
+	<span class="s0">set first [WordBack [$w get] $from]</span>
+	<span class="s0">set last [WordForward [$w get] $to]</span>
+	<span class="s0">$w icursor $last</span>
+    <span class="s0">}</span>
+    <span class="s0">$w selection range $first $last</span>
+<span class="s0">}</span>
+
+<span class="s0">## WordBack, WordForward -- helper routines for WordSelect.</span>
+<span class="s0">#</span>
+<span class="s0">proc ttk::entry::WordBack {text index} {</span>
+    <span class="s0">if {[set pos [tcl_wordBreakBefore $text $index]] &lt; 0} { return 0 }</span>
+    <span class="s0">return $pos</span>
+<span class="s0">}</span>
+<span class="s0">proc ttk::entry::WordForward {text index} {</span>
+    <span class="s0">if {[set pos [tcl_wordBreakAfter $text $index]] &lt; 0} { return end }</span>
+    <span class="s0">return $pos</span>
+<span class="s0">}</span>
+
+<span class="s0">## LineSelect -- Select the entire line.</span>
+<span class="s0">#</span>
+<span class="s0">proc ttk::entry::LineSelect {w _ _} {</span>
+    <span class="s0">variable State</span>
+    <span class="s0">$w selection range 0 end</span>
+    <span class="s0">$w icursor end</span>
+<span class="s0">}</span>
+
+<span class="s0">### Button 2 binding procedures.</span>
+<span class="s0">#</span>
+
+<span class="s0">## ScanMark -- ButtonPress-2 binding.</span>
+<span class="s0">#	Marks the start of a scan or primary transfer operation.</span>
+<span class="s0">#</span>
+<span class="s0">proc ttk::entry::ScanMark {w x} {</span>
+    <span class="s0">variable State</span>
+    <span class="s0">set State(scanX) $x</span>
+    <span class="s0">set State(scanIndex) [$w index @0]</span>
+    <span class="s0">set State(scanMoved) 0</span>
+<span class="s0">}</span>
+
+<span class="s0">## ScanDrag -- Button2 motion binding.</span>
+<span class="s0">#</span>
+<span class="s0">proc ttk::entry::ScanDrag {w x} {</span>
+    <span class="s0">variable State</span>
+
+    <span class="s0">set dx [expr {$State(scanX) - $x}]</span>
+    <span class="s0">if {abs($dx) &gt; $State(deadband)} {</span>
+	<span class="s0">set State(scanMoved) 1</span>
+    <span class="s0">}</span>
+    <span class="s0">set left [expr {$State(scanIndex) + ($dx*$State(scanNum))/$State(scanDen)}]</span>
+    <span class="s0">$w xview $left</span>
+
+    <span class="s0">if {$left != [set newLeft [$w index @0]]} {</span>
+    	<span class="s0"># We've scanned past one end of the entry;</span>
+	<span class="s0"># reset the mark so that the text will start dragging again</span>
+	<span class="s0"># as soon as the mouse reverses direction.</span>
+	<span class="s0">#</span>
+	<span class="s0">set State(scanX) $x</span>
+	<span class="s0">set State(scanIndex) $newLeft</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+
+<span class="s0">## ScanRelease -- Button2 release binding.</span>
+<span class="s0">#	Do a primary transfer if the mouse has not moved since the button press.</span>
+<span class="s0">#</span>
+<span class="s0">proc ttk::entry::ScanRelease {w x} {</span>
+    <span class="s0">variable State</span>
+    <span class="s0">if {!$State(scanMoved)} {</span>
+	<span class="s0">$w instate {!disabled !readonly} {</span>
+	    <span class="s0">$w icursor [ClosestGap $w $x]</span>
+	    <span class="s0">catch {$w insert insert [::tk::GetSelection $w PRIMARY]}</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+
+<span class="s0">### Insertion and deletion procedures.</span>
+<span class="s0">#</span>
+
+<span class="s0">## PendingDelete -- Delete selection prior to insert.</span>
+<span class="s0">#	If the entry currently has a selection, delete it and</span>
+<span class="s0">#	set the insert position to where the selection was.</span>
+<span class="s0">#	Returns: 1 if pending delete occurred, 0 if nothing was selected.</span>
+<span class="s0">#</span>
+<span class="s0">proc ttk::entry::PendingDelete {w} {</span>
+    <span class="s0">if {[$w selection present]} {</span>
+	<span class="s0">$w icursor sel.first</span>
+	<span class="s0">$w delete sel.first sel.last</span>
+	<span class="s0">return 1</span>
+    <span class="s0">}</span>
+    <span class="s0">return 0</span>
+<span class="s0">}</span>
+
+<span class="s0">## Insert -- Insert text into the entry widget.</span>
+<span class="s0">#	If a selection is present, the new text replaces it.</span>
+<span class="s0">#	Otherwise, the new text is inserted at the insert cursor.</span>
+<span class="s0">#</span>
+<span class="s0">proc ttk::entry::Insert {w s} {</span>
+    <span class="s0">if {$s eq &quot;&quot;} { return }</span>
+    <span class="s0">PendingDelete $w</span>
+    <span class="s0">$w insert insert $s</span>
+    <span class="s0">See $w insert</span>
+<span class="s0">}</span>
+
+<span class="s0">## Backspace -- Backspace over the character just before the insert cursor.</span>
+<span class="s0">#	If there is a selection, delete that instead.</span>
+<span class="s0">#	If the new insert position is offscreen to the left,</span>
+<span class="s0">#	scroll to place the cursor at about the middle of the window.</span>
+<span class="s0">#</span>
+<span class="s0">proc ttk::entry::Backspace {w} {</span>
+    <span class="s0">if {[PendingDelete $w]} {</span>
+    	<span class="s0">See $w</span>
+	<span class="s0">return</span>
+    <span class="s0">}</span>
+    <span class="s0">set x [expr {[$w index insert] - 1}]</span>
+    <span class="s0">if {$x &lt; 0} { return }</span>
+
+    <span class="s0">$w delete $x</span>
+
+    <span class="s0">if {[$w index @0] &gt;= [$w index insert]} {</span>
+	<span class="s0">set range [$w xview]</span>
+	<span class="s0">set left [lindex $range 0]</span>
+	<span class="s0">set right [lindex $range 1]</span>
+	<span class="s0">$w xview moveto [expr {$left - ($right - $left)/2.0}]</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+
+<span class="s0">## Delete -- Delete the character after the insert cursor.</span>
+<span class="s0">#	If there is a selection, delete that instead.</span>
+<span class="s0">#</span>
+<span class="s0">proc ttk::entry::Delete {w} {</span>
+    <span class="s0">if {![PendingDelete $w]} {</span>
+	<span class="s0">$w delete insert</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+
+<span class="s0">#*EOF*</span>
+</pre>
+</body>
+</html>

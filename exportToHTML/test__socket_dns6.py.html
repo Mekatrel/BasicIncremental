@@ -1,0 +1,135 @@
+<html>
+<head>
+<title>test__socket_dns6.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #cc7832;}
+.s3 { color: #6a8759;}
+.s4 { color: #6897bb;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+test__socket_dns6.py</font>
+</center></td></tr></table>
+<pre><span class="s0">#!/usr/bin/python</span>
+<span class="s0"># -*- coding: utf-8 -*-</span>
+<span class="s2">from </span><span class="s1">__future__ </span><span class="s2">import </span><span class="s1">print_function</span><span class="s2">, </span><span class="s1">absolute_import</span><span class="s2">, </span><span class="s1">division</span>
+
+<span class="s2">import </span><span class="s1">socket</span>
+<span class="s2">import </span><span class="s1">unittest</span>
+
+<span class="s2">import </span><span class="s1">gevent.testing </span><span class="s2">as </span><span class="s1">greentest</span>
+<span class="s2">from </span><span class="s1">gevent.tests.test__socket_dns </span><span class="s2">import </span><span class="s1">TestCase</span><span class="s2">, </span><span class="s1">add</span>
+
+<span class="s2">from </span><span class="s1">gevent.testing.sysinfo </span><span class="s2">import </span><span class="s1">OSX</span>
+<span class="s2">from </span><span class="s1">gevent.testing.sysinfo </span><span class="s2">import </span><span class="s1">RESOLVER_DNSPYTHON</span>
+<span class="s2">from </span><span class="s1">gevent.testing.sysinfo </span><span class="s2">import </span><span class="s1">RESOLVER_ARES</span>
+<span class="s2">from </span><span class="s1">gevent.testing.sysinfo </span><span class="s2">import </span><span class="s1">PYPY</span>
+<span class="s2">from </span><span class="s1">gevent.testing.sysinfo </span><span class="s2">import </span><span class="s1">PY2</span>
+
+<span class="s0"># We can't control the DNS servers on CI (or in general...)</span>
+<span class="s0"># for the system. This works best with the google DNS servers</span>
+<span class="s0"># The getnameinfo test can fail on CI.</span>
+
+<span class="s0"># Previously only Test6_ds failed, but as of Jan 2018, Test6</span>
+<span class="s0"># and Test6_google begin to fail:</span>
+
+<span class="s0"># First differing element 0:</span>
+<span class="s0"># 'vm2.test-ipv6.com'</span>
+<span class="s0"># 'ip119.gigo.com'</span>
+
+<span class="s0"># - ('vm2.test-ipv6.com', [], ['2001:470:1:18::125'])</span>
+<span class="s0"># ?   ---------  ^^                             ^^</span>
+
+<span class="s0"># + ('ip119.gigo.com', [], ['2001:470:1:18::119'])</span>
+<span class="s0"># ?     ^^^^^^^^                             ^^</span>
+
+<span class="s0"># These are known to work on jamadden's OS X machine using the google</span>
+<span class="s0"># resolvers (but not with DNSPython; things don't *quite* match)...so</span>
+<span class="s0"># by default we skip the tests everywhere else.</span>
+
+<span class="s2">class </span><span class="s1">Test6(TestCase):</span>
+    <span class="s1">NORMALIZE_GHBA_IGNORE_ALIAS = </span><span class="s2">True</span>
+    <span class="s0"># host that only has AAAA record</span>
+    <span class="s1">host = </span><span class="s3">'aaaa.test-ipv6.com'</span>
+
+    <span class="s2">def </span><span class="s1">_normalize_result_gethostbyaddr(self</span><span class="s2">, </span><span class="s1">result):</span>
+        <span class="s0"># This part of the test is effectively disabled. There are multiple address</span>
+        <span class="s0"># that resolve and which ones you get depend on the settings</span>
+        <span class="s0"># of the system and ares. They don't match exactly.</span>
+        <span class="s2">return </span><span class="s1">()</span>
+
+    <span class="s2">if </span><span class="s1">RESOLVER_ARES </span><span class="s2">and </span><span class="s1">PY2:</span>
+        <span class="s2">def </span><span class="s1">_normalize_result_getnameinfo(self</span><span class="s2">, </span><span class="s1">result):</span>
+            <span class="s0"># Beginning 2020-07-23,</span>
+            <span class="s0"># c-ares returns a scope id on the result:</span>
+            <span class="s0">#    ('2001:470:1:18::115%0', 'http')</span>
+            <span class="s0"># The standard library does not (on linux or os x).</span>
+            <span class="s0"># I've only seen '%0', so only remove that</span>
+            <span class="s1">ipaddr</span><span class="s2">, </span><span class="s1">service = result</span>
+            <span class="s2">if </span><span class="s1">ipaddr.endswith(</span><span class="s3">'%0'</span><span class="s1">):</span>
+                <span class="s1">ipaddr = ipaddr[:-</span><span class="s4">2</span><span class="s1">]</span>
+            <span class="s2">return </span><span class="s1">(ipaddr</span><span class="s2">, </span><span class="s1">service)</span>
+
+    <span class="s2">if not </span><span class="s1">OSX </span><span class="s2">and </span><span class="s1">RESOLVER_DNSPYTHON:</span>
+        <span class="s0"># It raises gaierror instead of socket.error,</span>
+        <span class="s0"># which is not great and leads to failures.</span>
+        <span class="s2">def </span><span class="s1">_run_test_getnameinfo(self</span><span class="s2">, </span><span class="s1">*_args</span><span class="s2">, </span><span class="s1">**_kwargs):</span>
+            <span class="s2">return </span><span class="s1">()</span><span class="s2">, </span><span class="s4">0</span><span class="s2">, </span><span class="s1">()</span><span class="s2">, </span><span class="s4">0</span>
+
+    <span class="s2">def </span><span class="s1">_run_test_gethostbyname(self</span><span class="s2">, </span><span class="s1">*_args</span><span class="s2">, </span><span class="s1">**_kwargs):</span>
+        <span class="s2">raise </span><span class="s1">unittest.SkipTest(</span><span class="s3">&quot;gethostbyname[_ex] does not support IPV6&quot;</span><span class="s1">)</span>
+
+    <span class="s1">_run_test_gethostbyname_ex = _run_test_gethostbyname</span>
+
+    <span class="s2">def </span><span class="s1">test_empty(self):</span>
+        <span class="s1">self._test(</span><span class="s3">'getaddrinfo'</span><span class="s2">, </span><span class="s1">self.host</span><span class="s2">, </span><span class="s3">'http'</span><span class="s1">)</span>
+
+    <span class="s2">def </span><span class="s1">test_inet(self):</span>
+        <span class="s1">self._test(</span><span class="s3">'getaddrinfo'</span><span class="s2">, </span><span class="s1">self.host</span><span class="s2">, None, </span><span class="s1">socket.AF_INET)</span>
+
+    <span class="s2">def </span><span class="s1">test_inet6(self):</span>
+        <span class="s1">self._test(</span><span class="s3">'getaddrinfo'</span><span class="s2">, </span><span class="s1">self.host</span><span class="s2">, None, </span><span class="s1">socket.AF_INET6)</span>
+
+    <span class="s2">def </span><span class="s1">test_unspec(self):</span>
+        <span class="s1">self._test(</span><span class="s3">'getaddrinfo'</span><span class="s2">, </span><span class="s1">self.host</span><span class="s2">, None, </span><span class="s1">socket.AF_UNSPEC)</span>
+
+
+<span class="s2">class </span><span class="s1">Test6_google(Test6):</span>
+    <span class="s1">host = </span><span class="s3">'ipv6.google.com'</span>
+
+    <span class="s2">if </span><span class="s1">greentest.RUNNING_ON_CI:</span>
+        <span class="s0"># Disabled, there are multiple possibilities</span>
+        <span class="s0"># and we can get different ones. Even the system resolvers</span>
+        <span class="s0"># can go round-robin and provide different answers.</span>
+        <span class="s2">def </span><span class="s1">_normalize_result_getnameinfo(self</span><span class="s2">, </span><span class="s1">result):</span>
+            <span class="s2">return </span><span class="s1">()</span>
+
+        <span class="s2">if </span><span class="s1">PYPY:</span>
+            <span class="s0"># PyPy tends to be especially problematic in that area.</span>
+            <span class="s1">_normalize_result_getaddrinfo = _normalize_result_getnameinfo</span>
+
+<span class="s1">add(Test6</span><span class="s2">, </span><span class="s1">Test6.host)</span>
+<span class="s1">add(Test6_google</span><span class="s2">, </span><span class="s1">Test6_google.host)</span>
+
+
+
+<span class="s2">class </span><span class="s1">Test6_ds(Test6):</span>
+    <span class="s0"># host that has both A and AAAA records</span>
+    <span class="s1">host = </span><span class="s3">'ds.test-ipv6.com'</span>
+
+    <span class="s1">_normalize_result_gethostbyname = Test6._normalize_result_gethostbyaddr</span>
+
+<span class="s1">add(Test6_ds</span><span class="s2">, </span><span class="s1">Test6_ds.host)</span>
+
+
+<span class="s2">if </span><span class="s1">__name__ == </span><span class="s3">'__main__'</span><span class="s1">:</span>
+    <span class="s1">greentest.main()</span>
+</pre>
+</body>
+</html>

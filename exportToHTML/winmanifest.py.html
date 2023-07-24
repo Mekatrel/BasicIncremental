@@ -1,0 +1,1106 @@
+<html>
+<head>
+<title>winmanifest.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #629755; font-style: italic;}
+.s3 { color: #cc7832;}
+.s4 { color: #6a8759;}
+.s5 { color: #6897bb;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+winmanifest.py</font>
+</center></td></tr></table>
+<pre><span class="s0">#-----------------------------------------------------------------------------</span>
+<span class="s0"># Copyright (c) 2013-2021, PyInstaller Development Team.</span>
+<span class="s0">#</span>
+<span class="s0"># Distributed under the terms of the GNU General Public License (version 2</span>
+<span class="s0"># or later) with exception for distributing the bootloader.</span>
+<span class="s0">#</span>
+<span class="s0"># The full license is in the file COPYING.txt, distributed with this software.</span>
+<span class="s0">#</span>
+<span class="s0"># SPDX-License-Identifier: (GPL-2.0-or-later WITH Bootloader-exception)</span>
+<span class="s0">#-----------------------------------------------------------------------------</span>
+
+<span class="s0"># Development notes kept for documentation purposes.</span>
+<span class="s0">#</span>
+<span class="s0"># Currently not implemented in the Manifest class:</span>
+<span class="s0"># * Validation (only very basic sanity checks are currently in place)</span>
+<span class="s0"># * comClass, typelib, comInterfaceProxyStub and windowClass child elements of the file element</span>
+<span class="s0"># * comInterfaceExternalProxyStub and windowClass child elements of the assembly element</span>
+<span class="s0"># * Application Configuration File and Multilanguage User Interface (MUI) support when searching for assembly files</span>
+<span class="s0">#</span>
+<span class="s0"># Isolated Applications and Side-by-side Assemblies:</span>
+<span class="s0"># http://msdn.microsoft.com/en-us/library/dd408052%28VS.85%29.aspx</span>
+<span class="s0">#</span>
+<span class="s0"># Changelog:</span>
+<span class="s0"># 2009-12-17  fix: small glitch in toxml / toprettyxml methods (xml declaration wasn't replaced when a different encodig</span>
+<span class="s0">#                  than UTF-8 was used)</span>
+<span class="s0">#             chg: catch xml.parsers.expat.ExpatError and re-raise as ManifestXMLParseError</span>
+<span class="s0">#             chg: support initialize option in parse method also</span>
+<span class="s0">#</span>
+<span class="s0"># 2009-12-13  fix: fixed os import</span>
+<span class="s0">#             fix: skip invalid / empty dependent assemblies</span>
+<span class="s0">#</span>
+<span class="s0"># 2009-08-21  fix: Corrected assembly searching sequence for localized assemblies</span>
+<span class="s0">#             fix: Allow assemblies with no dependent files</span>
+<span class="s0">#</span>
+<span class="s0"># 2009-07-31  chg: Find private assemblies even if unversioned</span>
+<span class="s0">#             add: Manifest.same_id method to check if two manifests have the same assemblyIdentity</span>
+<span class="s0">#</span>
+<span class="s0"># 2009-07-30  fix: Potential failure in File.calc_hash method if hash algorythm not supported</span>
+<span class="s0">#             add: Publisher configuration (policy) support when searching for assembly files</span>
+<span class="s0">#             fix: Private assemblies are now actually found if present (and no shared assembly exists)</span>
+<span class="s0">#             add: Python 2.3 compatibility (oldest version supported by pyinstaller)</span>
+<span class="s0">#</span>
+<span class="s0"># 2009-07-28  chg: Code cleanup, removed a bit of redundancy</span>
+<span class="s0">#             add: silent mode (set silent attribute on module)</span>
+<span class="s0">#             chg: Do not print messages in silent mode</span>
+<span class="s0">#</span>
+<span class="s0"># 2009-06-18  chg: Use glob instead of regular expression in Manifest.find_files</span>
+<span class="s0">#</span>
+<span class="s0"># 2009-05-04  fix: Don't fail if manifest has empty description</span>
+<span class="s0">#             fix: Manifests created by the toxml, toprettyxml, writexml or writeprettyxml methods are now correctly</span>
+<span class="s0">#                  recognized by Windows, which expects the XML declaration to be ordered version-encoding-standalone</span>
+<span class="s0">#                  (standalone being optional)</span>
+<span class="s0">#             add: 'encoding' keyword argument in toxml, toprettyxml, writexml and writeprettyxml methods</span>
+<span class="s0">#             chg: UpdateManifestResourcesFromXML and UpdateManifestResourcesFromXMLFile: set resource name depending on</span>
+<span class="s0">#                  file type ie. exe or dll</span>
+<span class="s0">#             fix: typo in __main__: UpdateManifestResourcesFromDataFile</span>
+<span class="s0">#                  should have been UpdateManifestResourcesFromXMLFile</span>
+<span class="s0">#</span>
+<span class="s0"># 2009-03-21  First version</span>
+<span class="s2">&quot;&quot;&quot; 
+Create, parse and write MS Windows Manifest files. Find files which are part of an assembly, by searching shared and 
+private assemblies. Update or add manifest resources in Win32 PE files. 
+ 
+Commandline usage: 
+winmanifest.py &lt;dstpath&gt; &lt;xmlpath&gt; 
+Updates or adds manifest &lt;xmlpath&gt; as resource in Win32 PE file &lt;dstpath&gt;. 
+&quot;&quot;&quot;</span>
+
+<span class="s3">import </span><span class="s1">hashlib</span>
+<span class="s3">import </span><span class="s1">os</span>
+<span class="s3">import </span><span class="s1">sys</span>
+<span class="s3">import </span><span class="s1">xml</span>
+<span class="s3">from </span><span class="s1">glob </span><span class="s3">import </span><span class="s1">glob</span>
+<span class="s3">from </span><span class="s1">xml.dom </span><span class="s3">import </span><span class="s1">Node</span><span class="s3">, </span><span class="s1">minidom</span>
+<span class="s3">from </span><span class="s1">xml.dom.minidom </span><span class="s3">import </span><span class="s1">Document</span><span class="s3">, </span><span class="s1">Element</span>
+
+<span class="s3">from </span><span class="s1">PyInstaller </span><span class="s3">import </span><span class="s1">compat</span>
+<span class="s3">from </span><span class="s1">PyInstaller </span><span class="s3">import </span><span class="s1">log </span><span class="s3">as </span><span class="s1">logging</span>
+<span class="s3">from </span><span class="s1">PyInstaller.compat </span><span class="s3">import </span><span class="s1">string_types</span>
+<span class="s3">from </span><span class="s1">PyInstaller.utils.win32 </span><span class="s3">import </span><span class="s1">winresource</span>
+
+<span class="s1">logger = logging.getLogger(__name__)</span>
+
+<span class="s1">LANGUAGE_NEUTRAL_NT5 = </span><span class="s4">&quot;x-ww&quot;</span>
+<span class="s1">LANGUAGE_NEUTRAL_NT6 = </span><span class="s4">&quot;none&quot;</span>
+<span class="s1">RT_MANIFEST = </span><span class="s5">24</span>
+
+<span class="s1">Document.aChild = Document.appendChild</span>
+<span class="s1">Document.cE = Document.createElement</span>
+<span class="s1">Document.cT = Document.createTextNode</span>
+<span class="s1">Document.getEByTN = Document.getElementsByTagName</span>
+<span class="s1">Element.aChild = Element.appendChild</span>
+<span class="s1">Element.getA = Element.getAttribute</span>
+<span class="s1">Element.getEByTN = Element.getElementsByTagName</span>
+<span class="s1">Element.remA = Element.removeAttribute</span>
+<span class="s1">Element.setA = Element.setAttribute</span>
+
+
+<span class="s3">def </span><span class="s1">getChildElementsByTagName(self</span><span class="s3">, </span><span class="s1">tagName):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Return child elements of type tagName if found, else []. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">result = []</span>
+    <span class="s3">for </span><span class="s1">child </span><span class="s3">in </span><span class="s1">self.childNodes:</span>
+        <span class="s3">if </span><span class="s1">isinstance(child</span><span class="s3">, </span><span class="s1">Element):</span>
+            <span class="s3">if </span><span class="s1">child.tagName == tagName:</span>
+                <span class="s1">result.append(child)</span>
+    <span class="s3">return </span><span class="s1">result</span>
+
+
+<span class="s3">def </span><span class="s1">getFirstChildElementByTagName(self</span><span class="s3">, </span><span class="s1">tagName):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Return the first element of type tagName if found, else None. 
+    &quot;&quot;&quot;</span>
+    <span class="s3">for </span><span class="s1">child </span><span class="s3">in </span><span class="s1">self.childNodes:</span>
+        <span class="s3">if </span><span class="s1">isinstance(child</span><span class="s3">, </span><span class="s1">Element):</span>
+            <span class="s3">if </span><span class="s1">child.tagName == tagName:</span>
+                <span class="s3">return </span><span class="s1">child</span>
+    <span class="s3">return None</span>
+
+
+<span class="s1">Document.getCEByTN = getChildElementsByTagName</span>
+<span class="s1">Document.getFCEByTN = getFirstChildElementByTagName</span>
+<span class="s1">Element.getCEByTN = getChildElementsByTagName</span>
+<span class="s1">Element.getFCEByTN = getFirstChildElementByTagName</span>
+
+
+<span class="s3">class </span><span class="s1">_Dummy:</span>
+    <span class="s3">pass</span>
+
+
+<span class="s3">if </span><span class="s1">winresource:</span>
+    <span class="s1">_File = winresource.File</span>
+<span class="s3">else</span><span class="s1">:</span>
+    <span class="s1">_File = _Dummy</span>
+
+
+<span class="s3">class </span><span class="s1">File(_File):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    A file referenced by an assembly inside a manifest. 
+    &quot;&quot;&quot;</span>
+    <span class="s3">def </span><span class="s1">__init__(</span>
+        <span class="s1">self</span><span class="s3">,</span>
+        <span class="s1">filename=</span><span class="s4">&quot;&quot;</span><span class="s3">,</span>
+        <span class="s1">hashalg=</span><span class="s3">None,</span>
+        <span class="s1">hash=</span><span class="s3">None,</span>
+        <span class="s1">comClasses=</span><span class="s3">None,</span>
+        <span class="s1">typelibs=</span><span class="s3">None,</span>
+        <span class="s1">comInterfaceProxyStubs=</span><span class="s3">None,</span>
+        <span class="s1">windowClasses=</span><span class="s3">None</span>
+    <span class="s1">):</span>
+        <span class="s3">if </span><span class="s1">winresource:</span>
+            <span class="s1">winresource.File.__init__(self</span><span class="s3">, </span><span class="s1">filename)</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s1">self.filename = filename</span>
+        <span class="s1">self.name = os.path.basename(filename)</span>
+        <span class="s3">if </span><span class="s1">hashalg:</span>
+            <span class="s1">self.hashalg = hashalg.upper()</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s1">self.hashalg = </span><span class="s3">None</span>
+        <span class="s3">if </span><span class="s1">os.path.isfile(filename) </span><span class="s3">and </span><span class="s1">hashalg </span><span class="s3">and </span><span class="s1">hashlib </span><span class="s3">and </span><span class="s1">hasattr(hashlib</span><span class="s3">, </span><span class="s1">hashalg.lower()):</span>
+            <span class="s1">self.calc_hash()</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s1">self.hash = hash</span>
+        <span class="s1">self.comClasses = comClasses </span><span class="s3">or </span><span class="s1">[]  </span><span class="s0"># TODO: implement</span>
+        <span class="s1">self.typelibs = typelibs </span><span class="s3">or </span><span class="s1">[]  </span><span class="s0"># TODO: implement</span>
+        <span class="s1">self.comInterfaceProxyStubs = comInterfaceProxyStubs </span><span class="s3">or </span><span class="s1">[]  </span><span class="s0"># TODO: implement</span>
+        <span class="s1">self.windowClasses = windowClasses </span><span class="s3">or </span><span class="s1">[]  </span><span class="s0"># TODO: implement</span>
+
+    <span class="s3">def </span><span class="s1">calc_hash(self</span><span class="s3">, </span><span class="s1">hashalg=</span><span class="s3">None</span><span class="s1">):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Calculate the hash of the file. 
+ 
+        Will be called automatically from the constructor if the file exists and hashalg is given (and supported), 
+        but may also be called manually e.g. to update the hash if the file has changed. 
+        &quot;&quot;&quot;</span>
+        <span class="s3">with </span><span class="s1">open(self.filename</span><span class="s3">, </span><span class="s4">&quot;rb&quot;</span><span class="s1">) </span><span class="s3">as </span><span class="s1">fd:</span>
+            <span class="s1">buf = fd.read()</span>
+        <span class="s3">if </span><span class="s1">hashalg:</span>
+            <span class="s1">self.hashalg = hashalg.upper()</span>
+        <span class="s1">self.hash = getattr(hashlib</span><span class="s3">, </span><span class="s1">self.hashalg.lower())(buf).hexdigest()</span>
+
+    <span class="s3">def </span><span class="s1">find(self</span><span class="s3">, </span><span class="s1">searchpath):</span>
+        <span class="s1">logger.info(</span><span class="s4">&quot;Searching for file %s&quot;</span><span class="s3">, </span><span class="s1">self.name)</span>
+        <span class="s1">fn = os.path.join(searchpath</span><span class="s3">, </span><span class="s1">self.name)</span>
+        <span class="s3">if </span><span class="s1">os.path.isfile(fn):</span>
+            <span class="s1">logger.info(</span><span class="s4">&quot;Found file %s&quot;</span><span class="s3">, </span><span class="s1">fn)</span>
+            <span class="s3">return </span><span class="s1">fn</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s1">logger.warning(</span><span class="s4">&quot;No such file %s&quot;</span><span class="s3">, </span><span class="s1">fn)</span>
+            <span class="s3">return None</span>
+
+
+<span class="s3">class </span><span class="s1">InvalidManifestError(Exception):</span>
+    <span class="s3">pass</span>
+
+
+<span class="s3">class </span><span class="s1">ManifestXMLParseError(InvalidManifestError):</span>
+    <span class="s3">pass</span>
+
+
+<span class="s3">class </span><span class="s1">Manifest(object):</span>
+    <span class="s0"># Manifests:</span>
+    <span class="s0"># http://msdn.microsoft.com/en-us/library/aa375365%28VS.85%29.aspx</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Manifest constructor. 
+ 
+    To build a basic manifest for your application: 
+      mf = Manifest(type='win32', name='YourAppName', language='*', processorArchitecture='x86', version=[1, 0, 0, 0]) 
+ 
+    To write the XML to a manifest file: 
+      mf.writexml(&quot;YourAppName.exe.manifest&quot;) 
+    or 
+      mf.writeprettyxml(&quot;YourAppName.exe.manifest&quot;) 
+    &quot;&quot;&quot;</span>
+    <span class="s3">def </span><span class="s1">__init__(</span>
+        <span class="s1">self</span><span class="s3">,</span>
+        <span class="s1">manifestType=</span><span class="s4">&quot;assembly&quot;</span><span class="s3">,</span>
+        <span class="s1">manifestVersion=</span><span class="s3">None,</span>
+        <span class="s1">noInheritable=</span><span class="s3">False,</span>
+        <span class="s1">noInherit=</span><span class="s3">False,</span>
+        <span class="s1">type_=</span><span class="s3">None,</span>
+        <span class="s1">name=</span><span class="s3">None,</span>
+        <span class="s1">language=</span><span class="s3">None,</span>
+        <span class="s1">processorArchitecture=</span><span class="s3">None,</span>
+        <span class="s1">version=</span><span class="s3">None,</span>
+        <span class="s1">publicKeyToken=</span><span class="s3">None,</span>
+        <span class="s1">description=</span><span class="s3">None,</span>
+        <span class="s1">requestedExecutionLevel=</span><span class="s3">None,</span>
+        <span class="s1">uiAccess=</span><span class="s3">None,</span>
+        <span class="s1">dependentAssemblies=</span><span class="s3">None,</span>
+        <span class="s1">files=</span><span class="s3">None,</span>
+        <span class="s1">comInterfaceExternalProxyStubs=</span><span class="s3">None</span>
+    <span class="s1">):</span>
+        <span class="s1">self.filename = </span><span class="s3">None</span>
+        <span class="s1">self.optional = </span><span class="s3">None</span>
+        <span class="s1">self.manifestType = manifestType</span>
+        <span class="s1">self.manifestVersion = manifestVersion </span><span class="s3">or </span><span class="s1">[</span><span class="s5">1</span><span class="s3">, </span><span class="s5">0</span><span class="s1">]</span>
+        <span class="s1">self.noInheritable = noInheritable</span>
+        <span class="s1">self.noInherit = noInherit</span>
+        <span class="s1">self.type = type_</span>
+        <span class="s1">self.name = name</span>
+        <span class="s1">self.language = language</span>
+        <span class="s1">self.processorArchitecture = processorArchitecture</span>
+        <span class="s1">self.version = version</span>
+        <span class="s1">self.publicKeyToken = publicKeyToken</span>
+        <span class="s0"># publicKeyToken: a 16-character hexadecimal string that represents the last 8 bytes of the SHA-1 hash of the</span>
+        <span class="s0"># public key under which the assembly is signed. The public key used to sign the catalog must be 2048 bits or</span>
+        <span class="s0"># greater. Required for all shared side-by-side assemblies.</span>
+        <span class="s0"># http://msdn.microsoft.com/en-us/library/aa375692(VS.85).aspx</span>
+        <span class="s1">self.applyPublisherPolicy = </span><span class="s3">None</span>
+        <span class="s1">self.description = </span><span class="s3">None</span>
+        <span class="s1">self.requestedExecutionLevel = requestedExecutionLevel</span>
+        <span class="s1">self.uiAccess = uiAccess</span>
+        <span class="s1">self.dependentAssemblies = dependentAssemblies </span><span class="s3">or </span><span class="s1">[]</span>
+        <span class="s1">self.bindingRedirects = []</span>
+        <span class="s1">self.files = files </span><span class="s3">or </span><span class="s1">[]</span>
+        <span class="s1">self.comInterfaceExternalProxyStubs = comInterfaceExternalProxyStubs </span><span class="s3">or </span><span class="s1">[]  </span><span class="s0"># TODO: implement</span>
+
+    <span class="s3">def </span><span class="s1">__eq__(self</span><span class="s3">, </span><span class="s1">other):</span>
+        <span class="s3">if </span><span class="s1">isinstance(other</span><span class="s3">, </span><span class="s1">Manifest):</span>
+            <span class="s3">return </span><span class="s1">self.toxml() == other.toxml()</span>
+        <span class="s3">if </span><span class="s1">isinstance(other</span><span class="s3">, </span><span class="s1">string_types):</span>
+            <span class="s3">return </span><span class="s1">self.toxml() == other</span>
+        <span class="s3">return False</span>
+
+    <span class="s3">def </span><span class="s1">__ne__(self</span><span class="s3">, </span><span class="s1">other):</span>
+        <span class="s3">return not </span><span class="s1">self.__eq__(other)</span>
+
+    <span class="s3">def </span><span class="s1">__repr__(self):</span>
+        <span class="s3">return </span><span class="s1">repr(self.toxml())</span>
+
+    <span class="s3">def </span><span class="s1">add_dependent_assembly(</span>
+        <span class="s1">self</span><span class="s3">,</span>
+        <span class="s1">manifestVersion=</span><span class="s3">None,</span>
+        <span class="s1">noInheritable=</span><span class="s3">False,</span>
+        <span class="s1">noInherit=</span><span class="s3">False,</span>
+        <span class="s1">type_=</span><span class="s3">None,</span>
+        <span class="s1">name=</span><span class="s3">None,</span>
+        <span class="s1">language=</span><span class="s3">None,</span>
+        <span class="s1">processorArchitecture=</span><span class="s3">None,</span>
+        <span class="s1">version=</span><span class="s3">None,</span>
+        <span class="s1">publicKeyToken=</span><span class="s3">None,</span>
+        <span class="s1">description=</span><span class="s3">None,</span>
+        <span class="s1">requestedExecutionLevel=</span><span class="s3">None,</span>
+        <span class="s1">uiAccess=</span><span class="s3">None,</span>
+        <span class="s1">dependentAssemblies=</span><span class="s3">None,</span>
+        <span class="s1">files=</span><span class="s3">None,</span>
+        <span class="s1">comInterfaceExternalProxyStubs=</span><span class="s3">None</span>
+    <span class="s1">):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Shortcut for self.dependentAssemblies.append(Manifest(*args, **kwargs)) 
+        &quot;&quot;&quot;</span>
+        <span class="s1">self.dependentAssemblies.append(</span>
+            <span class="s1">Manifest(</span>
+                <span class="s1">manifestVersion</span><span class="s3">,</span>
+                <span class="s1">noInheritable</span><span class="s3">,</span>
+                <span class="s1">noInherit</span><span class="s3">,</span>
+                <span class="s1">type_</span><span class="s3">,</span>
+                <span class="s1">name</span><span class="s3">,</span>
+                <span class="s1">language</span><span class="s3">,</span>
+                <span class="s1">processorArchitecture</span><span class="s3">,</span>
+                <span class="s1">version</span><span class="s3">,</span>
+                <span class="s1">publicKeyToken</span><span class="s3">,</span>
+                <span class="s1">description</span><span class="s3">,</span>
+                <span class="s1">requestedExecutionLevel</span><span class="s3">,</span>
+                <span class="s1">uiAccess</span><span class="s3">,</span>
+                <span class="s1">dependentAssemblies</span><span class="s3">,</span>
+                <span class="s1">files</span><span class="s3">,</span>
+                <span class="s1">comInterfaceExternalProxyStubs</span><span class="s3">,</span>
+            <span class="s1">)</span>
+        <span class="s1">)</span>
+        <span class="s3">if </span><span class="s1">self.filename:</span>
+            <span class="s0"># Enable search for private assembly by assigning bogus filename (only the directory has to be correct).</span>
+            <span class="s1">self.dependentAssemblies[-</span><span class="s5">1</span><span class="s1">].filename = </span><span class="s4">&quot;:&quot;</span><span class="s1">.join((self.filename</span><span class="s3">, </span><span class="s1">name))</span>
+
+    <span class="s3">def </span><span class="s1">add_file(</span>
+        <span class="s1">self</span><span class="s3">,</span>
+        <span class="s1">name=</span><span class="s4">&quot;&quot;</span><span class="s3">,</span>
+        <span class="s1">hashalg=</span><span class="s4">&quot;&quot;</span><span class="s3">,</span>
+        <span class="s1">hash=</span><span class="s4">&quot;&quot;</span><span class="s3">,</span>
+        <span class="s1">comClasses=</span><span class="s3">None,</span>
+        <span class="s1">typelibs=</span><span class="s3">None,</span>
+        <span class="s1">comInterfaceProxyStubs=</span><span class="s3">None,</span>
+        <span class="s1">windowClasses=</span><span class="s3">None</span>
+    <span class="s1">):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Shortcut for manifest.files.append 
+        &quot;&quot;&quot;</span>
+        <span class="s1">self.files.append(File(name</span><span class="s3">, </span><span class="s1">hashalg</span><span class="s3">, </span><span class="s1">hash</span><span class="s3">, </span><span class="s1">comClasses</span><span class="s3">, </span><span class="s1">typelibs</span><span class="s3">, </span><span class="s1">comInterfaceProxyStubs</span><span class="s3">, </span><span class="s1">windowClasses))</span>
+
+    <span class="s1">@classmethod</span>
+    <span class="s3">def </span><span class="s1">get_winsxs_dir(cls):</span>
+        <span class="s3">return </span><span class="s1">os.path.join(compat.getenv(</span><span class="s4">&quot;SystemRoot&quot;</span><span class="s1">)</span><span class="s3">, </span><span class="s4">&quot;WinSxS&quot;</span><span class="s1">)</span>
+
+    <span class="s1">@classmethod</span>
+    <span class="s3">def </span><span class="s1">get_manifest_dir(cls):</span>
+        <span class="s1">winsxs = cls.get_winsxs_dir()</span>
+        <span class="s3">if not </span><span class="s1">os.path.isdir(winsxs):</span>
+            <span class="s1">logger.warning(</span><span class="s4">&quot;No such dir %s&quot;</span><span class="s3">, </span><span class="s1">winsxs)</span>
+        <span class="s1">manifests = os.path.join(winsxs</span><span class="s3">, </span><span class="s4">&quot;Manifests&quot;</span><span class="s1">)</span>
+        <span class="s3">if not </span><span class="s1">os.path.isdir(manifests):</span>
+            <span class="s1">logger.warning(</span><span class="s4">&quot;No such dir %s&quot;</span><span class="s3">, </span><span class="s1">manifests)</span>
+        <span class="s3">return </span><span class="s1">manifests</span>
+
+    <span class="s1">@classmethod</span>
+    <span class="s3">def </span><span class="s1">get_policy_dir(cls):</span>
+        <span class="s1">winsxs = os.path.join(compat.getenv(</span><span class="s4">&quot;SystemRoot&quot;</span><span class="s1">)</span><span class="s3">, </span><span class="s4">&quot;WinSxS&quot;</span><span class="s1">)</span>
+        <span class="s3">if </span><span class="s1">sys.getwindowsversion() &lt; (</span><span class="s5">6</span><span class="s3">,</span><span class="s1">):</span>
+            <span class="s0"># Windows XP</span>
+            <span class="s1">pcfiles = os.path.join(winsxs</span><span class="s3">, </span><span class="s4">&quot;Policies&quot;</span><span class="s1">)</span>
+            <span class="s3">if not </span><span class="s1">os.path.isdir(pcfiles):</span>
+                <span class="s1">logger.warning(</span><span class="s4">&quot;No such dir %s&quot;</span><span class="s3">, </span><span class="s1">pcfiles)</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s0"># Vista or later</span>
+            <span class="s1">pcfiles = cls.get_manifest_dir()</span>
+        <span class="s3">return </span><span class="s1">pcfiles</span>
+
+    <span class="s3">def </span><span class="s1">get_policy_redirect(self</span><span class="s3">, </span><span class="s1">language=</span><span class="s3">None, </span><span class="s1">version=</span><span class="s3">None</span><span class="s1">):</span>
+        <span class="s0"># Publisher Configuration (aka policy)</span>
+        <span class="s0"># A publisher configuration file globally redirects applications and assemblies having a dependence on one</span>
+        <span class="s0"># version of a side-by-side assembly to use another version of the same assembly. This enables applications and</span>
+        <span class="s0"># assemblies to use the updated assembly without having to rebuild all of the affected applications.</span>
+        <span class="s0"># http://msdn.microsoft.com/en-us/library/aa375680%28VS.85%29.aspx</span>
+        <span class="s0">#</span>
+        <span class="s0"># Under Windows XP and 2003, policies are stored as</span>
+        <span class="s0"># &lt;version&gt;.policy files inside</span>
+        <span class="s0"># %SystemRoot%\WinSxS\Policies\&lt;name&gt;</span>
+        <span class="s0"># Under Vista and later, policies are stored as</span>
+        <span class="s0"># &lt;name&gt;.manifest files inside %SystemRoot%\winsxs\Manifests</span>
+        <span class="s1">redirected = </span><span class="s3">False</span>
+        <span class="s1">pcfiles = self.get_policy_dir()</span>
+        <span class="s3">if </span><span class="s1">version </span><span class="s3">is None</span><span class="s1">:</span>
+            <span class="s1">version = self.version</span>
+        <span class="s3">if </span><span class="s1">language </span><span class="s3">is None</span><span class="s1">:</span>
+            <span class="s1">language = self.language</span>
+
+        <span class="s3">if </span><span class="s1">os.path.isdir(pcfiles):</span>
+            <span class="s1">logger.debug(</span><span class="s4">&quot;Searching for publisher configuration %s ...&quot;</span><span class="s3">, </span><span class="s1">self.getpolicyid(</span><span class="s3">True, </span><span class="s1">language=language))</span>
+            <span class="s3">if </span><span class="s1">sys.getwindowsversion() &lt; (</span><span class="s5">6</span><span class="s3">,</span><span class="s1">):</span>
+                <span class="s0"># Windows XP</span>
+                <span class="s1">policies = os.path.join(pcfiles</span><span class="s3">, </span><span class="s1">self.getpolicyid(</span><span class="s3">True, </span><span class="s1">language=language) + </span><span class="s4">&quot;.policy&quot;</span><span class="s1">)</span>
+            <span class="s3">else</span><span class="s1">:</span>
+                <span class="s0"># Vista or later</span>
+                <span class="s1">policies = os.path.join(pcfiles</span><span class="s3">, </span><span class="s1">self.getpolicyid(</span><span class="s3">True, </span><span class="s1">language=language) + </span><span class="s4">&quot;.manifest&quot;</span><span class="s1">)</span>
+            <span class="s3">for </span><span class="s1">manifestpth </span><span class="s3">in </span><span class="s1">glob(policies):</span>
+                <span class="s3">if not </span><span class="s1">os.path.isfile(manifestpth):</span>
+                    <span class="s1">logger.warning(</span><span class="s4">&quot;Not a file %s&quot;</span><span class="s3">, </span><span class="s1">manifestpth)</span>
+                    <span class="s3">continue</span>
+                <span class="s1">logger.info(</span><span class="s4">&quot;Found %s&quot;</span><span class="s3">, </span><span class="s1">manifestpth)</span>
+                <span class="s3">try</span><span class="s1">:</span>
+                    <span class="s1">policy = ManifestFromXMLFile(manifestpth)</span>
+                <span class="s3">except </span><span class="s1">Exception:</span>
+                    <span class="s1">logger.error(</span><span class="s4">&quot;Could not parse file %s&quot;</span><span class="s3">, </span><span class="s1">manifestpth</span><span class="s3">, </span><span class="s1">exc_info=</span><span class="s5">1</span><span class="s1">)</span>
+                <span class="s3">else</span><span class="s1">:</span>
+                    <span class="s1">logger.debug(</span><span class="s4">&quot;Checking publisher policy for binding redirects&quot;</span><span class="s1">)</span>
+                    <span class="s3">for </span><span class="s1">assembly </span><span class="s3">in </span><span class="s1">policy.dependentAssemblies:</span>
+                        <span class="s3">if not </span><span class="s1">assembly.same_id(self</span><span class="s3">, True</span><span class="s1">) </span><span class="s3">or </span><span class="s1">assembly.optional:</span>
+                            <span class="s3">continue</span>
+                        <span class="s3">for </span><span class="s1">redirect </span><span class="s3">in </span><span class="s1">assembly.bindingRedirects:</span>
+                            <span class="s1">old = </span><span class="s4">&quot;-&quot;</span><span class="s1">.join([</span><span class="s4">&quot;.&quot;</span><span class="s1">.join([str(i) </span><span class="s3">for </span><span class="s1">i </span><span class="s3">in </span><span class="s1">part]) </span><span class="s3">for </span><span class="s1">part </span><span class="s3">in </span><span class="s1">redirect[</span><span class="s5">0</span><span class="s1">]])</span>
+                            <span class="s1">new = </span><span class="s4">&quot;.&quot;</span><span class="s1">.join([str(i) </span><span class="s3">for </span><span class="s1">i </span><span class="s3">in </span><span class="s1">redirect[</span><span class="s5">1</span><span class="s1">]])</span>
+                            <span class="s1">logger.debug(</span><span class="s4">&quot;Found redirect for version(s) %s -&gt; %s&quot;</span><span class="s3">, </span><span class="s1">old</span><span class="s3">, </span><span class="s1">new)</span>
+                            <span class="s3">if </span><span class="s1">redirect[</span><span class="s5">0</span><span class="s1">][</span><span class="s5">0</span><span class="s1">] &lt;= version &lt;= redirect[</span><span class="s5">0</span><span class="s1">][-</span><span class="s5">1</span><span class="s1">] </span><span class="s3">and </span><span class="s1">version != redirect[</span><span class="s5">1</span><span class="s1">]:</span>
+                                <span class="s1">logger.debug(</span><span class="s4">&quot;Applying redirect %s -&gt; %s&quot;</span><span class="s3">, </span><span class="s4">&quot;.&quot;</span><span class="s1">.join([str(i) </span><span class="s3">for </span><span class="s1">i </span><span class="s3">in </span><span class="s1">version])</span><span class="s3">, </span><span class="s1">new)</span>
+                                <span class="s1">version = redirect[</span><span class="s5">1</span><span class="s1">]</span>
+                                <span class="s1">redirected = </span><span class="s3">True</span>
+            <span class="s3">if not </span><span class="s1">redirected:</span>
+                <span class="s1">logger.debug(</span><span class="s4">&quot;Publisher configuration not used&quot;</span><span class="s1">)</span>
+
+        <span class="s3">return </span><span class="s1">version</span>
+
+    <span class="s3">def </span><span class="s1">find_files(self</span><span class="s3">, </span><span class="s1">ignore_policies=</span><span class="s3">True</span><span class="s1">):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Search shared and private assemblies and return a list of files. 
+ 
+        If any files are not found, return an empty list. 
+ 
+        IMPORTANT NOTE: On some Windows systems, the dependency listed in the manifest will not actually be present, 
+        and finding its files will fail. This is because a newer version of the dependency is installed, 
+        and the manifest's dependency is being redirected to a newer version. To properly bundle the newer version of 
+        the assembly, you need to find the newer version by setting ignore_policies=False, and then either create a 
+        .config file for each bundled assembly, or modify each bundled assembly to point to the newer version. 
+ 
+        This is important because Python 2.7's app manifest depends on version 21022 of the VC90 assembly, 
+        but the Python 2.7.9 installer will install version 30729 of the assembly along with a policy file that 
+        enacts the version redirect. 
+        &quot;&quot;&quot;</span>
+
+        <span class="s0"># Shared Assemblies:</span>
+        <span class="s0"># http://msdn.microsoft.com/en-us/library/aa375996%28VS.85%29.aspx</span>
+        <span class="s0">#</span>
+        <span class="s0"># Private Assemblies:</span>
+        <span class="s0"># http://msdn.microsoft.com/en-us/library/aa375674%28VS.85%29.aspx</span>
+        <span class="s0">#</span>
+        <span class="s0"># Assembly Searching Sequence:</span>
+        <span class="s0"># http://msdn.microsoft.com/en-us/library/aa374224%28VS.85%29.aspx</span>
+        <span class="s0">#</span>
+        <span class="s0"># NOTE:</span>
+        <span class="s0"># Multilanguage User Interface (MUI) support not yet implemented</span>
+
+        <span class="s1">files = []</span>
+
+        <span class="s1">languages = []</span>
+        <span class="s3">if </span><span class="s1">self.language </span><span class="s3">not in </span><span class="s1">(</span><span class="s3">None, </span><span class="s4">&quot;&quot;</span><span class="s3">, </span><span class="s4">&quot;*&quot;</span><span class="s3">, </span><span class="s4">&quot;neutral&quot;</span><span class="s1">):</span>
+            <span class="s1">languages.append(self.getlanguage())</span>
+            <span class="s3">if </span><span class="s4">&quot;-&quot; </span><span class="s3">in </span><span class="s1">self.language:</span>
+                <span class="s0"># language-culture syntax, e.g., en-us</span>
+                <span class="s0"># Add only the language part</span>
+                <span class="s1">languages.append(self.language.split(</span><span class="s4">&quot;-&quot;</span><span class="s1">)[</span><span class="s5">0</span><span class="s1">])</span>
+            <span class="s3">if </span><span class="s1">self.language </span><span class="s3">not in </span><span class="s1">(</span><span class="s4">&quot;en-us&quot;</span><span class="s3">, </span><span class="s4">&quot;en&quot;</span><span class="s1">):</span>
+                <span class="s1">languages.append(</span><span class="s4">&quot;en-us&quot;</span><span class="s1">)</span>
+            <span class="s3">if </span><span class="s1">self.language != </span><span class="s4">&quot;en&quot;</span><span class="s1">:</span>
+                <span class="s1">languages.append(</span><span class="s4">&quot;en&quot;</span><span class="s1">)</span>
+        <span class="s1">languages.append(self.getlanguage(</span><span class="s4">&quot;*&quot;</span><span class="s1">))</span>
+
+        <span class="s1">manifests = self.get_manifest_dir()</span>
+        <span class="s1">winsxs = self.get_winsxs_dir()</span>
+
+        <span class="s3">for </span><span class="s1">language </span><span class="s3">in </span><span class="s1">languages:</span>
+            <span class="s1">version = self.version</span>
+
+            <span class="s0"># Search for publisher configuration</span>
+            <span class="s3">if not </span><span class="s1">ignore_policies </span><span class="s3">and </span><span class="s1">version:</span>
+                <span class="s1">version = self.get_policy_redirect(language</span><span class="s3">, </span><span class="s1">version)</span>
+
+            <span class="s0"># Search for assemblies according to assembly searching sequence</span>
+            <span class="s1">paths = []</span>
+            <span class="s3">if </span><span class="s1">os.path.isdir(manifests):</span>
+                <span class="s0"># Add winsxs search paths</span>
+                <span class="s0"># Search for manifests in Windows\WinSxS\Manifests</span>
+                <span class="s1">paths.extend(</span>
+                    <span class="s1">glob(os.path.join(manifests</span><span class="s3">,</span>
+                                      <span class="s1">self.getid(language=language</span><span class="s3">, </span><span class="s1">version=version) + </span><span class="s4">&quot;_*.manifest&quot;</span><span class="s1">))</span>
+                <span class="s1">)</span>
+            <span class="s3">if </span><span class="s1">self.filename:</span>
+                <span class="s0"># Add private assembly search paths</span>
+                <span class="s0"># Search for manifests inside assembly folders that are in the same folder as the depending manifest.</span>
+                <span class="s1">dirnm = os.path.dirname(self.filename)</span>
+                <span class="s3">if </span><span class="s1">language </span><span class="s3">in </span><span class="s1">(LANGUAGE_NEUTRAL_NT5</span><span class="s3">, </span><span class="s1">LANGUAGE_NEUTRAL_NT6):</span>
+                    <span class="s3">for </span><span class="s1">ext </span><span class="s3">in </span><span class="s1">(</span><span class="s4">&quot;.dll&quot;</span><span class="s3">, </span><span class="s4">&quot;.manifest&quot;</span><span class="s1">):</span>
+                        <span class="s1">paths.extend(glob(os.path.join(dirnm</span><span class="s3">, </span><span class="s1">self.name + ext)))</span>
+                        <span class="s1">paths.extend(glob(os.path.join(dirnm</span><span class="s3">, </span><span class="s1">self.name</span><span class="s3">, </span><span class="s1">self.name + ext)))</span>
+                <span class="s3">else</span><span class="s1">:</span>
+                    <span class="s3">for </span><span class="s1">ext </span><span class="s3">in </span><span class="s1">(</span><span class="s4">&quot;.dll&quot;</span><span class="s3">, </span><span class="s4">&quot;.manifest&quot;</span><span class="s1">):</span>
+                        <span class="s1">paths.extend(glob(os.path.join(dirnm</span><span class="s3">, </span><span class="s1">language</span><span class="s3">, </span><span class="s1">self.name + ext)))</span>
+                    <span class="s3">for </span><span class="s1">ext </span><span class="s3">in </span><span class="s1">(</span><span class="s4">&quot;.dll&quot;</span><span class="s3">, </span><span class="s4">&quot;.manifest&quot;</span><span class="s1">):</span>
+                        <span class="s1">paths.extend(glob(os.path.join(dirnm</span><span class="s3">, </span><span class="s1">language</span><span class="s3">, </span><span class="s1">self.name</span><span class="s3">, </span><span class="s1">self.name + ext)))</span>
+            <span class="s1">logger.info(</span><span class="s4">&quot;Searching for assembly %s ...&quot;</span><span class="s3">, </span><span class="s1">self.getid(language=language</span><span class="s3">, </span><span class="s1">version=version))</span>
+            <span class="s3">for </span><span class="s1">manifestpth </span><span class="s3">in </span><span class="s1">paths:</span>
+                <span class="s3">if not </span><span class="s1">os.path.isfile(manifestpth):</span>
+                    <span class="s1">logger.warning(</span><span class="s4">&quot;Not a file %s&quot;</span><span class="s3">, </span><span class="s1">manifestpth)</span>
+                    <span class="s3">continue</span>
+                <span class="s1">assemblynm = os.path.basename(os.path.splitext(manifestpth)[</span><span class="s5">0</span><span class="s1">])</span>
+                <span class="s3">try</span><span class="s1">:</span>
+                    <span class="s3">if </span><span class="s1">manifestpth.endswith(</span><span class="s4">&quot;.dll&quot;</span><span class="s1">):</span>
+                        <span class="s1">logger.info(</span><span class="s4">&quot;Found manifest in %s&quot;</span><span class="s3">, </span><span class="s1">manifestpth)</span>
+                        <span class="s1">manifest = ManifestFromResFile(manifestpth</span><span class="s3">, </span><span class="s1">[</span><span class="s5">1</span><span class="s1">])</span>
+                    <span class="s3">else</span><span class="s1">:</span>
+                        <span class="s1">logger.info(</span><span class="s4">&quot;Found manifest %s&quot;</span><span class="s3">, </span><span class="s1">manifestpth)</span>
+                        <span class="s1">manifest = ManifestFromXMLFile(manifestpth)</span>
+                <span class="s3">except </span><span class="s1">Exception:</span>
+                    <span class="s1">logger.error(</span><span class="s4">&quot;Could not parse manifest %s&quot;</span><span class="s3">, </span><span class="s1">manifestpth</span><span class="s3">, </span><span class="s1">exc_info=</span><span class="s5">1</span><span class="s1">)</span>
+                <span class="s3">else</span><span class="s1">:</span>
+                    <span class="s3">if </span><span class="s1">manifestpth.startswith(winsxs):</span>
+                        <span class="s0"># Manifest is in Windows\WinSxS\Manifests, so assembly dir is in Windows\WinSxS</span>
+                        <span class="s1">assemblydir = os.path.join(winsxs</span><span class="s3">, </span><span class="s1">assemblynm)</span>
+                        <span class="s3">if not </span><span class="s1">os.path.isdir(assemblydir):</span>
+                            <span class="s1">logger.warning(</span><span class="s4">&quot;No such dir %s&quot;</span><span class="s3">, </span><span class="s1">assemblydir)</span>
+                            <span class="s1">logger.warning(</span><span class="s4">&quot;Assembly incomplete&quot;</span><span class="s1">)</span>
+                            <span class="s3">return </span><span class="s1">[]</span>
+                    <span class="s3">else</span><span class="s1">:</span>
+                        <span class="s0"># Manifest is inside assembly dir.</span>
+                        <span class="s1">assemblydir = os.path.dirname(manifestpth)</span>
+                    <span class="s1">files.append(manifestpth)</span>
+                    <span class="s3">for </span><span class="s1">file_ </span><span class="s3">in </span><span class="s1">self.files </span><span class="s3">or </span><span class="s1">manifest.files:</span>
+                        <span class="s1">fn = file_.find(assemblydir)</span>
+                        <span class="s3">if </span><span class="s1">fn:</span>
+                            <span class="s1">files.append(fn)</span>
+                        <span class="s3">else</span><span class="s1">:</span>
+                            <span class="s0"># If any of our files does not exist, the assembly is incomplete.</span>
+                            <span class="s1">logger.warning(</span><span class="s4">&quot;Assembly incomplete&quot;</span><span class="s1">)</span>
+                            <span class="s3">return </span><span class="s1">[]</span>
+                <span class="s3">return </span><span class="s1">files</span>
+
+        <span class="s1">logger.warning(</span><span class="s4">&quot;Assembly not found&quot;</span><span class="s1">)</span>
+        <span class="s3">return </span><span class="s1">[]</span>
+
+    <span class="s3">def </span><span class="s1">getid(self</span><span class="s3">, </span><span class="s1">language=</span><span class="s3">None, </span><span class="s1">version=</span><span class="s3">None</span><span class="s1">):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Return an identification string which uniquely names a manifest. 
+ 
+        This string is a combination of the manifest's processorArchitecture, name, publicKeyToken, version and 
+        language. 
+ 
+        Arguments: 
+        version (tuple or list of integers) - If version is given, use it instead of the manifest's version. 
+        &quot;&quot;&quot;</span>
+        <span class="s3">if not </span><span class="s1">self.name:</span>
+            <span class="s1">logger.warning(</span><span class="s4">&quot;Assembly metadata incomplete&quot;</span><span class="s1">)</span>
+            <span class="s3">return </span><span class="s4">&quot;&quot;</span>
+        <span class="s1">id = []</span>
+        <span class="s3">if </span><span class="s1">self.processorArchitecture:</span>
+            <span class="s1">id.append(self.processorArchitecture)</span>
+        <span class="s1">id.append(self.name)</span>
+        <span class="s3">if </span><span class="s1">self.publicKeyToken:</span>
+            <span class="s1">id.append(self.publicKeyToken)</span>
+        <span class="s3">if </span><span class="s1">version </span><span class="s3">or </span><span class="s1">self.version:</span>
+            <span class="s1">id.append(</span><span class="s4">&quot;.&quot;</span><span class="s1">.join([str(i) </span><span class="s3">for </span><span class="s1">i </span><span class="s3">in </span><span class="s1">version </span><span class="s3">or </span><span class="s1">self.version]))</span>
+        <span class="s3">if not </span><span class="s1">language:</span>
+            <span class="s1">language = self.getlanguage()</span>
+        <span class="s3">if </span><span class="s1">language:</span>
+            <span class="s1">id.append(language)</span>
+        <span class="s3">return </span><span class="s4">&quot;_&quot;</span><span class="s1">.join(id)</span>
+
+    <span class="s3">def </span><span class="s1">getlanguage(self</span><span class="s3">, </span><span class="s1">language=</span><span class="s3">None, </span><span class="s1">windowsversion=</span><span class="s3">None</span><span class="s1">):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Get and return the manifest's language as string. 
+ 
+        Can be either language-culture e.g. 'en-us' or a string indicating language neutrality, e.g. 'x-ww' on 
+        Windows XP or 'none' on Vista and later. 
+        &quot;&quot;&quot;</span>
+        <span class="s3">if not </span><span class="s1">language:</span>
+            <span class="s1">language = self.language</span>
+        <span class="s3">if </span><span class="s1">language </span><span class="s3">in </span><span class="s1">(</span><span class="s3">None, </span><span class="s4">&quot;&quot;</span><span class="s3">, </span><span class="s4">&quot;*&quot;</span><span class="s3">, </span><span class="s4">&quot;neutral&quot;</span><span class="s1">):</span>
+            <span class="s3">return </span><span class="s1">(LANGUAGE_NEUTRAL_NT5</span><span class="s3">, </span><span class="s1">LANGUAGE_NEUTRAL_NT6)[(windowsversion </span><span class="s3">or </span><span class="s1">sys.getwindowsversion()) &gt;= (</span><span class="s5">6</span><span class="s3">,</span><span class="s1">)]</span>
+        <span class="s3">return </span><span class="s1">language</span>
+
+    <span class="s3">def </span><span class="s1">getpolicyid(self</span><span class="s3">, </span><span class="s1">fuzzy=</span><span class="s3">True, </span><span class="s1">language=</span><span class="s3">None, </span><span class="s1">windowsversion=</span><span class="s3">None</span><span class="s1">):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Return an identification string which can be used to find a policy. 
+ 
+        This string is a combination of the manifest's processorArchitecture, major and minor version, name, 
+        publicKeyToken and language. 
+ 
+        Arguments: 
+            fuzzy (boolean): 
+                 If False, insert the full version in the id string. Default is True (omit). 
+            windowsversion (tuple or list of integers or None): 
+                If not specified (or None), default to sys.getwindowsversion(). 
+        &quot;&quot;&quot;</span>
+        <span class="s3">if not </span><span class="s1">self.name:</span>
+            <span class="s1">logger.warning(</span><span class="s4">&quot;Assembly metadata incomplete&quot;</span><span class="s1">)</span>
+            <span class="s3">return </span><span class="s4">&quot;&quot;</span>
+        <span class="s1">id = []</span>
+        <span class="s3">if </span><span class="s1">self.processorArchitecture:</span>
+            <span class="s1">id.append(self.processorArchitecture)</span>
+        <span class="s1">name = []</span>
+        <span class="s1">name.append(</span><span class="s4">&quot;policy&quot;</span><span class="s1">)</span>
+        <span class="s3">if </span><span class="s1">self.version:</span>
+            <span class="s1">name.append(str(self.version[</span><span class="s5">0</span><span class="s1">]))</span>
+            <span class="s1">name.append(str(self.version[</span><span class="s5">1</span><span class="s1">]))</span>
+        <span class="s1">name.append(self.name)</span>
+        <span class="s1">id.append(</span><span class="s4">&quot;.&quot;</span><span class="s1">.join(name))</span>
+        <span class="s3">if </span><span class="s1">self.publicKeyToken:</span>
+            <span class="s1">id.append(self.publicKeyToken)</span>
+        <span class="s3">if </span><span class="s1">self.version </span><span class="s3">and </span><span class="s1">(windowsversion </span><span class="s3">or </span><span class="s1">sys.getwindowsversion()) &gt;= (</span><span class="s5">6</span><span class="s3">,</span><span class="s1">):</span>
+            <span class="s0"># Vista and later</span>
+            <span class="s3">if </span><span class="s1">fuzzy:</span>
+                <span class="s1">id.append(</span><span class="s4">&quot;*&quot;</span><span class="s1">)</span>
+            <span class="s3">else</span><span class="s1">:</span>
+                <span class="s1">id.append(</span><span class="s4">&quot;.&quot;</span><span class="s1">.join([str(i) </span><span class="s3">for </span><span class="s1">i </span><span class="s3">in </span><span class="s1">self.version]))</span>
+        <span class="s3">if not </span><span class="s1">language:</span>
+            <span class="s1">language = self.getlanguage(windowsversion=windowsversion)</span>
+        <span class="s3">if </span><span class="s1">language:</span>
+            <span class="s1">id.append(language)</span>
+        <span class="s1">id.append(</span><span class="s4">&quot;*&quot;</span><span class="s1">)</span>
+        <span class="s1">id = </span><span class="s4">&quot;_&quot;</span><span class="s1">.join(id)</span>
+        <span class="s3">if </span><span class="s1">self.version </span><span class="s3">and </span><span class="s1">(windowsversion </span><span class="s3">or </span><span class="s1">sys.getwindowsversion()) &lt; (</span><span class="s5">6</span><span class="s3">,</span><span class="s1">):</span>
+            <span class="s0"># Windows XP</span>
+            <span class="s3">if </span><span class="s1">fuzzy:</span>
+                <span class="s1">id = os.path.join(id</span><span class="s3">, </span><span class="s4">&quot;*&quot;</span><span class="s1">)</span>
+            <span class="s3">else</span><span class="s1">:</span>
+                <span class="s1">id = os.path.join(id</span><span class="s3">, </span><span class="s4">&quot;.&quot;</span><span class="s1">.join([str(i) </span><span class="s3">for </span><span class="s1">i </span><span class="s3">in </span><span class="s1">self.version]))</span>
+        <span class="s3">return </span><span class="s1">id</span>
+
+    <span class="s3">def </span><span class="s1">load_dom(self</span><span class="s3">, </span><span class="s1">domtree</span><span class="s3">, </span><span class="s1">initialize=</span><span class="s3">True</span><span class="s1">):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Load manifest from DOM tree. 
+ 
+        If initialize is True (default), reset existing attributes first. 
+        &quot;&quot;&quot;</span>
+        <span class="s3">if </span><span class="s1">domtree.nodeType == Node.DOCUMENT_NODE:</span>
+            <span class="s1">rootElement = domtree.documentElement</span>
+        <span class="s3">elif </span><span class="s1">domtree.nodeType == Node.ELEMENT_NODE:</span>
+            <span class="s1">rootElement = domtree</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s3">raise </span><span class="s1">InvalidManifestError(</span>
+                <span class="s4">&quot;Invalid root element node type %s - has to be one of (DOCUMENT_NODE, ELEMENT_NODE)&quot; </span><span class="s1">%</span>
+                <span class="s1">rootElement.nodeType</span>
+            <span class="s1">)</span>
+        <span class="s1">allowed_names = (</span><span class="s4">&quot;assembly&quot;</span><span class="s3">, </span><span class="s4">&quot;assemblyBinding&quot;</span><span class="s3">, </span><span class="s4">&quot;configuration&quot;</span><span class="s3">, </span><span class="s4">&quot;dependentAssembly&quot;</span><span class="s1">)</span>
+        <span class="s3">if </span><span class="s1">rootElement.tagName </span><span class="s3">not in </span><span class="s1">allowed_names:</span>
+            <span class="s3">raise </span><span class="s1">InvalidManifestError(</span>
+                <span class="s4">&quot;Invalid root element &lt;%s&gt; - has to be one of &lt;%s&gt;&quot; </span><span class="s1">% (rootElement.tagName</span><span class="s3">, </span><span class="s4">&quot;&gt;, &lt;&quot;</span><span class="s1">.join(allowed_names))</span>
+            <span class="s1">)</span>
+        <span class="s0"># logger.info(&quot;loading manifest metadata from element &lt;%s&gt;&quot;, rootElement.tagName)</span>
+        <span class="s3">if </span><span class="s1">rootElement.tagName == </span><span class="s4">&quot;configuration&quot;</span><span class="s1">:</span>
+            <span class="s3">for </span><span class="s1">windows </span><span class="s3">in </span><span class="s1">rootElement.getCEByTN(</span><span class="s4">&quot;windows&quot;</span><span class="s1">):</span>
+                <span class="s3">for </span><span class="s1">assemblyBinding </span><span class="s3">in </span><span class="s1">windows.getCEByTN(</span><span class="s4">&quot;assemblyBinding&quot;</span><span class="s1">):</span>
+                    <span class="s1">self.load_dom(assemblyBinding</span><span class="s3">, </span><span class="s1">initialize)</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s3">if </span><span class="s1">initialize:</span>
+                <span class="s1">self.__init__()</span>
+            <span class="s1">self.manifestType = rootElement.tagName</span>
+            <span class="s1">self.manifestVersion = [int(i) </span><span class="s3">for </span><span class="s1">i </span><span class="s3">in </span><span class="s1">(rootElement.getA(</span><span class="s4">&quot;manifestVersion&quot;</span><span class="s1">) </span><span class="s3">or </span><span class="s4">&quot;1.0&quot;</span><span class="s1">).split(</span><span class="s4">&quot;.&quot;</span><span class="s1">)]</span>
+            <span class="s1">self.noInheritable = bool(rootElement.getFCEByTN(</span><span class="s4">&quot;noInheritable&quot;</span><span class="s1">))</span>
+            <span class="s1">self.noInherit = bool(rootElement.getFCEByTN(</span><span class="s4">&quot;noInherit&quot;</span><span class="s1">))</span>
+            <span class="s3">for </span><span class="s1">assemblyIdentity </span><span class="s3">in </span><span class="s1">rootElement.getCEByTN(</span><span class="s4">&quot;assemblyIdentity&quot;</span><span class="s1">):</span>
+                <span class="s1">self.type = assemblyIdentity.getA(</span><span class="s4">&quot;type&quot;</span><span class="s1">) </span><span class="s3">or None</span>
+                <span class="s1">self.name = assemblyIdentity.getA(</span><span class="s4">&quot;name&quot;</span><span class="s1">) </span><span class="s3">or None</span>
+                <span class="s1">self.language = assemblyIdentity.getA(</span><span class="s4">&quot;language&quot;</span><span class="s1">) </span><span class="s3">or None</span>
+                <span class="s1">self.processorArchitecture = assemblyIdentity.getA(</span><span class="s4">&quot;processorArchitecture&quot;</span><span class="s1">) </span><span class="s3">or None</span>
+                <span class="s1">version = assemblyIdentity.getA(</span><span class="s4">&quot;version&quot;</span><span class="s1">)</span>
+                <span class="s3">if </span><span class="s1">version:</span>
+                    <span class="s1">self.version = tuple(int(i) </span><span class="s3">for </span><span class="s1">i </span><span class="s3">in </span><span class="s1">version.split(</span><span class="s4">&quot;.&quot;</span><span class="s1">))</span>
+                <span class="s1">self.publicKeyToken = assemblyIdentity.getA(</span><span class="s4">&quot;publicKeyToken&quot;</span><span class="s1">) </span><span class="s3">or None</span>
+            <span class="s3">for </span><span class="s1">publisherPolicy </span><span class="s3">in </span><span class="s1">rootElement.getCEByTN(</span><span class="s4">&quot;publisherPolicy&quot;</span><span class="s1">):</span>
+                <span class="s1">self.applyPublisherPolicy = (publisherPolicy.getA(</span><span class="s4">&quot;apply&quot;</span><span class="s1">) </span><span class="s3">or </span><span class="s4">&quot;&quot;</span><span class="s1">).lower() == </span><span class="s4">&quot;yes&quot;</span>
+            <span class="s3">for </span><span class="s1">description </span><span class="s3">in </span><span class="s1">rootElement.getCEByTN(</span><span class="s4">&quot;description&quot;</span><span class="s1">):</span>
+                <span class="s3">if </span><span class="s1">description.firstChild:</span>
+                    <span class="s1">self.description = description.firstChild.wholeText</span>
+            <span class="s3">for </span><span class="s1">trustInfo </span><span class="s3">in </span><span class="s1">rootElement.getCEByTN(</span><span class="s4">&quot;trustInfo&quot;</span><span class="s1">):</span>
+                <span class="s3">for </span><span class="s1">security </span><span class="s3">in </span><span class="s1">trustInfo.getCEByTN(</span><span class="s4">&quot;security&quot;</span><span class="s1">):</span>
+                    <span class="s3">for </span><span class="s1">reqPriv </span><span class="s3">in </span><span class="s1">security.getCEByTN(</span><span class="s4">&quot;requestedPrivileges&quot;</span><span class="s1">):</span>
+                        <span class="s3">for </span><span class="s1">reqExeLev </span><span class="s3">in </span><span class="s1">reqPriv.getCEByTN(</span><span class="s4">&quot;requestedExecutionLevel&quot;</span><span class="s1">):</span>
+                            <span class="s1">self.requestedExecutionLevel = reqExeLev.getA(</span><span class="s4">&quot;level&quot;</span><span class="s1">)</span>
+                            <span class="s1">self.uiAccess = (reqExeLev.getA(</span><span class="s4">&quot;uiAccess&quot;</span><span class="s1">) </span><span class="s3">or </span><span class="s4">&quot;&quot;</span><span class="s1">).lower() == </span><span class="s4">&quot;true&quot;</span>
+            <span class="s3">if </span><span class="s1">rootElement.tagName == </span><span class="s4">&quot;assemblyBinding&quot;</span><span class="s1">:</span>
+                <span class="s1">dependencies = [rootElement]</span>
+            <span class="s3">else</span><span class="s1">:</span>
+                <span class="s1">dependencies = rootElement.getCEByTN(</span><span class="s4">&quot;dependency&quot;</span><span class="s1">)</span>
+            <span class="s3">for </span><span class="s1">dependency </span><span class="s3">in </span><span class="s1">dependencies:</span>
+                <span class="s3">for </span><span class="s1">dependentAssembly </span><span class="s3">in </span><span class="s1">dependency.getCEByTN(</span><span class="s4">&quot;dependentAssembly&quot;</span><span class="s1">):</span>
+                    <span class="s1">manifest = ManifestFromDOM(dependentAssembly)</span>
+                    <span class="s3">if not </span><span class="s1">manifest.name:</span>
+                        <span class="s0"># invalid, skip</span>
+                        <span class="s3">continue</span>
+                    <span class="s1">manifest.optional = (dependency.getA(</span><span class="s4">&quot;optional&quot;</span><span class="s1">) </span><span class="s3">or </span><span class="s4">&quot;&quot;</span><span class="s1">).lower() == </span><span class="s4">&quot;yes&quot;</span>
+                    <span class="s1">self.dependentAssemblies.append(manifest)</span>
+                    <span class="s3">if </span><span class="s1">self.filename:</span>
+                        <span class="s0"># Enable search for private assembly by assigning bogus filename</span>
+                        <span class="s0"># (only the directory has to be correct).</span>
+                        <span class="s1">self.dependentAssemblies[-</span><span class="s5">1</span><span class="s1">].filename = </span><span class="s4">&quot;:&quot;</span><span class="s1">.join((self.filename</span><span class="s3">, </span><span class="s1">manifest.name))</span>
+            <span class="s3">for </span><span class="s1">bindingRedirect </span><span class="s3">in </span><span class="s1">rootElement.getCEByTN(</span><span class="s4">&quot;bindingRedirect&quot;</span><span class="s1">):</span>
+                <span class="s1">oldVersion = tuple(</span>
+                    <span class="s1">tuple(int(i) </span><span class="s3">for </span><span class="s1">i </span><span class="s3">in </span><span class="s1">part.split(</span><span class="s4">&quot;.&quot;</span><span class="s1">)) </span><span class="s3">for </span><span class="s1">part </span><span class="s3">in </span><span class="s1">bindingRedirect.getA(</span><span class="s4">&quot;oldVersion&quot;</span><span class="s1">).split(</span><span class="s4">&quot;-&quot;</span><span class="s1">)</span>
+                <span class="s1">)</span>
+                <span class="s1">newVersion = tuple(int(i) </span><span class="s3">for </span><span class="s1">i </span><span class="s3">in </span><span class="s1">bindingRedirect.getA(</span><span class="s4">&quot;newVersion&quot;</span><span class="s1">).split(</span><span class="s4">&quot;.&quot;</span><span class="s1">))</span>
+                <span class="s1">self.bindingRedirects.append((oldVersion</span><span class="s3">, </span><span class="s1">newVersion))</span>
+            <span class="s3">for </span><span class="s1">file_ </span><span class="s3">in </span><span class="s1">rootElement.getCEByTN(</span><span class="s4">&quot;file&quot;</span><span class="s1">):</span>
+                <span class="s1">self.add_file(name=file_.getA(</span><span class="s4">&quot;name&quot;</span><span class="s1">)</span><span class="s3">, </span><span class="s1">hashalg=file_.getA(</span><span class="s4">&quot;hashalg&quot;</span><span class="s1">)</span><span class="s3">, </span><span class="s1">hash=file_.getA(</span><span class="s4">&quot;hash&quot;</span><span class="s1">))</span>
+
+    <span class="s3">def </span><span class="s1">parse(self</span><span class="s3">, </span><span class="s1">filename_or_file</span><span class="s3">, </span><span class="s1">initialize=</span><span class="s3">True</span><span class="s1">):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Load manifest from file or file object. 
+        &quot;&quot;&quot;</span>
+        <span class="s3">if </span><span class="s1">isinstance(filename_or_file</span><span class="s3">, </span><span class="s1">string_types):</span>
+            <span class="s1">filename = filename_or_file</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s1">filename = filename_or_file.name</span>
+        <span class="s3">try</span><span class="s1">:</span>
+            <span class="s1">domtree = minidom.parse(filename_or_file)</span>
+        <span class="s3">except </span><span class="s1">xml.parsers.expat.ExpatError </span><span class="s3">as </span><span class="s1">e:</span>
+            <span class="s1">args = [</span><span class="s4">'</span><span class="s3">\n  </span><span class="s4">File &quot;%r&quot;</span><span class="s3">\n   </span><span class="s4">' </span><span class="s1">% filename</span><span class="s3">, </span><span class="s1">str(e.args[</span><span class="s5">0</span><span class="s1">])]</span>
+            <span class="s3">raise </span><span class="s1">ManifestXMLParseError(</span><span class="s4">&quot; &quot;</span><span class="s1">.join(args)) </span><span class="s3">from </span><span class="s1">e</span>
+        <span class="s3">if </span><span class="s1">initialize:</span>
+            <span class="s1">self.__init__()</span>
+        <span class="s1">self.filename = filename</span>
+        <span class="s1">self.load_dom(domtree</span><span class="s3">, False</span><span class="s1">)</span>
+
+    <span class="s3">def </span><span class="s1">parse_string(self</span><span class="s3">, </span><span class="s1">xmlstr</span><span class="s3">, </span><span class="s1">initialize=</span><span class="s3">True</span><span class="s1">):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Load manifest from XML string. 
+        &quot;&quot;&quot;</span>
+        <span class="s3">try</span><span class="s1">:</span>
+            <span class="s1">domtree = minidom.parseString(xmlstr)</span>
+        <span class="s3">except </span><span class="s1">xml.parsers.expat.ExpatError </span><span class="s3">as </span><span class="s1">e:</span>
+            <span class="s3">raise </span><span class="s1">ManifestXMLParseError(e) </span><span class="s3">from </span><span class="s1">e</span>
+        <span class="s1">self.load_dom(domtree</span><span class="s3">, </span><span class="s1">initialize)</span>
+
+    <span class="s3">def </span><span class="s1">same_id(self</span><span class="s3">, </span><span class="s1">manifest</span><span class="s3">, </span><span class="s1">skip_version_check=</span><span class="s3">False</span><span class="s1">):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Return a bool indicating if another manifest has the same identitiy. 
+ 
+        This is done by comparing language, name, processorArchitecture, publicKeyToken, type and version. 
+        &quot;&quot;&quot;</span>
+        <span class="s3">if </span><span class="s1">skip_version_check:</span>
+            <span class="s1">version_check = </span><span class="s3">True</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s1">version_check = self.version == manifest.version</span>
+        <span class="s3">return </span><span class="s1">(</span>
+            <span class="s1">self.language == manifest.language </span><span class="s3">and </span><span class="s1">self.name == manifest.name</span>
+            <span class="s3">and </span><span class="s1">self.processorArchitecture == manifest.processorArchitecture</span>
+            <span class="s3">and </span><span class="s1">self.publicKeyToken == manifest.publicKeyToken </span><span class="s3">and </span><span class="s1">self.type == manifest.type </span><span class="s3">and </span><span class="s1">version_check</span>
+        <span class="s1">)</span>
+
+    <span class="s3">def </span><span class="s1">todom(self):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Return the manifest as DOM tree. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">doc = Document()</span>
+        <span class="s1">docE = doc.cE(self.manifestType)</span>
+        <span class="s3">if </span><span class="s1">self.manifestType == </span><span class="s4">&quot;assemblyBinding&quot;</span><span class="s1">:</span>
+            <span class="s1">cfg = doc.cE(</span><span class="s4">&quot;configuration&quot;</span><span class="s1">)</span>
+            <span class="s1">win = doc.cE(</span><span class="s4">&quot;windows&quot;</span><span class="s1">)</span>
+            <span class="s1">win.aChild(docE)</span>
+            <span class="s1">cfg.aChild(win)</span>
+            <span class="s1">doc.aChild(cfg)</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s1">doc.aChild(docE)</span>
+        <span class="s3">if </span><span class="s1">self.manifestType != </span><span class="s4">&quot;dependentAssembly&quot;</span><span class="s1">:</span>
+            <span class="s1">docE.setA(</span><span class="s4">&quot;xmlns&quot;</span><span class="s3">, </span><span class="s4">&quot;urn:schemas-microsoft-com:asm.v1&quot;</span><span class="s1">)</span>
+            <span class="s3">if </span><span class="s1">self.manifestType != </span><span class="s4">&quot;assemblyBinding&quot;</span><span class="s1">:</span>
+                <span class="s1">docE.setA(</span><span class="s4">&quot;manifestVersion&quot;</span><span class="s3">, </span><span class="s4">&quot;.&quot;</span><span class="s1">.join([str(i) </span><span class="s3">for </span><span class="s1">i </span><span class="s3">in </span><span class="s1">self.manifestVersion]))</span>
+        <span class="s3">if </span><span class="s1">self.noInheritable:</span>
+            <span class="s1">docE.aChild(doc.cE(</span><span class="s4">&quot;noInheritable&quot;</span><span class="s1">))</span>
+        <span class="s3">if </span><span class="s1">self.noInherit:</span>
+            <span class="s1">docE.aChild(doc.cE(</span><span class="s4">&quot;noInherit&quot;</span><span class="s1">))</span>
+        <span class="s1">aId = doc.cE(</span><span class="s4">&quot;assemblyIdentity&quot;</span><span class="s1">)</span>
+        <span class="s3">if </span><span class="s1">self.type:</span>
+            <span class="s1">aId.setAttribute(</span><span class="s4">&quot;type&quot;</span><span class="s3">, </span><span class="s1">self.type)</span>
+        <span class="s3">if </span><span class="s1">self.name:</span>
+            <span class="s1">aId.setAttribute(</span><span class="s4">&quot;name&quot;</span><span class="s3">, </span><span class="s1">self.name)</span>
+        <span class="s3">if </span><span class="s1">self.language:</span>
+            <span class="s1">aId.setAttribute(</span><span class="s4">&quot;language&quot;</span><span class="s3">, </span><span class="s1">self.language)</span>
+        <span class="s3">if </span><span class="s1">self.processorArchitecture:</span>
+            <span class="s1">aId.setAttribute(</span><span class="s4">&quot;processorArchitecture&quot;</span><span class="s3">, </span><span class="s1">self.processorArchitecture)</span>
+        <span class="s3">if </span><span class="s1">self.version:</span>
+            <span class="s1">aId.setAttribute(</span><span class="s4">&quot;version&quot;</span><span class="s3">, </span><span class="s4">&quot;.&quot;</span><span class="s1">.join([str(i) </span><span class="s3">for </span><span class="s1">i </span><span class="s3">in </span><span class="s1">self.version]))</span>
+        <span class="s3">if </span><span class="s1">self.publicKeyToken:</span>
+            <span class="s1">aId.setAttribute(</span><span class="s4">&quot;publicKeyToken&quot;</span><span class="s3">, </span><span class="s1">self.publicKeyToken)</span>
+        <span class="s3">if </span><span class="s1">aId.hasAttributes():</span>
+            <span class="s1">docE.aChild(aId)</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s1">aId.unlink()</span>
+        <span class="s3">if </span><span class="s1">self.applyPublisherPolicy </span><span class="s3">is not None</span><span class="s1">:</span>
+            <span class="s1">ppE = doc.cE(</span><span class="s4">&quot;publisherPolicy&quot;</span><span class="s1">)</span>
+            <span class="s3">if </span><span class="s1">self.applyPublisherPolicy:</span>
+                <span class="s1">ppE.setA(</span><span class="s4">&quot;apply&quot;</span><span class="s3">, </span><span class="s4">&quot;yes&quot;</span><span class="s1">)</span>
+            <span class="s3">else</span><span class="s1">:</span>
+                <span class="s1">ppE.setA(</span><span class="s4">&quot;apply&quot;</span><span class="s3">, </span><span class="s4">&quot;no&quot;</span><span class="s1">)</span>
+            <span class="s1">docE.aChild(ppE)</span>
+        <span class="s3">if </span><span class="s1">self.description:</span>
+            <span class="s1">descE = doc.cE(</span><span class="s4">&quot;description&quot;</span><span class="s1">)</span>
+            <span class="s1">descE.aChild(doc.cT(self.description))</span>
+            <span class="s1">docE.aChild(descE)</span>
+        <span class="s3">if </span><span class="s1">self.requestedExecutionLevel </span><span class="s3">in </span><span class="s1">(</span><span class="s4">&quot;asInvoker&quot;</span><span class="s3">, </span><span class="s4">&quot;highestAvailable&quot;</span><span class="s3">, </span><span class="s4">&quot;requireAdministrator&quot;</span><span class="s1">):</span>
+            <span class="s1">tE = doc.cE(</span><span class="s4">&quot;trustInfo&quot;</span><span class="s1">)</span>
+            <span class="s1">tE.setA(</span><span class="s4">&quot;xmlns&quot;</span><span class="s3">, </span><span class="s4">&quot;urn:schemas-microsoft-com:asm.v3&quot;</span><span class="s1">)</span>
+            <span class="s1">sE = doc.cE(</span><span class="s4">&quot;security&quot;</span><span class="s1">)</span>
+            <span class="s1">rpE = doc.cE(</span><span class="s4">&quot;requestedPrivileges&quot;</span><span class="s1">)</span>
+            <span class="s1">relE = doc.cE(</span><span class="s4">&quot;requestedExecutionLevel&quot;</span><span class="s1">)</span>
+            <span class="s1">relE.setA(</span><span class="s4">&quot;level&quot;</span><span class="s3">, </span><span class="s1">self.requestedExecutionLevel)</span>
+            <span class="s3">if </span><span class="s1">self.uiAccess:</span>
+                <span class="s1">relE.setA(</span><span class="s4">&quot;uiAccess&quot;</span><span class="s3">, </span><span class="s4">&quot;true&quot;</span><span class="s1">)</span>
+            <span class="s3">else</span><span class="s1">:</span>
+                <span class="s1">relE.setA(</span><span class="s4">&quot;uiAccess&quot;</span><span class="s3">, </span><span class="s4">&quot;false&quot;</span><span class="s1">)</span>
+            <span class="s1">rpE.aChild(relE)</span>
+            <span class="s1">sE.aChild(rpE)</span>
+            <span class="s1">tE.aChild(sE)</span>
+            <span class="s1">docE.aChild(tE)</span>
+        <span class="s3">if </span><span class="s1">self.dependentAssemblies:</span>
+            <span class="s3">for </span><span class="s1">assembly </span><span class="s3">in </span><span class="s1">self.dependentAssemblies:</span>
+                <span class="s3">if </span><span class="s1">self.manifestType != </span><span class="s4">&quot;assemblyBinding&quot;</span><span class="s1">:</span>
+                    <span class="s1">dE = doc.cE(</span><span class="s4">&quot;dependency&quot;</span><span class="s1">)</span>
+                    <span class="s3">if </span><span class="s1">assembly.optional:</span>
+                        <span class="s1">dE.setAttribute(</span><span class="s4">&quot;optional&quot;</span><span class="s3">, </span><span class="s4">&quot;yes&quot;</span><span class="s1">)</span>
+                <span class="s1">daE = doc.cE(</span><span class="s4">&quot;dependentAssembly&quot;</span><span class="s1">)</span>
+                <span class="s1">adom = assembly.todom()</span>
+                <span class="s3">for </span><span class="s1">child </span><span class="s3">in </span><span class="s1">adom.documentElement.childNodes:</span>
+                    <span class="s1">daE.aChild(child.cloneNode(</span><span class="s3">False</span><span class="s1">))</span>
+                <span class="s1">adom.unlink()</span>
+                <span class="s3">if </span><span class="s1">self.manifestType != </span><span class="s4">&quot;assemblyBinding&quot;</span><span class="s1">:</span>
+                    <span class="s1">dE.aChild(daE)</span>
+                    <span class="s1">docE.aChild(dE)</span>
+                <span class="s3">else</span><span class="s1">:</span>
+                    <span class="s1">docE.aChild(daE)</span>
+        <span class="s3">if </span><span class="s1">self.bindingRedirects:</span>
+            <span class="s3">for </span><span class="s1">bindingRedirect </span><span class="s3">in </span><span class="s1">self.bindingRedirects:</span>
+                <span class="s1">brE = doc.cE(</span><span class="s4">&quot;bindingRedirect&quot;</span><span class="s1">)</span>
+                <span class="s1">brE.setAttribute(</span>
+                    <span class="s4">&quot;oldVersion&quot;</span><span class="s3">, </span><span class="s4">&quot;-&quot;</span><span class="s1">.join([</span><span class="s4">&quot;.&quot;</span><span class="s1">.join([str(i) </span><span class="s3">for </span><span class="s1">i </span><span class="s3">in </span><span class="s1">part]) </span><span class="s3">for </span><span class="s1">part </span><span class="s3">in </span><span class="s1">bindingRedirect[</span><span class="s5">0</span><span class="s1">]])</span>
+                <span class="s1">)</span>
+                <span class="s1">brE.setAttribute(</span><span class="s4">&quot;newVersion&quot;</span><span class="s3">, </span><span class="s4">&quot;.&quot;</span><span class="s1">.join([str(i) </span><span class="s3">for </span><span class="s1">i </span><span class="s3">in </span><span class="s1">bindingRedirect[</span><span class="s5">1</span><span class="s1">]]))</span>
+                <span class="s1">docE.aChild(brE)</span>
+        <span class="s3">if </span><span class="s1">self.files:</span>
+            <span class="s3">for </span><span class="s1">file_ </span><span class="s3">in </span><span class="s1">self.files:</span>
+                <span class="s1">fE = doc.cE(</span><span class="s4">&quot;file&quot;</span><span class="s1">)</span>
+                <span class="s3">for </span><span class="s1">attr </span><span class="s3">in </span><span class="s1">(</span><span class="s4">&quot;name&quot;</span><span class="s3">, </span><span class="s4">&quot;hashalg&quot;</span><span class="s3">, </span><span class="s4">&quot;hash&quot;</span><span class="s1">):</span>
+                    <span class="s1">val = getattr(file_</span><span class="s3">, </span><span class="s1">attr)</span>
+                    <span class="s3">if </span><span class="s1">val:</span>
+                        <span class="s1">fE.setA(attr</span><span class="s3">, </span><span class="s1">val)</span>
+                <span class="s1">docE.aChild(fE)</span>
+
+        <span class="s0"># Add compatibility section: http://stackoverflow.com/a/10158920</span>
+        <span class="s3">if </span><span class="s1">self.manifestType == </span><span class="s4">&quot;assembly&quot;</span><span class="s1">:</span>
+            <span class="s1">cE = doc.cE(</span><span class="s4">&quot;compatibility&quot;</span><span class="s1">)</span>
+            <span class="s1">cE.setAttribute(</span><span class="s4">&quot;xmlns&quot;</span><span class="s3">, </span><span class="s4">&quot;urn:schemas-microsoft-com:compatibility.v1&quot;</span><span class="s1">)</span>
+            <span class="s1">caE = doc.cE(</span><span class="s4">&quot;application&quot;</span><span class="s1">)</span>
+            <span class="s1">supportedOS_guids = {</span>
+                <span class="s4">&quot;Vista&quot;</span><span class="s1">: </span><span class="s4">&quot;{e2011457-1546-43c5-a5fe-008deee3d3f0}&quot;</span><span class="s3">,</span>
+                <span class="s4">&quot;7&quot;</span><span class="s1">: </span><span class="s4">&quot;{35138b9a-5d96-4fbd-8e2d-a2440225f93a}&quot;</span><span class="s3">,</span>
+                <span class="s4">&quot;8&quot;</span><span class="s1">: </span><span class="s4">&quot;{4a2f28e3-53b9-4441-ba9c-d69d4a4a6e38}&quot;</span><span class="s3">,</span>
+                <span class="s4">&quot;8.1&quot;</span><span class="s1">: </span><span class="s4">&quot;{1f676c76-80e1-4239-95bb-83d0f6d0da78}&quot;</span><span class="s3">,</span>
+                <span class="s4">&quot;10&quot;</span><span class="s1">: </span><span class="s4">&quot;{8e0f7a12-bfb3-4fe8-b9a5-48fd50a15a9a}&quot;</span>
+            <span class="s1">}</span>
+            <span class="s3">for </span><span class="s1">guid </span><span class="s3">in </span><span class="s1">supportedOS_guids.values():</span>
+                <span class="s1">sosE = doc.cE(</span><span class="s4">&quot;supportedOS&quot;</span><span class="s1">)</span>
+                <span class="s1">sosE.setAttribute(</span><span class="s4">&quot;Id&quot;</span><span class="s3">, </span><span class="s1">guid)</span>
+                <span class="s1">caE.aChild(sosE)</span>
+            <span class="s1">cE.aChild(caE)</span>
+            <span class="s1">docE.aChild(cE)</span>
+
+        <span class="s0"># Add application.windowsSettings section to enable longPathAware</span>
+        <span class="s0"># option (issue #5423).</span>
+        <span class="s3">if </span><span class="s1">self.manifestType == </span><span class="s4">&quot;assembly&quot;</span><span class="s1">:</span>
+            <span class="s1">aE = doc.cE(</span><span class="s4">&quot;application&quot;</span><span class="s1">)</span>
+            <span class="s1">aE.setAttribute(</span><span class="s4">&quot;xmlns&quot;</span><span class="s3">, </span><span class="s4">&quot;urn:schemas-microsoft-com:asm.v3&quot;</span><span class="s1">)</span>
+            <span class="s1">wsE = doc.cE(</span><span class="s4">&quot;windowsSettings&quot;</span><span class="s1">)</span>
+            <span class="s1">lpaE = doc.cE(</span><span class="s4">&quot;longPathAware&quot;</span><span class="s1">)</span>
+            <span class="s1">lpaE.setAttribute(</span><span class="s4">&quot;xmlns&quot;</span><span class="s3">, </span><span class="s4">&quot;http://schemas.microsoft.com/SMI/2016/WindowsSettings&quot;</span><span class="s1">)</span>
+            <span class="s1">lpaT = doc.cT(</span><span class="s4">&quot;true&quot;</span><span class="s1">)</span>
+            <span class="s1">lpaE.aChild(lpaT)</span>
+            <span class="s1">wsE.aChild(lpaE)</span>
+            <span class="s1">aE.aChild(wsE)</span>
+            <span class="s1">docE.aChild(aE)</span>
+
+        <span class="s3">return </span><span class="s1">doc</span>
+
+    <span class="s3">def </span><span class="s1">toprettyxml(self</span><span class="s3">, </span><span class="s1">indent=</span><span class="s4">&quot;  &quot;</span><span class="s3">, </span><span class="s1">newl=os.linesep</span><span class="s3">, </span><span class="s1">encoding=</span><span class="s4">&quot;UTF-8&quot;</span><span class="s1">):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Return the manifest as pretty-printed XML. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">domtree = self.todom()</span>
+        <span class="s0"># WARNING: The XML declaration has to follow the order version-encoding-standalone (standalone being optional),</span>
+        <span class="s0"># otherwise if it is embedded in an exe the exe will fail to launch! ('application configuration incorrect')</span>
+        <span class="s1">xmlstr = domtree.toprettyxml(indent</span><span class="s3">, </span><span class="s1">newl</span><span class="s3">, </span><span class="s1">encoding)</span>
+        <span class="s1">xmlstr = xmlstr.decode(encoding).strip(os.linesep).replace(</span>
+            <span class="s4">'&lt;?xml version=&quot;1.0&quot; encoding=&quot;%s&quot;?&gt;' </span><span class="s1">% encoding</span><span class="s3">,</span>
+            <span class="s4">'&lt;?xml version=&quot;1.0&quot; encoding=&quot;%s&quot; standalone=&quot;yes&quot;?&gt;' </span><span class="s1">% encoding</span>
+        <span class="s1">)</span>
+        <span class="s1">domtree.unlink()</span>
+        <span class="s3">return </span><span class="s1">xmlstr</span>
+
+    <span class="s3">def </span><span class="s1">toxml(self</span><span class="s3">, </span><span class="s1">encoding=</span><span class="s4">&quot;UTF-8&quot;</span><span class="s1">):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Return the manifest as XML. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">domtree = self.todom()</span>
+        <span class="s0"># WARNING: The XML declaration has to follow the order version-encoding-standalone (standalone being optional),</span>
+        <span class="s0"># otherwise if it is embedded in an exe the exe will fail to launch! ('application configuration incorrect')</span>
+        <span class="s1">xmlstr = domtree.toxml(encoding).decode().replace(</span>
+            <span class="s4">'&lt;?xml version=&quot;1.0&quot; encoding=&quot;%s&quot;?&gt;' </span><span class="s1">% encoding</span><span class="s3">,</span>
+            <span class="s4">'&lt;?xml version=&quot;1.0&quot; encoding=&quot;%s&quot; standalone=&quot;yes&quot;?&gt;' </span><span class="s1">% encoding</span>
+        <span class="s1">)</span>
+        <span class="s1">domtree.unlink()</span>
+        <span class="s3">return </span><span class="s1">xmlstr</span>
+
+    <span class="s3">def </span><span class="s1">update_resources(self</span><span class="s3">, </span><span class="s1">dstpath</span><span class="s3">, </span><span class="s1">names=</span><span class="s3">None, </span><span class="s1">languages=</span><span class="s3">None</span><span class="s1">):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Update or add manifest resource in dll/exe file dstpath. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">UpdateManifestResourcesFromXML(dstpath</span><span class="s3">, </span><span class="s1">self.toprettyxml().encode(</span><span class="s4">&quot;UTF-8&quot;</span><span class="s1">)</span><span class="s3">, </span><span class="s1">names</span><span class="s3">, </span><span class="s1">languages)</span>
+
+    <span class="s3">def </span><span class="s1">writeprettyxml(self</span><span class="s3">, </span><span class="s1">filename_or_file=</span><span class="s3">None, </span><span class="s1">indent=</span><span class="s4">&quot;  &quot;</span><span class="s3">, </span><span class="s1">newl=os.linesep</span><span class="s3">, </span><span class="s1">encoding=</span><span class="s4">&quot;UTF-8&quot;</span><span class="s1">):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Write the manifest as XML to a file or file object. 
+        &quot;&quot;&quot;</span>
+        <span class="s3">if not </span><span class="s1">filename_or_file:</span>
+            <span class="s1">filename_or_file = self.filename</span>
+        <span class="s3">if </span><span class="s1">isinstance(filename_or_file</span><span class="s3">, </span><span class="s1">string_types):</span>
+            <span class="s1">filename_or_file = open(filename_or_file</span><span class="s3">, </span><span class="s4">&quot;wb&quot;</span><span class="s1">)</span>
+        <span class="s1">xmlstr = self.toprettyxml(indent</span><span class="s3">, </span><span class="s1">newl</span><span class="s3">, </span><span class="s1">encoding)</span>
+        <span class="s3">with </span><span class="s1">filename_or_file:</span>
+            <span class="s1">filename_or_file.write(xmlstr.encode())</span>
+
+    <span class="s3">def </span><span class="s1">writexml(self</span><span class="s3">, </span><span class="s1">filename_or_file=</span><span class="s3">None, </span><span class="s1">indent=</span><span class="s4">&quot;  &quot;</span><span class="s3">, </span><span class="s1">newl=os.linesep</span><span class="s3">, </span><span class="s1">encoding=</span><span class="s4">&quot;UTF-8&quot;</span><span class="s1">):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Write the manifest as XML to a file or file object. 
+        &quot;&quot;&quot;</span>
+        <span class="s3">if not </span><span class="s1">filename_or_file:</span>
+            <span class="s1">filename_or_file = self.filename</span>
+        <span class="s3">if </span><span class="s1">isinstance(filename_or_file</span><span class="s3">, </span><span class="s1">string_types):</span>
+            <span class="s1">filename_or_file = open(filename_or_file</span><span class="s3">, </span><span class="s4">&quot;wb&quot;</span><span class="s1">)</span>
+        <span class="s1">xmlstr = self.toxml(encoding)</span>
+        <span class="s3">with </span><span class="s1">filename_or_file:</span>
+            <span class="s1">filename_or_file.write(xmlstr.encode())</span>
+
+
+<span class="s3">def </span><span class="s1">ManifestFromResFile(filename</span><span class="s3">, </span><span class="s1">names=</span><span class="s3">None, </span><span class="s1">languages=</span><span class="s3">None</span><span class="s1">):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Create and return manifest instance from resource in dll/exe file. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">res = GetManifestResources(filename</span><span class="s3">, </span><span class="s1">names</span><span class="s3">, </span><span class="s1">languages)</span>
+    <span class="s1">pth = []</span>
+    <span class="s3">if </span><span class="s1">res </span><span class="s3">and </span><span class="s1">res[RT_MANIFEST]:</span>
+        <span class="s3">while </span><span class="s1">isinstance(res</span><span class="s3">, </span><span class="s1">dict) </span><span class="s3">and </span><span class="s1">res.keys():</span>
+            <span class="s1">key</span><span class="s3">, </span><span class="s1">res = next(iter(res.items()))</span>
+            <span class="s1">pth.append(str(key))</span>
+    <span class="s3">if </span><span class="s1">isinstance(res</span><span class="s3">, </span><span class="s1">dict):</span>
+        <span class="s3">raise </span><span class="s1">InvalidManifestError(</span><span class="s4">&quot;No matching manifest resource found in '%s'&quot; </span><span class="s1">% filename)</span>
+    <span class="s1">manifest = Manifest()</span>
+    <span class="s1">manifest.filename = </span><span class="s4">&quot;:&quot;</span><span class="s1">.join([filename] + pth)</span>
+    <span class="s1">manifest.parse_string(res</span><span class="s3">, False</span><span class="s1">)</span>
+    <span class="s3">return </span><span class="s1">manifest</span>
+
+
+<span class="s3">def </span><span class="s1">ManifestFromDOM(domtree):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Create and return manifest instance from DOM tree. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">manifest = Manifest()</span>
+    <span class="s1">manifest.load_dom(domtree)</span>
+    <span class="s3">return </span><span class="s1">manifest</span>
+
+
+<span class="s3">def </span><span class="s1">ManifestFromXML(xmlstr):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Create and return manifest instance from XML. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">manifest = Manifest()</span>
+    <span class="s1">manifest.parse_string(xmlstr)</span>
+    <span class="s3">return </span><span class="s1">manifest</span>
+
+
+<span class="s3">def </span><span class="s1">ManifestFromXMLFile(filename_or_file):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Create and return manifest instance from file. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">manifest = Manifest()</span>
+    <span class="s1">manifest.parse(filename_or_file)</span>
+    <span class="s3">return </span><span class="s1">manifest</span>
+
+
+<span class="s3">def </span><span class="s1">GetManifestResources(filename</span><span class="s3">, </span><span class="s1">names=</span><span class="s3">None, </span><span class="s1">languages=</span><span class="s3">None</span><span class="s1">):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Get manifest resources from file. 
+    &quot;&quot;&quot;</span>
+    <span class="s3">return </span><span class="s1">winresource.GetResources(filename</span><span class="s3">, </span><span class="s1">[RT_MANIFEST]</span><span class="s3">, </span><span class="s1">names</span><span class="s3">, </span><span class="s1">languages)</span>
+
+
+<span class="s3">def </span><span class="s1">UpdateManifestResourcesFromXML(dstpath</span><span class="s3">, </span><span class="s1">xmlstr</span><span class="s3">, </span><span class="s1">names=</span><span class="s3">None, </span><span class="s1">languages=</span><span class="s3">None</span><span class="s1">):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Update or add manifest XML as resource in dstpath. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">logger.info(</span><span class="s4">&quot;Updating manifest in %s&quot;</span><span class="s3">, </span><span class="s1">dstpath)</span>
+    <span class="s3">if </span><span class="s1">dstpath.lower().endswith(</span><span class="s4">&quot;.exe&quot;</span><span class="s1">):</span>
+        <span class="s1">name = </span><span class="s5">1</span>
+    <span class="s3">else</span><span class="s1">:</span>
+        <span class="s1">name = </span><span class="s5">2</span>
+    <span class="s1">winresource.UpdateResources(dstpath</span><span class="s3">, </span><span class="s1">xmlstr</span><span class="s3">, </span><span class="s1">RT_MANIFEST</span><span class="s3">, </span><span class="s1">names </span><span class="s3">or </span><span class="s1">[name]</span><span class="s3">, </span><span class="s1">languages </span><span class="s3">or </span><span class="s1">[</span><span class="s5">0</span><span class="s3">, </span><span class="s4">&quot;*&quot;</span><span class="s1">])</span>
+
+
+<span class="s3">def </span><span class="s1">UpdateManifestResourcesFromXMLFile(dstpath</span><span class="s3">, </span><span class="s1">srcpath</span><span class="s3">, </span><span class="s1">names=</span><span class="s3">None, </span><span class="s1">languages=</span><span class="s3">None</span><span class="s1">):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Update or add manifest XML from srcpath as resource in dstpath. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">logger.info(</span><span class="s4">&quot;Updating manifest from %s in %s&quot;</span><span class="s3">, </span><span class="s1">srcpath</span><span class="s3">, </span><span class="s1">dstpath)</span>
+    <span class="s3">if </span><span class="s1">dstpath.lower().endswith(</span><span class="s4">&quot;.exe&quot;</span><span class="s1">):</span>
+        <span class="s1">name = </span><span class="s5">1</span>
+    <span class="s3">else</span><span class="s1">:</span>
+        <span class="s1">name = </span><span class="s5">2</span>
+    <span class="s1">winresource.UpdateResourcesFromDataFile(dstpath</span><span class="s3">, </span><span class="s1">srcpath</span><span class="s3">, </span><span class="s1">RT_MANIFEST</span><span class="s3">, </span><span class="s1">names </span><span class="s3">or </span><span class="s1">[name]</span><span class="s3">, </span><span class="s1">languages </span><span class="s3">or </span><span class="s1">[</span><span class="s5">0</span><span class="s3">, </span><span class="s4">&quot;*&quot;</span><span class="s1">])</span>
+
+
+<span class="s3">def </span><span class="s1">create_manifest(filename</span><span class="s3">, </span><span class="s1">manifest</span><span class="s3">, </span><span class="s1">console</span><span class="s3">, </span><span class="s1">uac_admin=</span><span class="s3">False, </span><span class="s1">uac_uiaccess=</span><span class="s3">False</span><span class="s1">):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Create assembly manifest. 
+    &quot;&quot;&quot;</span>
+    <span class="s3">if not </span><span class="s1">manifest:</span>
+        <span class="s1">manifest = ManifestFromXMLFile(filename)</span>
+        <span class="s0"># /path/NAME.exe.manifest - split extension twice to get NAME.</span>
+        <span class="s1">name = os.path.basename(filename)</span>
+        <span class="s1">manifest.name = os.path.splitext(os.path.splitext(name)[</span><span class="s5">0</span><span class="s1">])[</span><span class="s5">0</span><span class="s1">]</span>
+    <span class="s3">elif </span><span class="s1">isinstance(manifest</span><span class="s3">, </span><span class="s1">string_types) </span><span class="s3">and </span><span class="s4">&quot;&lt;&quot; </span><span class="s3">in </span><span class="s1">manifest:</span>
+        <span class="s0"># Assume XML string</span>
+        <span class="s1">manifest = ManifestFromXML(manifest)</span>
+    <span class="s3">elif not </span><span class="s1">isinstance(manifest</span><span class="s3">, </span><span class="s1">Manifest):</span>
+        <span class="s0"># Assume filename</span>
+        <span class="s1">manifest = ManifestFromXMLFile(manifest)</span>
+    <span class="s1">dep_names = set([dep.name </span><span class="s3">for </span><span class="s1">dep </span><span class="s3">in </span><span class="s1">manifest.dependentAssemblies])</span>
+    <span class="s3">if </span><span class="s1">manifest.filename != filename:</span>
+        <span class="s0"># Update dependent assemblies.</span>
+        <span class="s1">depmanifest = ManifestFromXMLFile(filename)</span>
+        <span class="s3">for </span><span class="s1">assembly </span><span class="s3">in </span><span class="s1">depmanifest.dependentAssemblies:</span>
+            <span class="s3">if </span><span class="s1">assembly.name </span><span class="s3">not in </span><span class="s1">dep_names:</span>
+                <span class="s1">manifest.dependentAssemblies.append(assembly)</span>
+                <span class="s1">dep_names.add(assembly.name)</span>
+    <span class="s3">if </span><span class="s4">&quot;Microsoft.Windows.Common-Controls&quot; </span><span class="s3">not in </span><span class="s1">dep_names:</span>
+        <span class="s0"># Add Microsoft.Windows.Common-Controls to dependent assemblies.</span>
+        <span class="s1">manifest.dependentAssemblies.append(</span>
+            <span class="s1">Manifest(</span>
+                <span class="s1">manifestType=</span><span class="s4">'dependentAssembly'</span><span class="s3">,</span>
+                <span class="s1">type_=</span><span class="s4">&quot;win32&quot;</span><span class="s3">,</span>
+                <span class="s1">name=</span><span class="s4">&quot;Microsoft.Windows.Common-Controls&quot;</span><span class="s3">,</span>
+                <span class="s1">language=</span><span class="s4">&quot;*&quot;</span><span class="s3">,</span>
+                <span class="s1">processorArchitecture=processor_architecture()</span><span class="s3">,</span>
+                <span class="s1">version=(</span><span class="s5">6</span><span class="s3">, </span><span class="s5">0</span><span class="s3">, </span><span class="s5">0</span><span class="s3">, </span><span class="s5">0</span><span class="s1">)</span><span class="s3">,</span>
+                <span class="s1">publicKeyToken=</span><span class="s4">&quot;6595b64144ccf1df&quot;</span><span class="s3">,</span>
+            <span class="s1">)</span>
+        <span class="s1">)</span>
+    <span class="s3">if </span><span class="s1">uac_admin:</span>
+        <span class="s1">manifest.requestedExecutionLevel = </span><span class="s4">'requireAdministrator'</span>
+    <span class="s3">else</span><span class="s1">:</span>
+        <span class="s1">manifest.requestedExecutionLevel = </span><span class="s4">'asInvoker'</span>
+    <span class="s3">if </span><span class="s1">uac_uiaccess:</span>
+        <span class="s1">manifest.uiAccess = </span><span class="s3">True</span>
+
+    <span class="s0"># Only write a new manifest if it is different from the old.</span>
+    <span class="s1">need_new = </span><span class="s3">not </span><span class="s1">os.path.exists(filename)</span>
+    <span class="s3">if not </span><span class="s1">need_new:</span>
+        <span class="s1">old_xml = ManifestFromXMLFile(filename).toprettyxml().replace(</span><span class="s4">'</span><span class="s3">\r</span><span class="s4">'</span><span class="s3">, </span><span class="s4">''</span><span class="s1">)</span>
+        <span class="s1">new_xml = manifest.toprettyxml().replace(</span><span class="s4">'</span><span class="s3">\r</span><span class="s4">'</span><span class="s3">, </span><span class="s4">''</span><span class="s1">)</span>
+
+        <span class="s0"># This only works if PYTHONHASHSEED is set in environment.</span>
+        <span class="s1">need_new = (old_xml != new_xml)</span>
+    <span class="s3">if </span><span class="s1">need_new:</span>
+        <span class="s1">manifest.writeprettyxml(filename)</span>
+
+    <span class="s3">return </span><span class="s1">manifest</span>
+
+
+<span class="s3">def </span><span class="s1">processor_architecture():</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Detect processor architecture for assembly manifest. 
+ 
+    According to: 
+    http://msdn.microsoft.com/en-us/library/windows/desktop/aa374219(v=vs.85).aspx 
+    item processorArchitecture in assembly manifest is 
+ 
+    'x86' - 32bit Windows 
+    'amd64' - 64bit Windows 
+    &quot;&quot;&quot;</span>
+    <span class="s3">if </span><span class="s1">compat.architecture == </span><span class="s4">'32bit'</span><span class="s1">:</span>
+        <span class="s3">return </span><span class="s4">'x86'</span>
+    <span class="s3">else</span><span class="s1">:</span>
+        <span class="s3">return </span><span class="s4">'amd64'</span>
+
+
+<span class="s3">if </span><span class="s1">__name__ == </span><span class="s4">&quot;__main__&quot;</span><span class="s1">:</span>
+    <span class="s1">dstpath = sys.argv[</span><span class="s5">1</span><span class="s1">]</span>
+    <span class="s1">srcpath = sys.argv[</span><span class="s5">2</span><span class="s1">]</span>
+    <span class="s1">UpdateManifestResourcesFromXMLFile(dstpath</span><span class="s3">, </span><span class="s1">srcpath)</span>
+</pre>
+</body>
+</html>

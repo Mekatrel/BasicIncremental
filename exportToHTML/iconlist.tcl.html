@@ -1,0 +1,713 @@
+<html>
+<head>
+<title>iconlist.tcl</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #a9b7c6;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+iconlist.tcl</font>
+</center></td></tr></table>
+<pre><span class="s0"># iconlist.tcl</span>
+<span class="s0">#</span>
+<span class="s0">#	Implements the icon-list megawidget used in the &quot;Tk&quot; standard file</span>
+<span class="s0">#	selection dialog boxes.</span>
+<span class="s0">#</span>
+<span class="s0"># Copyright (c) 1994-1998 Sun Microsystems, Inc.</span>
+<span class="s0"># Copyright (c) 2009 Donal K. Fellows</span>
+<span class="s0">#</span>
+<span class="s0"># See the file &quot;license.terms&quot; for information on usage and redistribution of</span>
+<span class="s0"># this file, and for a DISCLAIMER OF ALL WARRANTIES.</span>
+<span class="s0">#</span>
+<span class="s0"># API Summary:</span>
+<span class="s0">#	tk::IconList &lt;path&gt; ?&lt;option&gt; &lt;value&gt;? ...</span>
+<span class="s0">#	&lt;path&gt; add &lt;imageName&gt; &lt;itemList&gt;</span>
+<span class="s0">#	&lt;path&gt; cget &lt;option&gt;</span>
+<span class="s0">#	&lt;path&gt; configure ?&lt;option&gt;? ?&lt;value&gt;? ...</span>
+<span class="s0">#	&lt;path&gt; deleteall</span>
+<span class="s0">#	&lt;path&gt; destroy</span>
+<span class="s0">#	&lt;path&gt; get &lt;itemIndex&gt;</span>
+<span class="s0">#	&lt;path&gt; index &lt;index&gt;</span>
+<span class="s0">#	&lt;path&gt; invoke</span>
+<span class="s0">#	&lt;path&gt; see &lt;index&gt;</span>
+<span class="s0">#	&lt;path&gt; selection anchor ?&lt;int&gt;?</span>
+<span class="s0">#	&lt;path&gt; selection clear &lt;first&gt; ?&lt;last&gt;?</span>
+<span class="s0">#	&lt;path&gt; selection get</span>
+<span class="s0">#	&lt;path&gt; selection includes &lt;item&gt;</span>
+<span class="s0">#	&lt;path&gt; selection set &lt;first&gt; ?&lt;last&gt;?</span>
+
+<span class="s0">package require Tk 8.6</span>
+
+<span class="s0">::tk::Megawidget create ::tk::IconList ::tk::FocusableWidget {</span>
+    <span class="s0">variable w canvas sbar accel accelCB fill font index \</span>
+	<span class="s0">itemList itemsPerColumn list maxIH maxIW maxTH maxTW noScroll \</span>
+	<span class="s0">numItems oldX oldY options rect selected selection textList</span>
+    <span class="s0">constructor args {</span>
+	<span class="s0">next {*}$args</span>
+	<span class="s0">set accelCB {}</span>
+    <span class="s0">}</span>
+    <span class="s0">destructor {</span>
+	<span class="s0">my Reset</span>
+	<span class="s0">next</span>
+    <span class="s0">}</span>
+
+    <span class="s0">method GetSpecs {} {</span>
+	<span class="s0">concat [next] {</span>
+	    <span class="s0">{-command &quot;&quot; &quot;&quot; &quot;&quot;}</span>
+	    <span class="s0">{-font &quot;&quot; &quot;&quot; &quot;TkIconFont&quot;}</span>
+	    <span class="s0">{-multiple &quot;&quot; &quot;&quot; &quot;0&quot;}</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+
+    <span class="s0"># ----------------------------------------------------------------------</span>
+
+    <span class="s0">method index i {</span>
+	<span class="s0">if {![info exist list]} {</span>
+	    <span class="s0">set list {}</span>
+	<span class="s0">}</span>
+	<span class="s0">switch -regexp -- $i {</span>
+	    <span class="s0">&quot;^-?[0-9]+$&quot; {</span>
+		<span class="s0">if {$i &lt; 0} {</span>
+		    <span class="s0">set i 0</span>
+		<span class="s0">}</span>
+		<span class="s0">if {$i &gt;= [llength $list]} {</span>
+		    <span class="s0">set i [expr {[llength $list] - 1}]</span>
+		<span class="s0">}</span>
+		<span class="s0">return $i</span>
+	    <span class="s0">}</span>
+	    <span class="s0">&quot;^anchor$&quot; {</span>
+		<span class="s0">return $index(anchor)</span>
+	    <span class="s0">}</span>
+	    <span class="s0">&quot;^end$&quot; {</span>
+		<span class="s0">return [llength $list]</span>
+	    <span class="s0">}</span>
+	    <span class="s0">&quot;@-?[0-9]+,-?[0-9]+&quot; {</span>
+		<span class="s0">scan $i &quot;@%d,%d&quot; x y</span>
+		<span class="s0">set item [$canvas find closest \</span>
+			<span class="s0">[$canvas canvasx $x] [$canvas canvasy $y]]</span>
+		<span class="s0">return [lindex [$canvas itemcget $item -tags] 1]</span>
+	    <span class="s0">}</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+
+    <span class="s0">method selection {op args} {</span>
+	<span class="s0">switch -exact -- $op {</span>
+	    <span class="s0">anchor {</span>
+		<span class="s0">if {[llength $args] == 1} {</span>
+		    <span class="s0">set index(anchor) [$w index [lindex $args 0]]</span>
+		<span class="s0">} else {</span>
+		    <span class="s0">return $index(anchor)</span>
+		<span class="s0">}</span>
+	    <span class="s0">}</span>
+	    <span class="s0">clear {</span>
+		<span class="s0">switch [llength $args] {</span>
+		    <span class="s0">2 {</span>
+			<span class="s0">lassign $args first last</span>
+		    <span class="s0">}</span>
+		    <span class="s0">1 {</span>
+			<span class="s0">set first [set last [lindex $args 0]]</span>
+		    <span class="s0">}</span>
+		    <span class="s0">default {</span>
+			<span class="s0">return -code error -errorcode {TCL WRONGARGS} \</span>
+			    <span class="s0">&quot;wrong # args: should be\</span>
+			    <span class="s0">\&quot;[lrange [info level 0] 0 1] first ?last?\&quot;&quot;</span>
+		    <span class="s0">}</span>
+		<span class="s0">}</span>
+
+		<span class="s0">set first [$w index $first]</span>
+		<span class="s0">set last [$w index $last]</span>
+		<span class="s0">if {$first &gt; $last} {</span>
+		    <span class="s0">set tmp $first</span>
+		    <span class="s0">set first $last</span>
+		    <span class="s0">set last $tmp</span>
+		<span class="s0">}</span>
+		<span class="s0">set ind 0</span>
+		<span class="s0">foreach item $selection {</span>
+		    <span class="s0">if {$item &gt;= $first} {</span>
+			<span class="s0">set first $ind</span>
+			<span class="s0">break</span>
+		    <span class="s0">}</span>
+		    <span class="s0">incr ind</span>
+		<span class="s0">}</span>
+		<span class="s0">set ind [expr {[llength $selection] - 1}]</span>
+		<span class="s0">for {} {$ind &gt;= 0} {incr ind -1} {</span>
+		    <span class="s0">set item [lindex $selection $ind]</span>
+		    <span class="s0">if {$item &lt;= $last} {</span>
+			<span class="s0">set last $ind</span>
+			<span class="s0">break</span>
+		    <span class="s0">}</span>
+		<span class="s0">}</span>
+
+		<span class="s0">if {$first &gt; $last} {</span>
+		    <span class="s0">return</span>
+		<span class="s0">}</span>
+		<span class="s0">set selection [lreplace $selection $first $last]</span>
+		<span class="s0">event generate $w &lt;&lt;ListboxSelect&gt;&gt;</span>
+		<span class="s0">my DrawSelection</span>
+	    <span class="s0">}</span>
+	    <span class="s0">get {</span>
+		<span class="s0">return $selection</span>
+	    <span class="s0">}</span>
+	    <span class="s0">includes {</span>
+		<span class="s0">return [expr {[lindex $args 0] in $selection}]</span>
+	    <span class="s0">}</span>
+	    <span class="s0">set {</span>
+		<span class="s0">switch [llength $args] {</span>
+		    <span class="s0">2 {</span>
+			<span class="s0">lassign $args first last</span>
+		    <span class="s0">}</span>
+		    <span class="s0">1 {</span>
+			<span class="s0">set first [set last [lindex $args 0]]</span>
+		    <span class="s0">}</span>
+		    <span class="s0">default {</span>
+			<span class="s0">return -code error -errorcode {TCL WRONGARGS} \</span>
+			    <span class="s0">&quot;wrong # args: should be\</span>
+			    <span class="s0">\&quot;[lrange [info level 0] 0 1] first ?last?\&quot;&quot;</span>
+		    <span class="s0">}</span>
+		<span class="s0">}</span>
+
+		<span class="s0">set first [$w index $first]</span>
+		<span class="s0">set last [$w index $last]</span>
+		<span class="s0">if {$first &gt; $last} {</span>
+		    <span class="s0">set tmp $first</span>
+		    <span class="s0">set first $last</span>
+		    <span class="s0">set last $tmp</span>
+		<span class="s0">}</span>
+
+		<span class="s0">for {set i $first} {$i &lt;= $last} {incr i} {</span>
+		    <span class="s0">lappend selection $i</span>
+		<span class="s0">}</span>
+		<span class="s0">set selection [lsort -integer -unique $selection]</span>
+		<span class="s0">event generate $w &lt;&lt;ListboxSelect&gt;&gt;</span>
+		<span class="s0">my DrawSelection</span>
+	    <span class="s0">}</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+
+    <span class="s0">method get item {</span>
+	<span class="s0">set rTag [lindex $list $item 2]</span>
+	<span class="s0">lassign $itemList($rTag) iTag tTag text serial</span>
+	<span class="s0">return $text</span>
+    <span class="s0">}</span>
+
+    <span class="s0">#	Deletes all the items inside the canvas subwidget and reset the</span>
+    <span class="s0">#	iconList's state.</span>
+    <span class="s0">#</span>
+    <span class="s0">method deleteall {} {</span>
+	<span class="s0">$canvas delete all</span>
+	<span class="s0">unset -nocomplain selected rect list itemList</span>
+	<span class="s0">set maxIW 1</span>
+	<span class="s0">set maxIH 1</span>
+	<span class="s0">set maxTW 1</span>
+	<span class="s0">set maxTH 1</span>
+	<span class="s0">set numItems 0</span>
+	<span class="s0">set noScroll 1</span>
+	<span class="s0">set selection {}</span>
+	<span class="s0">set index(anchor) &quot;&quot;</span>
+	<span class="s0">$sbar set 0.0 1.0</span>
+	<span class="s0">$canvas xview moveto 0</span>
+    <span class="s0">}</span>
+
+    <span class="s0">#	Adds an icon into the IconList with the designated image and text</span>
+    <span class="s0">#</span>
+    <span class="s0">method add {image items} {</span>
+	<span class="s0">foreach text $items {</span>
+	    <span class="s0">set iID item$numItems</span>
+	    <span class="s0">set iTag [$canvas create image 0 0 -image $image -anchor nw \</span>
+			  <span class="s0">-tags [list icon $numItems $iID]]</span>
+	    <span class="s0">set tTag [$canvas create text  0 0 -text  $text  -anchor nw \</span>
+			  <span class="s0">-font $options(-font) -fill $fill \</span>
+			  <span class="s0">-tags [list text $numItems $iID]]</span>
+	    <span class="s0">set rTag [$canvas create rect  0 0 0 0 -fill &quot;&quot; -outline &quot;&quot; \</span>
+			  <span class="s0">-tags [list rect $numItems $iID]]</span>
+
+	    <span class="s0">lassign [$canvas bbox $iTag] x1 y1 x2 y2</span>
+	    <span class="s0">set iW [expr {$x2 - $x1}]</span>
+	    <span class="s0">set iH [expr {$y2 - $y1}]</span>
+	    <span class="s0">if {$maxIW &lt; $iW} {</span>
+		<span class="s0">set maxIW $iW</span>
+	    <span class="s0">}</span>
+	    <span class="s0">if {$maxIH &lt; $iH} {</span>
+		<span class="s0">set maxIH $iH</span>
+	    <span class="s0">}</span>
+
+	    <span class="s0">lassign [$canvas bbox $tTag] x1 y1 x2 y2</span>
+	    <span class="s0">set tW [expr {$x2 - $x1}]</span>
+	    <span class="s0">set tH [expr {$y2 - $y1}]</span>
+	    <span class="s0">if {$maxTW &lt; $tW} {</span>
+		<span class="s0">set maxTW $tW</span>
+	    <span class="s0">}</span>
+	    <span class="s0">if {$maxTH &lt; $tH} {</span>
+		<span class="s0">set maxTH $tH</span>
+	    <span class="s0">}</span>
+
+	    <span class="s0">lappend list [list $iTag $tTag $rTag $iW $iH $tW $tH $numItems]</span>
+	    <span class="s0">set itemList($rTag) [list $iTag $tTag $text $numItems]</span>
+	    <span class="s0">set textList($numItems) [string tolower $text]</span>
+	    <span class="s0">incr numItems</span>
+	<span class="s0">}</span>
+	<span class="s0">my WhenIdle Arrange</span>
+	<span class="s0">return</span>
+    <span class="s0">}</span>
+
+    <span class="s0">#	Gets called when the user invokes the IconList (usually by</span>
+    <span class="s0">#	double-clicking or pressing the Return key).</span>
+    <span class="s0">#</span>
+    <span class="s0">method invoke {} {</span>
+	<span class="s0">if {$options(-command) ne &quot;&quot; &amp;&amp; [llength $selection]} {</span>
+	    <span class="s0">uplevel #0 $options(-command)</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+
+    <span class="s0">#	If the item is not (completely) visible, scroll the canvas so that it</span>
+    <span class="s0">#	becomes visible.</span>
+    <span class="s0">#</span>
+    <span class="s0">method see rTag {</span>
+	<span class="s0">if {$noScroll} {</span>
+	    <span class="s0">return</span>
+	<span class="s0">}</span>
+	<span class="s0">set sRegion [$canvas cget -scrollregion]</span>
+	<span class="s0">if {$sRegion eq &quot;&quot;} {</span>
+	    <span class="s0">return</span>
+	<span class="s0">}</span>
+
+	<span class="s0">if {$rTag &lt; 0 || $rTag &gt;= [llength $list]} {</span>
+	    <span class="s0">return</span>
+	<span class="s0">}</span>
+
+	<span class="s0">set bbox [$canvas bbox item$rTag]</span>
+	<span class="s0">set pad [expr {[$canvas cget -highlightthickness]+[$canvas cget -bd]}]</span>
+
+	<span class="s0">set x1 [lindex $bbox 0]</span>
+	<span class="s0">set x2 [lindex $bbox 2]</span>
+	<span class="s0">incr x1 [expr {$pad * -2}]</span>
+	<span class="s0">incr x2 [expr {$pad * -1}]</span>
+
+	<span class="s0">set cW [expr {[winfo width $canvas] - $pad*2}]</span>
+
+	<span class="s0">set scrollW [expr {[lindex $sRegion 2]-[lindex $sRegion 0]+1}]</span>
+	<span class="s0">set dispX [expr {int([lindex [$canvas xview] 0]*$scrollW)}]</span>
+	<span class="s0">set oldDispX $dispX</span>
+
+	<span class="s0"># check if out of the right edge</span>
+	<span class="s0">#</span>
+	<span class="s0">if {($x2 - $dispX) &gt;= $cW} {</span>
+	    <span class="s0">set dispX [expr {$x2 - $cW}]</span>
+	<span class="s0">}</span>
+	<span class="s0"># check if out of the left edge</span>
+	<span class="s0">#</span>
+	<span class="s0">if {($x1 - $dispX) &lt; 0} {</span>
+	    <span class="s0">set dispX $x1</span>
+	<span class="s0">}</span>
+
+	<span class="s0">if {$oldDispX ne $dispX} {</span>
+	    <span class="s0">set fraction [expr {double($dispX) / double($scrollW)}]</span>
+	    <span class="s0">$canvas xview moveto $fraction</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+
+    <span class="s0"># ----------------------------------------------------------------------</span>
+
+    <span class="s0">#	Places the icons in a column-major arrangement.</span>
+    <span class="s0">#</span>
+    <span class="s0">method Arrange {} {</span>
+	<span class="s0">if {![info exists list]} {</span>
+	    <span class="s0">if {[info exists canvas] &amp;&amp; [winfo exists $canvas]} {</span>
+		<span class="s0">set noScroll 1</span>
+		<span class="s0">$sbar configure -command &quot;&quot;</span>
+	    <span class="s0">}</span>
+	    <span class="s0">return</span>
+	<span class="s0">}</span>
+
+	<span class="s0">set W [winfo width  $canvas]</span>
+	<span class="s0">set H [winfo height $canvas]</span>
+	<span class="s0">set pad [expr {[$canvas cget -highlightthickness]+[$canvas cget -bd]}]</span>
+	<span class="s0">if {$pad &lt; 2} {</span>
+	    <span class="s0">set pad 2</span>
+	<span class="s0">}</span>
+
+	<span class="s0">incr W [expr {$pad*-2}]</span>
+	<span class="s0">incr H [expr {$pad*-2}]</span>
+
+	<span class="s0">set dx [expr {$maxIW + $maxTW + 8}]</span>
+	<span class="s0">if {$maxTH &gt; $maxIH} {</span>
+	    <span class="s0">set dy $maxTH</span>
+	<span class="s0">} else {</span>
+	    <span class="s0">set dy $maxIH</span>
+	<span class="s0">}</span>
+	<span class="s0">incr dy 2</span>
+	<span class="s0">set shift [expr {$maxIW + 4}]</span>
+
+	<span class="s0">set x [expr {$pad * 2}]</span>
+	<span class="s0">set y [expr {$pad * 1}] ; # Why * 1 ?</span>
+	<span class="s0">set usedColumn 0</span>
+	<span class="s0">foreach sublist $list {</span>
+	    <span class="s0">set usedColumn 1</span>
+	    <span class="s0">lassign $sublist iTag tTag rTag iW iH tW tH</span>
+
+	    <span class="s0">set i_dy [expr {($dy - $iH)/2}]</span>
+	    <span class="s0">set t_dy [expr {($dy - $tH)/2}]</span>
+
+	    <span class="s0">$canvas coords $iTag $x                    [expr {$y + $i_dy}]</span>
+	    <span class="s0">$canvas coords $tTag [expr {$x + $shift}]  [expr {$y + $t_dy}]</span>
+	    <span class="s0">$canvas coords $rTag $x $y [expr {$x+$dx}] [expr {$y+$dy}]</span>
+
+	    <span class="s0">incr y $dy</span>
+	    <span class="s0">if {($y + $dy) &gt; $H} {</span>
+		<span class="s0">set y [expr {$pad * 1}] ; # *1 ?</span>
+		<span class="s0">incr x $dx</span>
+		<span class="s0">set usedColumn 0</span>
+	    <span class="s0">}</span>
+	<span class="s0">}</span>
+
+	<span class="s0">if {$usedColumn} {</span>
+	    <span class="s0">set sW [expr {$x + $dx}]</span>
+	<span class="s0">} else {</span>
+	    <span class="s0">set sW $x</span>
+	<span class="s0">}</span>
+
+	<span class="s0">if {$sW &lt; $W} {</span>
+	    <span class="s0">$canvas configure -scrollregion [list $pad $pad $sW $H]</span>
+	    <span class="s0">$sbar configure -command &quot;&quot;</span>
+	    <span class="s0">$canvas xview moveto 0</span>
+	    <span class="s0">set noScroll 1</span>
+	<span class="s0">} else {</span>
+	    <span class="s0">$canvas configure -scrollregion [list $pad $pad $sW $H]</span>
+	    <span class="s0">$sbar configure -command [list $canvas xview]</span>
+	    <span class="s0">set noScroll 0</span>
+	<span class="s0">}</span>
+
+	<span class="s0">set itemsPerColumn [expr {($H-$pad) / $dy}]</span>
+	<span class="s0">if {$itemsPerColumn &lt; 1} {</span>
+	    <span class="s0">set itemsPerColumn 1</span>
+	<span class="s0">}</span>
+
+	<span class="s0">my DrawSelection</span>
+    <span class="s0">}</span>
+
+    <span class="s0">method DrawSelection {} {</span>
+	<span class="s0">$canvas delete selection</span>
+	<span class="s0">$canvas itemconfigure selectionText -fill black</span>
+	<span class="s0">$canvas dtag selectionText</span>
+	<span class="s0">set cbg [ttk::style lookup TEntry -selectbackground focus]</span>
+	<span class="s0">set cfg [ttk::style lookup TEntry -selectforeground focus]</span>
+	<span class="s0">foreach item $selection {</span>
+	    <span class="s0">set rTag [lindex $list $item 2]</span>
+	    <span class="s0">foreach {iTag tTag text serial} $itemList($rTag) {</span>
+		<span class="s0">break</span>
+	    <span class="s0">}</span>
+
+	    <span class="s0">set bbox [$canvas bbox $tTag]</span>
+	    <span class="s0">$canvas create rect $bbox -fill $cbg -outline $cbg \</span>
+		<span class="s0">-tags selection</span>
+	    <span class="s0">$canvas itemconfigure $tTag -fill $cfg -tags selectionText</span>
+	<span class="s0">}</span>
+	<span class="s0">$canvas lower selection</span>
+	<span class="s0">return</span>
+    <span class="s0">}</span>
+
+    <span class="s0">#	Creates an IconList widget by assembling a canvas widget and a</span>
+    <span class="s0">#	scrollbar widget. Sets all the bindings necessary for the IconList's</span>
+    <span class="s0">#	operations.</span>
+    <span class="s0">#</span>
+    <span class="s0">method Create {} {</span>
+	<span class="s0">variable hull</span>
+	<span class="s0">set sbar [ttk::scrollbar $hull.sbar -orient horizontal -takefocus 0]</span>
+	<span class="s0">catch {$sbar configure -highlightthickness 0}</span>
+	<span class="s0">set canvas [canvas $hull.canvas -highlightthick 0 -takefocus 1 \</span>
+			<span class="s0">-width 400 -height 120 -background white]</span>
+	<span class="s0">pack $sbar -side bottom -fill x -padx 2 -pady {0 2}</span>
+	<span class="s0">pack $canvas -expand yes -fill both -padx 2 -pady {2 0}</span>
+
+	<span class="s0">$sbar configure -command [list $canvas xview]</span>
+	<span class="s0">$canvas configure -xscrollcommand [list $sbar set]</span>
+
+	<span class="s0"># Initializes the max icon/text width and height and other variables</span>
+	<span class="s0">#</span>
+	<span class="s0">set maxIW 1</span>
+	<span class="s0">set maxIH 1</span>
+	<span class="s0">set maxTW 1</span>
+	<span class="s0">set maxTH 1</span>
+	<span class="s0">set numItems 0</span>
+	<span class="s0">set noScroll 1</span>
+	<span class="s0">set selection {}</span>
+	<span class="s0">set index(anchor) &quot;&quot;</span>
+	<span class="s0">set fg [option get $canvas foreground Foreground]</span>
+	<span class="s0">if {$fg eq &quot;&quot;} {</span>
+	    <span class="s0">set fill black</span>
+	<span class="s0">} else {</span>
+	    <span class="s0">set fill $fg</span>
+	<span class="s0">}</span>
+
+	<span class="s0"># Creates the event bindings.</span>
+	<span class="s0">#</span>
+	<span class="s0">bind $canvas &lt;Configure&gt;	[namespace code {my WhenIdle Arrange}]</span>
+
+	<span class="s0">bind $canvas &lt;1&gt;		[namespace code {my Btn1 %x %y}]</span>
+	<span class="s0">bind $canvas &lt;B1-Motion&gt;	[namespace code {my Motion1 %x %y}]</span>
+	<span class="s0">bind $canvas &lt;B1-Leave&gt;		[namespace code {my Leave1 %x %y}]</span>
+	<span class="s0">bind $canvas &lt;Control-1&gt;	[namespace code {my CtrlBtn1 %x %y}]</span>
+	<span class="s0">bind $canvas &lt;Shift-1&gt;		[namespace code {my ShiftBtn1 %x %y}]</span>
+	<span class="s0">bind $canvas &lt;B1-Enter&gt;		[list tk::CancelRepeat]</span>
+	<span class="s0">bind $canvas &lt;ButtonRelease-1&gt;	[list tk::CancelRepeat]</span>
+	<span class="s0">bind $canvas &lt;Double-ButtonRelease-1&gt; \</span>
+	    <span class="s0">[namespace code {my Double1 %x %y}]</span>
+
+	<span class="s0">bind $canvas &lt;Control-B1-Motion&gt; {;}</span>
+	<span class="s0">bind $canvas &lt;Shift-B1-Motion&gt;	[namespace code {my ShiftMotion1 %x %y}]</span>
+
+	<span class="s0">bind $canvas &lt;&lt;PrevLine&gt;&gt;	[namespace code {my UpDown -1}]</span>
+	<span class="s0">bind $canvas &lt;&lt;NextLine&gt;&gt;	[namespace code {my UpDown  1}]</span>
+	<span class="s0">bind $canvas &lt;&lt;PrevChar&gt;&gt;	[namespace code {my LeftRight -1}]</span>
+	<span class="s0">bind $canvas &lt;&lt;NextChar&gt;&gt;	[namespace code {my LeftRight  1}]</span>
+	<span class="s0">bind $canvas &lt;Return&gt;		[namespace code {my ReturnKey}]</span>
+	<span class="s0">bind $canvas &lt;KeyPress&gt;		[namespace code {my KeyPress %A}]</span>
+	<span class="s0">bind $canvas &lt;Control-KeyPress&gt; &quot;;&quot;</span>
+	<span class="s0">bind $canvas &lt;Alt-KeyPress&gt;	&quot;;&quot;</span>
+
+	<span class="s0">bind $canvas &lt;FocusIn&gt;		[namespace code {my FocusIn}]</span>
+	<span class="s0">bind $canvas &lt;FocusOut&gt;		[namespace code {my FocusOut}]</span>
+
+	<span class="s0">return $w</span>
+    <span class="s0">}</span>
+
+    <span class="s0">#	This procedure is invoked when the mouse leaves an entry window with</span>
+    <span class="s0">#	button 1 down.  It scrolls the window up, down, left, or right,</span>
+    <span class="s0">#	depending on where the mouse left the window, and reschedules itself</span>
+    <span class="s0">#	as an &quot;after&quot; command so that the window continues to scroll until the</span>
+    <span class="s0">#	mouse moves back into the window or the mouse button is released.</span>
+    <span class="s0">#</span>
+    <span class="s0">method AutoScan {} {</span>
+	<span class="s0">if {![winfo exists $w]} return</span>
+	<span class="s0">set x $oldX</span>
+	<span class="s0">set y $oldY</span>
+	<span class="s0">if {$noScroll} {</span>
+	    <span class="s0">return</span>
+	<span class="s0">}</span>
+	<span class="s0">if {$x &gt;= [winfo width $canvas]} {</span>
+	    <span class="s0">$canvas xview scroll 1 units</span>
+	<span class="s0">} elseif {$x &lt; 0} {</span>
+	    <span class="s0">$canvas xview scroll -1 units</span>
+	<span class="s0">} elseif {$y &gt;= [winfo height $canvas]} {</span>
+	    <span class="s0"># do nothing</span>
+	<span class="s0">} elseif {$y &lt; 0} {</span>
+	    <span class="s0"># do nothing</span>
+	<span class="s0">} else {</span>
+	    <span class="s0">return</span>
+	<span class="s0">}</span>
+	<span class="s0">my Motion1 $x $y</span>
+	<span class="s0">set ::tk::Priv(afterId) [after 50 [namespace code {my AutoScan}]]</span>
+    <span class="s0">}</span>
+
+    <span class="s0"># ----------------------------------------------------------------------</span>
+
+    <span class="s0"># Event handlers</span>
+    <span class="s0">method Btn1 {x y} {</span>
+	<span class="s0">focus $canvas</span>
+	<span class="s0">set i [$w index @$x,$y]</span>
+	<span class="s0">if {$i eq &quot;&quot;} {</span>
+	    <span class="s0">return</span>
+	<span class="s0">}</span>
+	<span class="s0">$w selection clear 0 end</span>
+	<span class="s0">$w selection set $i</span>
+	<span class="s0">$w selection anchor $i</span>
+    <span class="s0">}</span>
+    <span class="s0">method CtrlBtn1 {x y} {</span>
+	<span class="s0">if {$options(-multiple)} {</span>
+	    <span class="s0">focus $canvas</span>
+	    <span class="s0">set i [$w index @$x,$y]</span>
+	    <span class="s0">if {$i eq &quot;&quot;} {</span>
+		<span class="s0">return</span>
+	    <span class="s0">}</span>
+	    <span class="s0">if {[$w selection includes $i]} {</span>
+		<span class="s0">$w selection clear $i</span>
+	    <span class="s0">} else {</span>
+		<span class="s0">$w selection set $i</span>
+		<span class="s0">$w selection anchor $i</span>
+	    <span class="s0">}</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+    <span class="s0">method ShiftBtn1 {x y} {</span>
+	<span class="s0">if {$options(-multiple)} {</span>
+	    <span class="s0">focus $canvas</span>
+	    <span class="s0">set i [$w index @$x,$y]</span>
+	    <span class="s0">if {$i eq &quot;&quot;} {</span>
+		<span class="s0">return</span>
+	    <span class="s0">}</span>
+	    <span class="s0">if {[$w index anchor] eq &quot;&quot;} {</span>
+		<span class="s0">$w selection anchor $i</span>
+	    <span class="s0">}</span>
+	    <span class="s0">$w selection clear 0 end</span>
+	    <span class="s0">$w selection set anchor $i</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+
+    <span class="s0">#	Gets called on button-1 motions</span>
+    <span class="s0">#</span>
+    <span class="s0">method Motion1 {x y} {</span>
+	<span class="s0">set oldX $x</span>
+	<span class="s0">set oldY $y</span>
+	<span class="s0">set i [$w index @$x,$y]</span>
+	<span class="s0">if {$i eq &quot;&quot;} {</span>
+	    <span class="s0">return</span>
+	<span class="s0">}</span>
+	<span class="s0">$w selection clear 0 end</span>
+	<span class="s0">$w selection set $i</span>
+    <span class="s0">}</span>
+    <span class="s0">method ShiftMotion1 {x y} {</span>
+	<span class="s0">set oldX $x</span>
+	<span class="s0">set oldY $y</span>
+	<span class="s0">set i [$w index @$x,$y]</span>
+	<span class="s0">if {$i eq &quot;&quot;} {</span>
+	    <span class="s0">return</span>
+	<span class="s0">}</span>
+	<span class="s0">$w selection clear 0 end</span>
+	<span class="s0">$w selection set anchor $i</span>
+    <span class="s0">}</span>
+    <span class="s0">method Double1 {x y} {</span>
+	<span class="s0">if {[llength $selection]} {</span>
+	    <span class="s0">$w invoke</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+    <span class="s0">method ReturnKey {} {</span>
+	<span class="s0">$w invoke</span>
+    <span class="s0">}</span>
+    <span class="s0">method Leave1 {x y} {</span>
+	<span class="s0">set oldX $x</span>
+	<span class="s0">set oldY $y</span>
+	<span class="s0">my AutoScan</span>
+    <span class="s0">}</span>
+    <span class="s0">method FocusIn {} {</span>
+	<span class="s0">$w state focus</span>
+	<span class="s0">if {![info exists list]} {</span>
+	    <span class="s0">return</span>
+	<span class="s0">}</span>
+	<span class="s0">if {[llength $selection]} {</span>
+	    <span class="s0">my DrawSelection</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+    <span class="s0">method FocusOut {} {</span>
+	<span class="s0">$w state !focus</span>
+	<span class="s0">$w selection clear 0 end</span>
+    <span class="s0">}</span>
+
+    <span class="s0">#	Moves the active element up or down by one element</span>
+    <span class="s0">#</span>
+    <span class="s0"># Arguments:</span>
+    <span class="s0">#	amount -	+1 to move down one item, -1 to move back one item.</span>
+    <span class="s0">#</span>
+    <span class="s0">method UpDown amount {</span>
+	<span class="s0">if {![info exists list]} {</span>
+	    <span class="s0">return</span>
+	<span class="s0">}</span>
+	<span class="s0">set curr [$w selection get]</span>
+	<span class="s0">if {[llength $curr] == 0} {</span>
+	    <span class="s0">set i 0</span>
+	<span class="s0">} else {</span>
+	    <span class="s0">set i [$w index anchor]</span>
+	    <span class="s0">if {$i eq &quot;&quot;} {</span>
+		<span class="s0">return</span>
+	    <span class="s0">}</span>
+	    <span class="s0">incr i $amount</span>
+	<span class="s0">}</span>
+	<span class="s0">$w selection clear 0 end</span>
+	<span class="s0">$w selection set $i</span>
+	<span class="s0">$w selection anchor $i</span>
+	<span class="s0">$w see $i</span>
+    <span class="s0">}</span>
+
+    <span class="s0">#	Moves the active element left or right by one column</span>
+    <span class="s0">#</span>
+    <span class="s0"># Arguments:</span>
+    <span class="s0">#	amount -	+1 to move right one column, -1 to move left one</span>
+    <span class="s0">#			column</span>
+    <span class="s0">#</span>
+    <span class="s0">method LeftRight amount {</span>
+	<span class="s0">if {![info exists list]} {</span>
+	    <span class="s0">return</span>
+	<span class="s0">}</span>
+	<span class="s0">set curr [$w selection get]</span>
+	<span class="s0">if {[llength $curr] == 0} {</span>
+	    <span class="s0">set i 0</span>
+	<span class="s0">} else {</span>
+	    <span class="s0">set i [$w index anchor]</span>
+	    <span class="s0">if {$i eq &quot;&quot;} {</span>
+		<span class="s0">return</span>
+	    <span class="s0">}</span>
+	    <span class="s0">incr i [expr {$amount * $itemsPerColumn}]</span>
+	<span class="s0">}</span>
+	<span class="s0">$w selection clear 0 end</span>
+	<span class="s0">$w selection set $i</span>
+	<span class="s0">$w selection anchor $i</span>
+	<span class="s0">$w see $i</span>
+    <span class="s0">}</span>
+
+    <span class="s0">#	Gets called when user enters an arbitrary key in the listbox.</span>
+    <span class="s0">#</span>
+    <span class="s0">method KeyPress key {</span>
+	<span class="s0">append accel $key</span>
+	<span class="s0">my Goto $accel</span>
+	<span class="s0">after cancel $accelCB</span>
+	<span class="s0">set accelCB [after 500 [namespace code {my Reset}]]</span>
+    <span class="s0">}</span>
+
+    <span class="s0">method Goto text {</span>
+	<span class="s0">if {![info exists list]} {</span>
+	    <span class="s0">return</span>
+	<span class="s0">}</span>
+	<span class="s0">if {$text eq &quot;&quot; || $numItems == 0} {</span>
+	    <span class="s0">return</span>
+	<span class="s0">}</span>
+
+	<span class="s0">if {[llength [$w selection get]]} {</span>
+	    <span class="s0">set start [$w index anchor]</span>
+	<span class="s0">} else {</span>
+	    <span class="s0">set start 0</span>
+	<span class="s0">}</span>
+	<span class="s0">set theIndex -1</span>
+	<span class="s0">set less 0</span>
+	<span class="s0">set len [string length $text]</span>
+	<span class="s0">set len0 [expr {$len - 1}]</span>
+	<span class="s0">set i $start</span>
+
+	<span class="s0"># Search forward until we find a filename whose prefix is a</span>
+	<span class="s0"># case-insensitive match with $text</span>
+	<span class="s0">while {1} {</span>
+	    <span class="s0">if {[string equal -nocase -length $len0 $textList($i) $text]} {</span>
+		<span class="s0">set theIndex $i</span>
+		<span class="s0">break</span>
+	    <span class="s0">}</span>
+	    <span class="s0">incr i</span>
+	    <span class="s0">if {$i == $numItems} {</span>
+		<span class="s0">set i 0</span>
+	    <span class="s0">}</span>
+	    <span class="s0">if {$i == $start} {</span>
+		<span class="s0">break</span>
+	    <span class="s0">}</span>
+	<span class="s0">}</span>
+
+	<span class="s0">if {$theIndex &gt; -1} {</span>
+	    <span class="s0">$w selection clear 0 end</span>
+	    <span class="s0">$w selection set $theIndex</span>
+	    <span class="s0">$w selection anchor $theIndex</span>
+	    <span class="s0">$w see $theIndex</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+    <span class="s0">method Reset {} {</span>
+	<span class="s0">unset -nocomplain accel</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+
+<span class="s0">return</span>
+
+<span class="s0"># Local Variables:</span>
+<span class="s0"># mode: tcl</span>
+<span class="s0"># fill-column: 78</span>
+<span class="s0"># End:</span>
+</pre>
+</body>
+</html>

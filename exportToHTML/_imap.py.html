@@ -1,0 +1,248 @@
+<html>
+<head>
+<title>_imap.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #629755; font-style: italic;}
+.s3 { color: #cc7832;}
+.s4 { color: #6a8759;}
+.s5 { color: #6897bb;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+_imap.py</font>
+</center></td></tr></table>
+<pre><span class="s0"># -*- coding: utf-8 -*-</span>
+<span class="s0"># Copyright (c) 2018 gevent</span>
+<span class="s0"># cython: auto_pickle=False,embedsignature=True,always_allow_keywords=False,infer_types=True</span>
+
+<span class="s2">&quot;&quot;&quot; 
+Iterators across greenlets or AsyncResult objects. 
+ 
+&quot;&quot;&quot;</span>
+<span class="s3">from </span><span class="s1">__future__ </span><span class="s3">import </span><span class="s1">absolute_import</span>
+<span class="s3">from </span><span class="s1">__future__ </span><span class="s3">import </span><span class="s1">division</span>
+<span class="s3">from </span><span class="s1">__future__ </span><span class="s3">import </span><span class="s1">print_function</span>
+
+
+<span class="s3">from </span><span class="s1">gevent </span><span class="s3">import </span><span class="s1">lock</span>
+<span class="s3">from </span><span class="s1">gevent </span><span class="s3">import </span><span class="s1">queue</span>
+
+
+<span class="s1">__all__ = [</span>
+    <span class="s4">'IMapUnordered'</span><span class="s3">,</span>
+    <span class="s4">'IMap'</span><span class="s3">,</span>
+<span class="s1">]</span>
+
+<span class="s1">locals()[</span><span class="s4">'Greenlet'</span><span class="s1">] = __import__(</span><span class="s4">'gevent'</span><span class="s1">).Greenlet</span>
+<span class="s1">locals()[</span><span class="s4">'Semaphore'</span><span class="s1">] = lock.Semaphore</span>
+<span class="s1">locals()[</span><span class="s4">'UnboundQueue'</span><span class="s1">] = queue.UnboundQueue</span>
+
+
+<span class="s3">class </span><span class="s1">Failure(object):</span>
+    <span class="s1">__slots__ = (</span><span class="s4">'exc'</span><span class="s3">, </span><span class="s4">'raise_exception'</span><span class="s1">)</span>
+
+    <span class="s3">def </span><span class="s1">__init__(self</span><span class="s3">, </span><span class="s1">exc</span><span class="s3">, </span><span class="s1">raise_exception=</span><span class="s3">None</span><span class="s1">):</span>
+        <span class="s1">self.exc = exc</span>
+        <span class="s1">self.raise_exception = raise_exception</span>
+
+
+<span class="s3">def </span><span class="s1">_raise_exc(failure):</span>
+    <span class="s0"># For cython.</span>
+    <span class="s3">if </span><span class="s1">failure.raise_exception:</span>
+        <span class="s1">failure.raise_exception()</span>
+    <span class="s3">else</span><span class="s1">:</span>
+        <span class="s3">raise </span><span class="s1">failure.exc</span>
+
+<span class="s3">class </span><span class="s1">IMapUnordered(Greenlet): </span><span class="s0"># pylint:disable=undefined-variable</span>
+    <span class="s2">&quot;&quot;&quot; 
+    At iterator of map results. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s3">def </span><span class="s1">__init__(self</span><span class="s3">, </span><span class="s1">func</span><span class="s3">, </span><span class="s1">iterable</span><span class="s3">, </span><span class="s1">spawn</span><span class="s3">, </span><span class="s1">maxsize=</span><span class="s3">None, </span><span class="s1">_zipped=</span><span class="s3">False</span><span class="s1">):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        An iterator that. 
+ 
+        :param callable spawn: The function we use to create new greenlets. 
+        :keyword int maxsize: If given and not-None, specifies the maximum number of 
+            finished results that will be allowed to accumulated awaiting the reader; 
+            more than that number of results will cause map function greenlets to begin 
+            to block. This is most useful is there is a great disparity in the speed of 
+            the mapping code and the consumer and the results consume a great deal of resources. 
+            Using a bound is more computationally expensive than not using a bound. 
+ 
+        .. versionchanged:: 1.1b3 
+            Added the *maxsize* parameter. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">Greenlet.__init__(self) </span><span class="s0"># pylint:disable=undefined-variable</span>
+        <span class="s1">self.spawn = spawn</span>
+        <span class="s1">self._zipped = _zipped</span>
+        <span class="s1">self.func = func</span>
+        <span class="s1">self.iterable = iterable</span>
+        <span class="s1">self.queue = UnboundQueue() </span><span class="s0"># pylint:disable=undefined-variable</span>
+
+
+        <span class="s3">if </span><span class="s1">maxsize:</span>
+            <span class="s0"># Bounding the queue is not enough if we want to keep from</span>
+            <span class="s0"># accumulating objects; the result value will be around as</span>
+            <span class="s0"># the greenlet's result, blocked on self.queue.put(), and</span>
+            <span class="s0"># we'll go on to spawn another greenlet, which in turn can</span>
+            <span class="s0"># create the result. So we need a semaphore to prevent a</span>
+            <span class="s0"># greenlet from exiting while the queue is full so that we</span>
+            <span class="s0"># don't spawn the next greenlet (assuming that self.spawn</span>
+            <span class="s0"># is of course bounded). (Alternatively we could have the</span>
+            <span class="s0"># greenlet itself do the insert into the pool, but that</span>
+            <span class="s0"># takes some rework).</span>
+            <span class="s0">#</span>
+            <span class="s0"># Given the use of a semaphore at this level, sizing the queue becomes</span>
+            <span class="s0"># redundant, and that lets us avoid having to use self.link() instead</span>
+            <span class="s0"># of self.rawlink() to avoid having blocking methods called in the</span>
+            <span class="s0"># hub greenlet.</span>
+            <span class="s1">self._result_semaphore = Semaphore(maxsize) </span><span class="s0"># pylint:disable=undefined-variable</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s1">self._result_semaphore = </span><span class="s3">None</span>
+
+        <span class="s1">self._outstanding_tasks = </span><span class="s5">0</span>
+        <span class="s0"># The index (zero based) of the maximum number of</span>
+        <span class="s0"># results we will have.</span>
+        <span class="s1">self._max_index = -</span><span class="s5">1</span>
+        <span class="s1">self.finished = </span><span class="s3">False</span>
+
+
+    <span class="s0"># We're iterating in a different greenlet than we're running.</span>
+    <span class="s3">def </span><span class="s1">__iter__(self):</span>
+        <span class="s3">return </span><span class="s1">self</span>
+
+    <span class="s3">def </span><span class="s1">__next__(self):</span>
+        <span class="s3">if </span><span class="s1">self._result_semaphore </span><span class="s3">is not None</span><span class="s1">:</span>
+            <span class="s1">self._result_semaphore.release()</span>
+        <span class="s1">value = self._inext()</span>
+        <span class="s3">if </span><span class="s1">isinstance(value</span><span class="s3">, </span><span class="s1">Failure):</span>
+            <span class="s1">_raise_exc(value)</span>
+        <span class="s3">return </span><span class="s1">value</span>
+
+    <span class="s1">next = __next__ </span><span class="s0"># Py2</span>
+
+    <span class="s3">def </span><span class="s1">_inext(self):</span>
+        <span class="s3">return </span><span class="s1">self.queue.get()</span>
+
+    <span class="s3">def </span><span class="s1">_ispawn(self</span><span class="s3">, </span><span class="s1">func</span><span class="s3">, </span><span class="s1">item</span><span class="s3">, </span><span class="s1">item_index):</span>
+        <span class="s3">if </span><span class="s1">self._result_semaphore </span><span class="s3">is not None</span><span class="s1">:</span>
+            <span class="s1">self._result_semaphore.acquire()</span>
+        <span class="s1">self._outstanding_tasks += </span><span class="s5">1</span>
+        <span class="s1">g = self.spawn(func</span><span class="s3">, </span><span class="s1">item) </span><span class="s3">if not </span><span class="s1">self._zipped </span><span class="s3">else </span><span class="s1">self.spawn(func</span><span class="s3">, </span><span class="s1">*item)</span>
+        <span class="s1">g._imap_task_index = item_index</span>
+        <span class="s1">g.rawlink(self._on_result)</span>
+        <span class="s3">return </span><span class="s1">g</span>
+
+    <span class="s3">def </span><span class="s1">_run(self): </span><span class="s0"># pylint:disable=method-hidden</span>
+        <span class="s3">try</span><span class="s1">:</span>
+            <span class="s1">func = self.func</span>
+            <span class="s3">for </span><span class="s1">item </span><span class="s3">in </span><span class="s1">self.iterable:</span>
+                <span class="s1">self._max_index += </span><span class="s5">1</span>
+                <span class="s1">self._ispawn(func</span><span class="s3">, </span><span class="s1">item</span><span class="s3">, </span><span class="s1">self._max_index)</span>
+            <span class="s1">self._on_finish(</span><span class="s3">None</span><span class="s1">)</span>
+        <span class="s3">except </span><span class="s1">BaseException </span><span class="s3">as </span><span class="s1">e:</span>
+            <span class="s1">self._on_finish(e)</span>
+            <span class="s3">raise</span>
+        <span class="s3">finally</span><span class="s1">:</span>
+            <span class="s1">self.spawn = </span><span class="s3">None</span>
+            <span class="s1">self.func = </span><span class="s3">None</span>
+            <span class="s1">self.iterable = </span><span class="s3">None</span>
+            <span class="s1">self._result_semaphore = </span><span class="s3">None</span>
+
+    <span class="s3">def </span><span class="s1">_on_result(self</span><span class="s3">, </span><span class="s1">greenlet):</span>
+        <span class="s0"># This method will be called in the hub greenlet (we rawlink)</span>
+        <span class="s1">self._outstanding_tasks -= </span><span class="s5">1</span>
+        <span class="s1">count = self._outstanding_tasks</span>
+        <span class="s1">finished = self.finished</span>
+        <span class="s1">ready = self.ready()</span>
+        <span class="s1">put_finished = </span><span class="s3">False</span>
+
+        <span class="s3">if </span><span class="s1">ready </span><span class="s3">and </span><span class="s1">count &lt;= </span><span class="s5">0 </span><span class="s3">and not </span><span class="s1">finished:</span>
+            <span class="s1">finished = self.finished = </span><span class="s3">True</span>
+            <span class="s1">put_finished = </span><span class="s3">True</span>
+
+        <span class="s3">if </span><span class="s1">greenlet.successful():</span>
+            <span class="s1">self.queue.put(self._iqueue_value_for_success(greenlet))</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s1">self.queue.put(self._iqueue_value_for_failure(greenlet))</span>
+
+        <span class="s3">if </span><span class="s1">put_finished:</span>
+            <span class="s1">self.queue.put(self._iqueue_value_for_self_finished())</span>
+
+    <span class="s3">def </span><span class="s1">_on_finish(self</span><span class="s3">, </span><span class="s1">exception):</span>
+        <span class="s0"># Called in this greenlet.</span>
+        <span class="s3">if </span><span class="s1">self.finished:</span>
+            <span class="s3">return</span>
+
+        <span class="s3">if </span><span class="s1">exception </span><span class="s3">is not None</span><span class="s1">:</span>
+            <span class="s1">self.finished = </span><span class="s3">True</span>
+            <span class="s1">self.queue.put(self._iqueue_value_for_self_failure(exception))</span>
+            <span class="s3">return</span>
+
+        <span class="s3">if </span><span class="s1">self._outstanding_tasks &lt;= </span><span class="s5">0</span><span class="s1">:</span>
+            <span class="s1">self.finished = </span><span class="s3">True</span>
+            <span class="s1">self.queue.put(self._iqueue_value_for_self_finished())</span>
+
+    <span class="s3">def </span><span class="s1">_iqueue_value_for_success(self</span><span class="s3">, </span><span class="s1">greenlet):</span>
+        <span class="s3">return </span><span class="s1">greenlet.value</span>
+
+    <span class="s3">def </span><span class="s1">_iqueue_value_for_failure(self</span><span class="s3">, </span><span class="s1">greenlet):</span>
+        <span class="s3">return </span><span class="s1">Failure(greenlet.exception</span><span class="s3">, </span><span class="s1">getattr(greenlet</span><span class="s3">, </span><span class="s4">'_raise_exception'</span><span class="s1">))</span>
+
+    <span class="s3">def </span><span class="s1">_iqueue_value_for_self_finished(self):</span>
+        <span class="s3">return </span><span class="s1">Failure(StopIteration())</span>
+
+    <span class="s3">def </span><span class="s1">_iqueue_value_for_self_failure(self</span><span class="s3">, </span><span class="s1">exception):</span>
+        <span class="s3">return </span><span class="s1">Failure(exception</span><span class="s3">, </span><span class="s1">self._raise_exception)</span>
+
+
+<span class="s3">class </span><span class="s1">IMap(IMapUnordered):</span>
+    <span class="s0"># A specialization of IMapUnordered that returns items</span>
+    <span class="s0"># in the order in which they were generated, not</span>
+    <span class="s0"># the order in which they finish.</span>
+
+    <span class="s3">def </span><span class="s1">__init__(self</span><span class="s3">, </span><span class="s1">*args</span><span class="s3">, </span><span class="s1">**kwargs):</span>
+        <span class="s0"># The result dictionary: {index: value}</span>
+        <span class="s1">self._results = {}</span>
+
+        <span class="s0"># The index of the result to return next.</span>
+        <span class="s1">self.index = </span><span class="s5">0</span>
+        <span class="s1">IMapUnordered.__init__(self</span><span class="s3">, </span><span class="s1">*args</span><span class="s3">, </span><span class="s1">**kwargs)</span>
+
+    <span class="s3">def </span><span class="s1">_inext(self):</span>
+        <span class="s3">try</span><span class="s1">:</span>
+            <span class="s1">value = self._results.pop(self.index)</span>
+        <span class="s3">except </span><span class="s1">KeyError:</span>
+            <span class="s0"># Wait for our index to finish.</span>
+            <span class="s3">while </span><span class="s5">1</span><span class="s1">:</span>
+                <span class="s1">index</span><span class="s3">, </span><span class="s1">value = self.queue.get()</span>
+                <span class="s3">if </span><span class="s1">index == self.index:</span>
+                    <span class="s3">break</span>
+                <span class="s1">self._results[index] = value</span>
+        <span class="s1">self.index += </span><span class="s5">1</span>
+        <span class="s3">return </span><span class="s1">value</span>
+
+    <span class="s3">def </span><span class="s1">_iqueue_value_for_success(self</span><span class="s3">, </span><span class="s1">greenlet):</span>
+        <span class="s3">return </span><span class="s1">(greenlet._imap_task_index</span><span class="s3">, </span><span class="s1">IMapUnordered._iqueue_value_for_success(self</span><span class="s3">, </span><span class="s1">greenlet))</span>
+
+    <span class="s3">def </span><span class="s1">_iqueue_value_for_failure(self</span><span class="s3">, </span><span class="s1">greenlet):</span>
+        <span class="s3">return </span><span class="s1">(greenlet._imap_task_index</span><span class="s3">, </span><span class="s1">IMapUnordered._iqueue_value_for_failure(self</span><span class="s3">, </span><span class="s1">greenlet))</span>
+
+    <span class="s3">def </span><span class="s1">_iqueue_value_for_self_finished(self):</span>
+        <span class="s3">return </span><span class="s1">(self._max_index + </span><span class="s5">1</span><span class="s3">, </span><span class="s1">IMapUnordered._iqueue_value_for_self_finished(self))</span>
+
+    <span class="s3">def </span><span class="s1">_iqueue_value_for_self_failure(self</span><span class="s3">, </span><span class="s1">exception):</span>
+        <span class="s3">return </span><span class="s1">(self._max_index + </span><span class="s5">1</span><span class="s3">, </span><span class="s1">IMapUnordered._iqueue_value_for_self_failure(self</span><span class="s3">, </span><span class="s1">exception))</span>
+
+<span class="s3">from </span><span class="s1">gevent._util </span><span class="s3">import </span><span class="s1">import_c_accel</span>
+<span class="s1">import_c_accel(globals()</span><span class="s3">, </span><span class="s4">'gevent.__imap'</span><span class="s1">)</span>
+</pre>
+</body>
+</html>

@@ -1,0 +1,846 @@
+<html>
+<head>
+<title>test__threadpool.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #cc7832;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #808080;}
+.s3 { color: #6a8759;}
+.s4 { color: #6897bb;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+test__threadpool.py</font>
+</center></td></tr></table>
+<pre><span class="s0">from </span><span class="s1">__future__ </span><span class="s0">import </span><span class="s1">print_function</span>
+
+<span class="s0">from </span><span class="s1">time </span><span class="s0">import </span><span class="s1">time</span><span class="s0">, </span><span class="s1">sleep</span>
+<span class="s0">import </span><span class="s1">contextlib</span>
+<span class="s0">import </span><span class="s1">random</span>
+<span class="s0">import </span><span class="s1">weakref</span>
+<span class="s0">import </span><span class="s1">gc</span>
+
+
+<span class="s0">import </span><span class="s1">gevent.threadpool</span>
+<span class="s0">from </span><span class="s1">gevent.threadpool </span><span class="s0">import </span><span class="s1">ThreadPool</span>
+<span class="s0">import </span><span class="s1">gevent</span>
+<span class="s0">from </span><span class="s1">gevent.exceptions </span><span class="s0">import </span><span class="s1">InvalidThreadUseError</span>
+
+<span class="s0">import </span><span class="s1">gevent.testing </span><span class="s0">as </span><span class="s1">greentest</span>
+<span class="s0">from </span><span class="s1">gevent.testing </span><span class="s0">import </span><span class="s1">ExpectedException</span>
+<span class="s0">from </span><span class="s1">gevent.testing </span><span class="s0">import </span><span class="s1">PYPY</span>
+
+
+
+<span class="s2"># pylint:disable=too-many-ancestors</span>
+
+
+<span class="s1">@contextlib.contextmanager</span>
+<span class="s0">def </span><span class="s1">disabled_gc():</span>
+    <span class="s1">was_enabled = gc.isenabled()</span>
+    <span class="s1">gc.disable()</span>
+    <span class="s0">try</span><span class="s1">:</span>
+        <span class="s0">yield</span>
+    <span class="s0">finally</span><span class="s1">:</span>
+        <span class="s0">if </span><span class="s1">was_enabled:</span>
+            <span class="s1">gc.enable()</span>
+
+
+<span class="s0">class </span><span class="s1">TestCase(greentest.TestCase):</span>
+    <span class="s2"># These generally need more time</span>
+    <span class="s1">__timeout__ = greentest.LARGE_TIMEOUT</span>
+    <span class="s1">pool = </span><span class="s0">None</span>
+    <span class="s1">_all_pools = ()</span>
+
+    <span class="s1">ClassUnderTest = ThreadPool</span>
+    <span class="s0">def </span><span class="s1">_FUT(self):</span>
+        <span class="s0">return </span><span class="s1">self.ClassUnderTest</span>
+
+    <span class="s0">def </span><span class="s1">_makeOne(self</span><span class="s0">, </span><span class="s1">maxsize</span><span class="s0">, </span><span class="s1">create_all_worker_threads=greentest.RUN_LEAKCHECKS):</span>
+        <span class="s1">self.pool = pool = self._FUT()(maxsize)</span>
+        <span class="s1">self._all_pools += (pool</span><span class="s0">,</span><span class="s1">)</span>
+        <span class="s0">if </span><span class="s1">create_all_worker_threads:</span>
+            <span class="s2"># Max size to help eliminate false positives</span>
+            <span class="s1">self.pool.size = maxsize</span>
+        <span class="s0">return </span><span class="s1">pool</span>
+
+    <span class="s0">def </span><span class="s1">cleanup(self):</span>
+        <span class="s1">self.pool = </span><span class="s0">None</span>
+        <span class="s1">all_pools</span><span class="s0">, </span><span class="s1">self._all_pools = self._all_pools</span><span class="s0">, </span><span class="s1">()</span>
+        <span class="s0">for </span><span class="s1">pool </span><span class="s0">in </span><span class="s1">all_pools:</span>
+            <span class="s1">kill = getattr(pool</span><span class="s0">, </span><span class="s3">'kill'</span><span class="s0">, None</span><span class="s1">) </span><span class="s0">or </span><span class="s1">getattr(pool</span><span class="s0">, </span><span class="s3">'shutdown'</span><span class="s1">)</span>
+            <span class="s1">kill()</span>
+            <span class="s0">del </span><span class="s1">kill</span>
+
+        <span class="s0">if </span><span class="s1">greentest.RUN_LEAKCHECKS:</span>
+            <span class="s2"># Each worker thread created a greenlet object and switched to it.</span>
+            <span class="s2"># It's a custom subclass, but even if it's not, it appears that</span>
+            <span class="s2"># the root greenlet for the new thread sticks around until there's a</span>
+            <span class="s2"># gc. Simply calling 'getcurrent()' is enough to &quot;leak&quot; a greenlet.greenlet</span>
+            <span class="s2"># and a weakref.</span>
+            <span class="s0">for </span><span class="s1">_ </span><span class="s0">in </span><span class="s1">range(</span><span class="s4">3</span><span class="s1">):</span>
+                <span class="s1">gc.collect()</span>
+
+
+<span class="s0">class </span><span class="s1">PoolBasicTests(TestCase):</span>
+
+    <span class="s0">def </span><span class="s1">test_execute_async(self):</span>
+        <span class="s1">pool = self._makeOne(</span><span class="s4">2</span><span class="s1">)</span>
+        <span class="s1">r = []</span>
+        <span class="s1">first = pool.spawn(r.append</span><span class="s0">, </span><span class="s4">1</span><span class="s1">)</span>
+        <span class="s1">first.get()</span>
+        <span class="s1">self.assertEqual(r</span><span class="s0">, </span><span class="s1">[</span><span class="s4">1</span><span class="s1">])</span>
+        <span class="s1">gevent.sleep(</span><span class="s4">0</span><span class="s1">)</span>
+
+        <span class="s1">pool.apply_async(r.append</span><span class="s0">, </span><span class="s1">(</span><span class="s4">2</span><span class="s0">, </span><span class="s1">))</span>
+        <span class="s1">self.assertEqual(r</span><span class="s0">, </span><span class="s1">[</span><span class="s4">1</span><span class="s1">])</span>
+
+        <span class="s1">pool.apply_async(r.append</span><span class="s0">, </span><span class="s1">(</span><span class="s4">3</span><span class="s0">, </span><span class="s1">))</span>
+        <span class="s1">self.assertEqual(r</span><span class="s0">, </span><span class="s1">[</span><span class="s4">1</span><span class="s1">])</span>
+
+        <span class="s1">pool.apply_async(r.append</span><span class="s0">, </span><span class="s1">(</span><span class="s4">4</span><span class="s0">, </span><span class="s1">))</span>
+        <span class="s1">self.assertEqual(r</span><span class="s0">, </span><span class="s1">[</span><span class="s4">1</span><span class="s1">])</span>
+        <span class="s1">gevent.sleep(</span><span class="s4">0.01</span><span class="s1">)</span>
+        <span class="s1">self.assertEqualFlakyRaceCondition(sorted(r)</span><span class="s0">, </span><span class="s1">[</span><span class="s4">1</span><span class="s0">, </span><span class="s4">2</span><span class="s0">, </span><span class="s4">3</span><span class="s0">, </span><span class="s4">4</span><span class="s1">])</span>
+
+    <span class="s0">def </span><span class="s1">test_apply(self):</span>
+        <span class="s1">pool = self._makeOne(</span><span class="s4">1</span><span class="s1">)</span>
+        <span class="s1">result = pool.apply(</span><span class="s0">lambda </span><span class="s1">a: (</span><span class="s3">'foo'</span><span class="s0">, </span><span class="s1">a)</span><span class="s0">, </span><span class="s1">(</span><span class="s4">1</span><span class="s0">, </span><span class="s1">))</span>
+        <span class="s1">self.assertEqual(result</span><span class="s0">, </span><span class="s1">(</span><span class="s3">'foo'</span><span class="s0">, </span><span class="s4">1</span><span class="s1">))</span>
+
+    <span class="s0">def </span><span class="s1">test_apply_raises(self):</span>
+        <span class="s1">pool = self._makeOne(</span><span class="s4">1</span><span class="s1">)</span>
+
+        <span class="s0">def </span><span class="s1">raiser():</span>
+            <span class="s0">raise </span><span class="s1">ExpectedException()</span>
+
+        <span class="s0">with </span><span class="s1">self.assertRaises(ExpectedException):</span>
+            <span class="s1">pool.apply(raiser)</span>
+    <span class="s2"># Don't let the metaclass automatically force any error</span>
+    <span class="s2"># that reaches the hub from a spawned greenlet to become</span>
+    <span class="s2"># fatal; that defeats the point of the test.</span>
+    <span class="s1">test_apply_raises.error_fatal = </span><span class="s0">False</span>
+
+    <span class="s0">def </span><span class="s1">test_init_valueerror(self):</span>
+        <span class="s1">self.switch_expected = </span><span class="s0">False</span>
+        <span class="s0">with </span><span class="s1">self.assertRaises(ValueError):</span>
+            <span class="s1">self._makeOne(-</span><span class="s4">1</span><span class="s1">)</span>
+
+<span class="s2">#</span>
+<span class="s2"># tests from standard library test/test_multiprocessing.py</span>
+
+
+<span class="s0">class </span><span class="s1">TimingWrapper(object):</span>
+
+    <span class="s0">def </span><span class="s1">__init__(self</span><span class="s0">, </span><span class="s1">the_func):</span>
+        <span class="s1">self.func = the_func</span>
+        <span class="s1">self.elapsed = </span><span class="s0">None</span>
+
+    <span class="s0">def </span><span class="s1">__call__(self</span><span class="s0">, </span><span class="s1">*args</span><span class="s0">, </span><span class="s1">**kwds):</span>
+        <span class="s1">t = time()</span>
+        <span class="s0">try</span><span class="s1">:</span>
+            <span class="s0">return </span><span class="s1">self.func(*args</span><span class="s0">, </span><span class="s1">**kwds)</span>
+        <span class="s0">finally</span><span class="s1">:</span>
+            <span class="s1">self.elapsed = time() - t</span>
+
+
+<span class="s0">def </span><span class="s1">sqr(x</span><span class="s0">, </span><span class="s1">wait=</span><span class="s4">0.0</span><span class="s1">):</span>
+    <span class="s1">sleep(wait)</span>
+    <span class="s0">return </span><span class="s1">x * x</span>
+
+
+<span class="s0">def </span><span class="s1">sqr_random_sleep(x):</span>
+    <span class="s1">sleep(random.random() * </span><span class="s4">0.1</span><span class="s1">)</span>
+    <span class="s0">return </span><span class="s1">x * x</span>
+
+
+<span class="s1">TIMEOUT1</span><span class="s0">, </span><span class="s1">TIMEOUT2</span><span class="s0">, </span><span class="s1">TIMEOUT3 = </span><span class="s4">0.082</span><span class="s0">, </span><span class="s4">0.035</span><span class="s0">, </span><span class="s4">0.14</span>
+
+<span class="s0">class </span><span class="s1">_AbstractPoolTest(TestCase):</span>
+
+    <span class="s1">size = </span><span class="s4">1</span>
+
+    <span class="s1">MAP_IS_GEN = </span><span class="s0">False</span>
+
+    <span class="s0">def </span><span class="s1">setUp(self):</span>
+        <span class="s1">greentest.TestCase.setUp(self)</span>
+        <span class="s1">self._makeOne(self.size)</span>
+
+    <span class="s1">@greentest.ignores_leakcheck</span>
+    <span class="s0">def </span><span class="s1">test_map(self):</span>
+        <span class="s1">pmap = self.pool.map</span>
+        <span class="s0">if </span><span class="s1">self.MAP_IS_GEN:</span>
+            <span class="s1">pmap = </span><span class="s0">lambda </span><span class="s1">f</span><span class="s0">, </span><span class="s1">i: list(self.pool.map(f</span><span class="s0">, </span><span class="s1">i))</span>
+        <span class="s1">self.assertEqual(pmap(sqr</span><span class="s0">, </span><span class="s1">range(</span><span class="s4">10</span><span class="s1">))</span><span class="s0">, </span><span class="s1">list(map(sqr</span><span class="s0">, </span><span class="s1">range(</span><span class="s4">10</span><span class="s1">))))</span>
+        <span class="s1">self.assertEqual(pmap(sqr</span><span class="s0">, </span><span class="s1">range(</span><span class="s4">100</span><span class="s1">))</span><span class="s0">, </span><span class="s1">list(map(sqr</span><span class="s0">, </span><span class="s1">range(</span><span class="s4">100</span><span class="s1">))))</span>
+
+        <span class="s1">self.pool.kill()</span>
+        <span class="s0">del </span><span class="s1">self.pool</span>
+        <span class="s0">del </span><span class="s1">pmap</span>
+
+<span class="s1">SMALL_RANGE = </span><span class="s4">10</span>
+<span class="s1">LARGE_RANGE = </span><span class="s4">1000</span>
+
+<span class="s0">if </span><span class="s1">(greentest.PYPY </span><span class="s0">and </span><span class="s1">(greentest.WIN </span><span class="s0">or </span><span class="s1">greentest.RUN_COVERAGE)) </span><span class="s0">or </span><span class="s1">greentest.RUN_LEAKCHECKS:</span>
+    <span class="s2"># PyPy 5.10 is *really* slow at spawning or switching between</span>
+    <span class="s2"># threads (especially on Windows or when coverage is enabled) Tests that happen</span>
+    <span class="s2"># instantaneously on other platforms time out due to the overhead.</span>
+
+    <span class="s2"># Leakchecks also take much longer due to all the calls into the GC,</span>
+    <span class="s2"># most especially on Python 3</span>
+    <span class="s1">LARGE_RANGE = </span><span class="s4">50</span>
+
+<span class="s0">class </span><span class="s1">TestPool(_AbstractPoolTest):</span>
+
+    <span class="s0">def </span><span class="s1">test_greenlet_class(self):</span>
+        <span class="s0">from </span><span class="s1">greenlet </span><span class="s0">import </span><span class="s1">getcurrent</span>
+        <span class="s0">from </span><span class="s1">gevent.threadpool </span><span class="s0">import </span><span class="s1">_WorkerGreenlet</span>
+        <span class="s1">worker_greenlet = self.pool.apply(getcurrent)</span>
+
+        <span class="s1">self.assertIsInstance(worker_greenlet</span><span class="s0">, </span><span class="s1">_WorkerGreenlet)</span>
+        <span class="s1">r = repr(worker_greenlet)</span>
+        <span class="s1">self.assertIn(</span><span class="s3">'ThreadPoolWorker'</span><span class="s0">, </span><span class="s1">r)</span>
+        <span class="s1">self.assertIn(</span><span class="s3">'thread_ident'</span><span class="s0">, </span><span class="s1">r)</span>
+        <span class="s1">self.assertIn(</span><span class="s3">'hub='</span><span class="s0">, </span><span class="s1">r)</span>
+
+        <span class="s0">from </span><span class="s1">gevent.util </span><span class="s0">import </span><span class="s1">format_run_info</span>
+
+        <span class="s1">info = </span><span class="s3">'</span><span class="s0">\n</span><span class="s3">'</span><span class="s1">.join(format_run_info())</span>
+        <span class="s1">self.assertIn(</span><span class="s3">&quot;&lt;ThreadPoolWorker&quot;</span><span class="s0">, </span><span class="s1">info)</span>
+
+    <span class="s0">def </span><span class="s1">test_apply(self):</span>
+        <span class="s1">papply = self.pool.apply</span>
+        <span class="s1">self.assertEqual(papply(sqr</span><span class="s0">, </span><span class="s1">(</span><span class="s4">5</span><span class="s0">,</span><span class="s1">))</span><span class="s0">, </span><span class="s1">sqr(</span><span class="s4">5</span><span class="s1">))</span>
+        <span class="s1">self.assertEqual(papply(sqr</span><span class="s0">, </span><span class="s1">()</span><span class="s0">, </span><span class="s1">{</span><span class="s3">'x'</span><span class="s1">: </span><span class="s4">3</span><span class="s1">})</span><span class="s0">, </span><span class="s1">sqr(x=</span><span class="s4">3</span><span class="s1">))</span>
+
+    <span class="s0">def </span><span class="s1">test_async(self):</span>
+        <span class="s1">res = self.pool.apply_async(sqr</span><span class="s0">, </span><span class="s1">(</span><span class="s4">7</span><span class="s0">, </span><span class="s1">TIMEOUT1</span><span class="s0">,</span><span class="s1">))</span>
+        <span class="s1">get = TimingWrapper(res.get)</span>
+        <span class="s1">self.assertEqual(get()</span><span class="s0">, </span><span class="s4">49</span><span class="s1">)</span>
+        <span class="s1">self.assertTimeoutAlmostEqual(get.elapsed</span><span class="s0">, </span><span class="s1">TIMEOUT1</span><span class="s0">, </span><span class="s4">1</span><span class="s1">)</span>
+
+    <span class="s0">def </span><span class="s1">test_async_callback(self):</span>
+        <span class="s1">result = []</span>
+        <span class="s1">res = self.pool.apply_async(sqr</span><span class="s0">, </span><span class="s1">(</span><span class="s4">7</span><span class="s0">, </span><span class="s1">TIMEOUT1</span><span class="s0">,</span><span class="s1">)</span><span class="s0">, </span><span class="s1">callback=result.append)</span>
+        <span class="s1">get = TimingWrapper(res.get)</span>
+        <span class="s1">self.assertEqual(get()</span><span class="s0">, </span><span class="s4">49</span><span class="s1">)</span>
+        <span class="s1">self.assertTimeoutAlmostEqual(get.elapsed</span><span class="s0">, </span><span class="s1">TIMEOUT1</span><span class="s0">, </span><span class="s4">1</span><span class="s1">)</span>
+        <span class="s1">gevent.sleep(</span><span class="s4">0</span><span class="s1">)  </span><span class="s2"># lets the callback run</span>
+        <span class="s1">self.assertEqual(result</span><span class="s0">, </span><span class="s1">[</span><span class="s4">49</span><span class="s1">])</span>
+
+    <span class="s0">def </span><span class="s1">test_async_timeout(self):</span>
+        <span class="s1">res = self.pool.apply_async(sqr</span><span class="s0">, </span><span class="s1">(</span><span class="s4">6</span><span class="s0">, </span><span class="s1">TIMEOUT2 + </span><span class="s4">0.2</span><span class="s1">))</span>
+        <span class="s1">get = TimingWrapper(res.get)</span>
+        <span class="s1">self.assertRaises(gevent.Timeout</span><span class="s0">, </span><span class="s1">get</span><span class="s0">, </span><span class="s1">timeout=TIMEOUT2)</span>
+        <span class="s1">self.assertTimeoutAlmostEqual(get.elapsed</span><span class="s0">, </span><span class="s1">TIMEOUT2</span><span class="s0">, </span><span class="s4">1</span><span class="s1">)</span>
+        <span class="s1">self.pool.join()</span>
+
+    <span class="s0">def </span><span class="s1">test_imap_list_small(self):</span>
+        <span class="s1">it = self.pool.imap(sqr</span><span class="s0">, </span><span class="s1">range(SMALL_RANGE))</span>
+        <span class="s1">self.assertEqual(list(it)</span><span class="s0">, </span><span class="s1">list(map(sqr</span><span class="s0">, </span><span class="s1">range(SMALL_RANGE))))</span>
+
+    <span class="s0">def </span><span class="s1">test_imap_it_small(self):</span>
+        <span class="s1">it = self.pool.imap(sqr</span><span class="s0">, </span><span class="s1">range(SMALL_RANGE))</span>
+        <span class="s0">for </span><span class="s1">i </span><span class="s0">in </span><span class="s1">range(SMALL_RANGE):</span>
+            <span class="s1">self.assertEqual(next(it)</span><span class="s0">, </span><span class="s1">i * i)</span>
+        <span class="s1">self.assertRaises(StopIteration</span><span class="s0">, </span><span class="s1">next</span><span class="s0">, </span><span class="s1">it)</span>
+
+    <span class="s0">def </span><span class="s1">test_imap_it_large(self):</span>
+        <span class="s1">it = self.pool.imap(sqr</span><span class="s0">, </span><span class="s1">range(LARGE_RANGE))</span>
+        <span class="s0">for </span><span class="s1">i </span><span class="s0">in </span><span class="s1">range(LARGE_RANGE):</span>
+            <span class="s1">self.assertEqual(next(it)</span><span class="s0">, </span><span class="s1">i * i)</span>
+        <span class="s1">self.assertRaises(StopIteration</span><span class="s0">, </span><span class="s1">next</span><span class="s0">, </span><span class="s1">it)</span>
+
+    <span class="s0">def </span><span class="s1">test_imap_gc(self):</span>
+        <span class="s1">it = self.pool.imap(sqr</span><span class="s0">, </span><span class="s1">range(SMALL_RANGE))</span>
+        <span class="s0">for </span><span class="s1">i </span><span class="s0">in </span><span class="s1">range(SMALL_RANGE):</span>
+            <span class="s1">self.assertEqual(next(it)</span><span class="s0">, </span><span class="s1">i * i)</span>
+            <span class="s1">gc.collect()</span>
+        <span class="s1">self.assertRaises(StopIteration</span><span class="s0">, </span><span class="s1">next</span><span class="s0">, </span><span class="s1">it)</span>
+
+    <span class="s0">def </span><span class="s1">test_imap_unordered_gc(self):</span>
+        <span class="s1">it = self.pool.imap_unordered(sqr</span><span class="s0">, </span><span class="s1">range(SMALL_RANGE))</span>
+        <span class="s1">result = []</span>
+        <span class="s0">for </span><span class="s1">_ </span><span class="s0">in </span><span class="s1">range(SMALL_RANGE):</span>
+            <span class="s1">result.append(next(it))</span>
+            <span class="s1">gc.collect()</span>
+        <span class="s0">with </span><span class="s1">self.assertRaises(StopIteration):</span>
+            <span class="s1">next(it)</span>
+        <span class="s1">self.assertEqual(sorted(result)</span><span class="s0">, </span><span class="s1">[x * x </span><span class="s0">for </span><span class="s1">x </span><span class="s0">in </span><span class="s1">range(SMALL_RANGE)])</span>
+
+    <span class="s0">def </span><span class="s1">test_imap_random(self):</span>
+        <span class="s1">it = self.pool.imap(sqr_random_sleep</span><span class="s0">, </span><span class="s1">range(SMALL_RANGE))</span>
+        <span class="s1">self.assertEqual(list(it)</span><span class="s0">, </span><span class="s1">list(map(sqr</span><span class="s0">, </span><span class="s1">range(SMALL_RANGE))))</span>
+
+    <span class="s0">def </span><span class="s1">test_imap_unordered(self):</span>
+        <span class="s1">it = self.pool.imap_unordered(sqr</span><span class="s0">, </span><span class="s1">range(LARGE_RANGE))</span>
+        <span class="s1">self.assertEqual(sorted(it)</span><span class="s0">, </span><span class="s1">list(map(sqr</span><span class="s0">, </span><span class="s1">range(LARGE_RANGE))))</span>
+
+        <span class="s1">it = self.pool.imap_unordered(sqr</span><span class="s0">, </span><span class="s1">range(LARGE_RANGE))</span>
+        <span class="s1">self.assertEqual(sorted(it)</span><span class="s0">, </span><span class="s1">list(map(sqr</span><span class="s0">, </span><span class="s1">range(LARGE_RANGE))))</span>
+
+    <span class="s0">def </span><span class="s1">test_imap_unordered_random(self):</span>
+        <span class="s1">it = self.pool.imap_unordered(sqr_random_sleep</span><span class="s0">, </span><span class="s1">range(SMALL_RANGE))</span>
+        <span class="s1">self.assertEqual(sorted(it)</span><span class="s0">, </span><span class="s1">list(map(sqr</span><span class="s0">, </span><span class="s1">range(SMALL_RANGE))))</span>
+
+    <span class="s0">def </span><span class="s1">test_terminate(self):</span>
+        <span class="s1">size = self.size </span><span class="s0">or </span><span class="s4">10</span>
+        <span class="s1">result = self.pool.map_async(sleep</span><span class="s0">, </span><span class="s1">[</span><span class="s4">0.1</span><span class="s1">] * (size * </span><span class="s4">2</span><span class="s1">))</span>
+        <span class="s1">gevent.sleep(</span><span class="s4">0.1</span><span class="s1">)</span>
+        <span class="s0">try</span><span class="s1">:</span>
+            <span class="s0">with </span><span class="s1">self.runs_in_given_time(</span><span class="s4">0.1 </span><span class="s1">* self.size + </span><span class="s4">0.5</span><span class="s0">, </span><span class="s1">min_time=</span><span class="s4">0</span><span class="s1">):</span>
+                <span class="s1">self.pool.kill()</span>
+        <span class="s0">finally</span><span class="s1">:</span>
+            <span class="s1">result.join()</span>
+
+    <span class="s0">def </span><span class="s1">sleep(self</span><span class="s0">, </span><span class="s1">x):</span>
+        <span class="s1">sleep(float(x) / </span><span class="s4">10.0</span><span class="s1">)</span>
+        <span class="s0">return </span><span class="s1">str(x)</span>
+
+    <span class="s0">def </span><span class="s1">test_imap_unordered_sleep(self):</span>
+        <span class="s2"># testing that imap_unordered returns items in competion order</span>
+        <span class="s1">result = list(self.pool.imap_unordered(self.sleep</span><span class="s0">, </span><span class="s1">[</span><span class="s4">10</span><span class="s0">, </span><span class="s4">1</span><span class="s0">, </span><span class="s4">2</span><span class="s1">]))</span>
+        <span class="s0">if </span><span class="s1">self.pool.size == </span><span class="s4">1</span><span class="s1">:</span>
+            <span class="s1">expected = [</span><span class="s3">'10'</span><span class="s0">, </span><span class="s3">'1'</span><span class="s0">, </span><span class="s3">'2'</span><span class="s1">]</span>
+        <span class="s0">else</span><span class="s1">:</span>
+            <span class="s1">expected = [</span><span class="s3">'1'</span><span class="s0">, </span><span class="s3">'2'</span><span class="s0">, </span><span class="s3">'10'</span><span class="s1">]</span>
+        <span class="s1">self.assertEqual(result</span><span class="s0">, </span><span class="s1">expected)</span>
+
+
+<span class="s0">class </span><span class="s1">TestPool2(TestPool):</span>
+    <span class="s1">size = </span><span class="s4">2</span>
+
+    <span class="s1">@greentest.ignores_leakcheck </span><span class="s2"># Asking for the hub in the new thread shows up as a &quot;leak&quot;</span>
+    <span class="s0">def </span><span class="s1">test_recursive_apply(self):</span>
+        <span class="s1">p = self.pool</span>
+
+        <span class="s0">def </span><span class="s1">a():</span>
+            <span class="s0">return </span><span class="s1">p.apply(b)</span>
+
+        <span class="s0">def </span><span class="s1">b():</span>
+            <span class="s2"># make sure we can do both types of callbacks</span>
+            <span class="s2"># (loop iteration and end-of-loop) in the recursive</span>
+            <span class="s2"># call</span>
+            <span class="s1">gevent.sleep()</span>
+            <span class="s1">gevent.sleep(</span><span class="s4">0.001</span><span class="s1">)</span>
+            <span class="s0">return </span><span class="s3">&quot;B&quot;</span>
+
+        <span class="s1">result = p.apply(a)</span>
+        <span class="s1">self.assertEqual(result</span><span class="s0">, </span><span class="s3">&quot;B&quot;</span><span class="s1">)</span>
+
+
+<span class="s1">@greentest.ignores_leakcheck</span>
+<span class="s0">class </span><span class="s1">TestPool3(TestPool):</span>
+    <span class="s1">size = </span><span class="s4">3</span>
+
+<span class="s1">@greentest.ignores_leakcheck</span>
+<span class="s0">class </span><span class="s1">TestPool10(TestPool):</span>
+    <span class="s1">size = </span><span class="s4">10</span>
+
+
+
+<span class="s2"># class TestJoinSleep(greentest.GenericGetTestCase):</span>
+<span class="s2">#</span>
+<span class="s2">#     def wait(self, timeout):</span>
+<span class="s2">#         pool = ThreadPool(1)</span>
+<span class="s2">#         pool.spawn(gevent.sleep, 10)</span>
+<span class="s2">#         pool.join(timeout=timeout)</span>
+<span class="s2">#</span>
+<span class="s2">#</span>
+<span class="s2"># class TestJoinSleep_raise_error(greentest.GenericWaitTestCase):</span>
+<span class="s2">#</span>
+<span class="s2">#     def wait(self, timeout):</span>
+<span class="s2">#         pool = ThreadPool(1)</span>
+<span class="s2">#         g = pool.spawn(gevent.sleep, 10)</span>
+<span class="s2">#         pool.join(timeout=timeout, raise_error=True)</span>
+
+
+<span class="s0">class </span><span class="s1">TestJoinEmpty(TestCase):</span>
+    <span class="s1">switch_expected = </span><span class="s0">False</span>
+
+    <span class="s1">@greentest.skipIf(greentest.PYPY </span><span class="s0">and </span><span class="s1">greentest.LIBUV </span><span class="s0">and </span><span class="s1">greentest.RUNNING_ON_TRAVIS</span><span class="s0">,</span>
+                      <span class="s3">&quot;This sometimes appears to crash in PyPy2 5.9.0, &quot;</span>
+                      <span class="s3">&quot;but never crashes on macOS or local Ubunto with same PyPy version&quot;</span><span class="s1">)</span>
+    <span class="s2"># Running this test standalone doesn't crash PyPy, only when it's run</span>
+    <span class="s2"># as part of this whole file. Removing it does solve the crash though.</span>
+    <span class="s0">def </span><span class="s1">test(self):</span>
+        <span class="s1">pool = self._makeOne(</span><span class="s4">1</span><span class="s1">)</span>
+        <span class="s1">pool.join()</span>
+
+
+<span class="s0">class </span><span class="s1">TestSpawn(TestCase):</span>
+    <span class="s1">switch_expected = </span><span class="s0">True</span>
+
+    <span class="s1">@greentest.ignores_leakcheck</span>
+    <span class="s0">def </span><span class="s1">test_basics(self):</span>
+        <span class="s1">pool = self._makeOne(</span><span class="s4">1</span><span class="s1">)</span>
+        <span class="s1">self.assertEqual(len(pool)</span><span class="s0">, </span><span class="s4">0</span><span class="s1">)</span>
+        <span class="s1">log = []</span>
+        <span class="s1">sleep_n_log = </span><span class="s0">lambda </span><span class="s1">item</span><span class="s0">, </span><span class="s1">seconds: [sleep(seconds)</span><span class="s0">, </span><span class="s1">log.append(item)]</span>
+        <span class="s1">pool.spawn(sleep_n_log</span><span class="s0">, </span><span class="s3">'a'</span><span class="s0">, </span><span class="s4">0.1</span><span class="s1">)</span>
+        <span class="s1">self.assertEqual(len(pool)</span><span class="s0">, </span><span class="s4">1</span><span class="s1">)</span>
+        <span class="s1">pool.spawn(sleep_n_log</span><span class="s0">, </span><span class="s3">'b'</span><span class="s0">, </span><span class="s4">0.1</span><span class="s1">)</span>
+        <span class="s2"># even though the pool is of size 1, it can contain 2 items</span>
+        <span class="s2"># since we allow +1 for better throughput</span>
+        <span class="s1">self.assertEqual(len(pool)</span><span class="s0">, </span><span class="s4">2</span><span class="s1">)</span>
+        <span class="s1">gevent.sleep(</span><span class="s4">0.15</span><span class="s1">)</span>
+        <span class="s1">self.assertEqual(log</span><span class="s0">, </span><span class="s1">[</span><span class="s3">'a'</span><span class="s1">])</span>
+        <span class="s1">self.assertEqual(len(pool)</span><span class="s0">, </span><span class="s4">1</span><span class="s1">)</span>
+        <span class="s1">gevent.sleep(</span><span class="s4">0.15</span><span class="s1">)</span>
+        <span class="s1">self.assertEqual(log</span><span class="s0">, </span><span class="s1">[</span><span class="s3">'a'</span><span class="s0">, </span><span class="s3">'b'</span><span class="s1">])</span>
+        <span class="s1">self.assertEqual(len(pool)</span><span class="s0">, </span><span class="s4">0</span><span class="s1">)</span>
+
+    <span class="s1">@greentest.ignores_leakcheck</span>
+    <span class="s0">def </span><span class="s1">test_cannot_spawn_from_other_thread(self):</span>
+        <span class="s2"># Only the thread that owns a threadpool can spawn to it;</span>
+        <span class="s2"># this is because the threadpool uses the creating thread's hub,</span>
+        <span class="s2"># which is not threadsafe.</span>
+        <span class="s1">pool1 = self._makeOne(</span><span class="s4">1</span><span class="s1">)</span>
+        <span class="s1">pool2 = self._makeOne(</span><span class="s4">2</span><span class="s1">)</span>
+
+        <span class="s0">def </span><span class="s1">func():</span>
+            <span class="s1">pool2.spawn(</span><span class="s0">lambda</span><span class="s1">: </span><span class="s3">&quot;Hi&quot;</span><span class="s1">)</span>
+
+        <span class="s1">res = pool1.spawn(func)</span>
+        <span class="s0">with </span><span class="s1">self.assertRaises(InvalidThreadUseError):</span>
+            <span class="s1">res.get()</span>
+
+<span class="s0">def </span><span class="s1">error_iter():</span>
+    <span class="s0">yield </span><span class="s4">1</span>
+    <span class="s0">yield </span><span class="s4">2</span>
+    <span class="s0">raise </span><span class="s1">greentest.ExpectedException</span>
+
+
+<span class="s0">class </span><span class="s1">TestErrorInIterator(TestCase):</span>
+
+    <span class="s1">error_fatal = </span><span class="s0">False</span>
+
+    <span class="s0">def </span><span class="s1">test(self):</span>
+        <span class="s1">self.pool = self._makeOne(</span><span class="s4">3</span><span class="s1">)</span>
+        <span class="s1">self.assertRaises(greentest.ExpectedException</span><span class="s0">, </span><span class="s1">self.pool.map</span><span class="s0">, lambda </span><span class="s1">x: </span><span class="s0">None, </span><span class="s1">error_iter())</span>
+        <span class="s1">gevent.sleep(</span><span class="s4">0.001</span><span class="s1">)</span>
+
+    <span class="s0">def </span><span class="s1">test_unordered(self):</span>
+        <span class="s1">self.pool = self._makeOne(</span><span class="s4">3</span><span class="s1">)</span>
+
+        <span class="s0">def </span><span class="s1">unordered():</span>
+            <span class="s0">return </span><span class="s1">list(self.pool.imap_unordered(</span><span class="s0">lambda </span><span class="s1">x: </span><span class="s0">None, </span><span class="s1">error_iter()))</span>
+
+        <span class="s1">self.assertRaises(greentest.ExpectedException</span><span class="s0">, </span><span class="s1">unordered)</span>
+        <span class="s1">gevent.sleep(</span><span class="s4">0.001</span><span class="s1">)</span>
+
+
+<span class="s0">class </span><span class="s1">TestMaxsize(TestCase):</span>
+
+    <span class="s0">def </span><span class="s1">test_inc(self):</span>
+        <span class="s1">self.pool = self._makeOne(</span><span class="s4">0</span><span class="s1">)</span>
+        <span class="s1">done = []</span>
+        <span class="s2"># Try to be careful not to tick over the libuv timer.</span>
+        <span class="s2"># See libuv/loop.py:_start_callback_timer</span>
+        <span class="s1">gevent.spawn(self.pool.spawn</span><span class="s0">, </span><span class="s1">done.append</span><span class="s0">, </span><span class="s4">1</span><span class="s1">)</span>
+        <span class="s1">gevent.spawn_later(</span><span class="s4">0.01</span><span class="s0">, </span><span class="s1">self.pool.spawn</span><span class="s0">, </span><span class="s1">done.append</span><span class="s0">, </span><span class="s4">2</span><span class="s1">)</span>
+        <span class="s1">gevent.sleep(</span><span class="s4">0.02</span><span class="s1">)</span>
+        <span class="s1">self.assertEqual(done</span><span class="s0">, </span><span class="s1">[])</span>
+        <span class="s1">self.pool.maxsize = </span><span class="s4">1</span>
+        <span class="s1">gevent.sleep(</span><span class="s4">0.02</span><span class="s1">)</span>
+
+        <span class="s1">self.assertEqualFlakyRaceCondition(done</span><span class="s0">, </span><span class="s1">[</span><span class="s4">1</span><span class="s0">, </span><span class="s4">2</span><span class="s1">])</span>
+
+    <span class="s1">@greentest.ignores_leakcheck</span>
+    <span class="s0">def </span><span class="s1">test_setzero(self):</span>
+        <span class="s1">pool = self.pool = self._makeOne(</span><span class="s4">3</span><span class="s1">)</span>
+        <span class="s1">pool.spawn(sleep</span><span class="s0">, </span><span class="s4">0.1</span><span class="s1">)</span>
+        <span class="s1">pool.spawn(sleep</span><span class="s0">, </span><span class="s4">0.2</span><span class="s1">)</span>
+        <span class="s1">pool.spawn(sleep</span><span class="s0">, </span><span class="s4">0.3</span><span class="s1">)</span>
+        <span class="s1">gevent.sleep(</span><span class="s4">0.2</span><span class="s1">)</span>
+        <span class="s1">self.assertGreaterEqual(pool.size</span><span class="s0">, </span><span class="s4">2</span><span class="s1">)</span>
+        <span class="s1">pool.maxsize = </span><span class="s4">0</span>
+        <span class="s1">gevent.sleep(</span><span class="s4">0.2</span><span class="s1">)</span>
+        <span class="s1">self.assertEqualFlakyRaceCondition(pool.size</span><span class="s0">, </span><span class="s4">0</span><span class="s1">)</span>
+
+
+<span class="s0">class </span><span class="s1">TestSize(TestCase):</span>
+
+    <span class="s1">@greentest.reraises_flaky_race_condition()</span>
+    <span class="s0">def </span><span class="s1">test(self):</span>
+        <span class="s1">pool = self.pool = self._makeOne(</span><span class="s4">2</span><span class="s0">, </span><span class="s1">create_all_worker_threads=</span><span class="s0">False</span><span class="s1">)</span>
+        <span class="s1">self.assertEqual(pool.size</span><span class="s0">, </span><span class="s4">0</span><span class="s1">)</span>
+        <span class="s1">pool.size = </span><span class="s4">1</span>
+        <span class="s1">self.assertEqual(pool.size</span><span class="s0">, </span><span class="s4">1</span><span class="s1">)</span>
+        <span class="s1">pool.size = </span><span class="s4">2</span>
+        <span class="s1">self.assertEqual(pool.size</span><span class="s0">, </span><span class="s4">2</span><span class="s1">)</span>
+        <span class="s1">pool.size = </span><span class="s4">1</span>
+        <span class="s1">self.assertEqual(pool.size</span><span class="s0">, </span><span class="s4">1</span><span class="s1">)</span>
+
+        <span class="s0">with </span><span class="s1">self.assertRaises(ValueError):</span>
+            <span class="s1">pool.size = -</span><span class="s4">1</span>
+
+        <span class="s0">with </span><span class="s1">self.assertRaises(ValueError):</span>
+            <span class="s1">pool.size = </span><span class="s4">3</span>
+
+        <span class="s1">pool.size = </span><span class="s4">0</span>
+        <span class="s1">self.assertEqual(pool.size</span><span class="s0">, </span><span class="s4">0</span><span class="s1">)</span>
+        <span class="s1">pool.size = </span><span class="s4">2</span>
+        <span class="s1">self.assertEqual(pool.size</span><span class="s0">, </span><span class="s4">2</span><span class="s1">)</span>
+
+
+<span class="s0">class </span><span class="s1">TestRef(TestCase):</span>
+
+    <span class="s0">def </span><span class="s1">test(self):</span>
+        <span class="s1">pool = self.pool = self._makeOne(</span><span class="s4">2</span><span class="s1">)</span>
+
+        <span class="s1">refs = []</span>
+        <span class="s1">obj = SomeClass()</span>
+        <span class="s1">obj.refs = refs</span>
+        <span class="s1">func = obj.func</span>
+        <span class="s0">del </span><span class="s1">obj</span>
+
+        <span class="s0">with </span><span class="s1">disabled_gc():</span>
+            <span class="s2"># we do this:</span>
+            <span class="s2">#     result = func(Object(), kwarg1=Object())</span>
+            <span class="s2"># but in a thread pool and see that arguments', result's and func's references are not leaked</span>
+            <span class="s1">result = pool.apply(func</span><span class="s0">, </span><span class="s1">(Object()</span><span class="s0">, </span><span class="s1">)</span><span class="s0">, </span><span class="s1">{</span><span class="s3">'kwarg1'</span><span class="s1">: Object()})</span>
+            <span class="s1">self.assertIsInstance(result</span><span class="s0">, </span><span class="s1">Object)</span>
+            <span class="s1">gevent.sleep(</span><span class="s4">0.1</span><span class="s1">)  </span><span class="s2"># XXX should not be needed</span>
+
+            <span class="s1">refs.append(weakref.ref(func))</span>
+            <span class="s0">del </span><span class="s1">func</span><span class="s0">, </span><span class="s1">result</span>
+            <span class="s0">if </span><span class="s1">PYPY:</span>
+                <span class="s1">gc.collect()</span>
+                <span class="s1">gc.collect()</span>
+            <span class="s0">for </span><span class="s1">r </span><span class="s0">in </span><span class="s1">refs:</span>
+                <span class="s1">self.assertIsNone(r())</span>
+
+            <span class="s1">self.assertEqual(</span><span class="s4">4</span><span class="s0">, </span><span class="s1">len(refs))</span>
+
+
+<span class="s0">class </span><span class="s1">Object(object):</span>
+    <span class="s0">pass</span>
+
+
+<span class="s0">class </span><span class="s1">SomeClass(object):</span>
+
+    <span class="s1">refs = </span><span class="s0">None</span>
+
+    <span class="s0">def </span><span class="s1">func(self</span><span class="s0">, </span><span class="s1">arg1</span><span class="s0">, </span><span class="s1">kwarg1=</span><span class="s0">None</span><span class="s1">):</span>
+        <span class="s1">result = Object()</span>
+        <span class="s1">self.refs.extend([weakref.ref(x) </span><span class="s0">for </span><span class="s1">x </span><span class="s0">in </span><span class="s1">[arg1</span><span class="s0">, </span><span class="s1">kwarg1</span><span class="s0">, </span><span class="s1">result]])</span>
+        <span class="s0">return </span><span class="s1">result</span>
+
+
+<span class="s0">def </span><span class="s1">noop():</span>
+    <span class="s0">pass</span>
+
+
+<span class="s0">class </span><span class="s1">TestRefCount(TestCase):</span>
+
+    <span class="s0">def </span><span class="s1">test(self):</span>
+        <span class="s1">pool = self._makeOne(</span><span class="s4">1</span><span class="s1">)</span>
+        <span class="s1">pool.spawn(noop)</span>
+        <span class="s1">gevent.sleep(</span><span class="s4">0</span><span class="s1">)</span>
+        <span class="s1">pool.kill()</span>
+
+
+
+<span class="s0">from </span><span class="s1">gevent </span><span class="s0">import </span><span class="s1">monkey</span>
+
+<span class="s1">@greentest.skipUnless(</span>
+    <span class="s1">hasattr(gevent.threadpool</span><span class="s0">, </span><span class="s3">'ThreadPoolExecutor'</span><span class="s1">)</span><span class="s0">,</span>
+    <span class="s3">&quot;Requires ThreadPoolExecutor&quot;</span><span class="s1">)</span>
+<span class="s0">class </span><span class="s1">TestTPE(_AbstractPoolTest):</span>
+    <span class="s1">size = </span><span class="s4">1</span>
+
+    <span class="s1">MAP_IS_GEN = </span><span class="s0">True</span>
+
+    <span class="s1">@property</span>
+    <span class="s0">def </span><span class="s1">ClassUnderTest(self):</span>
+        <span class="s0">return </span><span class="s1">gevent.threadpool.ThreadPoolExecutor</span>
+
+    <span class="s1">MONKEY_PATCHED = </span><span class="s0">False</span>
+
+    <span class="s1">@property</span>
+    <span class="s0">def </span><span class="s1">FutureTimeoutError(self):</span>
+        <span class="s0">from </span><span class="s1">concurrent.futures </span><span class="s0">import </span><span class="s1">TimeoutError </span><span class="s0">as </span><span class="s1">FutureTimeoutError</span>
+        <span class="s0">return </span><span class="s1">FutureTimeoutError</span>
+
+    <span class="s1">@property</span>
+    <span class="s0">def </span><span class="s1">cf_wait(self):</span>
+        <span class="s0">from </span><span class="s1">concurrent.futures </span><span class="s0">import </span><span class="s1">wait </span><span class="s0">as </span><span class="s1">cf_wait</span>
+        <span class="s0">return </span><span class="s1">cf_wait</span>
+
+    <span class="s1">@property</span>
+    <span class="s0">def </span><span class="s1">cf_as_completed(self):</span>
+        <span class="s0">from </span><span class="s1">concurrent.futures </span><span class="s0">import </span><span class="s1">as_completed </span><span class="s0">as </span><span class="s1">cf_as_completed</span>
+        <span class="s0">return </span><span class="s1">cf_as_completed</span>
+
+    <span class="s1">@greentest.ignores_leakcheck</span>
+    <span class="s0">def </span><span class="s1">test_future(self):</span>
+        <span class="s1">self.assertEqual(monkey.is_module_patched(</span><span class="s3">'threading'</span><span class="s1">)</span><span class="s0">,</span>
+                         <span class="s1">self.MONKEY_PATCHED)</span>
+        <span class="s1">pool = self.pool</span>
+
+        <span class="s1">calledback = []</span>
+
+        <span class="s0">def </span><span class="s1">fn():</span>
+            <span class="s1">gevent.sleep(</span><span class="s4">0.5</span><span class="s1">)</span>
+            <span class="s0">return </span><span class="s4">42</span>
+
+        <span class="s0">def </span><span class="s1">callback(future):</span>
+            <span class="s1">future.calledback += </span><span class="s4">1</span>
+            <span class="s0">raise </span><span class="s1">greentest.ExpectedException(</span><span class="s3">&quot;Expected, ignored&quot;</span><span class="s1">)</span>
+
+        <span class="s1">future = pool.submit(fn) </span><span class="s2"># pylint:disable=no-member</span>
+        <span class="s1">future.calledback = </span><span class="s4">0</span>
+        <span class="s1">future.add_done_callback(callback)</span>
+        <span class="s1">self.assertRaises(self.FutureTimeoutError</span><span class="s0">, </span><span class="s1">future.result</span><span class="s0">, </span><span class="s1">timeout=</span><span class="s4">0.001</span><span class="s1">)</span>
+
+        <span class="s0">def </span><span class="s1">spawned():</span>
+            <span class="s0">return </span><span class="s4">2016</span>
+
+        <span class="s1">spawned_greenlet = gevent.spawn(spawned)</span>
+
+        <span class="s2"># Whether or not we are monkey patched, the background</span>
+        <span class="s2"># greenlet we spawned got to run while we waited.</span>
+
+        <span class="s1">self.assertEqual(future.result()</span><span class="s0">, </span><span class="s4">42</span><span class="s1">)</span>
+        <span class="s1">self.assertTrue(future.done())</span>
+        <span class="s1">self.assertFalse(future.cancelled())</span>
+        <span class="s2"># Make sure the notifier has a chance to run so the call back</span>
+        <span class="s2"># gets called</span>
+        <span class="s1">gevent.sleep()</span>
+        <span class="s1">self.assertEqual(future.calledback</span><span class="s0">, </span><span class="s4">1</span><span class="s1">)</span>
+
+        <span class="s1">self.assertTrue(spawned_greenlet.ready())</span>
+        <span class="s1">self.assertEqual(spawned_greenlet.value</span><span class="s0">, </span><span class="s4">2016</span><span class="s1">)</span>
+
+        <span class="s2"># Adding the callback again runs immediately</span>
+        <span class="s1">future.add_done_callback(</span><span class="s0">lambda </span><span class="s1">f: calledback.append(</span><span class="s0">True</span><span class="s1">))</span>
+        <span class="s1">self.assertEqual(calledback</span><span class="s0">, </span><span class="s1">[</span><span class="s0">True</span><span class="s1">])</span>
+
+        <span class="s2"># We can wait on the finished future</span>
+        <span class="s1">done</span><span class="s0">, </span><span class="s1">_not_done = self.cf_wait((future</span><span class="s0">,</span><span class="s1">))</span>
+        <span class="s1">self.assertEqual(list(done)</span><span class="s0">, </span><span class="s1">[future])</span>
+
+        <span class="s1">self.assertEqual(list(self.cf_as_completed((future</span><span class="s0">,</span><span class="s1">)))</span><span class="s0">, </span><span class="s1">[future])</span>
+        <span class="s2"># Doing so does not call the callback again</span>
+        <span class="s1">self.assertEqual(future.calledback</span><span class="s0">, </span><span class="s4">1</span><span class="s1">)</span>
+        <span class="s2"># even after a trip around the event loop</span>
+        <span class="s1">gevent.sleep()</span>
+        <span class="s1">self.assertEqual(future.calledback</span><span class="s0">, </span><span class="s4">1</span><span class="s1">)</span>
+
+        <span class="s1">pool.kill()</span>
+        <span class="s0">del </span><span class="s1">future</span>
+        <span class="s0">del </span><span class="s1">pool</span>
+        <span class="s0">del </span><span class="s1">self.pool</span>
+
+    <span class="s1">@greentest.ignores_leakcheck</span>
+    <span class="s0">def </span><span class="s1">test_future_wait_module_function(self):</span>
+        <span class="s2"># Instead of waiting on the result, we can wait</span>
+        <span class="s2"># on the future using the module functions</span>
+        <span class="s1">self.assertEqual(monkey.is_module_patched(</span><span class="s3">'threading'</span><span class="s1">)</span><span class="s0">,</span>
+                         <span class="s1">self.MONKEY_PATCHED)</span>
+        <span class="s1">pool = self.pool</span>
+
+        <span class="s0">def </span><span class="s1">fn():</span>
+            <span class="s1">gevent.sleep(</span><span class="s4">0.5</span><span class="s1">)</span>
+            <span class="s0">return </span><span class="s4">42</span>
+
+        <span class="s1">future = pool.submit(fn) </span><span class="s2"># pylint:disable=no-member</span>
+        <span class="s0">if </span><span class="s1">self.MONKEY_PATCHED:</span>
+            <span class="s2"># Things work as expected when monkey-patched</span>
+            <span class="s1">_done</span><span class="s0">, </span><span class="s1">not_done = self.cf_wait((future</span><span class="s0">,</span><span class="s1">)</span><span class="s0">, </span><span class="s1">timeout=</span><span class="s4">0.001</span><span class="s1">)</span>
+            <span class="s1">self.assertEqual(list(not_done)</span><span class="s0">, </span><span class="s1">[future])</span>
+
+            <span class="s0">def </span><span class="s1">spawned():</span>
+                <span class="s0">return </span><span class="s4">2016</span>
+
+            <span class="s1">spawned_greenlet = gevent.spawn(spawned)</span>
+
+            <span class="s1">done</span><span class="s0">, </span><span class="s1">_not_done = self.cf_wait((future</span><span class="s0">,</span><span class="s1">))</span>
+            <span class="s1">self.assertEqual(list(done)</span><span class="s0">, </span><span class="s1">[future])</span>
+            <span class="s1">self.assertTrue(spawned_greenlet.ready())</span>
+            <span class="s1">self.assertEqual(spawned_greenlet.value</span><span class="s0">, </span><span class="s4">2016</span><span class="s1">)</span>
+        <span class="s0">else</span><span class="s1">:</span>
+            <span class="s2"># When not monkey-patched, raises an AttributeError</span>
+            <span class="s1">self.assertRaises(AttributeError</span><span class="s0">, </span><span class="s1">self.cf_wait</span><span class="s0">, </span><span class="s1">(future</span><span class="s0">,</span><span class="s1">))</span>
+
+        <span class="s1">pool.kill()</span>
+        <span class="s0">del </span><span class="s1">future</span>
+        <span class="s0">del </span><span class="s1">pool</span>
+        <span class="s0">del </span><span class="s1">self.pool</span>
+
+    <span class="s1">@greentest.ignores_leakcheck</span>
+    <span class="s0">def </span><span class="s1">test_future_wait_gevent_function(self):</span>
+        <span class="s2"># The future object can be waited on with gevent functions.</span>
+        <span class="s1">self.assertEqual(monkey.is_module_patched(</span><span class="s3">'threading'</span><span class="s1">)</span><span class="s0">,</span>
+                         <span class="s1">self.MONKEY_PATCHED)</span>
+        <span class="s1">pool = self.pool</span>
+
+        <span class="s0">def </span><span class="s1">fn():</span>
+            <span class="s1">gevent.sleep(</span><span class="s4">0.5</span><span class="s1">)</span>
+            <span class="s0">return </span><span class="s4">42</span>
+
+        <span class="s1">future = pool.submit(fn) </span><span class="s2"># pylint:disable=no-member</span>
+
+        <span class="s0">def </span><span class="s1">spawned():</span>
+            <span class="s0">return </span><span class="s4">2016</span>
+
+        <span class="s1">spawned_greenlet = gevent.spawn(spawned)</span>
+
+        <span class="s1">done = gevent.wait((future</span><span class="s0">,</span><span class="s1">))</span>
+        <span class="s1">self.assertEqual(list(done)</span><span class="s0">, </span><span class="s1">[future])</span>
+        <span class="s1">self.assertTrue(spawned_greenlet.ready())</span>
+        <span class="s1">self.assertEqual(spawned_greenlet.value</span><span class="s0">, </span><span class="s4">2016</span><span class="s1">)</span>
+
+        <span class="s1">pool.kill()</span>
+        <span class="s0">del </span><span class="s1">future</span>
+        <span class="s0">del </span><span class="s1">pool</span>
+        <span class="s0">del </span><span class="s1">self.pool</span>
+
+
+<span class="s0">class </span><span class="s1">TestThreadResult(greentest.TestCase):</span>
+
+    <span class="s0">def </span><span class="s1">test_exception_in_on_async_doesnt_crash(self):</span>
+        <span class="s2"># Issue 1482. An FFI-based loop could crash the whole process</span>
+        <span class="s2"># by dereferencing a handle after it was closed.</span>
+        <span class="s1">called = []</span>
+        <span class="s0">class </span><span class="s1">MyException(Exception):</span>
+            <span class="s0">pass</span>
+
+        <span class="s0">def </span><span class="s1">bad_when_ready():</span>
+            <span class="s1">called.append(</span><span class="s4">1</span><span class="s1">)</span>
+            <span class="s0">raise </span><span class="s1">MyException</span>
+
+        <span class="s1">tr = gevent.threadpool.ThreadResult(</span><span class="s0">None, </span><span class="s1">gevent.get_hub()</span><span class="s0">, </span><span class="s1">bad_when_ready)</span>
+
+        <span class="s0">def </span><span class="s1">wake():</span>
+            <span class="s1">called.append(</span><span class="s4">1</span><span class="s1">)</span>
+            <span class="s1">tr.set(</span><span class="s4">42</span><span class="s1">)</span>
+
+        <span class="s1">gevent.spawn(wake).get()</span>
+        <span class="s2"># Spin the loop a few times to make sure we run the callbacks.</span>
+        <span class="s2"># If we neglect to spin, we don't trigger the bug.</span>
+        <span class="s2"># If error handling is correct, the exception raised from the callback</span>
+        <span class="s2"># will be surfaced in the main greenlet. On windows, it can sometimes take</span>
+        <span class="s2"># more than one spin for some reason; if we don't catch it here, then</span>
+        <span class="s2"># some other test is likely to die unexpectedly with MyException.</span>
+        <span class="s0">with </span><span class="s1">self.assertRaises(MyException):</span>
+            <span class="s0">for </span><span class="s1">_ </span><span class="s0">in </span><span class="s1">range(</span><span class="s4">5</span><span class="s1">):</span>
+                <span class="s1">gevent.sleep(</span><span class="s4">0.001</span><span class="s1">)</span>
+
+
+        <span class="s1">self.assertEqual(called</span><span class="s0">, </span><span class="s1">[</span><span class="s4">1</span><span class="s0">, </span><span class="s4">1</span><span class="s1">])</span>
+        <span class="s2"># But value was cleared in a finally block</span>
+        <span class="s1">self.assertIsNone(tr.value)</span>
+        <span class="s1">self.assertIsNotNone(tr.receiver)</span>
+
+
+<span class="s0">class </span><span class="s1">TestWorkerProfileAndTrace(TestCase):</span>
+    <span class="s2"># Worker threads should execute the test and trace functions.</span>
+    <span class="s2"># (When running the user code.)</span>
+    <span class="s2"># https://github.com/gevent/gevent/issues/1670</span>
+
+    <span class="s1">old_profile = </span><span class="s0">None</span>
+    <span class="s1">old_trace = </span><span class="s0">None</span>
+
+    <span class="s0">def </span><span class="s1">setUp(self):</span>
+        <span class="s1">super(TestWorkerProfileAndTrace</span><span class="s0">, </span><span class="s1">self).setUp()</span>
+        <span class="s1">self.old_profile = gevent.threadpool._get_thread_profile()</span>
+        <span class="s1">self.old_trace = gevent.threadpool._get_thread_trace()</span>
+
+    <span class="s0">def </span><span class="s1">tearDown(self):</span>
+        <span class="s0">import </span><span class="s1">threading</span>
+        <span class="s1">threading.setprofile(self.old_profile)</span>
+        <span class="s1">threading.settrace(self.old_trace)</span>
+        <span class="s1">super(TestWorkerProfileAndTrace</span><span class="s0">, </span><span class="s1">self).tearDown()</span>
+
+    <span class="s0">def </span><span class="s1">test_get_profile(self):</span>
+        <span class="s0">import </span><span class="s1">threading</span>
+        <span class="s1">threading.setprofile(self)</span>
+        <span class="s1">self.assertIs(gevent.threadpool._get_thread_profile()</span><span class="s0">, </span><span class="s1">self)</span>
+
+    <span class="s0">def </span><span class="s1">test_get_trace(self):</span>
+        <span class="s0">import </span><span class="s1">threading</span>
+        <span class="s1">threading.settrace(self)</span>
+        <span class="s1">self.assertIs(gevent.threadpool._get_thread_trace()</span><span class="s0">, </span><span class="s1">self)</span>
+
+    <span class="s0">def </span><span class="s1">_test_func_called_in_task(self</span><span class="s0">, </span><span class="s1">func):</span>
+        <span class="s0">import </span><span class="s1">threading</span>
+        <span class="s0">import </span><span class="s1">sys</span>
+
+        <span class="s1">setter = getattr(threading</span><span class="s0">, </span><span class="s3">'set' </span><span class="s1">+ func)</span>
+        <span class="s1">getter = getattr(sys</span><span class="s0">, </span><span class="s3">'get' </span><span class="s1">+ func)</span>
+
+        <span class="s1">called = [</span><span class="s4">0</span><span class="s1">]</span>
+        <span class="s0">def </span><span class="s1">callback(*_args):</span>
+            <span class="s1">called[</span><span class="s4">0</span><span class="s1">] += </span><span class="s4">1</span>
+
+        <span class="s0">def </span><span class="s1">task():</span>
+            <span class="s1">test.assertIsNotNone(getter)</span>
+            <span class="s0">return </span><span class="s4">1701</span>
+
+
+        <span class="s1">before_task = []</span>
+        <span class="s1">after_task = []</span>
+
+        <span class="s1">test = self</span>
+        <span class="s0">class </span><span class="s1">Pool(ThreadPool):</span>
+            <span class="s0">class </span><span class="s1">_WorkerGreenlet(ThreadPool._WorkerGreenlet):</span>
+                <span class="s2"># pylint:disable=signature-differs</span>
+                <span class="s0">def </span><span class="s1">_before_run_task(self</span><span class="s0">, </span><span class="s1">func</span><span class="s0">, </span><span class="s1">*args):</span>
+                    <span class="s1">before_task.append(func)</span>
+                    <span class="s1">before_task.append(getter())</span>
+                    <span class="s1">ThreadPool._WorkerGreenlet._before_run_task(self</span><span class="s0">, </span><span class="s1">func</span><span class="s0">, </span><span class="s1">*args)</span>
+                    <span class="s1">before_task.append(getter())</span>
+
+                <span class="s0">def </span><span class="s1">_after_run_task(self</span><span class="s0">, </span><span class="s1">func</span><span class="s0">, </span><span class="s1">*args):</span>
+                    <span class="s1">after_task.append(func)</span>
+                    <span class="s1">after_task.append(getter())</span>
+                    <span class="s1">ThreadPool._WorkerGreenlet._after_run_task(self</span><span class="s0">, </span><span class="s1">func</span><span class="s0">, </span><span class="s1">*args)</span>
+                    <span class="s1">after_task.append(getter())</span>
+
+        <span class="s1">self.ClassUnderTest = Pool</span>
+
+        <span class="s1">pool = self._makeOne(</span><span class="s4">1</span><span class="s0">, </span><span class="s1">create_all_worker_threads=</span><span class="s0">True</span><span class="s1">)</span>
+        <span class="s0">assert </span><span class="s1">isinstance(pool</span><span class="s0">, </span><span class="s1">Pool)</span>
+
+        <span class="s2"># Do this after creating the pool and its thread to verify we don't</span>
+        <span class="s2"># capture the function at thread creation time.</span>
+        <span class="s1">setter(callback)</span>
+
+
+        <span class="s1">res = pool.apply(task)</span>
+        <span class="s1">self.assertEqual(res</span><span class="s0">, </span><span class="s4">1701</span><span class="s1">)</span>
+        <span class="s1">self.assertGreaterEqual(called[</span><span class="s4">0</span><span class="s1">]</span><span class="s0">, </span><span class="s4">1</span><span class="s1">)</span>
+
+        <span class="s2"># Shutdown the pool. PyPy2.7-7.3.1 on Windows/Appveyor was</span>
+        <span class="s2"># properly seeing the before_task value, but after_task was empty.</span>
+        <span class="s2"># That suggested a memory consistency type issue, where the updates</span>
+        <span class="s2"># written by the other thread weren't fully visible to this thread</span>
+        <span class="s2"># yet. Try to kill it to see if that helps. (Couldn't reproduce</span>
+        <span class="s2"># on macOS).</span>
+        <span class="s2">#</span>
+        <span class="s2"># https://ci.appveyor.com/project/jamadden/gevent/build/job/wo9likk85cduui7n#L867</span>
+        <span class="s1">pool.kill()</span>
+
+        <span class="s2"># The function is active only for the scope of the function</span>
+        <span class="s1">self.assertEqual(before_task</span><span class="s0">, </span><span class="s1">[task</span><span class="s0">, None, </span><span class="s1">callback])</span>
+        <span class="s1">self.assertEqual(after_task</span><span class="s0">, </span><span class="s1">[task</span><span class="s0">, </span><span class="s1">callback</span><span class="s0">, None</span><span class="s1">])</span>
+
+    <span class="s0">def </span><span class="s1">test_profile_called_in_task(self):</span>
+        <span class="s1">self._test_func_called_in_task(</span><span class="s3">'profile'</span><span class="s1">)</span>
+
+    <span class="s0">def </span><span class="s1">test_trace_called_in_task(self):</span>
+        <span class="s1">self._test_func_called_in_task(</span><span class="s3">'trace'</span><span class="s1">)</span>
+
+
+
+<span class="s0">if </span><span class="s1">__name__ == </span><span class="s3">'__main__'</span><span class="s1">:</span>
+    <span class="s1">greentest.main()</span>
+</pre>
+</body>
+</html>

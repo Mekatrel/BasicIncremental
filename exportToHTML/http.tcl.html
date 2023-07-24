@@ -1,0 +1,394 @@
+<html>
+<head>
+<title>http.tcl</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #a9b7c6;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+http.tcl</font>
+</center></td></tr></table>
+<pre><span class="s0"># http.tcl</span>
+<span class="s0"># Client-side HTTP for GET, POST, and HEAD commands.</span>
+<span class="s0"># These routines can be used in untrusted code that uses the Safesock</span>
+<span class="s0"># security policy.</span>
+<span class="s0"># These procedures use a callback interface to avoid using vwait,</span>
+<span class="s0"># which is not defined in the safe base.</span>
+<span class="s0">#</span>
+<span class="s0"># See the http.n man page for documentation</span>
+
+<span class="s0">package provide http 1.0</span>
+
+<span class="s0">array set http {</span>
+    <span class="s0">-accept */*</span>
+    <span class="s0">-proxyhost {}</span>
+    <span class="s0">-proxyport {}</span>
+    <span class="s0">-useragent {Tcl http client package 1.0}</span>
+    <span class="s0">-proxyfilter httpProxyRequired</span>
+<span class="s0">}</span>
+<span class="s0">proc http_config {args} {</span>
+    <span class="s0">global http</span>
+    <span class="s0">set options [lsort [array names http -*]]</span>
+    <span class="s0">set usage [join $options &quot;, &quot;]</span>
+    <span class="s0">if {[llength $args] == 0} {</span>
+	<span class="s0">set result {}</span>
+	<span class="s0">foreach name $options {</span>
+	    <span class="s0">lappend result $name $http($name)</span>
+	<span class="s0">}</span>
+	<span class="s0">return $result</span>
+    <span class="s0">}</span>
+    <span class="s0">regsub -all -- - $options {} options</span>
+    <span class="s0">set pat ^-([join $options |])$</span>
+    <span class="s0">if {[llength $args] == 1} {</span>
+	<span class="s0">set flag [lindex $args 0]</span>
+	<span class="s0">if {[regexp -- $pat $flag]} {</span>
+	    <span class="s0">return $http($flag)</span>
+	<span class="s0">} else {</span>
+	    <span class="s0">return -code error &quot;Unknown option $flag, must be: $usage&quot;</span>
+	<span class="s0">}</span>
+    <span class="s0">} else {</span>
+	<span class="s0">foreach {flag value} $args {</span>
+	    <span class="s0">if {[regexp -- $pat $flag]} {</span>
+		<span class="s0">set http($flag) $value</span>
+	    <span class="s0">} else {</span>
+		<span class="s0">return -code error &quot;Unknown option $flag, must be: $usage&quot;</span>
+	    <span class="s0">}</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+
+ <span class="s0">proc httpFinish { token {errormsg &quot;&quot;} } {</span>
+    <span class="s0">upvar #0 $token state</span>
+    <span class="s0">global errorInfo errorCode</span>
+    <span class="s0">if {[string length $errormsg] != 0} {</span>
+	<span class="s0">set state(error) [list $errormsg $errorInfo $errorCode]</span>
+	<span class="s0">set state(status) error</span>
+    <span class="s0">}</span>
+    <span class="s0">catch {close $state(sock)}</span>
+    <span class="s0">catch {after cancel $state(after)}</span>
+    <span class="s0">if {[info exists state(-command)]} {</span>
+	<span class="s0">if {[catch {eval $state(-command) {$token}} err]} {</span>
+	    <span class="s0">if {[string length $errormsg] == 0} {</span>
+		<span class="s0">set state(error) [list $err $errorInfo $errorCode]</span>
+		<span class="s0">set state(status) error</span>
+	    <span class="s0">}</span>
+	<span class="s0">}</span>
+	<span class="s0">unset state(-command)</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+<span class="s0">proc http_reset { token {why reset} } {</span>
+    <span class="s0">upvar #0 $token state</span>
+    <span class="s0">set state(status) $why</span>
+    <span class="s0">catch {fileevent $state(sock) readable {}}</span>
+    <span class="s0">httpFinish $token</span>
+    <span class="s0">if {[info exists state(error)]} {</span>
+	<span class="s0">set errorlist $state(error)</span>
+	<span class="s0">unset state(error)</span>
+	<span class="s0">eval error $errorlist</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+<span class="s0">proc http_get { url args } {</span>
+    <span class="s0">global http</span>
+    <span class="s0">if {![info exists http(uid)]} {</span>
+	<span class="s0">set http(uid) 0</span>
+    <span class="s0">}</span>
+    <span class="s0">set token http#[incr http(uid)]</span>
+    <span class="s0">upvar #0 $token state</span>
+    <span class="s0">http_reset $token</span>
+    <span class="s0">array set state {</span>
+	<span class="s0">-blocksize 	8192</span>
+	<span class="s0">-validate 	0</span>
+	<span class="s0">-headers 	{}</span>
+	<span class="s0">-timeout 	0</span>
+	<span class="s0">state		header</span>
+	<span class="s0">meta		{}</span>
+	<span class="s0">currentsize	0</span>
+	<span class="s0">totalsize	0</span>
+        <span class="s0">type            text/html</span>
+        <span class="s0">body            {}</span>
+	<span class="s0">status		&quot;&quot;</span>
+    <span class="s0">}</span>
+    <span class="s0">set options {-blocksize -channel -command -handler -headers \</span>
+		<span class="s0">-progress -query -validate -timeout}</span>
+    <span class="s0">set usage [join $options &quot;, &quot;]</span>
+    <span class="s0">regsub -all -- - $options {} options</span>
+    <span class="s0">set pat ^-([join $options |])$</span>
+    <span class="s0">foreach {flag value} $args {</span>
+	<span class="s0">if {[regexp $pat $flag]} {</span>
+	    <span class="s0"># Validate numbers</span>
+	    <span class="s0">if {[info exists state($flag)] &amp;&amp; \</span>
+		    <span class="s0">[regexp {^[0-9]+$} $state($flag)] &amp;&amp; \</span>
+		    <span class="s0">![regexp {^[0-9]+$} $value]} {</span>
+		<span class="s0">return -code error &quot;Bad value for $flag ($value), must be integer&quot;</span>
+	    <span class="s0">}</span>
+	    <span class="s0">set state($flag) $value</span>
+	<span class="s0">} else {</span>
+	    <span class="s0">return -code error &quot;Unknown option $flag, can be: $usage&quot;</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+    <span class="s0">if {! [regexp -nocase {^(http://)?([^/:]+)(:([0-9]+))?(/.*)?$} $url \</span>
+	    <span class="s0">x proto host y port srvurl]} {</span>
+	<span class="s0">error &quot;Unsupported URL: $url&quot;</span>
+    <span class="s0">}</span>
+    <span class="s0">if {[string length $port] == 0} {</span>
+	<span class="s0">set port 80</span>
+    <span class="s0">}</span>
+    <span class="s0">if {[string length $srvurl] == 0} {</span>
+	<span class="s0">set srvurl /</span>
+    <span class="s0">}</span>
+    <span class="s0">if {[string length $proto] == 0} {</span>
+	<span class="s0">set url http://$url</span>
+    <span class="s0">}</span>
+    <span class="s0">set state(url) $url</span>
+    <span class="s0">if {![catch {$http(-proxyfilter) $host} proxy]} {</span>
+	<span class="s0">set phost [lindex $proxy 0]</span>
+	<span class="s0">set pport [lindex $proxy 1]</span>
+    <span class="s0">}</span>
+    <span class="s0">if {$state(-timeout) &gt; 0} {</span>
+	<span class="s0">set state(after) [after $state(-timeout) [list http_reset $token timeout]]</span>
+    <span class="s0">}</span>
+    <span class="s0">if {[info exists phost] &amp;&amp; [string length $phost]} {</span>
+	<span class="s0">set srvurl $url</span>
+	<span class="s0">set s [socket $phost $pport]</span>
+    <span class="s0">} else {</span>
+	<span class="s0">set s [socket $host $port]</span>
+    <span class="s0">}</span>
+    <span class="s0">set state(sock) $s</span>
+
+    <span class="s0"># Send data in cr-lf format, but accept any line terminators</span>
+
+    <span class="s0">fconfigure $s -translation {auto crlf} -buffersize $state(-blocksize)</span>
+
+    <span class="s0"># The following is disallowed in safe interpreters, but the socket</span>
+    <span class="s0"># is already in non-blocking mode in that case.</span>
+
+    <span class="s0">catch {fconfigure $s -blocking off}</span>
+    <span class="s0">set len 0</span>
+    <span class="s0">set how GET</span>
+    <span class="s0">if {[info exists state(-query)]} {</span>
+	<span class="s0">set len [string length $state(-query)]</span>
+	<span class="s0">if {$len &gt; 0} {</span>
+	    <span class="s0">set how POST</span>
+	<span class="s0">}</span>
+    <span class="s0">} elseif {$state(-validate)} {</span>
+	<span class="s0">set how HEAD</span>
+    <span class="s0">}</span>
+    <span class="s0">puts $s &quot;$how $srvurl HTTP/1.0&quot;</span>
+    <span class="s0">puts $s &quot;Accept: $http(-accept)&quot;</span>
+    <span class="s0">puts $s &quot;Host: $host&quot;</span>
+    <span class="s0">puts $s &quot;User-Agent: $http(-useragent)&quot;</span>
+    <span class="s0">foreach {key value} $state(-headers) {</span>
+	<span class="s0">regsub -all \[\n\r\]  $value {} value</span>
+	<span class="s0">set key [string trim $key]</span>
+	<span class="s0">if {[string length $key]} {</span>
+	    <span class="s0">puts $s &quot;$key: $value&quot;</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+    <span class="s0">if {$len &gt; 0} {</span>
+	<span class="s0">puts $s &quot;Content-Length: $len&quot;</span>
+	<span class="s0">puts $s &quot;Content-Type: application/x-www-form-urlencoded&quot;</span>
+	<span class="s0">puts $s &quot;&quot;</span>
+	<span class="s0">fconfigure $s -translation {auto binary}</span>
+	<span class="s0">puts -nonewline $s $state(-query)</span>
+    <span class="s0">} else {</span>
+	<span class="s0">puts $s &quot;&quot;</span>
+    <span class="s0">}</span>
+    <span class="s0">flush $s</span>
+    <span class="s0">fileevent $s readable [list httpEvent $token]</span>
+    <span class="s0">if {! [info exists state(-command)]} {</span>
+	<span class="s0">http_wait $token</span>
+    <span class="s0">}</span>
+    <span class="s0">return $token</span>
+<span class="s0">}</span>
+<span class="s0">proc http_data {token} {</span>
+    <span class="s0">upvar #0 $token state</span>
+    <span class="s0">return $state(body)</span>
+<span class="s0">}</span>
+<span class="s0">proc http_status {token} {</span>
+    <span class="s0">upvar #0 $token state</span>
+    <span class="s0">return $state(status)</span>
+<span class="s0">}</span>
+<span class="s0">proc http_code {token} {</span>
+    <span class="s0">upvar #0 $token state</span>
+    <span class="s0">return $state(http)</span>
+<span class="s0">}</span>
+<span class="s0">proc http_size {token} {</span>
+    <span class="s0">upvar #0 $token state</span>
+    <span class="s0">return $state(currentsize)</span>
+<span class="s0">}</span>
+
+ <span class="s0">proc httpEvent {token} {</span>
+    <span class="s0">upvar #0 $token state</span>
+    <span class="s0">set s $state(sock)</span>
+
+     <span class="s0">if {[eof $s]} {</span>
+	<span class="s0">httpEof $token</span>
+	<span class="s0">return</span>
+    <span class="s0">}</span>
+    <span class="s0">if {$state(state) == &quot;header&quot;} {</span>
+	<span class="s0">set n [gets $s line]</span>
+	<span class="s0">if {$n == 0} {</span>
+	    <span class="s0">set state(state) body</span>
+	    <span class="s0">if {![regexp -nocase ^text $state(type)]} {</span>
+		<span class="s0"># Turn off conversions for non-text data</span>
+		<span class="s0">fconfigure $s -translation binary</span>
+		<span class="s0">if {[info exists state(-channel)]} {</span>
+		    <span class="s0">fconfigure $state(-channel) -translation binary</span>
+		<span class="s0">}</span>
+	    <span class="s0">}</span>
+	    <span class="s0">if {[info exists state(-channel)] &amp;&amp;</span>
+		    <span class="s0">![info exists state(-handler)]} {</span>
+		<span class="s0"># Initiate a sequence of background fcopies</span>
+		<span class="s0">fileevent $s readable {}</span>
+		<span class="s0">httpCopyStart $s $token</span>
+	    <span class="s0">}</span>
+	<span class="s0">} elseif {$n &gt; 0} {</span>
+	    <span class="s0">if {[regexp -nocase {^content-type:(.+)$} $line x type]} {</span>
+		<span class="s0">set state(type) [string trim $type]</span>
+	    <span class="s0">}</span>
+	    <span class="s0">if {[regexp -nocase {^content-length:(.+)$} $line x length]} {</span>
+		<span class="s0">set state(totalsize) [string trim $length]</span>
+	    <span class="s0">}</span>
+	    <span class="s0">if {[regexp -nocase {^([^:]+):(.+)$} $line x key value]} {</span>
+		<span class="s0">lappend state(meta) $key $value</span>
+	    <span class="s0">} elseif {[regexp ^HTTP $line]} {</span>
+		<span class="s0">set state(http) $line</span>
+	    <span class="s0">}</span>
+	<span class="s0">}</span>
+    <span class="s0">} else {</span>
+	<span class="s0">if {[catch {</span>
+	    <span class="s0">if {[info exists state(-handler)]} {</span>
+		<span class="s0">set n [eval $state(-handler) {$s $token}]</span>
+	    <span class="s0">} else {</span>
+		<span class="s0">set block [read $s $state(-blocksize)]</span>
+		<span class="s0">set n [string length $block]</span>
+		<span class="s0">if {$n &gt;= 0} {</span>
+		    <span class="s0">append state(body) $block</span>
+		<span class="s0">}</span>
+	    <span class="s0">}</span>
+	    <span class="s0">if {$n &gt;= 0} {</span>
+		<span class="s0">incr state(currentsize) $n</span>
+	    <span class="s0">}</span>
+	<span class="s0">} err]} {</span>
+	    <span class="s0">httpFinish $token $err</span>
+	<span class="s0">} else {</span>
+	    <span class="s0">if {[info exists state(-progress)]} {</span>
+		<span class="s0">eval $state(-progress) {$token $state(totalsize) $state(currentsize)}</span>
+	    <span class="s0">}</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+ <span class="s0">proc httpCopyStart {s token} {</span>
+    <span class="s0">upvar #0 $token state</span>
+    <span class="s0">if {[catch {</span>
+	<span class="s0">fcopy $s $state(-channel) -size $state(-blocksize) -command \</span>
+	    <span class="s0">[list httpCopyDone $token]</span>
+    <span class="s0">} err]} {</span>
+	<span class="s0">httpFinish $token $err</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+ <span class="s0">proc httpCopyDone {token count {error {}}} {</span>
+    <span class="s0">upvar #0 $token state</span>
+    <span class="s0">set s $state(sock)</span>
+    <span class="s0">incr state(currentsize) $count</span>
+    <span class="s0">if {[info exists state(-progress)]} {</span>
+	<span class="s0">eval $state(-progress) {$token $state(totalsize) $state(currentsize)}</span>
+    <span class="s0">}</span>
+    <span class="s0">if {([string length $error] != 0)} {</span>
+	<span class="s0">httpFinish $token $error</span>
+    <span class="s0">} elseif {[eof $s]} {</span>
+	<span class="s0">httpEof $token</span>
+    <span class="s0">} else {</span>
+	<span class="s0">httpCopyStart $s $token</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+ <span class="s0">proc httpEof {token} {</span>
+    <span class="s0">upvar #0 $token state</span>
+    <span class="s0">if {$state(state) == &quot;header&quot;} {</span>
+	<span class="s0"># Premature eof</span>
+	<span class="s0">set state(status) eof</span>
+    <span class="s0">} else {</span>
+	<span class="s0">set state(status) ok</span>
+    <span class="s0">}</span>
+    <span class="s0">set state(state) eof</span>
+    <span class="s0">httpFinish $token</span>
+<span class="s0">}</span>
+<span class="s0">proc http_wait {token} {</span>
+    <span class="s0">upvar #0 $token state</span>
+    <span class="s0">if {![info exists state(status)] || [string length $state(status)] == 0} {</span>
+	<span class="s0">vwait $token\(status)</span>
+    <span class="s0">}</span>
+    <span class="s0">if {[info exists state(error)]} {</span>
+	<span class="s0">set errorlist $state(error)</span>
+	<span class="s0">unset state(error)</span>
+	<span class="s0">eval error $errorlist</span>
+    <span class="s0">}</span>
+    <span class="s0">return $state(status)</span>
+<span class="s0">}</span>
+
+<span class="s0"># Call http_formatQuery with an even number of arguments, where the first is</span>
+<span class="s0"># a name, the second is a value, the third is another name, and so on.</span>
+
+<span class="s0">proc http_formatQuery {args} {</span>
+    <span class="s0">set result &quot;&quot;</span>
+    <span class="s0">set sep &quot;&quot;</span>
+    <span class="s0">foreach i $args {</span>
+	<span class="s0">append result  $sep [httpMapReply $i]</span>
+	<span class="s0">if {$sep != &quot;=&quot;} {</span>
+	    <span class="s0">set sep =</span>
+	<span class="s0">} else {</span>
+	    <span class="s0">set sep &amp;</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+    <span class="s0">return $result</span>
+<span class="s0">}</span>
+
+<span class="s0"># do x-www-urlencoded character mapping</span>
+<span class="s0"># The spec says: &quot;non-alphanumeric characters are replaced by '%HH'&quot;</span>
+<span class="s0"># 1 leave alphanumerics characters alone</span>
+<span class="s0"># 2 Convert every other character to an array lookup</span>
+<span class="s0"># 3 Escape constructs that are &quot;special&quot; to the tcl parser</span>
+<span class="s0"># 4 &quot;subst&quot; the result, doing all the array substitutions</span>
+
+ <span class="s0">proc httpMapReply {string} {</span>
+    <span class="s0">global httpFormMap</span>
+    <span class="s0">set alphanumeric	a-zA-Z0-9</span>
+    <span class="s0">if {![info exists httpFormMap]} {</span>
+
+	<span class="s0">for {set i 1} {$i &lt;= 256} {incr i} {</span>
+	    <span class="s0">set c [format %c $i]</span>
+	    <span class="s0">if {![string match \[$alphanumeric\] $c]} {</span>
+		<span class="s0">set httpFormMap($c) %[format %.2x $i]</span>
+	    <span class="s0">}</span>
+	<span class="s0">}</span>
+	<span class="s0"># These are handled specially</span>
+	<span class="s0">array set httpFormMap {</span>
+	    <span class="s0">&quot; &quot; +   \n %0d%0a</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+    <span class="s0">regsub -all \[^$alphanumeric\] $string {$httpFormMap(&amp;)} string</span>
+    <span class="s0">regsub -all \n $string {\\n} string</span>
+    <span class="s0">regsub -all \t $string {\\t} string</span>
+    <span class="s0">regsub -all {[][{})\\]\)} $string {\\&amp;} string</span>
+    <span class="s0">return [subst $string]</span>
+<span class="s0">}</span>
+
+<span class="s0"># Default proxy filter.</span>
+ <span class="s0">proc httpProxyRequired {host} {</span>
+    <span class="s0">global http</span>
+    <span class="s0">if {[info exists http(-proxyhost)] &amp;&amp; [string length $http(-proxyhost)]} {</span>
+	<span class="s0">if {![info exists http(-proxyport)] || ![string length $http(-proxyport)]} {</span>
+	    <span class="s0">set http(-proxyport) 8080</span>
+	<span class="s0">}</span>
+	<span class="s0">return [list $http(-proxyhost) $http(-proxyport)]</span>
+    <span class="s0">} else {</span>
+	<span class="s0">return {}</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+</pre>
+</body>
+</html>

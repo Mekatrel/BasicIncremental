@@ -1,0 +1,135 @@
+<html>
+<head>
+<title>newsuper.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #629755; font-style: italic;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #cc7832;}
+.s3 { color: #6897bb;}
+.s4 { color: #808080;}
+.s5 { color: #6a8759;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+newsuper.py</font>
+</center></td></tr></table>
+<pre><span class="s0">''' 
+This module provides a newsuper() function in Python 2 that mimics the 
+behaviour of super() in Python 3. It is designed to be used as follows: 
+ 
+    from __future__ import division, absolute_import, print_function 
+    from future.builtins import super 
+ 
+And then, for example: 
+ 
+    class VerboseList(list): 
+        def append(self, item): 
+            print('Adding an item') 
+            super().append(item)        # new simpler super() function 
+ 
+Importing this module on Python 3 has no effect. 
+ 
+This is based on (i.e. almost identical to) Ryan Kelly's magicsuper 
+module here: 
+ 
+    https://github.com/rfk/magicsuper.git 
+ 
+Excerpts from Ryan's docstring: 
+ 
+  &quot;Of course, you can still explicitly pass in the arguments if you want 
+  to do something strange.  Sometimes you really do want that, e.g. to 
+  skip over some classes in the method resolution order. 
+ 
+  &quot;How does it work?  By inspecting the calling frame to determine the 
+  function object being executed and the object on which it's being 
+  called, and then walking the object's __mro__ chain to find out where 
+  that function was defined.  Yuck, but it seems to work...&quot; 
+'''</span>
+
+<span class="s2">from </span><span class="s1">__future__ </span><span class="s2">import </span><span class="s1">absolute_import</span>
+<span class="s2">import </span><span class="s1">sys</span>
+<span class="s2">from </span><span class="s1">types </span><span class="s2">import </span><span class="s1">FunctionType</span>
+
+<span class="s2">from </span><span class="s1">future.utils </span><span class="s2">import </span><span class="s1">PY3</span><span class="s2">, </span><span class="s1">PY26</span>
+
+
+<span class="s1">_builtin_super = super</span>
+
+<span class="s1">_SENTINEL = object()</span>
+
+<span class="s2">def </span><span class="s1">newsuper(typ=_SENTINEL</span><span class="s2">, </span><span class="s1">type_or_obj=_SENTINEL</span><span class="s2">, </span><span class="s1">framedepth=</span><span class="s3">1</span><span class="s1">):</span>
+    <span class="s0">'''Like builtin super(), but capable of magic. 
+ 
+    This acts just like the builtin super() function, but if called 
+    without any arguments it attempts to infer them at runtime. 
+    '''</span>
+    <span class="s4">#  Infer the correct call if used without arguments.</span>
+    <span class="s2">if </span><span class="s1">typ </span><span class="s2">is </span><span class="s1">_SENTINEL:</span>
+        <span class="s4"># We'll need to do some frame hacking.</span>
+        <span class="s1">f = sys._getframe(framedepth)</span>
+
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s4"># Get the function's first positional argument.</span>
+            <span class="s1">type_or_obj = f.f_locals[f.f_code.co_varnames[</span><span class="s3">0</span><span class="s1">]]</span>
+        <span class="s2">except </span><span class="s1">(IndexError</span><span class="s2">, </span><span class="s1">KeyError</span><span class="s2">,</span><span class="s1">):</span>
+            <span class="s2">raise </span><span class="s1">RuntimeError(</span><span class="s5">'super() used in a function with no args'</span><span class="s1">)</span>
+
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s1">typ = find_owner(type_or_obj</span><span class="s2">, </span><span class="s1">f.f_code)</span>
+        <span class="s2">except </span><span class="s1">(AttributeError</span><span class="s2">, </span><span class="s1">RuntimeError</span><span class="s2">, </span><span class="s1">TypeError):</span>
+            <span class="s4"># see issues #160, #267</span>
+            <span class="s2">try</span><span class="s1">:</span>
+                <span class="s1">typ = find_owner(type_or_obj.__class__</span><span class="s2">, </span><span class="s1">f.f_code)</span>
+            <span class="s2">except </span><span class="s1">AttributeError:</span>
+                <span class="s2">raise </span><span class="s1">RuntimeError(</span><span class="s5">'super() used with an old-style class'</span><span class="s1">)</span>
+            <span class="s2">except </span><span class="s1">TypeError:</span>
+                <span class="s2">raise </span><span class="s1">RuntimeError(</span><span class="s5">'super() called outside a method'</span><span class="s1">)</span>
+
+    <span class="s4">#  Dispatch to builtin super().</span>
+    <span class="s2">if </span><span class="s1">type_or_obj </span><span class="s2">is not </span><span class="s1">_SENTINEL:</span>
+        <span class="s2">return </span><span class="s1">_builtin_super(typ</span><span class="s2">, </span><span class="s1">type_or_obj)</span>
+    <span class="s2">return </span><span class="s1">_builtin_super(typ)</span>
+
+
+<span class="s2">def </span><span class="s1">find_owner(cls</span><span class="s2">, </span><span class="s1">code):</span>
+    <span class="s0">'''Find the class that owns the currently-executing method. 
+    '''</span>
+    <span class="s2">for </span><span class="s1">typ </span><span class="s2">in </span><span class="s1">cls.__mro__:</span>
+        <span class="s2">for </span><span class="s1">meth </span><span class="s2">in </span><span class="s1">typ.__dict__.values():</span>
+            <span class="s4"># Drill down through any wrappers to the underlying func.</span>
+            <span class="s4"># This handles e.g. classmethod() and staticmethod().</span>
+            <span class="s2">try</span><span class="s1">:</span>
+                <span class="s2">while not </span><span class="s1">isinstance(meth</span><span class="s2">,</span><span class="s1">FunctionType):</span>
+                    <span class="s2">if </span><span class="s1">isinstance(meth</span><span class="s2">, </span><span class="s1">property):</span>
+                        <span class="s4"># Calling __get__ on the property will invoke</span>
+                        <span class="s4"># user code which might throw exceptions or have</span>
+                        <span class="s4"># side effects</span>
+                        <span class="s1">meth = meth.fget</span>
+                    <span class="s2">else</span><span class="s1">:</span>
+                        <span class="s2">try</span><span class="s1">:</span>
+                            <span class="s1">meth = meth.__func__</span>
+                        <span class="s2">except </span><span class="s1">AttributeError:</span>
+                            <span class="s1">meth = meth.__get__(cls</span><span class="s2">, </span><span class="s1">typ)</span>
+            <span class="s2">except </span><span class="s1">(AttributeError</span><span class="s2">, </span><span class="s1">TypeError):</span>
+                <span class="s2">continue</span>
+            <span class="s2">if </span><span class="s1">meth.func_code </span><span class="s2">is </span><span class="s1">code:</span>
+                <span class="s2">return </span><span class="s1">typ   </span><span class="s4"># Aha!  Found you.</span>
+        <span class="s4">#  Not found! Move onto the next class in MRO.</span>
+
+    <span class="s2">raise </span><span class="s1">TypeError</span>
+
+
+<span class="s2">def </span><span class="s1">superm(*args</span><span class="s2">, </span><span class="s1">**kwds):</span>
+    <span class="s1">f = sys._getframe(</span><span class="s3">1</span><span class="s1">)</span>
+    <span class="s1">nm = f.f_code.co_name</span>
+    <span class="s2">return </span><span class="s1">getattr(newsuper(framedepth=</span><span class="s3">2</span><span class="s1">)</span><span class="s2">,</span><span class="s1">nm)(*args</span><span class="s2">, </span><span class="s1">**kwds)</span>
+
+
+<span class="s1">__all__ = [</span><span class="s5">'newsuper'</span><span class="s1">]</span>
+</pre>
+</body>
+</html>

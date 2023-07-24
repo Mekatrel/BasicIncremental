@@ -1,0 +1,521 @@
+<html>
+<head>
+<title>generator.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #629755; font-style: italic;}
+.s3 { color: #cc7832;}
+.s4 { color: #6a8759;}
+.s5 { color: #6897bb;}
+.s6 { color: #a5c261;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+generator.py</font>
+</center></td></tr></table>
+<pre><span class="s0"># Copyright (C) 2001-2010 Python Software Foundation</span>
+<span class="s0"># Author: Barry Warsaw</span>
+<span class="s0"># Contact: email-sig@python.org</span>
+
+<span class="s2">&quot;&quot;&quot;Classes to generate plain text from a message object tree.&quot;&quot;&quot;</span>
+<span class="s3">from </span><span class="s1">__future__ </span><span class="s3">import </span><span class="s1">print_function</span>
+<span class="s3">from </span><span class="s1">__future__ </span><span class="s3">import </span><span class="s1">unicode_literals</span>
+<span class="s3">from </span><span class="s1">__future__ </span><span class="s3">import </span><span class="s1">division</span>
+<span class="s3">from </span><span class="s1">__future__ </span><span class="s3">import </span><span class="s1">absolute_import</span>
+<span class="s3">from </span><span class="s1">future.builtins </span><span class="s3">import </span><span class="s1">super</span>
+<span class="s3">from </span><span class="s1">future.builtins </span><span class="s3">import </span><span class="s1">str</span>
+
+<span class="s1">__all__ = [</span><span class="s4">'Generator'</span><span class="s3">, </span><span class="s4">'DecodedGenerator'</span><span class="s3">, </span><span class="s4">'BytesGenerator'</span><span class="s1">]</span>
+
+<span class="s3">import </span><span class="s1">re</span>
+<span class="s3">import </span><span class="s1">sys</span>
+<span class="s3">import </span><span class="s1">time</span>
+<span class="s3">import </span><span class="s1">random</span>
+<span class="s3">import </span><span class="s1">warnings</span>
+
+<span class="s3">from </span><span class="s1">io </span><span class="s3">import </span><span class="s1">StringIO</span><span class="s3">, </span><span class="s1">BytesIO</span>
+<span class="s3">from </span><span class="s1">future.backports.email._policybase </span><span class="s3">import </span><span class="s1">compat32</span>
+<span class="s3">from </span><span class="s1">future.backports.email.header </span><span class="s3">import </span><span class="s1">Header</span>
+<span class="s3">from </span><span class="s1">future.backports.email.utils </span><span class="s3">import </span><span class="s1">_has_surrogates</span>
+<span class="s3">import </span><span class="s1">future.backports.email.charset </span><span class="s3">as </span><span class="s1">_charset</span>
+
+<span class="s1">UNDERSCORE = </span><span class="s4">'_'</span>
+<span class="s1">NL = </span><span class="s4">'</span><span class="s3">\n</span><span class="s4">'  </span><span class="s0"># XXX: no longer used by the code below.</span>
+
+<span class="s1">fcre = re.compile(</span><span class="s4">r'^From '</span><span class="s3">, </span><span class="s1">re.MULTILINE)</span>
+
+
+<span class="s3">class </span><span class="s1">Generator(object):</span>
+    <span class="s2">&quot;&quot;&quot;Generates output from a Message object tree. 
+ 
+    This basic generator writes the message to the given file object as plain 
+    text. 
+    &quot;&quot;&quot;</span>
+    <span class="s0">#</span>
+    <span class="s0"># Public interface</span>
+    <span class="s0">#</span>
+
+    <span class="s3">def </span><span class="s1">__init__(self</span><span class="s3">, </span><span class="s1">outfp</span><span class="s3">, </span><span class="s1">mangle_from_=</span><span class="s3">True, </span><span class="s1">maxheaderlen=</span><span class="s3">None, </span><span class="s1">**_3to2kwargs):</span>
+        <span class="s3">if </span><span class="s4">'policy' </span><span class="s3">in </span><span class="s1">_3to2kwargs: policy = _3to2kwargs[</span><span class="s4">'policy'</span><span class="s1">]; </span><span class="s3">del </span><span class="s1">_3to2kwargs[</span><span class="s4">'policy'</span><span class="s1">]</span>
+        <span class="s3">else</span><span class="s1">: policy = </span><span class="s3">None</span>
+        <span class="s4">&quot;&quot;&quot;Create the generator for message flattening. 
+ 
+        outfp is the output file-like object for writing the message to.  It 
+        must have a write() method. 
+ 
+        Optional mangle_from_ is a flag that, when True (the default), escapes 
+        From_ lines in the body of the message by putting a `&gt;' in front of 
+        them. 
+ 
+        Optional maxheaderlen specifies the longest length for a non-continued 
+        header.  When a header line is longer (in characters, with tabs 
+        expanded to 8 spaces) than maxheaderlen, the header will split as 
+        defined in the Header class.  Set maxheaderlen to zero to disable 
+        header wrapping.  The default is 78, as recommended (but not required) 
+        by RFC 2822. 
+ 
+        The policy keyword specifies a policy object that controls a number of 
+        aspects of the generator's operation.  The default policy maintains 
+        backward compatibility. 
+ 
+        &quot;&quot;&quot;</span>
+        <span class="s1">self._fp = outfp</span>
+        <span class="s1">self._mangle_from_ = mangle_from_</span>
+        <span class="s1">self.maxheaderlen = maxheaderlen</span>
+        <span class="s1">self.policy = policy</span>
+
+    <span class="s3">def </span><span class="s1">write(self</span><span class="s3">, </span><span class="s1">s):</span>
+        <span class="s0"># Just delegate to the file object</span>
+        <span class="s1">self._fp.write(s)</span>
+
+    <span class="s3">def </span><span class="s1">flatten(self</span><span class="s3">, </span><span class="s1">msg</span><span class="s3">, </span><span class="s1">unixfrom=</span><span class="s3">False, </span><span class="s1">linesep=</span><span class="s3">None</span><span class="s1">):</span>
+        <span class="s2">r&quot;&quot;&quot;Print the message object tree rooted at msg to the output file 
+        specified when the Generator instance was created. 
+ 
+        unixfrom is a flag that forces the printing of a Unix From_ delimiter 
+        before the first object in the message tree.  If the original message 
+        has no From_ delimiter, a `standard' one is crafted.  By default, this 
+        is False to inhibit the printing of any From_ delimiter. 
+ 
+        Note that for subobjects, no From_ line is printed. 
+ 
+        linesep specifies the characters used to indicate a new line in 
+        the output.  The default value is determined by the policy. 
+ 
+        &quot;&quot;&quot;</span>
+        <span class="s0"># We use the _XXX constants for operating on data that comes directly</span>
+        <span class="s0"># from the msg, and _encoded_XXX constants for operating on data that</span>
+        <span class="s0"># has already been converted (to bytes in the BytesGenerator) and</span>
+        <span class="s0"># inserted into a temporary buffer.</span>
+        <span class="s1">policy = msg.policy </span><span class="s3">if </span><span class="s1">self.policy </span><span class="s3">is None else </span><span class="s1">self.policy</span>
+        <span class="s3">if </span><span class="s1">linesep </span><span class="s3">is not None</span><span class="s1">:</span>
+            <span class="s1">policy = policy.clone(linesep=linesep)</span>
+        <span class="s3">if </span><span class="s1">self.maxheaderlen </span><span class="s3">is not None</span><span class="s1">:</span>
+            <span class="s1">policy = policy.clone(max_line_length=self.maxheaderlen)</span>
+        <span class="s1">self._NL = policy.linesep</span>
+        <span class="s1">self._encoded_NL = self._encode(self._NL)</span>
+        <span class="s1">self._EMPTY = </span><span class="s4">''</span>
+        <span class="s1">self._encoded_EMTPY = self._encode(</span><span class="s4">''</span><span class="s1">)</span>
+        <span class="s0"># Because we use clone (below) when we recursively process message</span>
+        <span class="s0"># subparts, and because clone uses the computed policy (not None),</span>
+        <span class="s0"># submessages will automatically get set to the computed policy when</span>
+        <span class="s0"># they are processed by this code.</span>
+        <span class="s1">old_gen_policy = self.policy</span>
+        <span class="s1">old_msg_policy = msg.policy</span>
+        <span class="s3">try</span><span class="s1">:</span>
+            <span class="s1">self.policy = policy</span>
+            <span class="s1">msg.policy = policy</span>
+            <span class="s3">if </span><span class="s1">unixfrom:</span>
+                <span class="s1">ufrom = msg.get_unixfrom()</span>
+                <span class="s3">if not </span><span class="s1">ufrom:</span>
+                    <span class="s1">ufrom = </span><span class="s4">'From nobody ' </span><span class="s1">+ time.ctime(time.time())</span>
+                <span class="s1">self.write(ufrom + self._NL)</span>
+            <span class="s1">self._write(msg)</span>
+        <span class="s3">finally</span><span class="s1">:</span>
+            <span class="s1">self.policy = old_gen_policy</span>
+            <span class="s1">msg.policy = old_msg_policy</span>
+
+    <span class="s3">def </span><span class="s1">clone(self</span><span class="s3">, </span><span class="s1">fp):</span>
+        <span class="s2">&quot;&quot;&quot;Clone this generator with the exact same options.&quot;&quot;&quot;</span>
+        <span class="s3">return </span><span class="s1">self.__class__(fp</span><span class="s3">,</span>
+                              <span class="s1">self._mangle_from_</span><span class="s3">,</span>
+                              <span class="s3">None, </span><span class="s0"># Use policy setting, which we've adjusted</span>
+                              <span class="s1">policy=self.policy)</span>
+
+    <span class="s0">#</span>
+    <span class="s0"># Protected interface - undocumented ;/</span>
+    <span class="s0">#</span>
+
+    <span class="s0"># Note that we use 'self.write' when what we are writing is coming from</span>
+    <span class="s0"># the source, and self._fp.write when what we are writing is coming from a</span>
+    <span class="s0"># buffer (because the Bytes subclass has already had a chance to transform</span>
+    <span class="s0"># the data in its write method in that case).  This is an entirely</span>
+    <span class="s0"># pragmatic split determined by experiment; we could be more general by</span>
+    <span class="s0"># always using write and having the Bytes subclass write method detect when</span>
+    <span class="s0"># it has already transformed the input; but, since this whole thing is a</span>
+    <span class="s0"># hack anyway this seems good enough.</span>
+
+    <span class="s0"># Similarly, we have _XXX and _encoded_XXX attributes that are used on</span>
+    <span class="s0"># source and buffer data, respectively.</span>
+    <span class="s1">_encoded_EMPTY = </span><span class="s4">''</span>
+
+    <span class="s3">def </span><span class="s1">_new_buffer(self):</span>
+        <span class="s0"># BytesGenerator overrides this to return BytesIO.</span>
+        <span class="s3">return </span><span class="s1">StringIO()</span>
+
+    <span class="s3">def </span><span class="s1">_encode(self</span><span class="s3">, </span><span class="s1">s):</span>
+        <span class="s0"># BytesGenerator overrides this to encode strings to bytes.</span>
+        <span class="s3">return </span><span class="s1">s</span>
+
+    <span class="s3">def </span><span class="s1">_write_lines(self</span><span class="s3">, </span><span class="s1">lines):</span>
+        <span class="s0"># We have to transform the line endings.</span>
+        <span class="s3">if not </span><span class="s1">lines:</span>
+            <span class="s3">return</span>
+        <span class="s1">lines = lines.splitlines(</span><span class="s3">True</span><span class="s1">)</span>
+        <span class="s3">for </span><span class="s1">line </span><span class="s3">in </span><span class="s1">lines[:-</span><span class="s5">1</span><span class="s1">]:</span>
+            <span class="s1">self.write(line.rstrip(</span><span class="s4">'</span><span class="s3">\r\n</span><span class="s4">'</span><span class="s1">))</span>
+            <span class="s1">self.write(self._NL)</span>
+        <span class="s1">laststripped = lines[-</span><span class="s5">1</span><span class="s1">].rstrip(</span><span class="s4">'</span><span class="s3">\r\n</span><span class="s4">'</span><span class="s1">)</span>
+        <span class="s1">self.write(laststripped)</span>
+        <span class="s3">if </span><span class="s1">len(lines[-</span><span class="s5">1</span><span class="s1">]) != len(laststripped):</span>
+            <span class="s1">self.write(self._NL)</span>
+
+    <span class="s3">def </span><span class="s1">_write(self</span><span class="s3">, </span><span class="s1">msg):</span>
+        <span class="s0"># We can't write the headers yet because of the following scenario:</span>
+        <span class="s0"># say a multipart message includes the boundary string somewhere in</span>
+        <span class="s0"># its body.  We'd have to calculate the new boundary /before/ we write</span>
+        <span class="s0"># the headers so that we can write the correct Content-Type:</span>
+        <span class="s0"># parameter.</span>
+        <span class="s0">#</span>
+        <span class="s0"># The way we do this, so as to make the _handle_*() methods simpler,</span>
+        <span class="s0"># is to cache any subpart writes into a buffer.  The we write the</span>
+        <span class="s0"># headers and the buffer contents.  That way, subpart handlers can</span>
+        <span class="s0"># Do The Right Thing, and can still modify the Content-Type: header if</span>
+        <span class="s0"># necessary.</span>
+        <span class="s1">oldfp = self._fp</span>
+        <span class="s3">try</span><span class="s1">:</span>
+            <span class="s1">self._fp = sfp = self._new_buffer()</span>
+            <span class="s1">self._dispatch(msg)</span>
+        <span class="s3">finally</span><span class="s1">:</span>
+            <span class="s1">self._fp = oldfp</span>
+        <span class="s0"># Write the headers.  First we see if the message object wants to</span>
+        <span class="s0"># handle that itself.  If not, we'll do it generically.</span>
+        <span class="s1">meth = getattr(msg</span><span class="s3">, </span><span class="s4">'_write_headers'</span><span class="s3">, None</span><span class="s1">)</span>
+        <span class="s3">if </span><span class="s1">meth </span><span class="s3">is None</span><span class="s1">:</span>
+            <span class="s1">self._write_headers(msg)</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s1">meth(self)</span>
+        <span class="s1">self._fp.write(sfp.getvalue())</span>
+
+    <span class="s3">def </span><span class="s1">_dispatch(self</span><span class="s3">, </span><span class="s1">msg):</span>
+        <span class="s0"># Get the Content-Type: for the message, then try to dispatch to</span>
+        <span class="s0"># self._handle_&lt;maintype&gt;_&lt;subtype&gt;().  If there's no handler for the</span>
+        <span class="s0"># full MIME type, then dispatch to self._handle_&lt;maintype&gt;().  If</span>
+        <span class="s0"># that's missing too, then dispatch to self._writeBody().</span>
+        <span class="s1">main = msg.get_content_maintype()</span>
+        <span class="s1">sub = msg.get_content_subtype()</span>
+        <span class="s1">specific = UNDERSCORE.join((main</span><span class="s3">, </span><span class="s1">sub)).replace(</span><span class="s4">'-'</span><span class="s3">, </span><span class="s4">'_'</span><span class="s1">)</span>
+        <span class="s1">meth = getattr(self</span><span class="s3">, </span><span class="s4">'_handle_' </span><span class="s1">+ specific</span><span class="s3">, None</span><span class="s1">)</span>
+        <span class="s3">if </span><span class="s1">meth </span><span class="s3">is None</span><span class="s1">:</span>
+            <span class="s1">generic = main.replace(</span><span class="s4">'-'</span><span class="s3">, </span><span class="s4">'_'</span><span class="s1">)</span>
+            <span class="s1">meth = getattr(self</span><span class="s3">, </span><span class="s4">'_handle_' </span><span class="s1">+ generic</span><span class="s3">, None</span><span class="s1">)</span>
+            <span class="s3">if </span><span class="s1">meth </span><span class="s3">is None</span><span class="s1">:</span>
+                <span class="s1">meth = self._writeBody</span>
+        <span class="s1">meth(msg)</span>
+
+    <span class="s0">#</span>
+    <span class="s0"># Default handlers</span>
+    <span class="s0">#</span>
+
+    <span class="s3">def </span><span class="s1">_write_headers(self</span><span class="s3">, </span><span class="s1">msg):</span>
+        <span class="s3">for </span><span class="s1">h</span><span class="s3">, </span><span class="s1">v </span><span class="s3">in </span><span class="s1">msg.raw_items():</span>
+            <span class="s1">self.write(self.policy.fold(h</span><span class="s3">, </span><span class="s1">v))</span>
+        <span class="s0"># A blank line always separates headers from body</span>
+        <span class="s1">self.write(self._NL)</span>
+
+    <span class="s0">#</span>
+    <span class="s0"># Handlers for writing types and subtypes</span>
+    <span class="s0">#</span>
+
+    <span class="s3">def </span><span class="s1">_handle_text(self</span><span class="s3">, </span><span class="s1">msg):</span>
+        <span class="s1">payload = msg.get_payload()</span>
+        <span class="s3">if </span><span class="s1">payload </span><span class="s3">is None</span><span class="s1">:</span>
+            <span class="s3">return</span>
+        <span class="s3">if not </span><span class="s1">isinstance(payload</span><span class="s3">, </span><span class="s1">str):</span>
+            <span class="s3">raise </span><span class="s1">TypeError(</span><span class="s4">'string payload expected: %s' </span><span class="s1">% type(payload))</span>
+        <span class="s3">if </span><span class="s1">_has_surrogates(msg._payload):</span>
+            <span class="s1">charset = msg.get_param(</span><span class="s4">'charset'</span><span class="s1">)</span>
+            <span class="s3">if </span><span class="s1">charset </span><span class="s3">is not None</span><span class="s1">:</span>
+                <span class="s3">del </span><span class="s1">msg[</span><span class="s4">'content-transfer-encoding'</span><span class="s1">]</span>
+                <span class="s1">msg.set_payload(payload</span><span class="s3">, </span><span class="s1">charset)</span>
+                <span class="s1">payload = msg.get_payload()</span>
+        <span class="s3">if </span><span class="s1">self._mangle_from_:</span>
+            <span class="s1">payload = fcre.sub(</span><span class="s4">'&gt;From '</span><span class="s3">, </span><span class="s1">payload)</span>
+        <span class="s1">self._write_lines(payload)</span>
+
+    <span class="s0"># Default body handler</span>
+    <span class="s1">_writeBody = _handle_text</span>
+
+    <span class="s3">def </span><span class="s1">_handle_multipart(self</span><span class="s3">, </span><span class="s1">msg):</span>
+        <span class="s0"># The trick here is to write out each part separately, merge them all</span>
+        <span class="s0"># together, and then make sure that the boundary we've chosen isn't</span>
+        <span class="s0"># present in the payload.</span>
+        <span class="s1">msgtexts = []</span>
+        <span class="s1">subparts = msg.get_payload()</span>
+        <span class="s3">if </span><span class="s1">subparts </span><span class="s3">is None</span><span class="s1">:</span>
+            <span class="s1">subparts = []</span>
+        <span class="s3">elif </span><span class="s1">isinstance(subparts</span><span class="s3">, </span><span class="s1">str):</span>
+            <span class="s0"># e.g. a non-strict parse of a message with no starting boundary.</span>
+            <span class="s1">self.write(subparts)</span>
+            <span class="s3">return</span>
+        <span class="s3">elif not </span><span class="s1">isinstance(subparts</span><span class="s3">, </span><span class="s1">list):</span>
+            <span class="s0"># Scalar payload</span>
+            <span class="s1">subparts = [subparts]</span>
+        <span class="s3">for </span><span class="s1">part </span><span class="s3">in </span><span class="s1">subparts:</span>
+            <span class="s1">s = self._new_buffer()</span>
+            <span class="s1">g = self.clone(s)</span>
+            <span class="s1">g.flatten(part</span><span class="s3">, </span><span class="s1">unixfrom=</span><span class="s3">False, </span><span class="s1">linesep=self._NL)</span>
+            <span class="s1">msgtexts.append(s.getvalue())</span>
+        <span class="s0"># BAW: What about boundaries that are wrapped in double-quotes?</span>
+        <span class="s1">boundary = msg.get_boundary()</span>
+        <span class="s3">if not </span><span class="s1">boundary:</span>
+            <span class="s0"># Create a boundary that doesn't appear in any of the</span>
+            <span class="s0"># message texts.</span>
+            <span class="s1">alltext = self._encoded_NL.join(msgtexts)</span>
+            <span class="s1">boundary = self._make_boundary(alltext)</span>
+            <span class="s1">msg.set_boundary(boundary)</span>
+        <span class="s0"># If there's a preamble, write it out, with a trailing CRLF</span>
+        <span class="s3">if </span><span class="s1">msg.preamble </span><span class="s3">is not None</span><span class="s1">:</span>
+            <span class="s3">if </span><span class="s1">self._mangle_from_:</span>
+                <span class="s1">preamble = fcre.sub(</span><span class="s4">'&gt;From '</span><span class="s3">, </span><span class="s1">msg.preamble)</span>
+            <span class="s3">else</span><span class="s1">:</span>
+                <span class="s1">preamble = msg.preamble</span>
+            <span class="s1">self._write_lines(preamble)</span>
+            <span class="s1">self.write(self._NL)</span>
+        <span class="s0"># dash-boundary transport-padding CRLF</span>
+        <span class="s1">self.write(</span><span class="s4">'--' </span><span class="s1">+ boundary + self._NL)</span>
+        <span class="s0"># body-part</span>
+        <span class="s3">if </span><span class="s1">msgtexts:</span>
+            <span class="s1">self._fp.write(msgtexts.pop(</span><span class="s5">0</span><span class="s1">))</span>
+        <span class="s0"># *encapsulation</span>
+        <span class="s0"># --&gt; delimiter transport-padding</span>
+        <span class="s0"># --&gt; CRLF body-part</span>
+        <span class="s3">for </span><span class="s1">body_part </span><span class="s3">in </span><span class="s1">msgtexts:</span>
+            <span class="s0"># delimiter transport-padding CRLF</span>
+            <span class="s1">self.write(self._NL + </span><span class="s4">'--' </span><span class="s1">+ boundary + self._NL)</span>
+            <span class="s0"># body-part</span>
+            <span class="s1">self._fp.write(body_part)</span>
+        <span class="s0"># close-delimiter transport-padding</span>
+        <span class="s1">self.write(self._NL + </span><span class="s4">'--' </span><span class="s1">+ boundary + </span><span class="s4">'--'</span><span class="s1">)</span>
+        <span class="s3">if </span><span class="s1">msg.epilogue </span><span class="s3">is not None</span><span class="s1">:</span>
+            <span class="s1">self.write(self._NL)</span>
+            <span class="s3">if </span><span class="s1">self._mangle_from_:</span>
+                <span class="s1">epilogue = fcre.sub(</span><span class="s4">'&gt;From '</span><span class="s3">, </span><span class="s1">msg.epilogue)</span>
+            <span class="s3">else</span><span class="s1">:</span>
+                <span class="s1">epilogue = msg.epilogue</span>
+            <span class="s1">self._write_lines(epilogue)</span>
+
+    <span class="s3">def </span><span class="s1">_handle_multipart_signed(self</span><span class="s3">, </span><span class="s1">msg):</span>
+        <span class="s0"># The contents of signed parts has to stay unmodified in order to keep</span>
+        <span class="s0"># the signature intact per RFC1847 2.1, so we disable header wrapping.</span>
+        <span class="s0"># RDM: This isn't enough to completely preserve the part, but it helps.</span>
+        <span class="s1">p = self.policy</span>
+        <span class="s1">self.policy = p.clone(max_line_length=</span><span class="s5">0</span><span class="s1">)</span>
+        <span class="s3">try</span><span class="s1">:</span>
+            <span class="s1">self._handle_multipart(msg)</span>
+        <span class="s3">finally</span><span class="s1">:</span>
+            <span class="s1">self.policy = p</span>
+
+    <span class="s3">def </span><span class="s1">_handle_message_delivery_status(self</span><span class="s3">, </span><span class="s1">msg):</span>
+        <span class="s0"># We can't just write the headers directly to self's file object</span>
+        <span class="s0"># because this will leave an extra newline between the last header</span>
+        <span class="s0"># block and the boundary.  Sigh.</span>
+        <span class="s1">blocks = []</span>
+        <span class="s3">for </span><span class="s1">part </span><span class="s3">in </span><span class="s1">msg.get_payload():</span>
+            <span class="s1">s = self._new_buffer()</span>
+            <span class="s1">g = self.clone(s)</span>
+            <span class="s1">g.flatten(part</span><span class="s3">, </span><span class="s1">unixfrom=</span><span class="s3">False, </span><span class="s1">linesep=self._NL)</span>
+            <span class="s1">text = s.getvalue()</span>
+            <span class="s1">lines = text.split(self._encoded_NL)</span>
+            <span class="s0"># Strip off the unnecessary trailing empty line</span>
+            <span class="s3">if </span><span class="s1">lines </span><span class="s3">and </span><span class="s1">lines[-</span><span class="s5">1</span><span class="s1">] == self._encoded_EMPTY:</span>
+                <span class="s1">blocks.append(self._encoded_NL.join(lines[:-</span><span class="s5">1</span><span class="s1">]))</span>
+            <span class="s3">else</span><span class="s1">:</span>
+                <span class="s1">blocks.append(text)</span>
+        <span class="s0"># Now join all the blocks with an empty line.  This has the lovely</span>
+        <span class="s0"># effect of separating each block with an empty line, but not adding</span>
+        <span class="s0"># an extra one after the last one.</span>
+        <span class="s1">self._fp.write(self._encoded_NL.join(blocks))</span>
+
+    <span class="s3">def </span><span class="s1">_handle_message(self</span><span class="s3">, </span><span class="s1">msg):</span>
+        <span class="s1">s = self._new_buffer()</span>
+        <span class="s1">g = self.clone(s)</span>
+        <span class="s0"># The payload of a message/rfc822 part should be a multipart sequence</span>
+        <span class="s0"># of length 1.  The zeroth element of the list should be the Message</span>
+        <span class="s0"># object for the subpart.  Extract that object, stringify it, and</span>
+        <span class="s0"># write it out.</span>
+        <span class="s0"># Except, it turns out, when it's a string instead, which happens when</span>
+        <span class="s0"># and only when HeaderParser is used on a message of mime type</span>
+        <span class="s0"># message/rfc822.  Such messages are generated by, for example,</span>
+        <span class="s0"># Groupwise when forwarding unadorned messages.  (Issue 7970.)  So</span>
+        <span class="s0"># in that case we just emit the string body.</span>
+        <span class="s1">payload = msg._payload</span>
+        <span class="s3">if </span><span class="s1">isinstance(payload</span><span class="s3">, </span><span class="s1">list):</span>
+            <span class="s1">g.flatten(msg.get_payload(</span><span class="s5">0</span><span class="s1">)</span><span class="s3">, </span><span class="s1">unixfrom=</span><span class="s3">False, </span><span class="s1">linesep=self._NL)</span>
+            <span class="s1">payload = s.getvalue()</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s1">payload = self._encode(payload)</span>
+        <span class="s1">self._fp.write(payload)</span>
+
+    <span class="s0"># This used to be a module level function; we use a classmethod for this</span>
+    <span class="s0"># and _compile_re so we can continue to provide the module level function</span>
+    <span class="s0"># for backward compatibility by doing</span>
+    <span class="s0">#   _make_boudary = Generator._make_boundary</span>
+    <span class="s0"># at the end of the module.  It *is* internal, so we could drop that...</span>
+    <span class="s1">@classmethod</span>
+    <span class="s3">def </span><span class="s1">_make_boundary(cls</span><span class="s3">, </span><span class="s1">text=</span><span class="s3">None</span><span class="s1">):</span>
+        <span class="s0"># Craft a random boundary.  If text is given, ensure that the chosen</span>
+        <span class="s0"># boundary doesn't appear in the text.</span>
+        <span class="s1">token = random.randrange(sys.maxsize)</span>
+        <span class="s1">boundary = (</span><span class="s4">'=' </span><span class="s1">* </span><span class="s5">15</span><span class="s1">) + (_fmt % token) + </span><span class="s4">'=='</span>
+        <span class="s3">if </span><span class="s1">text </span><span class="s3">is None</span><span class="s1">:</span>
+            <span class="s3">return </span><span class="s1">boundary</span>
+        <span class="s1">b = boundary</span>
+        <span class="s1">counter = </span><span class="s5">0</span>
+        <span class="s3">while True</span><span class="s1">:</span>
+            <span class="s1">cre = cls._compile_re(</span><span class="s4">'^--' </span><span class="s1">+ re.escape(b) + </span><span class="s4">'(--)?$'</span><span class="s3">, </span><span class="s1">re.MULTILINE)</span>
+            <span class="s3">if not </span><span class="s1">cre.search(text):</span>
+                <span class="s3">break</span>
+            <span class="s1">b = boundary + </span><span class="s4">'.' </span><span class="s1">+ str(counter)</span>
+            <span class="s1">counter += </span><span class="s5">1</span>
+        <span class="s3">return </span><span class="s1">b</span>
+
+    <span class="s1">@classmethod</span>
+    <span class="s3">def </span><span class="s1">_compile_re(cls</span><span class="s3">, </span><span class="s1">s</span><span class="s3">, </span><span class="s1">flags):</span>
+        <span class="s3">return </span><span class="s1">re.compile(s</span><span class="s3">, </span><span class="s1">flags)</span>
+
+<span class="s3">class </span><span class="s1">BytesGenerator(Generator):</span>
+    <span class="s2">&quot;&quot;&quot;Generates a bytes version of a Message object tree. 
+ 
+    Functionally identical to the base Generator except that the output is 
+    bytes and not string.  When surrogates were used in the input to encode 
+    bytes, these are decoded back to bytes for output.  If the policy has 
+    cte_type set to 7bit, then the message is transformed such that the 
+    non-ASCII bytes are properly content transfer encoded, using the charset 
+    unknown-8bit. 
+ 
+    The outfp object must accept bytes in its write method. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s0"># Bytes versions of this constant for use in manipulating data from</span>
+    <span class="s0"># the BytesIO buffer.</span>
+    <span class="s1">_encoded_EMPTY = </span><span class="s6">b''</span>
+
+    <span class="s3">def </span><span class="s1">write(self</span><span class="s3">, </span><span class="s1">s):</span>
+        <span class="s1">self._fp.write(str(s).encode(</span><span class="s4">'ascii'</span><span class="s3">, </span><span class="s4">'surrogateescape'</span><span class="s1">))</span>
+
+    <span class="s3">def </span><span class="s1">_new_buffer(self):</span>
+        <span class="s3">return </span><span class="s1">BytesIO()</span>
+
+    <span class="s3">def </span><span class="s1">_encode(self</span><span class="s3">, </span><span class="s1">s):</span>
+        <span class="s3">return </span><span class="s1">s.encode(</span><span class="s4">'ascii'</span><span class="s1">)</span>
+
+    <span class="s3">def </span><span class="s1">_write_headers(self</span><span class="s3">, </span><span class="s1">msg):</span>
+        <span class="s0"># This is almost the same as the string version, except for handling</span>
+        <span class="s0"># strings with 8bit bytes.</span>
+        <span class="s3">for </span><span class="s1">h</span><span class="s3">, </span><span class="s1">v </span><span class="s3">in </span><span class="s1">msg.raw_items():</span>
+            <span class="s1">self._fp.write(self.policy.fold_binary(h</span><span class="s3">, </span><span class="s1">v))</span>
+        <span class="s0"># A blank line always separates headers from body</span>
+        <span class="s1">self.write(self._NL)</span>
+
+    <span class="s3">def </span><span class="s1">_handle_text(self</span><span class="s3">, </span><span class="s1">msg):</span>
+        <span class="s0"># If the string has surrogates the original source was bytes, so</span>
+        <span class="s0"># just write it back out.</span>
+        <span class="s3">if </span><span class="s1">msg._payload </span><span class="s3">is None</span><span class="s1">:</span>
+            <span class="s3">return</span>
+        <span class="s3">if </span><span class="s1">_has_surrogates(msg._payload) </span><span class="s3">and not </span><span class="s1">self.policy.cte_type==</span><span class="s4">'7bit'</span><span class="s1">:</span>
+            <span class="s3">if </span><span class="s1">self._mangle_from_:</span>
+                <span class="s1">msg._payload = fcre.sub(</span><span class="s4">&quot;&gt;From &quot;</span><span class="s3">, </span><span class="s1">msg._payload)</span>
+            <span class="s1">self._write_lines(msg._payload)</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s1">super(BytesGenerator</span><span class="s3">,</span><span class="s1">self)._handle_text(msg)</span>
+
+    <span class="s0"># Default body handler</span>
+    <span class="s1">_writeBody = _handle_text</span>
+
+    <span class="s1">@classmethod</span>
+    <span class="s3">def </span><span class="s1">_compile_re(cls</span><span class="s3">, </span><span class="s1">s</span><span class="s3">, </span><span class="s1">flags):</span>
+        <span class="s3">return </span><span class="s1">re.compile(s.encode(</span><span class="s4">'ascii'</span><span class="s1">)</span><span class="s3">, </span><span class="s1">flags)</span>
+
+
+<span class="s1">_FMT = </span><span class="s4">'[Non-text (%(type)s) part of message omitted, filename %(filename)s]'</span>
+
+<span class="s3">class </span><span class="s1">DecodedGenerator(Generator):</span>
+    <span class="s2">&quot;&quot;&quot;Generates a text representation of a message. 
+ 
+    Like the Generator base class, except that non-text parts are substituted 
+    with a format string representing the part. 
+    &quot;&quot;&quot;</span>
+    <span class="s3">def </span><span class="s1">__init__(self</span><span class="s3">, </span><span class="s1">outfp</span><span class="s3">, </span><span class="s1">mangle_from_=</span><span class="s3">True, </span><span class="s1">maxheaderlen=</span><span class="s5">78</span><span class="s3">, </span><span class="s1">fmt=</span><span class="s3">None</span><span class="s1">):</span>
+        <span class="s2">&quot;&quot;&quot;Like Generator.__init__() except that an additional optional 
+        argument is allowed. 
+ 
+        Walks through all subparts of a message.  If the subpart is of main 
+        type `text', then it prints the decoded payload of the subpart. 
+ 
+        Otherwise, fmt is a format string that is used instead of the message 
+        payload.  fmt is expanded with the following keywords (in 
+        %(keyword)s format): 
+ 
+        type       : Full MIME type of the non-text part 
+        maintype   : Main MIME type of the non-text part 
+        subtype    : Sub-MIME type of the non-text part 
+        filename   : Filename of the non-text part 
+        description: Description associated with the non-text part 
+        encoding   : Content transfer encoding of the non-text part 
+ 
+        The default value for fmt is None, meaning 
+ 
+        [Non-text (%(type)s) part of message omitted, filename %(filename)s] 
+        &quot;&quot;&quot;</span>
+        <span class="s1">Generator.__init__(self</span><span class="s3">, </span><span class="s1">outfp</span><span class="s3">, </span><span class="s1">mangle_from_</span><span class="s3">, </span><span class="s1">maxheaderlen)</span>
+        <span class="s3">if </span><span class="s1">fmt </span><span class="s3">is None</span><span class="s1">:</span>
+            <span class="s1">self._fmt = _FMT</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s1">self._fmt = fmt</span>
+
+    <span class="s3">def </span><span class="s1">_dispatch(self</span><span class="s3">, </span><span class="s1">msg):</span>
+        <span class="s3">for </span><span class="s1">part </span><span class="s3">in </span><span class="s1">msg.walk():</span>
+            <span class="s1">maintype = part.get_content_maintype()</span>
+            <span class="s3">if </span><span class="s1">maintype == </span><span class="s4">'text'</span><span class="s1">:</span>
+                <span class="s1">print(part.get_payload(decode=</span><span class="s3">False</span><span class="s1">)</span><span class="s3">, </span><span class="s1">file=self)</span>
+            <span class="s3">elif </span><span class="s1">maintype == </span><span class="s4">'multipart'</span><span class="s1">:</span>
+                <span class="s0"># Just skip this</span>
+                <span class="s3">pass</span>
+            <span class="s3">else</span><span class="s1">:</span>
+                <span class="s1">print(self._fmt % {</span>
+                    <span class="s4">'type'       </span><span class="s1">: part.get_content_type()</span><span class="s3">,</span>
+                    <span class="s4">'maintype'   </span><span class="s1">: part.get_content_maintype()</span><span class="s3">,</span>
+                    <span class="s4">'subtype'    </span><span class="s1">: part.get_content_subtype()</span><span class="s3">,</span>
+                    <span class="s4">'filename'   </span><span class="s1">: part.get_filename(</span><span class="s4">'[no filename]'</span><span class="s1">)</span><span class="s3">,</span>
+                    <span class="s4">'description'</span><span class="s1">: part.get(</span><span class="s4">'Content-Description'</span><span class="s3">,</span>
+                                            <span class="s4">'[no description]'</span><span class="s1">)</span><span class="s3">,</span>
+                    <span class="s4">'encoding'   </span><span class="s1">: part.get(</span><span class="s4">'Content-Transfer-Encoding'</span><span class="s3">,</span>
+                                            <span class="s4">'[no encoding]'</span><span class="s1">)</span><span class="s3">,</span>
+                    <span class="s1">}</span><span class="s3">, </span><span class="s1">file=self)</span>
+
+
+<span class="s0"># Helper used by Generator._make_boundary</span>
+<span class="s1">_width = len(repr(sys.maxsize-</span><span class="s5">1</span><span class="s1">))</span>
+<span class="s1">_fmt = </span><span class="s4">'%%0%dd' </span><span class="s1">% _width</span>
+
+<span class="s0"># Backward compatibility</span>
+<span class="s1">_make_boundary = Generator._make_boundary</span>
+</pre>
+</body>
+</html>

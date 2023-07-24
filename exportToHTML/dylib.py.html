@@ -1,0 +1,391 @@
+<html>
+<head>
+<title>dylib.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #629755; font-style: italic;}
+.s3 { color: #cc7832;}
+.s4 { color: #6a8759;}
+.s5 { color: #6897bb;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+dylib.py</font>
+</center></td></tr></table>
+<pre><span class="s0">#-----------------------------------------------------------------------------</span>
+<span class="s0"># Copyright (c) 2013-2021, PyInstaller Development Team.</span>
+<span class="s0">#</span>
+<span class="s0"># Distributed under the terms of the GNU General Public License (version 2</span>
+<span class="s0"># or later) with exception for distributing the bootloader.</span>
+<span class="s0">#</span>
+<span class="s0"># The full license is in the file COPYING.txt, distributed with this software.</span>
+<span class="s0">#</span>
+<span class="s0"># SPDX-License-Identifier: (GPL-2.0-or-later WITH Bootloader-exception)</span>
+<span class="s0">#-----------------------------------------------------------------------------</span>
+<span class="s2">&quot;&quot;&quot; 
+Manipulating with dynamic libraries. 
+&quot;&quot;&quot;</span>
+
+<span class="s3">import </span><span class="s1">os.path</span>
+
+<span class="s3">from </span><span class="s1">PyInstaller.utils.win32 </span><span class="s3">import </span><span class="s1">winutils</span>
+
+<span class="s1">__all__ = [</span><span class="s4">'exclude_list'</span><span class="s3">, </span><span class="s4">'include_list'</span><span class="s3">, </span><span class="s4">'include_library'</span><span class="s1">]</span>
+
+<span class="s3">import </span><span class="s1">os</span>
+<span class="s3">import </span><span class="s1">re</span>
+
+<span class="s3">import </span><span class="s1">PyInstaller.log </span><span class="s3">as </span><span class="s1">logging</span>
+<span class="s3">from </span><span class="s1">PyInstaller </span><span class="s3">import </span><span class="s1">compat</span>
+
+<span class="s1">logger = logging.getLogger(__name__)</span>
+
+<span class="s1">_BOOTLOADER_FNAMES = {</span><span class="s4">'run'</span><span class="s3">, </span><span class="s4">'run_d'</span><span class="s3">, </span><span class="s4">'runw'</span><span class="s3">, </span><span class="s4">'runw_d'</span><span class="s1">}</span>
+
+<span class="s0"># Ignoring some system libraries speeds up packaging process</span>
+<span class="s1">_excludes = {</span>
+    <span class="s0"># Ignore annoying warnings with Windows system DLLs.</span>
+    <span class="s0">#</span>
+    <span class="s0"># 'W: library kernel32.dll required via ctypes not found'</span>
+    <span class="s0"># 'W: library coredll.dll required via ctypes not found'</span>
+    <span class="s0">#</span>
+    <span class="s0"># These these dlls has to be ignored for all operating systems because they might be resolved when scanning code for</span>
+    <span class="s0"># ctypes dependencies.</span>
+    <span class="s4">r'advapi32\.dll'</span><span class="s3">,</span>
+    <span class="s4">r'ws2_32\.dll'</span><span class="s3">,</span>
+    <span class="s4">r'gdi32\.dll'</span><span class="s3">,</span>
+    <span class="s4">r'oleaut32\.dll'</span><span class="s3">,</span>
+    <span class="s4">r'shell32\.dll'</span><span class="s3">,</span>
+    <span class="s4">r'ole32\.dll'</span><span class="s3">,</span>
+    <span class="s4">r'coredll\.dll'</span><span class="s3">,</span>
+    <span class="s4">r'crypt32\.dll'</span><span class="s3">,</span>
+    <span class="s4">r'kernel32'</span><span class="s3">,</span>
+    <span class="s4">r'kernel32\.dll'</span><span class="s3">,</span>
+    <span class="s4">r'msvcrt\.dll'</span><span class="s3">,</span>
+    <span class="s4">r'rpcrt4\.dll'</span><span class="s3">,</span>
+    <span class="s4">r'user32\.dll'</span><span class="s3">,</span>
+    <span class="s0"># Some modules tries to import the Python library. e.g. pyreadline.console.console</span>
+    <span class="s4">r'python\%s\%s'</span><span class="s3">,</span>
+<span class="s1">}</span>
+
+<span class="s0"># Regex includes - overrides excludes. Include list is used only to override specific libraries from exclude list.</span>
+<span class="s1">_includes = set()</span>
+
+<span class="s1">_win_includes = {</span>
+    <span class="s0"># DLLs are from 'Microsoft Visual C++ 2010 Redistributable Package'</span>
+    <span class="s0"># http://msdn.microsoft.com/en-us/library/8kche8ah(v=vs.100).aspx</span>
+    <span class="s0">#</span>
+    <span class="s0"># Python 3.3 and 3.4 use Visual Studio C++ 2010 for Windows builds; python33.dll depends on msvcr100.dll.</span>
+    <span class="s0">#</span>
+    <span class="s0"># Visual Studio C++ 2010 does not need Assembly manifests anymore and uses C++ runtime libraries the old way -</span>
+    <span class="s0"># pointing to C:\Windows\System32. It is necessary to allow inclusion of these libraries from C:\Windows\System32.</span>
+    <span class="s4">r'atl100\.dll'</span><span class="s3">,</span>
+    <span class="s4">r'msvcr100\.dll'</span><span class="s3">,</span>
+    <span class="s4">r'msvcp100\.dll'</span><span class="s3">,</span>
+    <span class="s4">r'mfc100\.dll'</span><span class="s3">,</span>
+    <span class="s4">r'mfc100u\.dll'</span><span class="s3">,</span>
+    <span class="s4">r'mfcmifc80\.dll'</span><span class="s3">,</span>
+    <span class="s4">r'mfcm100\.dll'</span><span class="s3">,</span>
+    <span class="s4">r'mfcm100u\.dll'</span><span class="s3">,</span>
+
+    <span class="s0"># Python 3.5 uses the Univeral C Runtime which consists of these DLLs:</span>
+    <span class="s4">r'api-ms-win-core.*'</span><span class="s3">,</span>
+    <span class="s4">r'api-ms-win-crt.*'</span><span class="s3">,</span>
+    <span class="s4">r'ucrtbase\.dll'</span><span class="s3">,</span>
+    <span class="s4">r'vcruntime140\.dll'</span><span class="s3">,</span>
+
+    <span class="s0"># Additional DLLs from VC 2015/2017/2019 runtime. Allow these to be collected to avoid missing-DLL errors when the</span>
+    <span class="s0"># target machine does not have the VC redistributable installed.</span>
+    <span class="s4">r'msvcp140\.dll'</span><span class="s3">,</span>
+    <span class="s4">r'msvcp140_1\.dll'</span><span class="s3">,</span>
+    <span class="s4">r'msvcp140_2\.dll'</span><span class="s3">,</span>
+    <span class="s4">r'vcruntime140_1\.dll'</span><span class="s3">,</span>
+    <span class="s4">r'vcomp140\.dll'</span><span class="s3">,</span>
+    <span class="s4">r'concrt140\.dll'</span><span class="s3">,</span>
+
+    <span class="s0"># Allow pythonNN.dll, pythoncomNN.dll, pywintypesNN.dll</span>
+    <span class="s4">r'py(?:thon(?:com(?:loader)?)?|wintypes)\d+\.dll'</span><span class="s3">,</span>
+<span class="s1">}</span>
+
+<span class="s1">_win_excludes = {</span>
+    <span class="s0"># On Windows, only .dll files can be loaded.</span>
+    <span class="s4">r'.*\.so'</span><span class="s3">,</span>
+    <span class="s4">r'.*\.dylib'</span><span class="s3">,</span>
+
+    <span class="s0"># MS assembly excludes</span>
+    <span class="s4">r'Microsoft\.Windows\.Common-Controls'</span><span class="s3">,</span>
+<span class="s1">}</span>
+
+<span class="s1">_unix_excludes = {</span>
+    <span class="s4">r'libc\.so(\..*)?'</span><span class="s3">,</span>
+    <span class="s4">r'libdl\.so(\..*)?'</span><span class="s3">,</span>
+    <span class="s4">r'libm\.so(\..*)?'</span><span class="s3">,</span>
+    <span class="s4">r'libpthread\.so(\..*)?'</span><span class="s3">,</span>
+    <span class="s4">r'librt\.so(\..*)?'</span><span class="s3">,</span>
+    <span class="s4">r'libthread_db\.so(\..*)?'</span><span class="s3">,</span>
+    <span class="s0"># glibc regex excludes.</span>
+    <span class="s4">r'ld-linux\.so(\..*)?'</span><span class="s3">,</span>
+    <span class="s4">r'libBrokenLocale\.so(\..*)?'</span><span class="s3">,</span>
+    <span class="s4">r'libanl\.so(\..*)?'</span><span class="s3">,</span>
+    <span class="s4">r'libcidn\.so(\..*)?'</span><span class="s3">,</span>
+    <span class="s4">r'libcrypt\.so(\..*)?'</span><span class="s3">,</span>
+    <span class="s4">r'libnsl\.so(\..*)?'</span><span class="s3">,</span>
+    <span class="s4">r'libnss_compat.*\.so(\..*)?'</span><span class="s3">,</span>
+    <span class="s4">r'libnss_dns.*\.so(\..*)?'</span><span class="s3">,</span>
+    <span class="s4">r'libnss_files.*\.so(\..*)?'</span><span class="s3">,</span>
+    <span class="s4">r'libnss_hesiod.*\.so(\..*)?'</span><span class="s3">,</span>
+    <span class="s4">r'libnss_nis.*\.so(\..*)?'</span><span class="s3">,</span>
+    <span class="s4">r'libnss_nisplus.*\.so(\..*)?'</span><span class="s3">,</span>
+    <span class="s4">r'libresolv\.so(\..*)?'</span><span class="s3">,</span>
+    <span class="s4">r'libutil\.so(\..*)?'</span><span class="s3">,</span>
+    <span class="s0"># graphical interface libraries come with graphical stack (see libglvnd)</span>
+    <span class="s4">r'libE?(Open)?GLX?(ESv1_CM|ESv2)?(dispatch)?\.so(\..*)?'</span><span class="s3">,</span>
+    <span class="s4">r'libdrm\.so(\..*)?'</span><span class="s3">,</span>
+    <span class="s0"># libxcb-dri changes ABI frequently (e.g.: between Ubuntu LTS releases) and is usually installed as dependency of</span>
+    <span class="s0"># the graphics stack anyway. No need to bundle it.</span>
+    <span class="s4">r'libxcb\.so(\..*)?'</span><span class="s3">,</span>
+    <span class="s4">r'libxcb-dri.*\.so(\..*)?'</span><span class="s3">,</span>
+<span class="s1">}</span>
+
+<span class="s1">_aix_excludes = {</span>
+    <span class="s4">r'libbz2\.a'</span><span class="s3">,</span>
+    <span class="s4">r'libc\.a'</span><span class="s3">,</span>
+    <span class="s4">r'libC\.a'</span><span class="s3">,</span>
+    <span class="s4">r'libcrypt\.a'</span><span class="s3">,</span>
+    <span class="s4">r'libdl\.a'</span><span class="s3">,</span>
+    <span class="s4">r'libintl\.a'</span><span class="s3">,</span>
+    <span class="s4">r'libpthreads\.a'</span><span class="s3">,</span>
+    <span class="s4">r'librt\\.a'</span><span class="s3">,</span>
+    <span class="s4">r'librtl\.a'</span><span class="s3">,</span>
+    <span class="s4">r'libz\.a'</span><span class="s3">,</span>
+<span class="s1">}</span>
+
+<span class="s3">if </span><span class="s1">compat.is_win:</span>
+    <span class="s1">_includes |= _win_includes</span>
+    <span class="s1">_excludes |= _win_excludes</span>
+<span class="s3">elif </span><span class="s1">compat.is_aix:</span>
+    <span class="s0"># The exclude list for AIX differs from other *nix platforms.</span>
+    <span class="s1">_excludes |= _aix_excludes</span>
+<span class="s3">elif </span><span class="s1">compat.is_unix:</span>
+    <span class="s0"># Common excludes for *nix platforms -- except AIX.</span>
+    <span class="s1">_excludes |= _unix_excludes</span>
+
+
+<span class="s3">class </span><span class="s1">ExcludeList(object):</span>
+    <span class="s3">def </span><span class="s1">__init__(self):</span>
+        <span class="s1">self.regex = re.compile(</span><span class="s4">'|'</span><span class="s1">.join(_excludes)</span><span class="s3">, </span><span class="s1">re.I)</span>
+
+    <span class="s3">def </span><span class="s1">search(self</span><span class="s3">, </span><span class="s1">libname):</span>
+        <span class="s0"># Running re.search() on '' regex never returns None.</span>
+        <span class="s3">if </span><span class="s1">_excludes:</span>
+            <span class="s3">return </span><span class="s1">self.regex.match(os.path.basename(libname))</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s3">return False</span>
+
+
+<span class="s3">class </span><span class="s1">IncludeList(object):</span>
+    <span class="s3">def </span><span class="s1">__init__(self):</span>
+        <span class="s1">self.regex = re.compile(</span><span class="s4">'|'</span><span class="s1">.join(_includes)</span><span class="s3">, </span><span class="s1">re.I)</span>
+
+    <span class="s3">def </span><span class="s1">search(self</span><span class="s3">, </span><span class="s1">libname):</span>
+        <span class="s0"># Running re.search() on '' regex never returns None.</span>
+        <span class="s3">if </span><span class="s1">_includes:</span>
+            <span class="s3">return </span><span class="s1">self.regex.match(os.path.basename(libname))</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s3">return False</span>
+
+
+<span class="s1">exclude_list = ExcludeList()</span>
+<span class="s1">include_list = IncludeList()</span>
+
+<span class="s3">if </span><span class="s1">compat.is_darwin:</span>
+    <span class="s0"># On Mac use macholib to decide if a binary is a system one.</span>
+    <span class="s3">from </span><span class="s1">macholib </span><span class="s3">import </span><span class="s1">util</span>
+
+    <span class="s3">class </span><span class="s1">MacExcludeList(object):</span>
+        <span class="s3">def </span><span class="s1">__init__(self</span><span class="s3">, </span><span class="s1">global_exclude_list):</span>
+            <span class="s0"># Wraps the global 'exclude_list' before it is overridden by this class.</span>
+            <span class="s1">self._exclude_list = global_exclude_list</span>
+
+        <span class="s3">def </span><span class="s1">search(self</span><span class="s3">, </span><span class="s1">libname):</span>
+            <span class="s0"># First try global exclude list. If it matches, return its result; otherwise continue with other check.</span>
+            <span class="s1">result = self._exclude_list.search(libname)</span>
+            <span class="s3">if </span><span class="s1">result:</span>
+                <span class="s3">return </span><span class="s1">result</span>
+            <span class="s3">else</span><span class="s1">:</span>
+                <span class="s3">return </span><span class="s1">util.in_system_path(libname)</span>
+
+    <span class="s1">exclude_list = MacExcludeList(exclude_list)</span>
+
+<span class="s3">elif </span><span class="s1">compat.is_win:</span>
+
+    <span class="s3">class </span><span class="s1">WinExcludeList(object):</span>
+        <span class="s3">def </span><span class="s1">__init__(self</span><span class="s3">, </span><span class="s1">global_exclude_list):</span>
+            <span class="s1">self._exclude_list = global_exclude_list</span>
+            <span class="s0"># use normpath because msys2 uses / instead of \</span>
+            <span class="s1">self._windows_dir = os.path.normpath(winutils.get_windows_dir().lower())</span>
+
+        <span class="s3">def </span><span class="s1">search(self</span><span class="s3">, </span><span class="s1">libname):</span>
+            <span class="s1">libname = libname.lower()</span>
+            <span class="s1">result = self._exclude_list.search(libname)</span>
+            <span class="s3">if </span><span class="s1">result:</span>
+                <span class="s3">return </span><span class="s1">result</span>
+            <span class="s3">else</span><span class="s1">:</span>
+                <span class="s0"># Exclude everything from the Windows directory by default.</span>
+                <span class="s0"># .. sometimes realpath changes the case of libname, lower it</span>
+                <span class="s0"># .. use normpath because msys2 uses / instead of \</span>
+                <span class="s1">fn = os.path.normpath(os.path.realpath(libname).lower())</span>
+                <span class="s3">return </span><span class="s1">fn.startswith(self._windows_dir)</span>
+
+    <span class="s1">exclude_list = WinExcludeList(exclude_list)</span>
+
+<span class="s1">_seen_wine_dlls = set()  </span><span class="s0"># Used for warning tracking in include_library()</span>
+
+
+<span class="s3">def </span><span class="s1">include_library(libname):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Check if the dynamic library should be included with application or not. 
+    &quot;&quot;&quot;</span>
+    <span class="s3">if </span><span class="s1">exclude_list:</span>
+        <span class="s3">if </span><span class="s1">exclude_list.search(libname) </span><span class="s3">and not </span><span class="s1">include_list.search(libname):</span>
+            <span class="s0"># Library is excluded and is not overriden by include list. It should be excluded.</span>
+            <span class="s3">return False</span>
+
+    <span class="s0"># If we are running under Wine and the library is a Wine built-in DLL, ensure that it is always excluded. Typically,</span>
+    <span class="s0"># excluding a DLL leads to an incomplete bundle and run-time errors when the said DLL is not installed on the target</span>
+    <span class="s0"># system. However, having Wine built-in DLLs collected is even more detrimental, as they usually provide Wine's</span>
+    <span class="s0"># implementation of low-level functionality, and therefore cannot be used on actual Windows (i.e., system libraries</span>
+    <span class="s0"># from the C:\Windows\system32 directory that might end up collected due to ``_win_includes`` list; a prominent</span>
+    <span class="s0"># example are VC runtime DLLs, for which Wine provides their own implementation, unless user explicitly installs</span>
+    <span class="s0"># Microsoft's VC redistributable package in their Wine environment). Therefore, excluding the Wine built-in DLLs</span>
+    <span class="s0"># actually improves the chances of the bundle running on Windows, or at least makes the issue easier to debug by</span>
+    <span class="s0"># turning it into the &quot;standard&quot; missing DLL problem. Exclusion should not affect the bundle's ability to run under</span>
+    <span class="s0"># Wine itself, as the excluded DLLs are available there.</span>
+    <span class="s3">if </span><span class="s1">compat.is_win_wine </span><span class="s3">and </span><span class="s1">compat.is_wine_dll(libname):</span>
+        <span class="s3">if </span><span class="s1">libname </span><span class="s3">not in </span><span class="s1">_seen_wine_dlls:</span>
+            <span class="s1">logger.warning(</span><span class="s4">&quot;Excluding Wine built-in DLL: %s&quot;</span><span class="s3">, </span><span class="s1">libname)  </span><span class="s0"># displayed only if DLL would have been included</span>
+            <span class="s1">_seen_wine_dlls.add(libname)  </span><span class="s0"># display only once for each DLL</span>
+        <span class="s3">return False</span>
+
+    <span class="s3">return True</span>
+
+
+<span class="s0"># Patterns for suppressing warnings about missing dynamically linked libraries</span>
+<span class="s1">_warning_suppressions = [</span>
+    <span class="s0"># We fail to discover shiboken2 (PySide2) and shiboken6 (PySide6) shared libraries due to the way the packages set</span>
+    <span class="s0"># up the search path to the library, which is located in a separate package. Suppress the harmless warnings to avoid</span>
+    <span class="s0"># confusion.</span>
+    <span class="s4">r'(lib)?shiboken.*'</span><span class="s3">,</span>
+<span class="s1">]</span>
+
+<span class="s0"># On some systems (e.g., openwrt), libc.so might point to ldd. Suppress warnings about it.</span>
+<span class="s3">if </span><span class="s1">compat.is_linux:</span>
+    <span class="s1">_warning_suppressions.append(</span><span class="s4">r'ldd'</span><span class="s1">)</span>
+
+<span class="s0"># Suppress false warnings on win 10 and UCRT (see issue #1566).</span>
+<span class="s3">if </span><span class="s1">compat.is_win_10:</span>
+    <span class="s1">_warning_suppressions.append(</span><span class="s4">r'api-ms-win-crt.*'</span><span class="s1">)</span>
+    <span class="s1">_warning_suppressions.append(</span><span class="s4">r'api-ms-win-core.*'</span><span class="s1">)</span>
+
+
+<span class="s3">class </span><span class="s1">MissingLibWarningSuppressionList:</span>
+    <span class="s3">def </span><span class="s1">__init__(self):</span>
+        <span class="s1">self.regex = re.compile(</span><span class="s4">'|'</span><span class="s1">.join(_warning_suppressions)</span><span class="s3">, </span><span class="s1">re.I)</span>
+
+    <span class="s3">def </span><span class="s1">search(self</span><span class="s3">, </span><span class="s1">libname):</span>
+        <span class="s0"># Running re.search() on '' regex never returns None.</span>
+        <span class="s3">if </span><span class="s1">_warning_suppressions:</span>
+            <span class="s3">return </span><span class="s1">self.regex.match(os.path.basename(libname))</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s3">return False</span>
+
+
+<span class="s1">missing_lib_warning_suppression_list = MissingLibWarningSuppressionList()</span>
+
+
+<span class="s3">def </span><span class="s1">warn_missing_lib(libname):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Check if a missing-library warning should be displayed for the given library name (or full path). 
+    &quot;&quot;&quot;</span>
+    <span class="s3">return not </span><span class="s1">missing_lib_warning_suppression_list.search(libname)</span>
+
+
+<span class="s3">def </span><span class="s1">mac_set_relative_dylib_deps(libname</span><span class="s3">, </span><span class="s1">distname):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    On Mac OS set relative paths to dynamic library dependencies of `libname`. 
+ 
+    Relative paths allow to avoid using environment variable DYLD_LIBRARY_PATH. There are known some issues with 
+    DYLD_LIBRARY_PATH. Relative paths is more flexible mechanism. 
+ 
+    Current location of dependend libraries is derived from the location of the library path (paths start with 
+    '@loader_path'). 
+ 
+    'distname'  path of the library relative to dist directory of frozen executable. We need this to determine the level 
+                of directory level for @loader_path of binaries not found in dist directory. 
+ 
+                For example, Qt5 plugins are not in the same directory as Qt*.dylib files. Without using 
+                '@loader_path/../..' for Qt plugins, Mac OS would not be able to resolve shared library dependencies, 
+                and Qt plugins will not be loaded. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s3">from </span><span class="s1">macholib </span><span class="s3">import </span><span class="s1">util</span>
+    <span class="s3">from </span><span class="s1">macholib.MachO </span><span class="s3">import </span><span class="s1">MachO</span>
+
+    <span class="s0"># Ignore bootloader; otherwise PyInstaller fails with exception like</span>
+    <span class="s0"># 'ValueError: total_size &gt; low_offset (288 &gt; 0)'</span>
+    <span class="s3">if </span><span class="s1">os.path.basename(libname) </span><span class="s3">in </span><span class="s1">_BOOTLOADER_FNAMES:</span>
+        <span class="s3">return</span>
+
+    <span class="s0"># Determine how many directories up ('../') is the directory with shared dynamic libraries.</span>
+    <span class="s0"># E.g., ./qt4_plugins/images/ -&gt; ./../../</span>
+    <span class="s1">parent_dir = </span><span class="s4">''</span>
+    <span class="s0"># Check if distname is not only base filename.</span>
+    <span class="s3">if </span><span class="s1">os.path.dirname(distname):</span>
+        <span class="s1">parent_level = len(os.path.dirname(distname).split(os.sep))</span>
+        <span class="s1">parent_dir = parent_level * (os.pardir + os.sep)</span>
+
+    <span class="s3">def </span><span class="s1">match_func(pth):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        For system libraries is still used absolute path. It is unchanged. 
+        &quot;&quot;&quot;</span>
+        <span class="s0"># Leave system dynamic libraries unchanged.</span>
+        <span class="s3">if </span><span class="s1">util.in_system_path(pth):</span>
+            <span class="s3">return None</span>
+
+        <span class="s0"># The older python.org builds that use system Tcl/Tk framework have their _tkinter.cpython-*-darwin.so</span>
+        <span class="s0"># library linked against /Library/Frameworks/Tcl.framework/Versions/8.5/Tcl and</span>
+        <span class="s0"># /Library/Frameworks/Tk.framework/Versions/8.5/Tk, although the actual frameworks are located in</span>
+        <span class="s0"># /System/Library/Frameworks. Therefore, they slip through the above in_system_path() check, and we need to</span>
+        <span class="s0"># exempt them manually.</span>
+        <span class="s1">_exemptions = [</span>
+            <span class="s4">'/Library/Frameworks/Tcl.framework/'</span><span class="s3">,</span>
+            <span class="s4">'/Library/Frameworks/Tk.framework/'</span><span class="s3">,</span>
+        <span class="s1">]</span>
+        <span class="s3">if </span><span class="s1">any([x </span><span class="s3">in </span><span class="s1">pth </span><span class="s3">for </span><span class="s1">x </span><span class="s3">in </span><span class="s1">_exemptions]):</span>
+            <span class="s3">return None</span>
+
+        <span class="s0"># Use relative path to dependent dynamic libraries based on the location of the executable.</span>
+        <span class="s3">return </span><span class="s1">os.path.join(</span><span class="s4">'@loader_path'</span><span class="s3">, </span><span class="s1">parent_dir</span><span class="s3">, </span><span class="s1">os.path.basename(pth))</span>
+
+    <span class="s0"># Rewrite mach headers with @loader_path.</span>
+    <span class="s1">dll = MachO(libname)</span>
+    <span class="s1">dll.rewriteLoadCommands(match_func)</span>
+
+    <span class="s0"># Write changes into file. Write code is based on macholib example.</span>
+    <span class="s3">try</span><span class="s1">:</span>
+        <span class="s3">with </span><span class="s1">open(dll.filename</span><span class="s3">, </span><span class="s4">'rb+'</span><span class="s1">) </span><span class="s3">as </span><span class="s1">f:</span>
+            <span class="s3">for </span><span class="s1">header </span><span class="s3">in </span><span class="s1">dll.headers:</span>
+                <span class="s1">f.seek(</span><span class="s5">0</span><span class="s1">)</span>
+                <span class="s1">dll.write(f)</span>
+            <span class="s1">f.seek(</span><span class="s5">0</span><span class="s3">, </span><span class="s5">2</span><span class="s1">)</span>
+            <span class="s1">f.flush()</span>
+    <span class="s3">except </span><span class="s1">Exception:</span>
+        <span class="s3">pass</span>
+</pre>
+</body>
+</html>

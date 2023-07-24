@@ -1,0 +1,172 @@
+<html>
+<head>
+<title>packaging.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #cc7832;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #6a8759;}
+.s3 { color: #808080;}
+.s4 { color: #629755; font-style: italic;}
+.s5 { color: #6897bb;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+packaging.py</font>
+</center></td></tr></table>
+<pre><span class="s0">from </span><span class="s1">__future__ </span><span class="s0">import </span><span class="s1">print_function</span>
+
+<span class="s0">import </span><span class="s1">argparse</span>
+<span class="s0">import </span><span class="s1">logging</span>
+<span class="s0">import </span><span class="s1">os</span>
+<span class="s0">import </span><span class="s1">shlex</span>
+<span class="s0">import </span><span class="s1">shutil</span>
+<span class="s0">import </span><span class="s1">sys</span>
+<span class="s0">import </span><span class="s1">traceback</span>
+
+<span class="s0">from </span><span class="s1">. </span><span class="s0">import </span><span class="s1">config</span>
+<span class="s0">from </span><span class="s1">. </span><span class="s0">import </span><span class="s1">__version__ </span><span class="s0">as </span><span class="s1">version</span>
+
+<span class="s0">from </span><span class="s1">PyInstaller.__main__ </span><span class="s0">import </span><span class="s1">run </span><span class="s0">as </span><span class="s1">run_pyinstaller</span>
+
+
+<span class="s1">logger = logging.getLogger(__name__)</span>
+
+
+<span class="s0">def </span><span class="s1">__get_pyinstaller_argument_parser():</span>
+    <span class="s0">from </span><span class="s1">PyInstaller.building.makespec </span><span class="s0">import </span><span class="s1">__add_options </span><span class="s0">as </span><span class="s1">add_makespec_options</span>
+    <span class="s0">from </span><span class="s1">PyInstaller.building.build_main </span><span class="s0">import </span><span class="s1">__add_options </span><span class="s0">as </span><span class="s1">add_build_options</span>
+    <span class="s0">from </span><span class="s1">PyInstaller.log </span><span class="s0">import </span><span class="s1">__add_options </span><span class="s0">as </span><span class="s1">add_log_options</span>
+
+    <span class="s1">parser = argparse.ArgumentParser()</span>
+
+    <span class="s1">add_makespec_options(parser)</span>
+    <span class="s1">add_build_options(parser)</span>
+    <span class="s1">add_log_options(parser)</span>
+
+    <span class="s1">parser.add_argument(</span>
+        <span class="s2">'filenames'</span><span class="s0">, </span><span class="s1">metavar=</span><span class="s2">'scriptname'</span><span class="s0">, </span><span class="s1">nargs=</span><span class="s2">'+'</span><span class="s0">,</span>
+        <span class="s1">help=(</span><span class="s2">&quot;name of scriptfiles to be processed or &quot;</span>
+              <span class="s2">&quot;exactly one .spec-file. If a .spec-file is &quot;</span>
+              <span class="s2">&quot;specified, most options are unnecessary &quot;</span>
+              <span class="s2">&quot;and are ignored.&quot;</span><span class="s1">)</span>
+    <span class="s1">)  </span><span class="s3"># From PyInstaller.__main__.run</span>
+
+    <span class="s0">return </span><span class="s1">parser</span>
+
+
+<span class="s0">def </span><span class="s1">get_pyinstaller_options():</span>
+    <span class="s1">parser = __get_pyinstaller_argument_parser()</span>
+
+    <span class="s1">options = []</span>
+    <span class="s0">for </span><span class="s1">action </span><span class="s0">in </span><span class="s1">parser._actions:</span>
+        <span class="s3"># Clean out what we can't send over to the ui</span>
+        <span class="s3"># Here is what we currently have: https://github.com/python/cpython/blob/master/Lib/argparse.py#L771</span>
+        <span class="s0">del </span><span class="s1">action.container</span>
+        <span class="s1">options.append(action)</span>
+
+    <span class="s0">return </span><span class="s1">[o.__dict__ </span><span class="s0">for </span><span class="s1">o </span><span class="s0">in </span><span class="s1">options]</span>
+
+
+<span class="s0">def </span><span class="s1">will_packaging_overwrite_existing(file_path</span><span class="s0">, </span><span class="s1">one_file</span><span class="s0">, </span><span class="s1">output_folder):</span>
+    <span class="s4">&quot;&quot;&quot; Checks if there is a possibility of a previous output being overwritten. &quot;&quot;&quot;</span>
+    <span class="s0">if not </span><span class="s1">os.path.exists(output_folder):</span>
+        <span class="s0">return False</span>
+    <span class="s1">no_extension = </span><span class="s2">'.'</span><span class="s1">.join(os.path.basename(file_path).split(</span><span class="s2">'.'</span><span class="s1">)[:-</span><span class="s5">1</span><span class="s1">])</span>
+    <span class="s0">if </span><span class="s1">one_file:</span>
+        <span class="s0">if </span><span class="s1">no_extension + </span><span class="s2">'.exe' </span><span class="s0">in </span><span class="s1">os.listdir(output_folder):</span>
+            <span class="s0">return True</span>
+    <span class="s0">else</span><span class="s1">:</span>
+        <span class="s0">if </span><span class="s1">no_extension </span><span class="s0">in </span><span class="s1">os.listdir(output_folder):</span>
+            <span class="s0">return True</span>
+    <span class="s0">return False</span>
+
+
+<span class="s0">def </span><span class="s1">__move_package(src</span><span class="s0">, </span><span class="s1">dst):</span>
+    <span class="s4">&quot;&quot;&quot; Move the output package to the desired path (default is output/ - set in script.js) &quot;&quot;&quot;</span>
+    <span class="s3"># Make sure the destination exists</span>
+    <span class="s0">if not </span><span class="s1">os.path.exists(dst):</span>
+        <span class="s1">os.makedirs(dst)</span>
+
+    <span class="s3"># Move all files/folders in dist/</span>
+    <span class="s0">for </span><span class="s1">file_or_folder </span><span class="s0">in </span><span class="s1">os.listdir(src):</span>
+        <span class="s1">_dst = os.path.join(dst</span><span class="s0">, </span><span class="s1">file_or_folder)</span>
+        <span class="s3"># If this already exists in the destination, delete it</span>
+        <span class="s0">if </span><span class="s1">os.path.exists(_dst):</span>
+            <span class="s0">if </span><span class="s1">os.path.isfile(_dst):</span>
+                <span class="s1">os.remove(_dst)</span>
+            <span class="s0">else</span><span class="s1">:</span>
+                <span class="s1">shutil.rmtree(_dst)</span>
+        <span class="s3"># Move file</span>
+        <span class="s1">shutil.move(os.path.join(src</span><span class="s0">, </span><span class="s1">file_or_folder)</span><span class="s0">, </span><span class="s1">dst)</span>
+
+
+<span class="s0">def </span><span class="s1">package(pyinstaller_command</span><span class="s0">, </span><span class="s1">options):</span>
+    <span class="s4">&quot;&quot;&quot; 
+    Call PyInstaller to package a script using provided arguments and options. 
+    :param pyinstaller_command: Command to supply to PyInstaller 
+    :param options: auto-py-to-exe specific options for setup and cleaning up 
+    :return: Whether packaging was successful 
+    &quot;&quot;&quot;</span>
+
+    <span class="s3"># Show current version</span>
+    <span class="s1">logger.info(</span><span class="s2">&quot;Running auto-py-to-exe v&quot; </span><span class="s1">+ version)</span>
+
+    <span class="s3"># Notify the user of the workspace and setup building to it</span>
+    <span class="s1">logger.info(</span><span class="s2">&quot;Building directory: {}&quot;</span><span class="s1">.format(config.temporary_directory))</span>
+
+    <span class="s3"># Override arguments</span>
+    <span class="s1">dist_path = os.path.join(config.temporary_directory</span><span class="s0">, </span><span class="s2">'application'</span><span class="s1">)</span>
+    <span class="s1">build_path = os.path.join(config.temporary_directory</span><span class="s0">, </span><span class="s2">'build'</span><span class="s1">)</span>
+    <span class="s1">extra_args = [</span><span class="s2">'--distpath'</span><span class="s0">, </span><span class="s1">dist_path] + [</span><span class="s2">'--workpath'</span><span class="s0">, </span><span class="s1">build_path] + [</span><span class="s2">'--specpath'</span><span class="s0">, </span><span class="s1">config.temporary_directory]</span>
+
+    <span class="s1">logger.info(</span><span class="s2">'Provided command: {}'</span><span class="s1">.format(pyinstaller_command))</span>
+
+    <span class="s3"># Setup options</span>
+    <span class="s1">increase_recursion_limit = options[</span><span class="s2">'increaseRecursionLimit'</span><span class="s1">]</span>
+    <span class="s1">output_directory = os.path.abspath(options[</span><span class="s2">'outputDirectory'</span><span class="s1">])</span>
+
+    <span class="s0">if </span><span class="s1">increase_recursion_limit:</span>
+        <span class="s1">sys.setrecursionlimit(</span><span class="s5">5000</span><span class="s1">)</span>
+        <span class="s1">logger.info(</span><span class="s2">&quot;Recursion Limit is set to 5000&quot;</span><span class="s1">)</span>
+    <span class="s0">else</span><span class="s1">:</span>
+        <span class="s1">sys.setrecursionlimit(config.DEFAULT_RECURSION_LIMIT)</span>
+
+    <span class="s3"># Run PyInstaller</span>
+    <span class="s1">fail = </span><span class="s0">False</span>
+    <span class="s0">try</span><span class="s1">:</span>
+        <span class="s3"># Since we allow manual argument input, we cannot pass arguments to PyInstaller as a list as we can't</span>
+        <span class="s3"># guarantee that the arguments will be parsed correctly. To get around this, we can set sys.argv here with our</span>
+        <span class="s3"># command to trick PyInstaller to reading the command as if we are using the cli tool.</span>
+        <span class="s1">sys.argv = shlex.split(pyinstaller_command) + extra_args  </span><span class="s3"># Put command into sys.argv and extra args</span>
+
+        <span class="s3"># Display the command we are using and leave a space to separate out PyInstallers logs</span>
+        <span class="s1">logger.info(</span><span class="s2">'Executing: {}'</span><span class="s1">.format(</span><span class="s2">' '</span><span class="s1">.join(sys.argv)))</span>
+        <span class="s1">logger.info(</span><span class="s2">''</span><span class="s1">)</span>
+
+        <span class="s1">run_pyinstaller()</span>
+    <span class="s0">except</span><span class="s1">:</span>
+        <span class="s1">fail = </span><span class="s0">True</span>
+        <span class="s1">logger.exception(</span><span class="s2">&quot;An error occurred while packaging&quot;</span><span class="s1">)</span>
+
+    <span class="s3"># Move project if there was no failure</span>
+    <span class="s1">logger.info(</span><span class="s2">&quot;&quot;</span><span class="s1">)</span>
+    <span class="s0">if not </span><span class="s1">fail:</span>
+        <span class="s1">logger.info(</span><span class="s2">&quot;Moving project to: {0}&quot;</span><span class="s1">.format(output_directory))</span>
+        <span class="s0">try</span><span class="s1">:</span>
+            <span class="s1">__move_package(dist_path</span><span class="s0">, </span><span class="s1">output_directory)</span>
+        <span class="s0">except</span><span class="s1">:</span>
+            <span class="s1">logger.error(</span><span class="s2">&quot;Failed to move project&quot;</span><span class="s1">)</span>
+            <span class="s1">logger.exception(traceback.format_exc())</span>
+    <span class="s0">else</span><span class="s1">:</span>
+        <span class="s1">logger.info(</span><span class="s2">&quot;Project output will not be moved to output folder&quot;</span><span class="s1">)</span>
+        <span class="s0">return False</span>
+
+    <span class="s3"># Set complete</span>
+    <span class="s0">return True</span>
+</pre>
+</body>
+</html>

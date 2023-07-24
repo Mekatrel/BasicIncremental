@@ -1,0 +1,168 @@
+<html>
+<head>
+<title>test__greenio.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #cc7832;}
+.s3 { color: #6897bb;}
+.s4 { color: #6a8759;}
+.s5 { color: #a5c261;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+test__greenio.py</font>
+</center></td></tr></table>
+<pre><span class="s0"># Copyright (c) 2006-2007, Linden Research, Inc.</span>
+<span class="s0"># Permission is hereby granted, free of charge, to any person obtaining a copy</span>
+<span class="s0"># of this software and associated documentation files (the &quot;Software&quot;), to deal</span>
+<span class="s0"># in the Software without restriction, including without limitation the rights</span>
+<span class="s0"># to use, copy, modify, merge, publish, distribute, sublicense, and/or sell</span>
+<span class="s0"># copies of the Software, and to permit persons to whom the Software is</span>
+<span class="s0"># furnished to do so, subject to the following conditions:</span>
+<span class="s0">#</span>
+<span class="s0"># The above copyright notice and this permission notice shall be included in</span>
+<span class="s0"># all copies or substantial portions of the Software.</span>
+<span class="s0">#</span>
+<span class="s0"># THE SOFTWARE IS PROVIDED &quot;AS IS&quot;, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR</span>
+<span class="s0"># IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,</span>
+<span class="s0"># FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE</span>
+<span class="s0"># AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER</span>
+<span class="s0"># LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,</span>
+<span class="s0"># OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN</span>
+<span class="s0"># THE SOFTWARE.</span>
+<span class="s2">import </span><span class="s1">sys</span>
+
+<span class="s2">import </span><span class="s1">gevent</span>
+<span class="s2">from </span><span class="s1">gevent </span><span class="s2">import </span><span class="s1">socket</span>
+
+<span class="s2">from </span><span class="s1">gevent </span><span class="s2">import </span><span class="s1">testing </span><span class="s2">as </span><span class="s1">greentest</span>
+<span class="s2">from </span><span class="s1">gevent.testing </span><span class="s2">import </span><span class="s1">TestCase</span><span class="s2">, </span><span class="s1">tcp_listener</span>
+<span class="s2">from </span><span class="s1">gevent.testing </span><span class="s2">import </span><span class="s1">gc_collect_if_needed</span>
+<span class="s2">from </span><span class="s1">gevent.testing </span><span class="s2">import </span><span class="s1">skipOnPyPy</span>
+<span class="s2">from </span><span class="s1">gevent.testing </span><span class="s2">import </span><span class="s1">params</span>
+
+
+<span class="s1">PY3 = sys.version_info[</span><span class="s3">0</span><span class="s1">] &gt;= </span><span class="s3">3</span>
+
+
+<span class="s2">def </span><span class="s1">_write_to_closed(f</span><span class="s2">, </span><span class="s1">s):</span>
+    <span class="s2">try</span><span class="s1">:</span>
+        <span class="s1">r = f.write(s)</span>
+    <span class="s2">except </span><span class="s1">ValueError:</span>
+        <span class="s2">assert </span><span class="s1">PY3</span>
+    <span class="s2">else</span><span class="s1">:</span>
+        <span class="s2">assert </span><span class="s1">r </span><span class="s2">is None, </span><span class="s1">r</span>
+
+
+<span class="s2">class </span><span class="s1">TestGreenIo(TestCase):</span>
+
+    <span class="s2">def </span><span class="s1">test_close_with_makefile(self):</span>
+
+        <span class="s2">def </span><span class="s1">accept_close_early(listener):</span>
+            <span class="s0"># verify that the makefile and the socket are truly independent</span>
+            <span class="s0"># by closing the socket prior to using the made file</span>
+            <span class="s2">try</span><span class="s1">:</span>
+                <span class="s1">conn</span><span class="s2">, </span><span class="s1">_ = listener.accept()</span>
+                <span class="s1">fd = conn.makefile(mode=</span><span class="s4">'wb'</span><span class="s1">)</span>
+                <span class="s1">conn.close()</span>
+                <span class="s1">fd.write(</span><span class="s5">b'hello</span><span class="s2">\n</span><span class="s5">'</span><span class="s1">)</span>
+                <span class="s1">fd.close()</span>
+                <span class="s1">_write_to_closed(fd</span><span class="s2">, </span><span class="s5">b'a'</span><span class="s1">)</span>
+                <span class="s1">self.assertRaises(socket.error</span><span class="s2">, </span><span class="s1">conn.send</span><span class="s2">, </span><span class="s5">b'b'</span><span class="s1">)</span>
+            <span class="s2">finally</span><span class="s1">:</span>
+                <span class="s1">listener.close()</span>
+
+        <span class="s2">def </span><span class="s1">accept_close_late(listener):</span>
+            <span class="s0"># verify that the makefile and the socket are truly independent</span>
+            <span class="s0"># by closing the made file and then sending a character</span>
+            <span class="s2">try</span><span class="s1">:</span>
+                <span class="s1">conn</span><span class="s2">, </span><span class="s1">_ = listener.accept()</span>
+                <span class="s1">fd = conn.makefile(mode=</span><span class="s4">'wb'</span><span class="s1">)</span>
+                <span class="s1">fd.write(</span><span class="s5">b'hello'</span><span class="s1">)</span>
+                <span class="s1">fd.close()</span>
+                <span class="s1">conn.send(</span><span class="s5">b'</span><span class="s2">\n</span><span class="s5">'</span><span class="s1">)</span>
+                <span class="s1">conn.close()</span>
+                <span class="s1">_write_to_closed(fd</span><span class="s2">, </span><span class="s5">b'a'</span><span class="s1">)</span>
+                <span class="s1">self.assertRaises(socket.error</span><span class="s2">, </span><span class="s1">conn.send</span><span class="s2">, </span><span class="s5">b'b'</span><span class="s1">)</span>
+            <span class="s2">finally</span><span class="s1">:</span>
+                <span class="s1">listener.close()</span>
+
+        <span class="s2">def </span><span class="s1">did_it_work(server):</span>
+            <span class="s1">client = socket.create_connection((params.DEFAULT_CONNECT</span><span class="s2">, </span><span class="s1">server.getsockname()[</span><span class="s3">1</span><span class="s1">]))</span>
+            <span class="s1">fd = client.makefile(mode=</span><span class="s4">'rb'</span><span class="s1">)</span>
+            <span class="s1">client.close()</span>
+            <span class="s1">self.assertEqual(fd.readline()</span><span class="s2">, </span><span class="s5">b'hello</span><span class="s2">\n</span><span class="s5">'</span><span class="s1">)</span>
+            <span class="s1">self.assertFalse(fd.read())</span>
+            <span class="s1">fd.close()</span>
+
+        <span class="s1">server = tcp_listener()</span>
+        <span class="s1">server_greenlet = gevent.spawn(accept_close_early</span><span class="s2">, </span><span class="s1">server)</span>
+        <span class="s1">did_it_work(server)</span>
+        <span class="s1">server_greenlet.kill()</span>
+
+        <span class="s1">server = tcp_listener()</span>
+        <span class="s1">server_greenlet = gevent.spawn(accept_close_late</span><span class="s2">, </span><span class="s1">server)</span>
+        <span class="s1">did_it_work(server)</span>
+        <span class="s1">server_greenlet.kill()</span>
+
+    <span class="s1">@skipOnPyPy(</span><span class="s4">&quot;Takes multiple GCs and issues a warning we can't catch&quot;</span><span class="s1">)</span>
+    <span class="s2">def </span><span class="s1">test_del_closes_socket(self):</span>
+        <span class="s2">import </span><span class="s1">warnings</span>
+        <span class="s2">def </span><span class="s1">accept_once(listener):</span>
+            <span class="s0"># delete/overwrite the original conn</span>
+            <span class="s0"># object, only keeping the file object around</span>
+            <span class="s0"># closing the file object should close everything</span>
+
+            <span class="s0"># This is not *exactly* true on Python 3. This produces</span>
+            <span class="s0"># a ResourceWarning, which we silence below. (Previously we actually</span>
+            <span class="s0"># *saved* a reference to the socket object, so we</span>
+            <span class="s0"># weren't testing what we thought we were.)</span>
+
+            <span class="s0"># It's definitely not true on PyPy, which needs GC to</span>
+            <span class="s0"># reliably close everything; sometimes this is more than</span>
+            <span class="s0"># one collection cycle. And PyPy issues a warning with -X</span>
+            <span class="s0"># track-resources that we cannot catch.</span>
+            <span class="s2">with </span><span class="s1">warnings.catch_warnings():</span>
+                <span class="s1">warnings.simplefilter(</span><span class="s4">'ignore'</span><span class="s1">)</span>
+
+                <span class="s2">try</span><span class="s1">:</span>
+                    <span class="s1">conn = listener.accept()[</span><span class="s3">0</span><span class="s1">]</span>
+                    <span class="s0"># Note that we overwrite the original variable,</span>
+                    <span class="s0"># losing our reference to the socket.</span>
+                    <span class="s1">conn = conn.makefile(mode=</span><span class="s4">'wb'</span><span class="s1">)</span>
+                    <span class="s1">conn.write(</span><span class="s5">b'hello</span><span class="s2">\n</span><span class="s5">'</span><span class="s1">)</span>
+                    <span class="s1">conn.close()</span>
+                    <span class="s1">_write_to_closed(conn</span><span class="s2">, </span><span class="s5">b'a'</span><span class="s1">)</span>
+                <span class="s2">finally</span><span class="s1">:</span>
+                    <span class="s1">listener.close()</span>
+                    <span class="s2">del </span><span class="s1">listener</span>
+                    <span class="s2">del </span><span class="s1">conn</span>
+                    <span class="s1">gc_collect_if_needed()</span>
+                    <span class="s1">gc_collect_if_needed()</span>
+
+        <span class="s1">server = tcp_listener()</span>
+        <span class="s1">gevent.spawn(accept_once</span><span class="s2">, </span><span class="s1">server)</span>
+        <span class="s1">client = socket.create_connection((params.DEFAULT_CONNECT</span><span class="s2">, </span><span class="s1">server.getsockname()[</span><span class="s3">1</span><span class="s1">]))</span>
+        <span class="s2">with </span><span class="s1">gevent.Timeout.start_new(</span><span class="s3">0.5</span><span class="s1">):</span>
+            <span class="s1">fd = client.makefile()</span>
+            <span class="s1">client.close()</span>
+            <span class="s1">self.assertEqual(fd.read()</span><span class="s2">, </span><span class="s4">'hello</span><span class="s2">\n</span><span class="s4">'</span><span class="s1">)</span>
+            <span class="s0"># If the socket isn't closed when 'accept_once' finished,</span>
+            <span class="s0"># then this will hang and exceed the timeout</span>
+            <span class="s1">self.assertEqual(fd.read()</span><span class="s2">, </span><span class="s4">''</span><span class="s1">)</span>
+
+            <span class="s1">fd.close()</span>
+        <span class="s2">del </span><span class="s1">client</span>
+        <span class="s2">del </span><span class="s1">fd</span>
+
+
+<span class="s2">if </span><span class="s1">__name__ == </span><span class="s4">'__main__'</span><span class="s1">:</span>
+    <span class="s1">greentest.main()</span>
+</pre>
+</body>
+</html>

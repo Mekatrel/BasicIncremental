@@ -1,0 +1,758 @@
+<html>
+<head>
+<title>_config.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #629755; font-style: italic;}
+.s3 { color: #cc7832;}
+.s4 { color: #6a8759;}
+.s5 { color: #6897bb;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+_config.py</font>
+</center></td></tr></table>
+<pre><span class="s0"># Copyright (c) 2018 gevent. See LICENSE for details.</span>
+<span class="s2">&quot;&quot;&quot; 
+gevent tunables. 
+ 
+This should be used as ``from gevent import config``. That variable 
+is an object of :class:`Config`. 
+ 
+.. versionadded:: 1.3a2 
+ 
+.. versionchanged:: 22.08.0 
+   Invoking this module like ``python -m gevent._config`` will 
+   print a help message about available configuration properties. 
+   This is handy to quickly look for environment variables. 
+&quot;&quot;&quot;</span>
+
+<span class="s3">from </span><span class="s1">__future__ </span><span class="s3">import </span><span class="s1">print_function</span><span class="s3">, </span><span class="s1">absolute_import</span><span class="s3">, </span><span class="s1">division</span>
+
+<span class="s3">import </span><span class="s1">importlib</span>
+<span class="s3">import </span><span class="s1">os</span>
+<span class="s3">import </span><span class="s1">textwrap</span>
+
+<span class="s3">from </span><span class="s1">gevent._compat </span><span class="s3">import </span><span class="s1">string_types</span>
+<span class="s3">from </span><span class="s1">gevent._compat </span><span class="s3">import </span><span class="s1">WIN</span>
+
+<span class="s1">__all__ = [</span>
+    <span class="s4">'config'</span><span class="s3">,</span>
+<span class="s1">]</span>
+
+<span class="s1">ALL_SETTINGS = []</span>
+
+<span class="s3">class </span><span class="s1">SettingType(type):</span>
+    <span class="s0"># pylint:disable=bad-mcs-classmethod-argument</span>
+
+    <span class="s3">def </span><span class="s1">__new__(cls</span><span class="s3">, </span><span class="s1">name</span><span class="s3">, </span><span class="s1">bases</span><span class="s3">, </span><span class="s1">cls_dict):</span>
+        <span class="s3">if </span><span class="s1">name == </span><span class="s4">'Setting'</span><span class="s1">:</span>
+            <span class="s3">return </span><span class="s1">type.__new__(cls</span><span class="s3">, </span><span class="s1">name</span><span class="s3">, </span><span class="s1">bases</span><span class="s3">, </span><span class="s1">cls_dict)</span>
+
+        <span class="s1">cls_dict[</span><span class="s4">&quot;order&quot;</span><span class="s1">] = len(ALL_SETTINGS)</span>
+        <span class="s3">if </span><span class="s4">'name' </span><span class="s3">not in </span><span class="s1">cls_dict:</span>
+            <span class="s1">cls_dict[</span><span class="s4">'name'</span><span class="s1">] = name.lower()</span>
+
+        <span class="s3">if </span><span class="s4">'environment_key' </span><span class="s3">not in </span><span class="s1">cls_dict:</span>
+            <span class="s1">cls_dict[</span><span class="s4">'environment_key'</span><span class="s1">] = </span><span class="s4">'GEVENT_' </span><span class="s1">+ cls_dict[</span><span class="s4">'name'</span><span class="s1">].upper()</span>
+
+
+        <span class="s1">new_class = type.__new__(cls</span><span class="s3">, </span><span class="s1">name</span><span class="s3">, </span><span class="s1">bases</span><span class="s3">, </span><span class="s1">cls_dict)</span>
+        <span class="s1">new_class.fmt_desc(cls_dict.get(</span><span class="s4">&quot;desc&quot;</span><span class="s3">, </span><span class="s4">&quot;&quot;</span><span class="s1">))</span>
+        <span class="s1">new_class.__doc__ = new_class.desc</span>
+        <span class="s1">ALL_SETTINGS.append(new_class)</span>
+
+        <span class="s3">if </span><span class="s1">new_class.document:</span>
+            <span class="s1">setting_name = cls_dict[</span><span class="s4">'name'</span><span class="s1">]</span>
+
+            <span class="s3">def </span><span class="s1">getter(self):</span>
+                <span class="s3">return </span><span class="s1">self.settings[setting_name].get()</span>
+
+            <span class="s3">def </span><span class="s1">setter(self</span><span class="s3">, </span><span class="s1">value): </span><span class="s0"># pragma: no cover</span>
+                <span class="s0"># The setter should never be hit, Config has a</span>
+                <span class="s0"># __setattr__ that would override. But for the sake</span>
+                <span class="s0"># of consistency we provide one.</span>
+                <span class="s1">self.settings[setting_name].set(value)</span>
+
+            <span class="s1">prop = property(getter</span><span class="s3">, </span><span class="s1">setter</span><span class="s3">, </span><span class="s1">doc=new_class.__doc__)</span>
+
+            <span class="s1">setattr(Config</span><span class="s3">, </span><span class="s1">cls_dict[</span><span class="s4">'name'</span><span class="s1">]</span><span class="s3">, </span><span class="s1">prop)</span>
+        <span class="s3">return </span><span class="s1">new_class</span>
+
+    <span class="s3">def </span><span class="s1">fmt_desc(cls</span><span class="s3">, </span><span class="s1">desc):</span>
+        <span class="s1">desc = textwrap.dedent(desc).strip()</span>
+        <span class="s3">if </span><span class="s1">hasattr(cls</span><span class="s3">, </span><span class="s4">'shortname_map'</span><span class="s1">):</span>
+            <span class="s1">desc += (</span>
+                <span class="s4">&quot;</span><span class="s3">\n\n</span><span class="s4">This is an importable value. It can be &quot;</span>
+                <span class="s4">&quot;given as a string naming an importable object, &quot;</span>
+                <span class="s4">&quot;or a list of strings in preference order and the first &quot;</span>
+                <span class="s4">&quot;successfully importable object will be used. (Separate values &quot;</span>
+                <span class="s4">&quot;in the environment variable with commas.) &quot;</span>
+                <span class="s4">&quot;It can also be given as the callable object itself (in code). &quot;</span>
+            <span class="s1">)</span>
+            <span class="s3">if </span><span class="s1">cls.shortname_map:</span>
+                <span class="s1">desc += </span><span class="s4">&quot;Shorthand names for default objects are %r&quot; </span><span class="s1">% (list(cls.shortname_map)</span><span class="s3">,</span><span class="s1">)</span>
+        <span class="s3">if </span><span class="s1">getattr(cls.validate</span><span class="s3">, </span><span class="s4">'__doc__'</span><span class="s1">):</span>
+            <span class="s1">desc += </span><span class="s4">'</span><span class="s3">\n\n</span><span class="s4">' </span><span class="s1">+ textwrap.dedent(cls.validate.__doc__).strip()</span>
+        <span class="s3">if </span><span class="s1">isinstance(cls.default</span><span class="s3">, </span><span class="s1">str) </span><span class="s3">and </span><span class="s1">hasattr(cls</span><span class="s3">, </span><span class="s4">'shortname_map'</span><span class="s1">):</span>
+            <span class="s1">default = </span><span class="s4">&quot;`%s`&quot; </span><span class="s1">% (cls.default</span><span class="s3">,</span><span class="s1">)</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s1">default = </span><span class="s4">&quot;`%r`&quot; </span><span class="s1">% (cls.default</span><span class="s3">,</span><span class="s1">)</span>
+        <span class="s1">desc += </span><span class="s4">&quot;</span><span class="s3">\n\n</span><span class="s4">The default value is %s&quot; </span><span class="s1">% (default</span><span class="s3">,</span><span class="s1">)</span>
+        <span class="s1">desc += (</span><span class="s4">&quot;</span><span class="s3">\n\n</span><span class="s4">The environment variable ``%s`` &quot;</span>
+                 <span class="s4">&quot;can be used to control this.&quot; </span><span class="s1">% (cls.environment_key</span><span class="s3">,</span><span class="s1">))</span>
+        <span class="s1">setattr(cls</span><span class="s3">, </span><span class="s4">&quot;desc&quot;</span><span class="s3">, </span><span class="s1">desc)</span>
+        <span class="s3">return </span><span class="s1">desc</span>
+
+<span class="s3">def </span><span class="s1">validate_invalid(value):</span>
+    <span class="s3">raise </span><span class="s1">ValueError(</span><span class="s4">&quot;Not a valid value: %r&quot; </span><span class="s1">% (value</span><span class="s3">,</span><span class="s1">))</span>
+
+<span class="s3">def </span><span class="s1">validate_bool(value):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    This is a boolean value. 
+ 
+    In the environment variable, it may be given as ``1``, ``true``, 
+    ``on`` or ``yes`` for `True`, or ``0``, ``false``, ``off``, or 
+    ``no`` for `False`. 
+    &quot;&quot;&quot;</span>
+    <span class="s3">if </span><span class="s1">isinstance(value</span><span class="s3">, </span><span class="s1">string_types):</span>
+        <span class="s1">value = value.lower().strip()</span>
+        <span class="s3">if </span><span class="s1">value </span><span class="s3">in </span><span class="s1">(</span><span class="s4">'1'</span><span class="s3">, </span><span class="s4">'true'</span><span class="s3">, </span><span class="s4">'on'</span><span class="s3">, </span><span class="s4">'yes'</span><span class="s1">):</span>
+            <span class="s1">value = </span><span class="s3">True</span>
+        <span class="s3">elif </span><span class="s1">value </span><span class="s3">in </span><span class="s1">(</span><span class="s4">'0'</span><span class="s3">, </span><span class="s4">'false'</span><span class="s3">, </span><span class="s4">'off'</span><span class="s3">, </span><span class="s4">'no'</span><span class="s1">) </span><span class="s3">or not </span><span class="s1">value:</span>
+            <span class="s1">value = </span><span class="s3">False</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s3">raise </span><span class="s1">ValueError(</span><span class="s4">&quot;Invalid boolean string: %r&quot; </span><span class="s1">% (value</span><span class="s3">,</span><span class="s1">))</span>
+    <span class="s3">return </span><span class="s1">bool(value)</span>
+
+<span class="s3">def </span><span class="s1">validate_anything(value):</span>
+    <span class="s3">return </span><span class="s1">value</span>
+
+<span class="s1">convert_str_value_as_is = validate_anything</span>
+
+<span class="s3">class </span><span class="s1">Setting(object):</span>
+    <span class="s1">name = </span><span class="s3">None</span>
+    <span class="s1">value = </span><span class="s3">None</span>
+    <span class="s1">validate = staticmethod(validate_invalid)</span>
+    <span class="s1">default = </span><span class="s3">None</span>
+    <span class="s1">environment_key = </span><span class="s3">None</span>
+    <span class="s1">document = </span><span class="s3">True</span>
+
+    <span class="s1">desc = </span><span class="s4">&quot;&quot;&quot;</span><span class="s3">\ 
+</span>
+    <span class="s4">A long ReST description. 
+ 
+    The first line should be a single sentence. 
+ 
+    &quot;&quot;&quot;</span>
+
+    <span class="s3">def </span><span class="s1">_convert(self</span><span class="s3">, </span><span class="s1">value):</span>
+        <span class="s3">if </span><span class="s1">isinstance(value</span><span class="s3">, </span><span class="s1">string_types):</span>
+            <span class="s3">return </span><span class="s1">value.split(</span><span class="s4">','</span><span class="s1">)</span>
+        <span class="s3">return </span><span class="s1">value</span>
+
+    <span class="s3">def </span><span class="s1">_default(self):</span>
+        <span class="s1">result = os.environ.get(self.environment_key</span><span class="s3">, </span><span class="s1">self.default)</span>
+        <span class="s1">result = self._convert(result)</span>
+        <span class="s3">return </span><span class="s1">result</span>
+
+    <span class="s3">def </span><span class="s1">get(self):</span>
+        <span class="s0"># If we've been specifically set, return it</span>
+        <span class="s3">if </span><span class="s4">'value' </span><span class="s3">in </span><span class="s1">self.__dict__:</span>
+            <span class="s3">return </span><span class="s1">self.value</span>
+        <span class="s0"># Otherwise, read from the environment and reify</span>
+        <span class="s0"># so we return consistent results.</span>
+        <span class="s1">self.value = self.validate(self._default())</span>
+        <span class="s3">return </span><span class="s1">self.value</span>
+
+    <span class="s3">def </span><span class="s1">set(self</span><span class="s3">, </span><span class="s1">val):</span>
+        <span class="s1">self.value = self.validate(self._convert(val))</span>
+
+
+<span class="s1">Setting = SettingType(</span><span class="s4">'Setting'</span><span class="s3">, </span><span class="s1">(Setting</span><span class="s3">,</span><span class="s1">)</span><span class="s3">, </span><span class="s1">dict(Setting.__dict__))</span>
+
+<span class="s3">def </span><span class="s1">make_settings():</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Return fresh instances of all classes defined in `ALL_SETTINGS`. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">settings = {}</span>
+    <span class="s3">for </span><span class="s1">setting_kind </span><span class="s3">in </span><span class="s1">ALL_SETTINGS:</span>
+        <span class="s1">setting = setting_kind()</span>
+        <span class="s3">assert </span><span class="s1">setting.name </span><span class="s3">not in </span><span class="s1">settings</span>
+        <span class="s1">settings[setting.name] = setting</span>
+    <span class="s3">return </span><span class="s1">settings</span>
+
+
+<span class="s3">class </span><span class="s1">Config(object):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Global configuration for gevent. 
+ 
+    There is one instance of this object at ``gevent.config``. If you 
+    are going to make changes in code, instead of using the documented 
+    environment variables, you need to make the changes before using 
+    any parts of gevent that might need those settings. For example:: 
+ 
+        &gt;&gt;&gt; from gevent import config 
+        &gt;&gt;&gt; config.fileobject = 'thread' 
+ 
+        &gt;&gt;&gt; from gevent import fileobject 
+        &gt;&gt;&gt; fileobject.FileObject.__name__ 
+        'FileObjectThread' 
+ 
+    .. versionadded:: 1.3a2 
+ 
+    &quot;&quot;&quot;</span>
+
+    <span class="s3">def </span><span class="s1">__init__(self):</span>
+        <span class="s1">self.settings = make_settings()</span>
+
+    <span class="s3">def </span><span class="s1">__getattr__(self</span><span class="s3">, </span><span class="s1">name):</span>
+        <span class="s3">if </span><span class="s1">name </span><span class="s3">not in </span><span class="s1">self.settings:</span>
+            <span class="s3">raise </span><span class="s1">AttributeError(</span><span class="s4">&quot;No configuration setting for: %r&quot; </span><span class="s1">% name)</span>
+        <span class="s3">return </span><span class="s1">self.settings[name].get()</span>
+
+    <span class="s3">def </span><span class="s1">__setattr__(self</span><span class="s3">, </span><span class="s1">name</span><span class="s3">, </span><span class="s1">value):</span>
+        <span class="s3">if </span><span class="s1">name != </span><span class="s4">&quot;settings&quot; </span><span class="s3">and </span><span class="s1">name </span><span class="s3">in </span><span class="s1">self.settings:</span>
+            <span class="s1">self.set(name</span><span class="s3">, </span><span class="s1">value)</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s1">super(Config</span><span class="s3">, </span><span class="s1">self).__setattr__(name</span><span class="s3">, </span><span class="s1">value)</span>
+
+    <span class="s3">def </span><span class="s1">set(self</span><span class="s3">, </span><span class="s1">name</span><span class="s3">, </span><span class="s1">value):</span>
+        <span class="s3">if </span><span class="s1">name </span><span class="s3">not in </span><span class="s1">self.settings:</span>
+            <span class="s3">raise </span><span class="s1">AttributeError(</span><span class="s4">&quot;No configuration setting for: %r&quot; </span><span class="s1">% name)</span>
+        <span class="s1">self.settings[name].set(value)</span>
+
+    <span class="s3">def </span><span class="s1">__dir__(self):</span>
+        <span class="s3">return </span><span class="s1">list(self.settings)</span>
+
+    <span class="s3">def </span><span class="s1">print_help(self):</span>
+        <span class="s3">for </span><span class="s1">k</span><span class="s3">, </span><span class="s1">v </span><span class="s3">in </span><span class="s1">self.settings.items():</span>
+            <span class="s1">print(k)</span>
+            <span class="s1">print(textwrap.indent(v.__doc__.lstrip()</span><span class="s3">, </span><span class="s4">' ' </span><span class="s1">* </span><span class="s5">4</span><span class="s1">))</span>
+            <span class="s1">print()</span>
+
+
+<span class="s3">class </span><span class="s1">ImportableSetting(object):</span>
+
+    <span class="s3">def </span><span class="s1">_import_one_of(self</span><span class="s3">, </span><span class="s1">candidates):</span>
+        <span class="s3">assert </span><span class="s1">isinstance(candidates</span><span class="s3">, </span><span class="s1">list)</span>
+        <span class="s3">if not </span><span class="s1">candidates:</span>
+            <span class="s3">raise </span><span class="s1">ImportError(</span><span class="s4">'Cannot import from empty list'</span><span class="s1">)</span>
+
+        <span class="s3">for </span><span class="s1">item </span><span class="s3">in </span><span class="s1">candidates[:-</span><span class="s5">1</span><span class="s1">]:</span>
+            <span class="s3">try</span><span class="s1">:</span>
+                <span class="s3">return </span><span class="s1">self._import_one(item)</span>
+            <span class="s3">except </span><span class="s1">ImportError:</span>
+                <span class="s3">pass</span>
+
+        <span class="s3">return </span><span class="s1">self._import_one(candidates[-</span><span class="s5">1</span><span class="s1">])</span>
+
+    <span class="s3">def </span><span class="s1">_import_one(self</span><span class="s3">, </span><span class="s1">path</span><span class="s3">, </span><span class="s1">_MISSING=object()):</span>
+        <span class="s3">if not </span><span class="s1">isinstance(path</span><span class="s3">, </span><span class="s1">string_types):</span>
+            <span class="s3">return </span><span class="s1">path</span>
+
+        <span class="s3">if </span><span class="s4">'.' </span><span class="s3">not in </span><span class="s1">path </span><span class="s3">or </span><span class="s4">'/' </span><span class="s3">in </span><span class="s1">path:</span>
+            <span class="s3">raise </span><span class="s1">ImportError(</span><span class="s4">&quot;Cannot import %r. &quot;</span>
+                              <span class="s4">&quot;Required format: [package.]module.class. &quot;</span>
+                              <span class="s4">&quot;Or choose from %r&quot;</span>
+                              <span class="s1">% (path</span><span class="s3">, </span><span class="s1">list(self.shortname_map)))</span>
+
+
+        <span class="s1">module</span><span class="s3">, </span><span class="s1">item = path.rsplit(</span><span class="s4">'.'</span><span class="s3">, </span><span class="s5">1</span><span class="s1">)</span>
+        <span class="s1">module = importlib.import_module(module)</span>
+        <span class="s1">x = getattr(module</span><span class="s3">, </span><span class="s1">item</span><span class="s3">, </span><span class="s1">_MISSING)</span>
+        <span class="s3">if </span><span class="s1">x </span><span class="s3">is </span><span class="s1">_MISSING:</span>
+            <span class="s3">raise </span><span class="s1">ImportError(</span><span class="s4">'Cannot import %r from %r' </span><span class="s1">% (item</span><span class="s3">, </span><span class="s1">module))</span>
+        <span class="s3">return </span><span class="s1">x</span>
+
+    <span class="s1">shortname_map = {}</span>
+
+    <span class="s3">def </span><span class="s1">validate(self</span><span class="s3">, </span><span class="s1">value):</span>
+        <span class="s3">if </span><span class="s1">isinstance(value</span><span class="s3">, </span><span class="s1">type):</span>
+            <span class="s3">return </span><span class="s1">value</span>
+        <span class="s3">return </span><span class="s1">self._import_one_of([self.shortname_map.get(x</span><span class="s3">, </span><span class="s1">x) </span><span class="s3">for </span><span class="s1">x </span><span class="s3">in </span><span class="s1">value])</span>
+
+    <span class="s3">def </span><span class="s1">get_options(self):</span>
+        <span class="s1">result = {}</span>
+        <span class="s3">for </span><span class="s1">name</span><span class="s3">, </span><span class="s1">val </span><span class="s3">in </span><span class="s1">self.shortname_map.items():</span>
+            <span class="s3">try</span><span class="s1">:</span>
+                <span class="s1">result[name] = self._import_one(val)</span>
+            <span class="s3">except </span><span class="s1">ImportError </span><span class="s3">as </span><span class="s1">e:</span>
+                <span class="s1">result[name] = e</span>
+        <span class="s3">return </span><span class="s1">result</span>
+
+
+<span class="s3">class </span><span class="s1">BoolSettingMixin(object):</span>
+    <span class="s1">validate = staticmethod(validate_bool)</span>
+    <span class="s0"># Don't do string-to-list conversion.</span>
+    <span class="s1">_convert = staticmethod(convert_str_value_as_is)</span>
+
+
+<span class="s3">class </span><span class="s1">IntSettingMixin(object):</span>
+    <span class="s0"># Don't do string-to-list conversion.</span>
+    <span class="s3">def </span><span class="s1">_convert(self</span><span class="s3">, </span><span class="s1">value):</span>
+        <span class="s3">if </span><span class="s1">value:</span>
+            <span class="s3">return </span><span class="s1">int(value)</span>
+
+    <span class="s1">validate = staticmethod(validate_anything)</span>
+
+
+<span class="s3">class </span><span class="s1">_PositiveValueMixin(object):</span>
+
+    <span class="s3">def </span><span class="s1">validate(self</span><span class="s3">, </span><span class="s1">value):</span>
+        <span class="s3">if </span><span class="s1">value </span><span class="s3">is not None and </span><span class="s1">value &lt;= </span><span class="s5">0</span><span class="s1">:</span>
+            <span class="s3">raise </span><span class="s1">ValueError(</span><span class="s4">&quot;Must be positive&quot;</span><span class="s1">)</span>
+        <span class="s3">return </span><span class="s1">value</span>
+
+
+<span class="s3">class </span><span class="s1">FloatSettingMixin(_PositiveValueMixin):</span>
+    <span class="s3">def </span><span class="s1">_convert(self</span><span class="s3">, </span><span class="s1">value):</span>
+        <span class="s3">if </span><span class="s1">value:</span>
+            <span class="s3">return </span><span class="s1">float(value)</span>
+
+
+<span class="s3">class </span><span class="s1">ByteCountSettingMixin(_PositiveValueMixin):</span>
+
+    <span class="s1">_MULTIPLES = {</span>
+        <span class="s0"># All keys must be the same size.</span>
+        <span class="s4">'kb'</span><span class="s1">: </span><span class="s5">1024</span><span class="s3">,</span>
+        <span class="s4">'mb'</span><span class="s1">: </span><span class="s5">1024 </span><span class="s1">* </span><span class="s5">1024</span><span class="s3">,</span>
+        <span class="s4">'gb'</span><span class="s1">: </span><span class="s5">1024 </span><span class="s1">* </span><span class="s5">1024 </span><span class="s1">* </span><span class="s5">1024</span><span class="s3">,</span>
+    <span class="s1">}</span>
+
+    <span class="s1">_SUFFIX_SIZE = </span><span class="s5">2</span>
+
+    <span class="s3">def </span><span class="s1">_convert(self</span><span class="s3">, </span><span class="s1">value):</span>
+        <span class="s3">if not </span><span class="s1">value </span><span class="s3">or not </span><span class="s1">isinstance(value</span><span class="s3">, </span><span class="s1">str):</span>
+            <span class="s3">return </span><span class="s1">value</span>
+        <span class="s1">value = value.lower()</span>
+        <span class="s3">for </span><span class="s1">s</span><span class="s3">, </span><span class="s1">m </span><span class="s3">in </span><span class="s1">self._MULTIPLES.items():</span>
+            <span class="s3">if </span><span class="s1">value[-self._SUFFIX_SIZE:] == s:</span>
+                <span class="s3">return </span><span class="s1">int(value[:-self._SUFFIX_SIZE]) * m</span>
+        <span class="s3">return </span><span class="s1">int(value)</span>
+
+
+<span class="s3">class </span><span class="s1">Resolver(ImportableSetting</span><span class="s3">, </span><span class="s1">Setting):</span>
+
+    <span class="s1">desc = </span><span class="s4">&quot;&quot;&quot;</span><span class="s3">\ 
+    </span><span class="s4">The callable that will be used to create 
+    :attr:`gevent.hub.Hub.resolver`. 
+ 
+    See :doc:`dns` for more information. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s1">default = [</span>
+        <span class="s4">'thread'</span><span class="s3">,</span>
+        <span class="s4">'dnspython'</span><span class="s3">,</span>
+        <span class="s4">'ares'</span><span class="s3">,</span>
+        <span class="s4">'block'</span><span class="s3">,</span>
+    <span class="s1">]</span>
+
+    <span class="s1">shortname_map = {</span>
+        <span class="s4">'ares'</span><span class="s1">: </span><span class="s4">'gevent.resolver.ares.Resolver'</span><span class="s3">,</span>
+        <span class="s4">'thread'</span><span class="s1">: </span><span class="s4">'gevent.resolver.thread.Resolver'</span><span class="s3">,</span>
+        <span class="s4">'block'</span><span class="s1">: </span><span class="s4">'gevent.resolver.blocking.Resolver'</span><span class="s3">,</span>
+        <span class="s4">'dnspython'</span><span class="s1">: </span><span class="s4">'gevent.resolver.dnspython.Resolver'</span><span class="s3">,</span>
+    <span class="s1">}</span>
+
+
+
+<span class="s3">class </span><span class="s1">Threadpool(ImportableSetting</span><span class="s3">, </span><span class="s1">Setting):</span>
+
+    <span class="s1">desc = </span><span class="s4">&quot;&quot;&quot;</span><span class="s3">\ 
+    </span><span class="s4">The kind of threadpool we use. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s1">default = </span><span class="s4">'gevent.threadpool.ThreadPool'</span>
+
+<span class="s3">class </span><span class="s1">ThreadpoolIdleTaskTimeout(FloatSettingMixin</span><span class="s3">, </span><span class="s1">Setting):</span>
+    <span class="s1">document = </span><span class="s3">True</span>
+    <span class="s1">name = </span><span class="s4">'threadpool_idle_task_timeout'</span>
+    <span class="s1">environment_key = </span><span class="s4">'GEVENT_THREADPOOL_IDLE_TASK_TIMEOUT'</span>
+
+    <span class="s1">desc = </span><span class="s4">&quot;&quot;&quot;</span><span class="s3">\ 
+    </span><span class="s4">How long threads in the default threadpool (used for 
+    DNS by default) are allowed to be idle before exiting. 
+ 
+    Use -1 for no timeout. 
+ 
+    .. versionadded:: 22.08.0 
+    &quot;&quot;&quot;</span>
+
+    <span class="s0"># This value is picked pretty much arbitrarily.</span>
+    <span class="s0"># We want to balance performance (keeping threads around)</span>
+    <span class="s0"># with memory/cpu usage (letting threads go).</span>
+    <span class="s1">default = </span><span class="s5">5.0</span>
+
+<span class="s3">class </span><span class="s1">Loop(ImportableSetting</span><span class="s3">, </span><span class="s1">Setting):</span>
+
+    <span class="s1">desc = </span><span class="s4">&quot;&quot;&quot;</span><span class="s3">\ 
+    </span><span class="s4">The kind of the loop we use. 
+ 
+    On Windows, this defaults to libuv, while on 
+    other platforms it defaults to libev. 
+ 
+    &quot;&quot;&quot;</span>
+
+    <span class="s1">default = [</span>
+        <span class="s4">'libev-cext'</span><span class="s3">,</span>
+        <span class="s4">'libev-cffi'</span><span class="s3">,</span>
+        <span class="s4">'libuv-cffi'</span><span class="s3">,</span>
+    <span class="s1">] </span><span class="s3">if not </span><span class="s1">WIN </span><span class="s3">else </span><span class="s1">[</span>
+        <span class="s4">'libuv-cffi'</span><span class="s3">,</span>
+        <span class="s4">'libev-cext'</span><span class="s3">,</span>
+        <span class="s4">'libev-cffi'</span><span class="s3">,</span>
+    <span class="s1">]</span>
+
+    <span class="s1">shortname_map = {</span>
+        <span class="s4">'libev-cext'</span><span class="s1">: </span><span class="s4">'gevent.libev.corecext.loop'</span><span class="s3">,</span>
+        <span class="s4">'libev-cffi'</span><span class="s1">: </span><span class="s4">'gevent.libev.corecffi.loop'</span><span class="s3">,</span>
+        <span class="s4">'libuv-cffi'</span><span class="s1">: </span><span class="s4">'gevent.libuv.loop.loop'</span><span class="s3">,</span>
+    <span class="s1">}</span>
+
+    <span class="s1">shortname_map[</span><span class="s4">'libuv'</span><span class="s1">] = shortname_map[</span><span class="s4">'libuv-cffi'</span><span class="s1">]</span>
+
+
+<span class="s3">class </span><span class="s1">FormatContext(ImportableSetting</span><span class="s3">, </span><span class="s1">Setting):</span>
+    <span class="s1">name = </span><span class="s4">'format_context'</span>
+
+    <span class="s0"># using pprint.pformat can override custom __repr__ methods on dict/list</span>
+    <span class="s0"># subclasses, which can be a security concern</span>
+    <span class="s1">default = </span><span class="s4">'pprint.saferepr'</span>
+
+
+<span class="s3">class </span><span class="s1">LibevBackend(Setting):</span>
+    <span class="s1">name = </span><span class="s4">'libev_backend'</span>
+    <span class="s1">environment_key = </span><span class="s4">'GEVENT_BACKEND'</span>
+
+    <span class="s1">desc = </span><span class="s4">&quot;&quot;&quot;</span><span class="s3">\ 
+    </span><span class="s4">The backend for libev, such as 'select' 
+    &quot;&quot;&quot;</span>
+
+    <span class="s1">default = </span><span class="s3">None</span>
+
+    <span class="s1">validate = staticmethod(validate_anything)</span>
+
+
+<span class="s3">class </span><span class="s1">FileObject(ImportableSetting</span><span class="s3">, </span><span class="s1">Setting):</span>
+    <span class="s1">desc = </span><span class="s4">&quot;&quot;&quot;</span><span class="s3">\ 
+    </span><span class="s4">The kind of ``FileObject`` we will use. 
+ 
+    See :mod:`gevent.fileobject` for a detailed description. 
+ 
+    &quot;&quot;&quot;</span>
+    <span class="s1">environment_key = </span><span class="s4">'GEVENT_FILE'</span>
+
+    <span class="s1">default = [</span>
+        <span class="s4">'posix'</span><span class="s3">,</span>
+        <span class="s4">'thread'</span><span class="s3">,</span>
+    <span class="s1">]</span>
+
+    <span class="s1">shortname_map = {</span>
+        <span class="s4">'thread'</span><span class="s1">: </span><span class="s4">'gevent._fileobjectcommon.FileObjectThread'</span><span class="s3">,</span>
+        <span class="s4">'posix'</span><span class="s1">: </span><span class="s4">'gevent._fileobjectposix.FileObjectPosix'</span><span class="s3">,</span>
+        <span class="s4">'block'</span><span class="s1">: </span><span class="s4">'gevent._fileobjectcommon.FileObjectBlock'</span>
+    <span class="s1">}</span>
+
+
+<span class="s3">class </span><span class="s1">WatchChildren(BoolSettingMixin</span><span class="s3">, </span><span class="s1">Setting):</span>
+    <span class="s1">desc = </span><span class="s4">&quot;&quot;&quot;</span><span class="s3">\ 
+    </span><span class="s4">Should we *not* watch children with the event loop watchers? 
+ 
+    This is an advanced setting. 
+ 
+    See :mod:`gevent.os` for a detailed description. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">name = </span><span class="s4">'disable_watch_children'</span>
+    <span class="s1">environment_key = </span><span class="s4">'GEVENT_NOWAITPID'</span>
+    <span class="s1">default = </span><span class="s3">False</span>
+
+
+<span class="s3">class </span><span class="s1">TraceMalloc(IntSettingMixin</span><span class="s3">, </span><span class="s1">Setting):</span>
+    <span class="s1">name = </span><span class="s4">'trace_malloc'</span>
+    <span class="s1">environment_key = </span><span class="s4">'PYTHONTRACEMALLOC'</span>
+    <span class="s1">default = </span><span class="s3">False</span>
+
+    <span class="s1">desc = </span><span class="s4">&quot;&quot;&quot;</span><span class="s3">\ 
+    </span><span class="s4">Should FFI objects track their allocation? 
+ 
+    This is only useful for low-level debugging. 
+ 
+    On Python 3, this environment variable is built in to the 
+    interpreter, and it may also be set with the ``-X 
+    tracemalloc`` command line argument. 
+ 
+    On Python 2, gevent interprets this argument and adds extra 
+    tracking information for FFI objects. 
+    &quot;&quot;&quot;</span>
+
+
+<span class="s3">class </span><span class="s1">TrackGreenletTree(BoolSettingMixin</span><span class="s3">, </span><span class="s1">Setting):</span>
+    <span class="s1">name = </span><span class="s4">'track_greenlet_tree'</span>
+    <span class="s1">environment_key = </span><span class="s4">'GEVENT_TRACK_GREENLET_TREE'</span>
+    <span class="s1">default = </span><span class="s3">True</span>
+
+    <span class="s1">desc = </span><span class="s4">&quot;&quot;&quot;</span><span class="s3">\ 
+    </span><span class="s4">Should `Greenlet` objects track their spawning tree? 
+ 
+    Setting this to a false value will make spawning `Greenlet` 
+    objects and using `spawn_raw` faster, but the 
+    ``spawning_greenlet``, ``spawn_tree_locals`` and ``spawning_stack`` 
+    will not be captured. Setting this to a false value can also 
+    reduce memory usage because capturing the stack captures 
+    some information about Python frames. 
+ 
+    .. versionadded:: 1.3b1 
+    &quot;&quot;&quot;</span>
+
+
+<span class="s0">## Monitoring settings</span>
+<span class="s0"># All env keys should begin with GEVENT_MONITOR</span>
+
+<span class="s3">class </span><span class="s1">MonitorThread(BoolSettingMixin</span><span class="s3">, </span><span class="s1">Setting):</span>
+    <span class="s1">name = </span><span class="s4">'monitor_thread'</span>
+    <span class="s1">environment_key = </span><span class="s4">'GEVENT_MONITOR_THREAD_ENABLE'</span>
+    <span class="s1">default = </span><span class="s3">False</span>
+
+    <span class="s1">desc = </span><span class="s4">&quot;&quot;&quot;</span><span class="s3">\ 
+    </span><span class="s4">Should each hub start a native OS thread to monitor 
+    for problems? 
+ 
+    Such a thread will periodically check to see if the event loop 
+    is blocked for longer than `max_blocking_time`, producing output on 
+    the hub's exception stream (stderr by default) if it detects this condition. 
+ 
+    If this setting is true, then this thread will be created 
+    the first time the hub is switched to, 
+    or you can call :meth:`gevent.hub.Hub.start_periodic_monitoring_thread` at any 
+    time to create it (from the same thread that will run the hub). That function 
+    will return an instance of :class:`gevent.events.IPeriodicMonitorThread` 
+    to which you can add your own monitoring functions. That function 
+    also emits an event of :class:`gevent.events.PeriodicMonitorThreadStartedEvent`. 
+ 
+    .. seealso:: `max_blocking_time` 
+ 
+    .. versionadded:: 1.3b1 
+    &quot;&quot;&quot;</span>
+
+<span class="s3">class </span><span class="s1">MaxBlockingTime(FloatSettingMixin</span><span class="s3">, </span><span class="s1">Setting):</span>
+    <span class="s1">name = </span><span class="s4">'max_blocking_time'</span>
+    <span class="s0"># This environment key doesn't follow the convention because it's</span>
+    <span class="s0"># meant to match a key used by existing projects</span>
+    <span class="s1">environment_key = </span><span class="s4">'GEVENT_MAX_BLOCKING_TIME'</span>
+    <span class="s1">default = </span><span class="s5">0.1</span>
+
+    <span class="s1">desc = </span><span class="s4">&quot;&quot;&quot;</span><span class="s3">\ 
+    </span><span class="s4">If the `monitor_thread` is enabled, this is 
+    approximately how long (in seconds) 
+    the event loop will be allowed to block before a warning is issued. 
+ 
+    This function depends on using `greenlet.settrace`, so installing 
+    your own trace function after starting the monitoring thread will 
+    cause this feature to misbehave unless you call the function 
+    returned by `greenlet.settrace`. If you install a tracing function *before* 
+    the monitoring thread is started, it will still be called. 
+ 
+    .. note:: In the unlikely event of creating and using multiple different 
+        gevent hubs in the same native thread in a short period of time, 
+        especially without destroying the hubs, false positives may be reported. 
+ 
+    .. versionadded:: 1.3b1 
+    &quot;&quot;&quot;</span>
+
+<span class="s3">class </span><span class="s1">MonitorMemoryPeriod(FloatSettingMixin</span><span class="s3">, </span><span class="s1">Setting):</span>
+    <span class="s1">name = </span><span class="s4">'memory_monitor_period'</span>
+
+    <span class="s1">environment_key = </span><span class="s4">'GEVENT_MONITOR_MEMORY_PERIOD'</span>
+    <span class="s1">default = </span><span class="s5">5</span>
+
+    <span class="s1">desc = </span><span class="s4">&quot;&quot;&quot;</span><span class="s3">\ 
+    </span><span class="s4">If `monitor_thread` is enabled, this is approximately how long 
+    (in seconds) we will go between checking the processes memory usage. 
+ 
+    Checking the memory usage is relatively expensive on some operating 
+    systems, so this should not be too low. gevent will place a floor 
+    value on it. 
+    &quot;&quot;&quot;</span>
+
+<span class="s3">class </span><span class="s1">MonitorMemoryMaxUsage(ByteCountSettingMixin</span><span class="s3">, </span><span class="s1">Setting):</span>
+    <span class="s1">name = </span><span class="s4">'max_memory_usage'</span>
+
+    <span class="s1">environment_key = </span><span class="s4">'GEVENT_MONITOR_MEMORY_MAX'</span>
+    <span class="s1">default = </span><span class="s3">None</span>
+
+    <span class="s1">desc = </span><span class="s4">&quot;&quot;&quot;</span><span class="s3">\ 
+    </span><span class="s4">If `monitor_thread` is enabled, 
+    then if memory usage exceeds this amount (in bytes), events will 
+    be emitted. See `gevent.events`. In the environment variable, you can use 
+    a suffix of 'kb', 'mb' or 'gb' to specify the value in kilobytes, megabytes 
+    or gigibytes. 
+ 
+    There is no default value for this setting. If you wish to 
+    cap memory usage, you must choose a value. 
+    &quot;&quot;&quot;</span>
+
+<span class="s0"># The ares settings are all interpreted by</span>
+<span class="s0"># gevent/resolver/ares.pyx, so we don't do</span>
+<span class="s0"># any validation here.</span>
+
+<span class="s3">class </span><span class="s1">AresSettingMixin(object):</span>
+
+    <span class="s1">document = </span><span class="s3">False</span>
+
+    <span class="s1">@property</span>
+    <span class="s3">def </span><span class="s1">kwarg_name(self):</span>
+        <span class="s3">return </span><span class="s1">self.name[</span><span class="s5">5</span><span class="s1">:]</span>
+
+    <span class="s1">validate = staticmethod(validate_anything)</span>
+
+    <span class="s1">_convert = staticmethod(convert_str_value_as_is)</span>
+
+<span class="s3">class </span><span class="s1">AresFlags(AresSettingMixin</span><span class="s3">, </span><span class="s1">Setting):</span>
+    <span class="s1">name = </span><span class="s4">'ares_flags'</span>
+    <span class="s1">default = </span><span class="s3">None</span>
+    <span class="s1">environment_key = </span><span class="s4">'GEVENTARES_FLAGS'</span>
+
+<span class="s3">class </span><span class="s1">AresTimeout(AresSettingMixin</span><span class="s3">, </span><span class="s1">Setting):</span>
+    <span class="s1">document = </span><span class="s3">True</span>
+    <span class="s1">name = </span><span class="s4">'ares_timeout'</span>
+    <span class="s1">default = </span><span class="s3">None</span>
+    <span class="s1">environment_key = </span><span class="s4">'GEVENTARES_TIMEOUT'</span>
+    <span class="s1">desc = </span><span class="s4">&quot;&quot;&quot;</span><span class="s3">\ 
+</span>
+    <span class="s4">.. deprecated:: 1.3a2 
+       Prefer the :attr:`resolver_timeout` setting. If both are set, 
+       the results are not defined. 
+    &quot;&quot;&quot;</span>
+
+<span class="s3">class </span><span class="s1">AresTries(AresSettingMixin</span><span class="s3">, </span><span class="s1">Setting):</span>
+    <span class="s1">name = </span><span class="s4">'ares_tries'</span>
+    <span class="s1">default = </span><span class="s3">None</span>
+    <span class="s1">environment_key = </span><span class="s4">'GEVENTARES_TRIES'</span>
+
+<span class="s3">class </span><span class="s1">AresNdots(AresSettingMixin</span><span class="s3">, </span><span class="s1">Setting):</span>
+    <span class="s1">name = </span><span class="s4">'ares_ndots'</span>
+    <span class="s1">default = </span><span class="s3">None</span>
+    <span class="s1">environment_key = </span><span class="s4">'GEVENTARES_NDOTS'</span>
+
+<span class="s3">class </span><span class="s1">AresUDPPort(AresSettingMixin</span><span class="s3">, </span><span class="s1">Setting):</span>
+    <span class="s1">name = </span><span class="s4">'ares_udp_port'</span>
+    <span class="s1">default = </span><span class="s3">None</span>
+    <span class="s1">environment_key = </span><span class="s4">'GEVENTARES_UDP_PORT'</span>
+
+<span class="s3">class </span><span class="s1">AresTCPPort(AresSettingMixin</span><span class="s3">, </span><span class="s1">Setting):</span>
+    <span class="s1">name = </span><span class="s4">'ares_tcp_port'</span>
+    <span class="s1">default = </span><span class="s3">None</span>
+    <span class="s1">environment_key = </span><span class="s4">'GEVENTARES_TCP_PORT'</span>
+
+<span class="s3">class </span><span class="s1">AresServers(AresSettingMixin</span><span class="s3">, </span><span class="s1">Setting):</span>
+    <span class="s1">document = </span><span class="s3">True</span>
+    <span class="s1">name = </span><span class="s4">'ares_servers'</span>
+    <span class="s1">default = </span><span class="s3">None</span>
+    <span class="s1">environment_key = </span><span class="s4">'GEVENTARES_SERVERS'</span>
+    <span class="s1">desc = </span><span class="s4">&quot;&quot;&quot;</span><span class="s3">\ 
+    </span><span class="s4">A list of strings giving the IP addresses of nameservers for the ares resolver. 
+ 
+    In the environment variable, these strings are separated by commas. 
+ 
+    .. deprecated:: 1.3a2 
+       Prefer the :attr:`resolver_nameservers` setting. If both are set, 
+       the results are not defined. 
+    &quot;&quot;&quot;</span>
+
+<span class="s0"># Generic nameservers, works for dnspython and ares.</span>
+<span class="s3">class </span><span class="s1">ResolverNameservers(AresSettingMixin</span><span class="s3">, </span><span class="s1">Setting):</span>
+    <span class="s1">document = </span><span class="s3">True</span>
+    <span class="s1">name = </span><span class="s4">'resolver_nameservers'</span>
+    <span class="s1">default = </span><span class="s3">None</span>
+    <span class="s1">environment_key = </span><span class="s4">'GEVENT_RESOLVER_NAMESERVERS'</span>
+    <span class="s1">desc = </span><span class="s4">&quot;&quot;&quot;</span><span class="s3">\ 
+    </span><span class="s4">A list of strings giving the IP addresses of nameservers for the (non-system) resolver. 
+ 
+    In the environment variable, these strings are separated by commas. 
+ 
+    .. rubric:: Resolver Behaviour 
+ 
+    * blocking 
+ 
+      Ignored 
+ 
+    * Threaded 
+ 
+      Ignored 
+ 
+    * dnspython 
+ 
+      If this setting is not given, the dnspython resolver will 
+      load nameservers to use from ``/etc/resolv.conf`` 
+      or the Windows registry. This setting replaces any nameservers read 
+      from those means. Note that the file and registry are still read 
+      for other settings. 
+ 
+      .. caution:: dnspython does not validate the members of the list. 
+         An improper address (such as a hostname instead of IP) has 
+         undefined results, including hanging the process. 
+ 
+    * ares 
+ 
+      Similar to dnspython, but with more platform and compile-time 
+      options. ares validates that the members of the list are valid 
+      addresses. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s0"># Normal string-to-list rules. But still validate_anything.</span>
+    <span class="s1">_convert = Setting._convert</span>
+
+    <span class="s0"># TODO: In the future, support reading a resolv.conf file</span>
+    <span class="s0"># *other* than /etc/resolv.conf, and do that both on Windows</span>
+    <span class="s0"># and other platforms. Also offer the option to disable the system</span>
+    <span class="s0"># configuration entirely.</span>
+
+    <span class="s1">@property</span>
+    <span class="s3">def </span><span class="s1">kwarg_name(self):</span>
+        <span class="s3">return </span><span class="s4">'servers'</span>
+
+<span class="s0"># Generic timeout, works for dnspython and ares</span>
+<span class="s3">class </span><span class="s1">ResolverTimeout(FloatSettingMixin</span><span class="s3">, </span><span class="s1">AresSettingMixin</span><span class="s3">, </span><span class="s1">Setting):</span>
+    <span class="s1">document = </span><span class="s3">True</span>
+    <span class="s1">name = </span><span class="s4">'resolver_timeout'</span>
+    <span class="s1">environment_key = </span><span class="s4">'GEVENT_RESOLVER_TIMEOUT'</span>
+    <span class="s1">desc = </span><span class="s4">&quot;&quot;&quot;</span><span class="s3">\ 
+    </span><span class="s4">The total amount of time that the DNS resolver will spend making queries. 
+ 
+    Only the ares and dnspython resolvers support this. 
+ 
+    .. versionadded:: 1.3a2 
+    &quot;&quot;&quot;</span>
+
+    <span class="s1">@property</span>
+    <span class="s3">def </span><span class="s1">kwarg_name(self):</span>
+        <span class="s3">return </span><span class="s4">'timeout'</span>
+
+<span class="s1">config = Config()</span>
+
+<span class="s0"># Go ahead and attempt to import the loop when this class is</span>
+<span class="s0"># instantiated. The hub won't work if the loop can't be found. This</span>
+<span class="s0"># can solve problems with the class being imported from multiple</span>
+<span class="s0"># threads at once, leading to one of the imports failing.</span>
+<span class="s0"># factories are themselves handled lazily. See #687.</span>
+
+<span class="s0"># Don't cache it though, in case the user re-configures through the</span>
+<span class="s0"># API.</span>
+
+<span class="s3">try</span><span class="s1">:</span>
+    <span class="s1">Loop().get()</span>
+<span class="s3">except </span><span class="s1">ImportError: </span><span class="s0"># pragma: no cover</span>
+    <span class="s3">pass</span>
+
+
+<span class="s3">if </span><span class="s1">__name__ == </span><span class="s4">'__main__'</span><span class="s1">:</span>
+    <span class="s1">config.print_help()</span>
+</pre>
+</body>
+</html>

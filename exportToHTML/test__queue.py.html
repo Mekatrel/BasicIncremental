@@ -1,0 +1,492 @@
+<html>
+<head>
+<title>test__queue.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #cc7832;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #808080;}
+.s3 { color: #6a8759;}
+.s4 { color: #6897bb;}
+.s5 { color: #629755; font-style: italic;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+test__queue.py</font>
+</center></td></tr></table>
+<pre><span class="s0">import </span><span class="s1">unittest</span>
+
+<span class="s0">import </span><span class="s1">gevent.testing </span><span class="s0">as </span><span class="s1">greentest</span>
+<span class="s0">from </span><span class="s1">gevent.testing </span><span class="s0">import </span><span class="s1">TestCase</span>
+<span class="s0">import </span><span class="s1">gevent</span>
+<span class="s0">from </span><span class="s1">gevent.hub </span><span class="s0">import </span><span class="s1">get_hub</span><span class="s0">, </span><span class="s1">LoopExit</span>
+<span class="s0">from </span><span class="s1">gevent </span><span class="s0">import </span><span class="s1">util</span>
+<span class="s0">from </span><span class="s1">gevent </span><span class="s0">import </span><span class="s1">queue</span>
+<span class="s0">from </span><span class="s1">gevent.queue </span><span class="s0">import </span><span class="s1">Empty</span><span class="s0">, </span><span class="s1">Full</span>
+<span class="s0">from </span><span class="s1">gevent.event </span><span class="s0">import </span><span class="s1">AsyncResult</span>
+<span class="s0">from </span><span class="s1">gevent.testing.timing </span><span class="s0">import </span><span class="s1">AbstractGenericGetTestCase</span>
+
+<span class="s2"># pylint:disable=too-many-ancestors</span>
+
+<span class="s0">class </span><span class="s1">TestQueue(TestCase):</span>
+
+    <span class="s0">def </span><span class="s1">test_send_first(self):</span>
+        <span class="s1">self.switch_expected = </span><span class="s0">False</span>
+        <span class="s1">q = queue.Queue()</span>
+        <span class="s1">q.put(</span><span class="s3">'hi'</span><span class="s1">)</span>
+        <span class="s1">self.assertEqual(q.peek()</span><span class="s0">, </span><span class="s3">'hi'</span><span class="s1">)</span>
+        <span class="s1">self.assertEqual(q.get()</span><span class="s0">, </span><span class="s3">'hi'</span><span class="s1">)</span>
+
+    <span class="s0">def </span><span class="s1">test_peek_empty(self):</span>
+        <span class="s1">q = queue.Queue()</span>
+        <span class="s2"># No putters waiting, in the main loop: LoopExit</span>
+        <span class="s0">with </span><span class="s1">self.assertRaises(LoopExit):</span>
+            <span class="s1">q.peek()</span>
+
+        <span class="s0">def </span><span class="s1">waiter(q):</span>
+            <span class="s1">self.assertRaises(Empty</span><span class="s0">, </span><span class="s1">q.peek</span><span class="s0">, </span><span class="s1">timeout=</span><span class="s4">0.01</span><span class="s1">)</span>
+        <span class="s1">g = gevent.spawn(waiter</span><span class="s0">, </span><span class="s1">q)</span>
+        <span class="s1">gevent.sleep(</span><span class="s4">0.1</span><span class="s1">)</span>
+        <span class="s1">g.join()</span>
+
+    <span class="s0">def </span><span class="s1">test_peek_multi_greenlet(self):</span>
+        <span class="s1">q = queue.Queue()</span>
+        <span class="s1">g = gevent.spawn(q.peek)</span>
+        <span class="s1">g.start()</span>
+        <span class="s1">gevent.sleep(</span><span class="s4">0</span><span class="s1">)</span>
+        <span class="s1">q.put(</span><span class="s4">1</span><span class="s1">)</span>
+        <span class="s1">g.join()</span>
+        <span class="s1">self.assertTrue(g.exception </span><span class="s0">is None</span><span class="s1">)</span>
+        <span class="s1">self.assertEqual(q.peek()</span><span class="s0">, </span><span class="s4">1</span><span class="s1">)</span>
+
+    <span class="s0">def </span><span class="s1">test_send_last(self):</span>
+        <span class="s1">q = queue.Queue()</span>
+
+        <span class="s0">def </span><span class="s1">waiter(q):</span>
+            <span class="s0">with </span><span class="s1">gevent.Timeout(</span><span class="s4">0.1 </span><span class="s0">if not </span><span class="s1">greentest.RUNNING_ON_APPVEYOR </span><span class="s0">else </span><span class="s4">0.5</span><span class="s1">):</span>
+                <span class="s1">self.assertEqual(q.get()</span><span class="s0">, </span><span class="s3">'hi2'</span><span class="s1">)</span>
+            <span class="s0">return </span><span class="s3">&quot;OK&quot;</span>
+
+        <span class="s1">p = gevent.spawn(waiter</span><span class="s0">, </span><span class="s1">q)</span>
+        <span class="s1">gevent.sleep(</span><span class="s4">0.01</span><span class="s1">)</span>
+        <span class="s1">q.put(</span><span class="s3">'hi2'</span><span class="s1">)</span>
+        <span class="s1">gevent.sleep(</span><span class="s4">0.01</span><span class="s1">)</span>
+        <span class="s0">assert </span><span class="s1">p.get(timeout=</span><span class="s4">0</span><span class="s1">) == </span><span class="s3">&quot;OK&quot;</span>
+
+    <span class="s0">def </span><span class="s1">test_max_size(self):</span>
+        <span class="s1">q = queue.Queue(</span><span class="s4">2</span><span class="s1">)</span>
+        <span class="s1">results = []</span>
+
+        <span class="s0">def </span><span class="s1">putter(q):</span>
+            <span class="s1">q.put(</span><span class="s3">'a'</span><span class="s1">)</span>
+            <span class="s1">results.append(</span><span class="s3">'a'</span><span class="s1">)</span>
+            <span class="s1">q.put(</span><span class="s3">'b'</span><span class="s1">)</span>
+            <span class="s1">results.append(</span><span class="s3">'b'</span><span class="s1">)</span>
+            <span class="s1">q.put(</span><span class="s3">'c'</span><span class="s1">)</span>
+            <span class="s1">results.append(</span><span class="s3">'c'</span><span class="s1">)</span>
+            <span class="s0">return </span><span class="s3">&quot;OK&quot;</span>
+
+        <span class="s1">p = gevent.spawn(putter</span><span class="s0">, </span><span class="s1">q)</span>
+        <span class="s1">gevent.sleep(</span><span class="s4">0</span><span class="s1">)</span>
+        <span class="s1">self.assertEqual(results</span><span class="s0">, </span><span class="s1">[</span><span class="s3">'a'</span><span class="s0">, </span><span class="s3">'b'</span><span class="s1">])</span>
+        <span class="s1">self.assertEqual(q.get()</span><span class="s0">, </span><span class="s3">'a'</span><span class="s1">)</span>
+        <span class="s1">gevent.sleep(</span><span class="s4">0</span><span class="s1">)</span>
+        <span class="s1">self.assertEqual(results</span><span class="s0">, </span><span class="s1">[</span><span class="s3">'a'</span><span class="s0">, </span><span class="s3">'b'</span><span class="s0">, </span><span class="s3">'c'</span><span class="s1">])</span>
+        <span class="s1">self.assertEqual(q.get()</span><span class="s0">, </span><span class="s3">'b'</span><span class="s1">)</span>
+        <span class="s1">self.assertEqual(q.get()</span><span class="s0">, </span><span class="s3">'c'</span><span class="s1">)</span>
+        <span class="s0">assert </span><span class="s1">p.get(timeout=</span><span class="s4">0</span><span class="s1">) == </span><span class="s3">&quot;OK&quot;</span>
+
+    <span class="s0">def </span><span class="s1">test_zero_max_size(self):</span>
+        <span class="s1">q = queue.Channel()</span>
+
+        <span class="s0">def </span><span class="s1">sender(evt</span><span class="s0">, </span><span class="s1">q):</span>
+            <span class="s1">q.put(</span><span class="s3">'hi'</span><span class="s1">)</span>
+            <span class="s1">evt.set(</span><span class="s3">'done'</span><span class="s1">)</span>
+
+        <span class="s0">def </span><span class="s1">receiver(evt</span><span class="s0">, </span><span class="s1">q):</span>
+            <span class="s1">x = q.get()</span>
+            <span class="s1">evt.set(x)</span>
+
+        <span class="s1">e1 = AsyncResult()</span>
+        <span class="s1">e2 = AsyncResult()</span>
+
+        <span class="s1">p1 = gevent.spawn(sender</span><span class="s0">, </span><span class="s1">e1</span><span class="s0">, </span><span class="s1">q)</span>
+        <span class="s1">gevent.sleep(</span><span class="s4">0.001</span><span class="s1">)</span>
+        <span class="s1">self.assertTrue(</span><span class="s0">not </span><span class="s1">e1.ready())</span>
+        <span class="s1">p2 = gevent.spawn(receiver</span><span class="s0">, </span><span class="s1">e2</span><span class="s0">, </span><span class="s1">q)</span>
+        <span class="s1">self.assertEqual(e2.get()</span><span class="s0">, </span><span class="s3">'hi'</span><span class="s1">)</span>
+        <span class="s1">self.assertEqual(e1.get()</span><span class="s0">, </span><span class="s3">'done'</span><span class="s1">)</span>
+        <span class="s0">with </span><span class="s1">gevent.Timeout(</span><span class="s4">0</span><span class="s1">):</span>
+            <span class="s1">gevent.joinall([p1</span><span class="s0">, </span><span class="s1">p2])</span>
+
+    <span class="s0">def </span><span class="s1">test_multiple_waiters(self):</span>
+        <span class="s2"># tests that multiple waiters get their results back</span>
+        <span class="s1">q = queue.Queue()</span>
+
+        <span class="s0">def </span><span class="s1">waiter(q</span><span class="s0">, </span><span class="s1">evt):</span>
+            <span class="s1">evt.set(q.get())</span>
+
+        <span class="s1">sendings = [</span><span class="s3">'1'</span><span class="s0">, </span><span class="s3">'2'</span><span class="s0">, </span><span class="s3">'3'</span><span class="s0">, </span><span class="s3">'4'</span><span class="s1">]</span>
+        <span class="s1">evts = [AsyncResult() </span><span class="s0">for </span><span class="s1">x </span><span class="s0">in </span><span class="s1">sendings]</span>
+        <span class="s0">for </span><span class="s1">i</span><span class="s0">, </span><span class="s1">_ </span><span class="s0">in </span><span class="s1">enumerate(sendings):</span>
+            <span class="s1">gevent.spawn(waiter</span><span class="s0">, </span><span class="s1">q</span><span class="s0">, </span><span class="s1">evts[i])  </span><span class="s2"># XXX use waitall for them</span>
+
+        <span class="s1">gevent.sleep(</span><span class="s4">0.01</span><span class="s1">)  </span><span class="s2"># get 'em all waiting</span>
+
+        <span class="s1">results = set()</span>
+
+        <span class="s0">def </span><span class="s1">collect_pending_results():</span>
+            <span class="s0">for </span><span class="s1">e </span><span class="s0">in </span><span class="s1">evts:</span>
+                <span class="s0">with </span><span class="s1">gevent.Timeout(</span><span class="s4">0.001</span><span class="s0">, False</span><span class="s1">):</span>
+                    <span class="s1">x = e.get()</span>
+                    <span class="s1">results.add(x)</span>
+            <span class="s0">return </span><span class="s1">len(results)</span>
+
+        <span class="s1">q.put(sendings[</span><span class="s4">0</span><span class="s1">])</span>
+        <span class="s1">self.assertEqual(collect_pending_results()</span><span class="s0">, </span><span class="s4">1</span><span class="s1">)</span>
+        <span class="s1">q.put(sendings[</span><span class="s4">1</span><span class="s1">])</span>
+        <span class="s1">self.assertEqual(collect_pending_results()</span><span class="s0">, </span><span class="s4">2</span><span class="s1">)</span>
+        <span class="s1">q.put(sendings[</span><span class="s4">2</span><span class="s1">])</span>
+        <span class="s1">q.put(sendings[</span><span class="s4">3</span><span class="s1">])</span>
+        <span class="s1">self.assertEqual(collect_pending_results()</span><span class="s0">, </span><span class="s4">4</span><span class="s1">)</span>
+
+    <span class="s0">def </span><span class="s1">test_waiters_that_cancel(self):</span>
+        <span class="s1">q = queue.Queue()</span>
+
+        <span class="s0">def </span><span class="s1">do_receive(q</span><span class="s0">, </span><span class="s1">evt):</span>
+            <span class="s0">with </span><span class="s1">gevent.Timeout(</span><span class="s4">0</span><span class="s0">, </span><span class="s1">RuntimeError()):</span>
+                <span class="s0">try</span><span class="s1">:</span>
+                    <span class="s1">result = q.get()</span>
+                    <span class="s1">evt.set(result) </span><span class="s2"># pragma: no cover (should have raised)</span>
+                <span class="s0">except </span><span class="s1">RuntimeError:</span>
+                    <span class="s1">evt.set(</span><span class="s3">'timed out'</span><span class="s1">)</span>
+
+        <span class="s1">evt = AsyncResult()</span>
+        <span class="s1">gevent.spawn(do_receive</span><span class="s0">, </span><span class="s1">q</span><span class="s0">, </span><span class="s1">evt)</span>
+        <span class="s1">self.assertEqual(evt.get()</span><span class="s0">, </span><span class="s3">'timed out'</span><span class="s1">)</span>
+
+        <span class="s1">q.put(</span><span class="s3">'hi'</span><span class="s1">)</span>
+        <span class="s1">self.assertEqual(q.get()</span><span class="s0">, </span><span class="s3">'hi'</span><span class="s1">)</span>
+
+    <span class="s0">def </span><span class="s1">test_senders_that_die(self):</span>
+        <span class="s1">q = queue.Queue()</span>
+
+        <span class="s0">def </span><span class="s1">do_send(q):</span>
+            <span class="s1">q.put(</span><span class="s3">'sent'</span><span class="s1">)</span>
+
+        <span class="s1">gevent.spawn(do_send</span><span class="s0">, </span><span class="s1">q)</span>
+        <span class="s1">self.assertEqual(q.get()</span><span class="s0">, </span><span class="s3">'sent'</span><span class="s1">)</span>
+
+    <span class="s0">def </span><span class="s1">test_two_waiters_one_dies(self):</span>
+
+        <span class="s0">def </span><span class="s1">waiter(q</span><span class="s0">, </span><span class="s1">evt):</span>
+            <span class="s1">evt.set(q.get())</span>
+
+        <span class="s0">def </span><span class="s1">do_receive(q</span><span class="s0">, </span><span class="s1">evt):</span>
+            <span class="s0">with </span><span class="s1">gevent.Timeout(</span><span class="s4">0</span><span class="s0">, </span><span class="s1">RuntimeError()):</span>
+                <span class="s0">try</span><span class="s1">:</span>
+                    <span class="s1">result = q.get()</span>
+                    <span class="s1">evt.set(result) </span><span class="s2"># pragma: no cover (should have raised)</span>
+                <span class="s0">except </span><span class="s1">RuntimeError:</span>
+                    <span class="s1">evt.set(</span><span class="s3">'timed out'</span><span class="s1">)</span>
+
+        <span class="s1">q = queue.Queue()</span>
+        <span class="s1">dying_evt = AsyncResult()</span>
+        <span class="s1">waiting_evt = AsyncResult()</span>
+        <span class="s1">gevent.spawn(do_receive</span><span class="s0">, </span><span class="s1">q</span><span class="s0">, </span><span class="s1">dying_evt)</span>
+        <span class="s1">gevent.spawn(waiter</span><span class="s0">, </span><span class="s1">q</span><span class="s0">, </span><span class="s1">waiting_evt)</span>
+        <span class="s1">gevent.sleep(</span><span class="s4">0.1</span><span class="s1">)</span>
+        <span class="s1">q.put(</span><span class="s3">'hi'</span><span class="s1">)</span>
+        <span class="s1">self.assertEqual(dying_evt.get()</span><span class="s0">, </span><span class="s3">'timed out'</span><span class="s1">)</span>
+        <span class="s1">self.assertEqual(waiting_evt.get()</span><span class="s0">, </span><span class="s3">'hi'</span><span class="s1">)</span>
+
+    <span class="s0">def </span><span class="s1">test_two_bogus_waiters(self):</span>
+        <span class="s0">def </span><span class="s1">do_receive(q</span><span class="s0">, </span><span class="s1">evt):</span>
+            <span class="s0">with </span><span class="s1">gevent.Timeout(</span><span class="s4">0</span><span class="s0">, </span><span class="s1">RuntimeError()):</span>
+                <span class="s0">try</span><span class="s1">:</span>
+                    <span class="s1">result = q.get()</span>
+                    <span class="s1">evt.set(result) </span><span class="s2"># pragma: no cover (should have raised)</span>
+                <span class="s0">except </span><span class="s1">RuntimeError:</span>
+                    <span class="s1">evt.set(</span><span class="s3">'timed out'</span><span class="s1">)</span>
+
+        <span class="s1">q = queue.Queue()</span>
+        <span class="s1">e1 = AsyncResult()</span>
+        <span class="s1">e2 = AsyncResult()</span>
+        <span class="s1">gevent.spawn(do_receive</span><span class="s0">, </span><span class="s1">q</span><span class="s0">, </span><span class="s1">e1)</span>
+        <span class="s1">gevent.spawn(do_receive</span><span class="s0">, </span><span class="s1">q</span><span class="s0">, </span><span class="s1">e2)</span>
+        <span class="s1">gevent.sleep(</span><span class="s4">0.1</span><span class="s1">)</span>
+        <span class="s1">q.put(</span><span class="s3">'sent'</span><span class="s1">)</span>
+        <span class="s1">self.assertEqual(e1.get()</span><span class="s0">, </span><span class="s3">'timed out'</span><span class="s1">)</span>
+        <span class="s1">self.assertEqual(e2.get()</span><span class="s0">, </span><span class="s3">'timed out'</span><span class="s1">)</span>
+        <span class="s1">self.assertEqual(q.get()</span><span class="s0">, </span><span class="s3">'sent'</span><span class="s1">)</span>
+
+
+<span class="s0">class </span><span class="s1">TestChannel(TestCase):</span>
+
+    <span class="s0">def </span><span class="s1">test_send(self):</span>
+        <span class="s1">channel = queue.Channel()</span>
+
+        <span class="s1">events = []</span>
+
+        <span class="s0">def </span><span class="s1">another_greenlet():</span>
+            <span class="s1">events.append(channel.get())</span>
+            <span class="s1">events.append(channel.get())</span>
+
+        <span class="s1">g = gevent.spawn(another_greenlet)</span>
+
+        <span class="s1">events.append(</span><span class="s3">'sending'</span><span class="s1">)</span>
+        <span class="s1">channel.put(</span><span class="s3">'hello'</span><span class="s1">)</span>
+        <span class="s1">events.append(</span><span class="s3">'sent hello'</span><span class="s1">)</span>
+        <span class="s1">channel.put(</span><span class="s3">'world'</span><span class="s1">)</span>
+        <span class="s1">events.append(</span><span class="s3">'sent world'</span><span class="s1">)</span>
+
+        <span class="s1">self.assertEqual([</span><span class="s3">'sending'</span><span class="s0">, </span><span class="s3">'hello'</span><span class="s0">, </span><span class="s3">'sent hello'</span><span class="s0">, </span><span class="s3">'world'</span><span class="s0">, </span><span class="s3">'sent world'</span><span class="s1">]</span><span class="s0">, </span><span class="s1">events)</span>
+        <span class="s1">g.get()</span>
+
+    <span class="s0">def </span><span class="s1">test_wait(self):</span>
+        <span class="s1">channel = queue.Channel()</span>
+        <span class="s1">events = []</span>
+
+        <span class="s0">def </span><span class="s1">another_greenlet():</span>
+            <span class="s1">events.append(</span><span class="s3">'sending hello'</span><span class="s1">)</span>
+            <span class="s1">channel.put(</span><span class="s3">'hello'</span><span class="s1">)</span>
+            <span class="s1">events.append(</span><span class="s3">'sending world'</span><span class="s1">)</span>
+            <span class="s1">channel.put(</span><span class="s3">'world'</span><span class="s1">)</span>
+            <span class="s1">events.append(</span><span class="s3">'sent world'</span><span class="s1">)</span>
+
+        <span class="s1">g = gevent.spawn(another_greenlet)</span>
+
+        <span class="s1">events.append(</span><span class="s3">'waiting'</span><span class="s1">)</span>
+        <span class="s1">events.append(channel.get())</span>
+        <span class="s1">events.append(channel.get())</span>
+
+        <span class="s1">self.assertEqual([</span><span class="s3">'waiting'</span><span class="s0">, </span><span class="s3">'sending hello'</span><span class="s0">, </span><span class="s3">'hello'</span><span class="s0">, </span><span class="s3">'sending world'</span><span class="s0">, </span><span class="s3">'world'</span><span class="s1">]</span><span class="s0">, </span><span class="s1">events)</span>
+        <span class="s1">gevent.sleep(</span><span class="s4">0</span><span class="s1">)</span>
+        <span class="s1">self.assertEqual([</span><span class="s3">'waiting'</span><span class="s0">, </span><span class="s3">'sending hello'</span><span class="s0">, </span><span class="s3">'hello'</span><span class="s0">, </span><span class="s3">'sending world'</span><span class="s0">, </span><span class="s3">'world'</span><span class="s0">, </span><span class="s3">'sent world'</span><span class="s1">]</span><span class="s0">, </span><span class="s1">events)</span>
+        <span class="s1">g.get()</span>
+
+    <span class="s0">def </span><span class="s1">test_iterable(self):</span>
+        <span class="s1">channel = queue.Channel()</span>
+        <span class="s1">gevent.spawn(channel.put</span><span class="s0">, </span><span class="s1">StopIteration)</span>
+        <span class="s1">r = list(channel)</span>
+        <span class="s1">self.assertEqual(r</span><span class="s0">, </span><span class="s1">[])</span>
+
+<span class="s0">class </span><span class="s1">TestJoinableQueue(TestCase):</span>
+
+    <span class="s0">def </span><span class="s1">test_task_done(self):</span>
+        <span class="s1">channel = queue.JoinableQueue()</span>
+        <span class="s1">X = object()</span>
+        <span class="s1">gevent.spawn(channel.put</span><span class="s0">, </span><span class="s1">X)</span>
+        <span class="s1">result = channel.get()</span>
+        <span class="s1">self.assertIs(result</span><span class="s0">, </span><span class="s1">X)</span>
+        <span class="s1">self.assertEqual(</span><span class="s4">1</span><span class="s0">, </span><span class="s1">channel.unfinished_tasks)</span>
+        <span class="s1">channel.task_done()</span>
+        <span class="s1">self.assertEqual(</span><span class="s4">0</span><span class="s0">, </span><span class="s1">channel.unfinished_tasks)</span>
+
+
+<span class="s0">class </span><span class="s1">TestNoWait(TestCase):</span>
+
+    <span class="s0">def </span><span class="s1">test_put_nowait_simple(self):</span>
+        <span class="s1">result = []</span>
+        <span class="s1">q = queue.Queue(</span><span class="s4">1</span><span class="s1">)</span>
+
+        <span class="s0">def </span><span class="s1">store_result(func</span><span class="s0">, </span><span class="s1">*args):</span>
+            <span class="s1">result.append(func(*args))</span>
+
+        <span class="s1">run_callback = get_hub().loop.run_callback</span>
+
+        <span class="s1">run_callback(store_result</span><span class="s0">, </span><span class="s1">util.wrap_errors(Full</span><span class="s0">, </span><span class="s1">q.put_nowait)</span><span class="s0">, </span><span class="s4">2</span><span class="s1">)</span>
+        <span class="s1">run_callback(store_result</span><span class="s0">, </span><span class="s1">util.wrap_errors(Full</span><span class="s0">, </span><span class="s1">q.put_nowait)</span><span class="s0">, </span><span class="s4">3</span><span class="s1">)</span>
+        <span class="s1">gevent.sleep(</span><span class="s4">0</span><span class="s1">)</span>
+        <span class="s0">assert </span><span class="s1">len(result) == </span><span class="s4">2</span><span class="s0">, </span><span class="s1">result</span>
+        <span class="s0">assert </span><span class="s1">result[</span><span class="s4">0</span><span class="s1">] </span><span class="s0">is None, </span><span class="s1">result</span>
+        <span class="s0">assert </span><span class="s1">isinstance(result[</span><span class="s4">1</span><span class="s1">]</span><span class="s0">, </span><span class="s1">queue.Full)</span><span class="s0">, </span><span class="s1">result</span>
+
+    <span class="s0">def </span><span class="s1">test_get_nowait_simple(self):</span>
+        <span class="s1">result = []</span>
+        <span class="s1">q = queue.Queue(</span><span class="s4">1</span><span class="s1">)</span>
+        <span class="s1">q.put(</span><span class="s4">4</span><span class="s1">)</span>
+
+        <span class="s0">def </span><span class="s1">store_result(func</span><span class="s0">, </span><span class="s1">*args):</span>
+            <span class="s1">result.append(func(*args))</span>
+
+        <span class="s1">run_callback = get_hub().loop.run_callback</span>
+
+        <span class="s1">run_callback(store_result</span><span class="s0">, </span><span class="s1">util.wrap_errors(Empty</span><span class="s0">, </span><span class="s1">q.get_nowait))</span>
+        <span class="s1">run_callback(store_result</span><span class="s0">, </span><span class="s1">util.wrap_errors(Empty</span><span class="s0">, </span><span class="s1">q.get_nowait))</span>
+        <span class="s1">gevent.sleep(</span><span class="s4">0</span><span class="s1">)</span>
+        <span class="s0">assert </span><span class="s1">len(result) == </span><span class="s4">2</span><span class="s0">, </span><span class="s1">result</span>
+        <span class="s0">assert </span><span class="s1">result[</span><span class="s4">0</span><span class="s1">] == </span><span class="s4">4</span><span class="s0">, </span><span class="s1">result</span>
+        <span class="s0">assert </span><span class="s1">isinstance(result[</span><span class="s4">1</span><span class="s1">]</span><span class="s0">, </span><span class="s1">queue.Empty)</span><span class="s0">, </span><span class="s1">result</span>
+
+    <span class="s2"># get_nowait must work from the mainloop</span>
+    <span class="s0">def </span><span class="s1">test_get_nowait_unlock(self):</span>
+        <span class="s1">result = []</span>
+        <span class="s1">q = queue.Queue(</span><span class="s4">1</span><span class="s1">)</span>
+        <span class="s1">p = gevent.spawn(q.put</span><span class="s0">, </span><span class="s4">5</span><span class="s1">)</span>
+
+        <span class="s0">def </span><span class="s1">store_result(func</span><span class="s0">, </span><span class="s1">*args):</span>
+            <span class="s1">result.append(func(*args))</span>
+
+        <span class="s0">assert </span><span class="s1">q.empty()</span><span class="s0">, </span><span class="s1">q</span>
+        <span class="s1">gevent.sleep(</span><span class="s4">0</span><span class="s1">)</span>
+        <span class="s0">assert </span><span class="s1">q.full()</span><span class="s0">, </span><span class="s1">q</span>
+        <span class="s1">get_hub().loop.run_callback(store_result</span><span class="s0">, </span><span class="s1">q.get_nowait)</span>
+        <span class="s1">gevent.sleep(</span><span class="s4">0</span><span class="s1">)</span>
+        <span class="s0">assert </span><span class="s1">q.empty()</span><span class="s0">, </span><span class="s1">q</span>
+        <span class="s0">assert </span><span class="s1">result == [</span><span class="s4">5</span><span class="s1">]</span><span class="s0">, </span><span class="s1">result</span>
+        <span class="s0">assert </span><span class="s1">p.ready()</span><span class="s0">, </span><span class="s1">p</span>
+        <span class="s0">assert </span><span class="s1">p.dead</span><span class="s0">, </span><span class="s1">p</span>
+        <span class="s0">assert </span><span class="s1">q.empty()</span><span class="s0">, </span><span class="s1">q</span>
+
+    <span class="s0">def </span><span class="s1">test_get_nowait_unlock_channel(self):</span>
+        <span class="s2"># get_nowait runs fine in the hub, and</span>
+        <span class="s2"># it switches to a waiting putter if needed.</span>
+        <span class="s1">result = []</span>
+        <span class="s1">q = queue.Channel()</span>
+        <span class="s1">p = gevent.spawn(q.put</span><span class="s0">, </span><span class="s4">5</span><span class="s1">)</span>
+
+        <span class="s0">def </span><span class="s1">store_result(func</span><span class="s0">, </span><span class="s1">*args):</span>
+            <span class="s1">result.append(func(*args))</span>
+
+        <span class="s1">self.assertTrue(q.empty())</span>
+        <span class="s1">self.assertTrue(q.full())</span>
+
+        <span class="s1">gevent.sleep(</span><span class="s4">0.001</span><span class="s1">)</span>
+        <span class="s1">self.assertTrue(q.empty())</span>
+        <span class="s1">self.assertTrue(q.full())</span>
+
+        <span class="s1">get_hub().loop.run_callback(store_result</span><span class="s0">, </span><span class="s1">q.get_nowait)</span>
+        <span class="s1">gevent.sleep(</span><span class="s4">0.001</span><span class="s1">)</span>
+        <span class="s1">self.assertTrue(q.empty())</span>
+        <span class="s1">self.assertTrue(q.full())</span>
+        <span class="s1">self.assertEqual(result</span><span class="s0">, </span><span class="s1">[</span><span class="s4">5</span><span class="s1">])</span>
+        <span class="s1">self.assertTrue(p.ready())</span>
+        <span class="s1">self.assertTrue(p.dead)</span>
+        <span class="s1">self.assertTrue(q.empty())</span>
+
+    <span class="s2"># put_nowait must work from the mainloop</span>
+    <span class="s0">def </span><span class="s1">test_put_nowait_unlock(self):</span>
+        <span class="s1">result = []</span>
+        <span class="s1">q = queue.Queue()</span>
+        <span class="s1">p = gevent.spawn(q.get)</span>
+
+        <span class="s0">def </span><span class="s1">store_result(func</span><span class="s0">, </span><span class="s1">*args):</span>
+            <span class="s1">result.append(func(*args))</span>
+
+        <span class="s1">self.assertTrue(q.empty()</span><span class="s0">, </span><span class="s1">q)</span>
+        <span class="s1">self.assertFalse(q.full()</span><span class="s0">, </span><span class="s1">q)</span>
+        <span class="s1">gevent.sleep(</span><span class="s4">0.001</span><span class="s1">)</span>
+
+        <span class="s1">self.assertTrue(q.empty()</span><span class="s0">, </span><span class="s1">q)</span>
+        <span class="s1">self.assertFalse(q.full()</span><span class="s0">, </span><span class="s1">q)</span>
+
+        <span class="s1">get_hub().loop.run_callback(store_result</span><span class="s0">, </span><span class="s1">q.put_nowait</span><span class="s0">, </span><span class="s4">10</span><span class="s1">)</span>
+
+        <span class="s1">self.assertFalse(p.ready()</span><span class="s0">, </span><span class="s1">p)</span>
+        <span class="s1">gevent.sleep(</span><span class="s4">0.001</span><span class="s1">)</span>
+
+        <span class="s1">self.assertEqual(result</span><span class="s0">, </span><span class="s1">[</span><span class="s0">None</span><span class="s1">])</span>
+        <span class="s1">self.assertTrue(p.ready()</span><span class="s0">, </span><span class="s1">p)</span>
+        <span class="s1">self.assertFalse(q.full()</span><span class="s0">, </span><span class="s1">q)</span>
+        <span class="s1">self.assertTrue(q.empty()</span><span class="s0">, </span><span class="s1">q)</span>
+
+
+<span class="s0">class </span><span class="s1">TestJoinEmpty(TestCase):</span>
+
+    <span class="s0">def </span><span class="s1">test_issue_45(self):</span>
+        <span class="s5">&quot;&quot;&quot;Test that join() exits immediately if not jobs were put into the queue&quot;&quot;&quot;</span>
+        <span class="s1">self.switch_expected = </span><span class="s0">False</span>
+        <span class="s1">q = queue.JoinableQueue()</span>
+        <span class="s1">q.join()</span>
+
+<span class="s0">class </span><span class="s1">AbstractTestWeakRefMixin(object):</span>
+
+    <span class="s0">def </span><span class="s1">test_weak_reference(self):</span>
+        <span class="s0">import </span><span class="s1">weakref</span>
+        <span class="s1">one = self._makeOne()</span>
+        <span class="s1">ref = weakref.ref(one)</span>
+        <span class="s1">self.assertIs(one</span><span class="s0">, </span><span class="s1">ref())</span>
+
+
+<span class="s0">class </span><span class="s1">TestGetInterrupt(AbstractTestWeakRefMixin</span><span class="s0">, </span><span class="s1">AbstractGenericGetTestCase):</span>
+
+    <span class="s1">Timeout = Empty</span>
+
+    <span class="s1">kind = queue.Queue</span>
+
+    <span class="s0">def </span><span class="s1">wait(self</span><span class="s0">, </span><span class="s1">timeout):</span>
+        <span class="s0">return </span><span class="s1">self._makeOne().get(timeout=timeout)</span>
+
+    <span class="s0">def </span><span class="s1">_makeOne(self):</span>
+        <span class="s0">return </span><span class="s1">self.kind()</span>
+
+<span class="s0">class </span><span class="s1">TestGetInterruptJoinableQueue(TestGetInterrupt):</span>
+    <span class="s1">kind = queue.JoinableQueue</span>
+
+<span class="s0">class </span><span class="s1">TestGetInterruptLifoQueue(TestGetInterrupt):</span>
+    <span class="s1">kind = queue.LifoQueue</span>
+
+<span class="s0">class </span><span class="s1">TestGetInterruptPriorityQueue(TestGetInterrupt):</span>
+    <span class="s1">kind = queue.PriorityQueue</span>
+
+<span class="s0">class </span><span class="s1">TestGetInterruptChannel(TestGetInterrupt):</span>
+    <span class="s1">kind = queue.Channel</span>
+
+
+<span class="s0">class </span><span class="s1">TestPutInterrupt(AbstractGenericGetTestCase):</span>
+    <span class="s1">kind = queue.Queue</span>
+    <span class="s1">Timeout = Full</span>
+
+    <span class="s0">def </span><span class="s1">setUp(self):</span>
+        <span class="s1">super(TestPutInterrupt</span><span class="s0">, </span><span class="s1">self).setUp()</span>
+        <span class="s1">self.queue = self._makeOne()</span>
+
+    <span class="s0">def </span><span class="s1">wait(self</span><span class="s0">, </span><span class="s1">timeout):</span>
+        <span class="s0">while not </span><span class="s1">self.queue.full():</span>
+            <span class="s1">self.queue.put(</span><span class="s4">1</span><span class="s1">)</span>
+        <span class="s0">return </span><span class="s1">self.queue.put(</span><span class="s4">2</span><span class="s0">, </span><span class="s1">timeout=timeout)</span>
+
+    <span class="s0">def </span><span class="s1">_makeOne(self):</span>
+        <span class="s0">return </span><span class="s1">self.kind(</span><span class="s4">1</span><span class="s1">)</span>
+
+
+<span class="s0">class </span><span class="s1">TestPutInterruptJoinableQueue(TestPutInterrupt):</span>
+    <span class="s1">kind = queue.JoinableQueue</span>
+
+<span class="s0">class </span><span class="s1">TestPutInterruptLifoQueue(TestPutInterrupt):</span>
+    <span class="s1">kind = queue.LifoQueue</span>
+
+<span class="s0">class </span><span class="s1">TestPutInterruptPriorityQueue(TestPutInterrupt):</span>
+    <span class="s1">kind = queue.PriorityQueue</span>
+
+<span class="s0">class </span><span class="s1">TestPutInterruptChannel(TestPutInterrupt):</span>
+    <span class="s1">kind = queue.Channel</span>
+
+    <span class="s0">def </span><span class="s1">_makeOne(self):</span>
+        <span class="s0">return </span><span class="s1">self.kind()</span>
+
+
+<span class="s0">if </span><span class="s1">hasattr(queue</span><span class="s0">, </span><span class="s3">'SimpleQueue'</span><span class="s1">):</span>
+
+    <span class="s0">class </span><span class="s1">TestGetInterruptSimpleQueue(TestGetInterrupt):</span>
+        <span class="s1">kind = queue.SimpleQueue</span>
+
+        <span class="s0">def </span><span class="s1">test_raises_timeout_Timeout(self):</span>
+            <span class="s0">raise </span><span class="s1">unittest.SkipTest(</span><span class="s3">&quot;Not supported&quot;</span><span class="s1">)</span>
+
+        <span class="s1">test_raises_timeout_Timeout_exc_customized = test_raises_timeout_Timeout</span>
+        <span class="s1">test_outer_timeout_is_not_lost = test_raises_timeout_Timeout</span>
+
+
+<span class="s0">del </span><span class="s1">AbstractGenericGetTestCase</span>
+
+
+<span class="s0">if </span><span class="s1">__name__ == </span><span class="s3">'__main__'</span><span class="s1">:</span>
+    <span class="s1">greentest.main()</span>
+</pre>
+</body>
+</html>

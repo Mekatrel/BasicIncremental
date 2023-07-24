@@ -1,0 +1,446 @@
+<html>
+<head>
+<title>test__semaphore.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #cc7832;}
+.s3 { color: #6897bb;}
+.s4 { color: #6a8759;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+test__semaphore.py</font>
+</center></td></tr></table>
+<pre><span class="s0">###</span>
+<span class="s0"># This file is test__semaphore.py only for organization purposes.</span>
+<span class="s0"># The public API,</span>
+<span class="s0"># and the *only* correct place to import Semaphore --- even in tests ---</span>
+<span class="s0"># is ``gevent.lock``, never ``gevent._semaphore``.</span>
+<span class="s0">##</span>
+<span class="s2">from </span><span class="s1">__future__ </span><span class="s2">import </span><span class="s1">print_function</span>
+<span class="s2">from </span><span class="s1">__future__ </span><span class="s2">import </span><span class="s1">absolute_import</span>
+
+<span class="s2">import </span><span class="s1">weakref</span>
+
+<span class="s2">import </span><span class="s1">gevent</span>
+<span class="s2">import </span><span class="s1">gevent.exceptions</span>
+<span class="s2">from </span><span class="s1">gevent.lock </span><span class="s2">import </span><span class="s1">Semaphore</span>
+<span class="s2">from </span><span class="s1">gevent.lock </span><span class="s2">import </span><span class="s1">BoundedSemaphore</span>
+
+<span class="s2">import </span><span class="s1">gevent.testing </span><span class="s2">as </span><span class="s1">greentest</span>
+<span class="s2">from </span><span class="s1">gevent.testing </span><span class="s2">import </span><span class="s1">timing</span>
+
+<span class="s2">class </span><span class="s1">TestSemaphore(greentest.TestCase):</span>
+
+    <span class="s0"># issue 39</span>
+    <span class="s2">def </span><span class="s1">test_acquire_returns_false_after_timeout(self):</span>
+        <span class="s1">s = Semaphore(value=</span><span class="s3">0</span><span class="s1">)</span>
+        <span class="s1">result = s.acquire(timeout=</span><span class="s3">0.01</span><span class="s1">)</span>
+        <span class="s2">assert </span><span class="s1">result </span><span class="s2">is False, </span><span class="s1">repr(result)</span>
+
+    <span class="s2">def </span><span class="s1">test_release_twice(self):</span>
+        <span class="s1">s = Semaphore()</span>
+        <span class="s1">result = []</span>
+        <span class="s1">s.rawlink(</span><span class="s2">lambda </span><span class="s1">s: result.append(</span><span class="s4">'a'</span><span class="s1">))</span>
+        <span class="s1">s.release()</span>
+        <span class="s1">s.rawlink(</span><span class="s2">lambda </span><span class="s1">s: result.append(</span><span class="s4">'b'</span><span class="s1">))</span>
+        <span class="s1">s.release()</span>
+        <span class="s1">gevent.sleep(</span><span class="s3">0.001</span><span class="s1">)</span>
+        <span class="s0"># The order, though, is not guaranteed.</span>
+        <span class="s1">self.assertEqual(sorted(result)</span><span class="s2">, </span><span class="s1">[</span><span class="s4">'a'</span><span class="s2">, </span><span class="s4">'b'</span><span class="s1">])</span>
+
+    <span class="s2">def </span><span class="s1">test_semaphore_weakref(self):</span>
+        <span class="s1">s = Semaphore()</span>
+        <span class="s1">r = weakref.ref(s)</span>
+        <span class="s1">self.assertEqual(s</span><span class="s2">, </span><span class="s1">r())</span>
+
+    <span class="s1">@greentest.ignores_leakcheck</span>
+    <span class="s2">def </span><span class="s1">test_semaphore_in_class_with_del(self):</span>
+        <span class="s0"># Issue #704. This used to crash the process</span>
+        <span class="s0"># under PyPy through at least 4.0.1 if the Semaphore</span>
+        <span class="s0"># was implemented with Cython.</span>
+        <span class="s2">class </span><span class="s1">X(object):</span>
+            <span class="s2">def </span><span class="s1">__init__(self):</span>
+                <span class="s1">self.s = Semaphore()</span>
+
+            <span class="s2">def </span><span class="s1">__del__(self):</span>
+                <span class="s1">self.s.acquire()</span>
+
+        <span class="s1">X()</span>
+        <span class="s2">import </span><span class="s1">gc</span>
+        <span class="s1">gc.collect()</span>
+        <span class="s1">gc.collect()</span>
+
+
+    <span class="s2">def </span><span class="s1">test_rawlink_on_unacquired_runs_notifiers(self):</span>
+        <span class="s0"># https://github.com/gevent/gevent/issues/1287</span>
+
+        <span class="s0"># Rawlinking a ready semaphore should fire immediately,</span>
+        <span class="s0"># not raise LoopExit</span>
+        <span class="s1">s = Semaphore()</span>
+        <span class="s1">gevent.wait([s])</span>
+
+
+<span class="s2">class </span><span class="s1">TestSemaphoreMultiThread(greentest.TestCase):</span>
+    <span class="s0"># Tests that the object can be acquired correctly across</span>
+    <span class="s0"># multiple threads.</span>
+    <span class="s0"># Used as a base class.</span>
+
+    <span class="s0"># See https://github.com/gevent/gevent/issues/1437</span>
+
+    <span class="s2">def </span><span class="s1">_getTargetClass(self):</span>
+        <span class="s2">return </span><span class="s1">Semaphore</span>
+
+    <span class="s2">def </span><span class="s1">_makeOne(self):</span>
+        <span class="s0"># Create an object that is associated with the current hub. If</span>
+        <span class="s0"># we don't do this now, it gets initialized lazily the first</span>
+        <span class="s0"># time it would have to block, which, in the event of threads,</span>
+        <span class="s0"># would be from an arbitrary thread.</span>
+        <span class="s2">return </span><span class="s1">self._getTargetClass()(</span><span class="s3">1</span><span class="s1">)</span>
+
+    <span class="s2">def </span><span class="s1">_makeThreadMain(self</span><span class="s2">, </span><span class="s1">thread_running</span><span class="s2">, </span><span class="s1">thread_acquired</span><span class="s2">, </span><span class="s1">sem</span><span class="s2">,</span>
+                        <span class="s1">acquired</span><span class="s2">, </span><span class="s1">exc_info</span><span class="s2">,</span>
+                        <span class="s1">**thread_acquire_kwargs):</span>
+        <span class="s2">from </span><span class="s1">gevent._hub_local </span><span class="s2">import </span><span class="s1">get_hub_if_exists</span>
+        <span class="s2">import </span><span class="s1">sys</span>
+
+        <span class="s2">def </span><span class="s1">thread_main():</span>
+            <span class="s1">thread_running.set()</span>
+            <span class="s2">try</span><span class="s1">:</span>
+                <span class="s1">acquired.append(</span>
+                    <span class="s1">sem.acquire(**thread_acquire_kwargs)</span>
+                <span class="s1">)</span>
+            <span class="s2">except</span><span class="s1">:</span>
+                <span class="s1">exc_info[:] = sys.exc_info()</span>
+                <span class="s2">raise </span><span class="s0"># Print</span>
+            <span class="s2">finally</span><span class="s1">:</span>
+                <span class="s1">hub = get_hub_if_exists()</span>
+                <span class="s2">if </span><span class="s1">hub </span><span class="s2">is not None</span><span class="s1">:</span>
+                    <span class="s1">hub.join()</span>
+                    <span class="s1">hub.destroy(destroy_loop=</span><span class="s2">True</span><span class="s1">)</span>
+                <span class="s1">thread_acquired.set()</span>
+        <span class="s2">return </span><span class="s1">thread_main</span>
+
+    <span class="s1">IDLE_ITERATIONS = </span><span class="s3">5</span>
+
+    <span class="s2">def </span><span class="s1">_do_test_acquire_in_one_then_another(self</span><span class="s2">,</span>
+                                             <span class="s1">release=</span><span class="s2">True,</span>
+                                             <span class="s1">require_thread_acquired_to_finish=</span><span class="s2">False,</span>
+                                             <span class="s1">**thread_acquire_kwargs):</span>
+        <span class="s2">from </span><span class="s1">gevent </span><span class="s2">import </span><span class="s1">monkey</span>
+        <span class="s1">self.assertFalse(monkey.is_module_patched(</span><span class="s4">'threading'</span><span class="s1">))</span>
+
+        <span class="s2">import </span><span class="s1">threading</span>
+        <span class="s1">thread_running = threading.Event()</span>
+        <span class="s1">thread_acquired = threading.Event()</span>
+
+        <span class="s1">sem = self._makeOne()</span>
+        <span class="s0"># Make future acquires block</span>
+        <span class="s1">sem.acquire()</span>
+
+        <span class="s1">exc_info = []</span>
+        <span class="s1">acquired = []</span>
+
+        <span class="s1">t = threading.Thread(target=self._makeThreadMain(</span>
+            <span class="s1">thread_running</span><span class="s2">, </span><span class="s1">thread_acquired</span><span class="s2">, </span><span class="s1">sem</span><span class="s2">,</span>
+            <span class="s1">acquired</span><span class="s2">, </span><span class="s1">exc_info</span><span class="s2">,</span>
+            <span class="s1">**thread_acquire_kwargs</span>
+        <span class="s1">))</span>
+        <span class="s1">t.daemon = </span><span class="s2">True</span>
+        <span class="s1">t.start()</span>
+        <span class="s1">thread_running.wait(</span><span class="s3">10</span><span class="s1">) </span><span class="s0"># implausibly large time</span>
+        <span class="s2">if </span><span class="s1">release:</span>
+            <span class="s1">sem.release()</span>
+            <span class="s0"># Spin the loop to be sure the release gets through.</span>
+            <span class="s0"># (Release schedules the notifier to run, and when the</span>
+            <span class="s0"># notifier run it sends the async notification to the</span>
+            <span class="s0"># other thread. Depending on exactly where we are in the</span>
+            <span class="s0"># event loop, and the limit to the number of callbacks</span>
+            <span class="s0"># that get run (including time-based) the notifier may or</span>
+            <span class="s0"># may not be immediately ready to run, so this can take up</span>
+            <span class="s0"># to two iterations.)</span>
+            <span class="s2">for </span><span class="s1">_ </span><span class="s2">in </span><span class="s1">range(self.IDLE_ITERATIONS):</span>
+                <span class="s1">gevent.idle()</span>
+                <span class="s2">if </span><span class="s1">thread_acquired.wait(timing.LARGE_TICK):</span>
+                    <span class="s2">break</span>
+
+            <span class="s1">self.assertEqual(acquired</span><span class="s2">, </span><span class="s1">[</span><span class="s2">True</span><span class="s1">])</span>
+
+        <span class="s2">if not </span><span class="s1">release </span><span class="s2">and </span><span class="s1">thread_acquire_kwargs.get(</span><span class="s4">&quot;timeout&quot;</span><span class="s1">):</span>
+            <span class="s0"># Spin the loop to be sure that the timeout has a chance to</span>
+            <span class="s0"># process. Interleave this with something that drops the GIL</span>
+            <span class="s0"># so the background thread has a chance to notice that.</span>
+            <span class="s2">for </span><span class="s1">_ </span><span class="s2">in </span><span class="s1">range(self.IDLE_ITERATIONS):</span>
+                <span class="s1">gevent.idle()</span>
+                <span class="s2">if </span><span class="s1">thread_acquired.wait(timing.LARGE_TICK):</span>
+                    <span class="s2">break</span>
+        <span class="s1">thread_acquired.wait(timing.LARGE_TICK * </span><span class="s3">5</span><span class="s1">)</span>
+
+        <span class="s2">if </span><span class="s1">require_thread_acquired_to_finish:</span>
+            <span class="s1">self.assertTrue(thread_acquired.is_set())</span>
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s1">self.assertEqual(exc_info</span><span class="s2">, </span><span class="s1">[])</span>
+        <span class="s2">finally</span><span class="s1">:</span>
+            <span class="s1">exc_info = </span><span class="s2">None</span>
+
+        <span class="s2">return </span><span class="s1">sem</span><span class="s2">, </span><span class="s1">acquired</span>
+
+    <span class="s2">def </span><span class="s1">test_acquire_in_one_then_another(self):</span>
+        <span class="s1">self._do_test_acquire_in_one_then_another(release=</span><span class="s2">True</span><span class="s1">)</span>
+
+    <span class="s2">def </span><span class="s1">test_acquire_in_one_then_another_timed(self):</span>
+        <span class="s1">sem</span><span class="s2">, </span><span class="s1">acquired_in_thread = self._do_test_acquire_in_one_then_another(</span>
+            <span class="s1">release=</span><span class="s2">False,</span>
+            <span class="s1">require_thread_acquired_to_finish=</span><span class="s2">True,</span>
+            <span class="s1">timeout=timing.SMALLEST_RELIABLE_DELAY)</span>
+        <span class="s1">self.assertEqual([</span><span class="s2">False</span><span class="s1">]</span><span class="s2">, </span><span class="s1">acquired_in_thread)</span>
+        <span class="s0"># This doesn't, of course, notify anything, because</span>
+        <span class="s0"># the waiter has given up.</span>
+        <span class="s1">sem.release()</span>
+        <span class="s1">notifier = getattr(sem</span><span class="s2">, </span><span class="s4">'_notifier'</span><span class="s2">, None</span><span class="s1">)</span>
+        <span class="s1">self.assertIsNone(notifier)</span>
+
+    <span class="s2">def </span><span class="s1">test_acquire_in_one_wait_greenlet_wait_thread_gives_up(self):</span>
+        <span class="s0"># The waiter in the thread both arrives and gives up while</span>
+        <span class="s0"># the notifier is already running...or at least, that's what</span>
+        <span class="s0"># we'd like to arrange, but the _notify_links function doesn't</span>
+        <span class="s0"># drop the GIL/object lock, so the other thread is stuck and doesn't</span>
+        <span class="s0"># actually get to call into the acquire method.</span>
+
+        <span class="s2">from </span><span class="s1">gevent </span><span class="s2">import </span><span class="s1">monkey</span>
+        <span class="s1">self.assertFalse(monkey.is_module_patched(</span><span class="s4">'threading'</span><span class="s1">))</span>
+
+        <span class="s2">import </span><span class="s1">threading</span>
+
+        <span class="s1">sem = self._makeOne()</span>
+        <span class="s0"># Make future acquires block</span>
+        <span class="s1">sem.acquire()</span>
+
+        <span class="s2">def </span><span class="s1">greenlet_one():</span>
+            <span class="s1">ack = sem.acquire()</span>
+            <span class="s0"># We're running in the notifier function right now. It switched to</span>
+            <span class="s0"># us.</span>
+            <span class="s1">thread.start()</span>
+            <span class="s1">gevent.sleep(timing.LARGE_TICK)</span>
+            <span class="s2">return </span><span class="s1">ack</span>
+
+        <span class="s1">exc_info = []</span>
+        <span class="s1">acquired = []</span>
+
+        <span class="s1">glet = gevent.spawn(greenlet_one)</span>
+        <span class="s1">thread = threading.Thread(target=self._makeThreadMain(</span>
+            <span class="s1">threading.Event()</span><span class="s2">, </span><span class="s1">threading.Event()</span><span class="s2">,</span>
+            <span class="s1">sem</span><span class="s2">,</span>
+            <span class="s1">acquired</span><span class="s2">, </span><span class="s1">exc_info</span><span class="s2">,</span>
+            <span class="s1">timeout=timing.LARGE_TICK</span>
+        <span class="s1">))</span>
+        <span class="s1">thread.daemon = </span><span class="s2">True</span>
+        <span class="s1">gevent.idle()</span>
+        <span class="s1">sem.release()</span>
+        <span class="s1">glet.join()</span>
+        <span class="s2">for </span><span class="s1">_ </span><span class="s2">in </span><span class="s1">range(</span><span class="s3">3</span><span class="s1">):</span>
+            <span class="s1">gevent.idle()</span>
+            <span class="s1">thread.join(timing.LARGE_TICK)</span>
+
+        <span class="s1">self.assertEqual(glet.value</span><span class="s2">, True</span><span class="s1">)</span>
+        <span class="s1">self.assertEqual([]</span><span class="s2">, </span><span class="s1">exc_info)</span>
+        <span class="s1">self.assertEqual([</span><span class="s2">False</span><span class="s1">]</span><span class="s2">, </span><span class="s1">acquired)</span>
+        <span class="s1">self.assertTrue(glet.dead</span><span class="s2">, </span><span class="s1">glet)</span>
+        <span class="s1">glet = </span><span class="s2">None</span>
+
+    <span class="s2">def </span><span class="s1">assertOneHasNoHub(self</span><span class="s2">, </span><span class="s1">sem):</span>
+        <span class="s1">self.assertIsNone(sem.hub</span><span class="s2">, </span><span class="s1">sem)</span>
+
+    <span class="s1">@greentest.skipOnPyPyOnWindows(</span><span class="s4">&quot;Flaky there; can't reproduce elsewhere&quot;</span><span class="s1">)</span>
+    <span class="s2">def </span><span class="s1">test_dueling_threads(self</span><span class="s2">, </span><span class="s1">acquire_args=()</span><span class="s2">, </span><span class="s1">create_hub=</span><span class="s2">None</span><span class="s1">):</span>
+        <span class="s0"># pylint:disable=too-many-locals,too-many-statements</span>
+
+        <span class="s0"># Threads doing nothing but acquiring and releasing locks, without</span>
+        <span class="s0"># having any other greenlets to switch to.</span>
+        <span class="s0"># https://github.com/gevent/gevent/issues/1698</span>
+        <span class="s2">from </span><span class="s1">gevent </span><span class="s2">import </span><span class="s1">monkey</span>
+        <span class="s2">from </span><span class="s1">gevent._hub_local </span><span class="s2">import </span><span class="s1">get_hub_if_exists</span>
+
+        <span class="s1">self.assertFalse(monkey.is_module_patched(</span><span class="s4">'threading'</span><span class="s1">))</span>
+
+        <span class="s2">import </span><span class="s1">threading</span>
+        <span class="s2">from </span><span class="s1">time </span><span class="s2">import </span><span class="s1">sleep </span><span class="s2">as </span><span class="s1">native_sleep</span>
+
+        <span class="s1">sem = self._makeOne()</span>
+        <span class="s1">self.assertOneHasNoHub(sem)</span>
+        <span class="s1">count = </span><span class="s3">10000</span>
+        <span class="s1">results = [-</span><span class="s3">1</span><span class="s2">, </span><span class="s1">-</span><span class="s3">1</span><span class="s1">]</span>
+        <span class="s1">run = </span><span class="s2">True</span>
+        <span class="s2">def </span><span class="s1">do_it(ix):</span>
+            <span class="s2">if </span><span class="s1">create_hub:</span>
+                <span class="s1">gevent.get_hub()</span>
+
+            <span class="s2">try</span><span class="s1">:</span>
+                <span class="s2">for </span><span class="s1">i </span><span class="s2">in </span><span class="s1">range(count):</span>
+                    <span class="s2">if not </span><span class="s1">run:</span>
+                        <span class="s2">break</span>
+
+                    <span class="s1">acquired = sem.acquire(*acquire_args)</span>
+                    <span class="s2">assert </span><span class="s1">acquire_args </span><span class="s2">or </span><span class="s1">acquired</span>
+                    <span class="s2">if </span><span class="s1">acquired:</span>
+                        <span class="s1">sem.release()</span>
+                    <span class="s1">results[ix] = i</span>
+                    <span class="s2">if not </span><span class="s1">create_hub:</span>
+                        <span class="s0"># We don't artificially create the hub.</span>
+                        <span class="s1">self.assertIsNone(</span>
+                            <span class="s1">get_hub_if_exists()</span><span class="s2">,</span>
+                            <span class="s1">(get_hub_if_exists()</span><span class="s2">, </span><span class="s1">ix</span><span class="s2">, </span><span class="s1">i)</span>
+                        <span class="s1">)</span>
+                    <span class="s2">if </span><span class="s1">create_hub </span><span class="s2">and </span><span class="s1">i % </span><span class="s3">10 </span><span class="s1">== </span><span class="s3">0</span><span class="s1">:</span>
+                        <span class="s1">gevent.sleep(timing.SMALLEST_RELIABLE_DELAY)</span>
+                    <span class="s2">elif </span><span class="s1">i % </span><span class="s3">100 </span><span class="s1">== </span><span class="s3">0</span><span class="s1">:</span>
+                        <span class="s1">native_sleep(timing.SMALLEST_RELIABLE_DELAY)</span>
+            <span class="s2">except </span><span class="s1">Exception </span><span class="s2">as </span><span class="s1">ex: </span><span class="s0"># pylint:disable=broad-except</span>
+                <span class="s2">import </span><span class="s1">traceback; traceback.print_exc()</span>
+                <span class="s1">results[ix] = str(ex)</span>
+                <span class="s1">ex = </span><span class="s2">None</span>
+            <span class="s2">finally</span><span class="s1">:</span>
+                <span class="s1">hub = get_hub_if_exists()</span>
+                <span class="s2">if </span><span class="s1">hub </span><span class="s2">is not None</span><span class="s1">:</span>
+                    <span class="s1">hub.join()</span>
+                    <span class="s1">hub.destroy(destroy_loop=</span><span class="s2">True</span><span class="s1">)</span>
+
+        <span class="s1">t1 = threading.Thread(target=do_it</span><span class="s2">, </span><span class="s1">args=(</span><span class="s3">0</span><span class="s2">,</span><span class="s1">))</span>
+        <span class="s1">t1.daemon = </span><span class="s2">True</span>
+        <span class="s1">t2 = threading.Thread(target=do_it</span><span class="s2">, </span><span class="s1">args=(</span><span class="s3">1</span><span class="s2">,</span><span class="s1">))</span>
+        <span class="s1">t2.daemon = </span><span class="s2">True</span>
+        <span class="s1">t1.start()</span>
+        <span class="s1">t2.start()</span>
+
+        <span class="s1">t1.join(</span><span class="s3">1</span><span class="s1">)</span>
+        <span class="s1">t2.join(</span><span class="s3">1</span><span class="s1">)</span>
+
+        <span class="s2">while </span><span class="s1">t1.is_alive() </span><span class="s2">or </span><span class="s1">t2.is_alive():</span>
+            <span class="s1">cur = list(results)</span>
+            <span class="s1">t1.join(</span><span class="s3">7</span><span class="s1">)</span>
+            <span class="s1">t2.join(</span><span class="s3">7</span><span class="s1">)</span>
+            <span class="s2">if </span><span class="s1">cur == results:</span>
+                <span class="s0"># Hmm, after two seconds, no progress</span>
+                <span class="s1">run = </span><span class="s2">False</span>
+                <span class="s2">break</span>
+
+        <span class="s1">self.assertEqual(results</span><span class="s2">, </span><span class="s1">[count - </span><span class="s3">1</span><span class="s2">, </span><span class="s1">count - </span><span class="s3">1</span><span class="s1">])</span>
+
+    <span class="s2">def </span><span class="s1">test_dueling_threads_timeout(self):</span>
+        <span class="s1">self.test_dueling_threads((</span><span class="s2">True, </span><span class="s3">4</span><span class="s1">))</span>
+
+    <span class="s2">def </span><span class="s1">test_dueling_threads_with_hub(self):</span>
+        <span class="s1">self.test_dueling_threads(create_hub=</span><span class="s2">True</span><span class="s1">)</span>
+
+
+    <span class="s0"># XXX: Need a test with multiple greenlets in a non-primary</span>
+    <span class="s0"># thread. Things should work, just very slowly; instead of moving through</span>
+    <span class="s0"># greenlet.switch(), they'll be moving with async watchers.</span>
+
+<span class="s2">class </span><span class="s1">TestBoundedSemaphoreMultiThread(TestSemaphoreMultiThread):</span>
+
+    <span class="s2">def </span><span class="s1">_getTargetClass(self):</span>
+        <span class="s2">return </span><span class="s1">BoundedSemaphore</span>
+
+<span class="s1">@greentest.skipOnPurePython(</span><span class="s4">&quot;Needs C extension&quot;</span><span class="s1">)</span>
+<span class="s2">class </span><span class="s1">TestCExt(greentest.TestCase):</span>
+
+    <span class="s2">def </span><span class="s1">test_c_extension(self):</span>
+        <span class="s1">self.assertEqual(Semaphore.__module__</span><span class="s2">,</span>
+                         <span class="s4">'gevent._gevent_c_semaphore'</span><span class="s1">)</span>
+
+
+<span class="s2">class </span><span class="s1">SwitchWithFixedHash(object):</span>
+    <span class="s0"># Replaces greenlet.switch with a callable object</span>
+    <span class="s0"># with a hash code we control. This only matters if</span>
+    <span class="s0"># we're hashing this somewhere (which we used to), but</span>
+    <span class="s0"># that doesn't preserve order, so we don't do</span>
+    <span class="s0"># that anymore.</span>
+
+    <span class="s2">def </span><span class="s1">__init__(self</span><span class="s2">, </span><span class="s1">greenlet</span><span class="s2">, </span><span class="s1">hashcode):</span>
+        <span class="s1">self.switch = greenlet.switch</span>
+        <span class="s1">self.hashcode = hashcode</span>
+
+    <span class="s2">def </span><span class="s1">__hash__(self):</span>
+        <span class="s2">raise </span><span class="s1">AssertionError</span>
+
+    <span class="s2">def </span><span class="s1">__eq__(self</span><span class="s2">, </span><span class="s1">other):</span>
+        <span class="s2">raise </span><span class="s1">AssertionError</span>
+
+    <span class="s2">def </span><span class="s1">__call__(self</span><span class="s2">, </span><span class="s1">*args</span><span class="s2">, </span><span class="s1">**kwargs):</span>
+        <span class="s2">return </span><span class="s1">self.switch(*args</span><span class="s2">, </span><span class="s1">**kwargs)</span>
+
+    <span class="s2">def </span><span class="s1">__repr__(self):</span>
+        <span class="s2">return </span><span class="s1">repr(self.switch)</span>
+
+<span class="s2">class </span><span class="s1">FirstG(gevent.Greenlet):</span>
+    <span class="s0"># A greenlet whose switch method will have a low hashcode.</span>
+
+    <span class="s1">hashcode = </span><span class="s3">10</span>
+
+    <span class="s2">def </span><span class="s1">__init__(self</span><span class="s2">, </span><span class="s1">*args</span><span class="s2">, </span><span class="s1">**kwargs):</span>
+        <span class="s1">gevent.Greenlet.__init__(self</span><span class="s2">, </span><span class="s1">*args</span><span class="s2">, </span><span class="s1">**kwargs)</span>
+        <span class="s1">self.switch = SwitchWithFixedHash(self</span><span class="s2">, </span><span class="s1">self.hashcode)</span>
+
+
+<span class="s2">class </span><span class="s1">LastG(FirstG):</span>
+    <span class="s0"># A greenlet whose switch method will have a high hashcode.</span>
+    <span class="s1">hashcode = </span><span class="s3">12</span>
+
+
+<span class="s2">def </span><span class="s1">acquire_then_exit(sem</span><span class="s2">, </span><span class="s1">should_quit):</span>
+    <span class="s1">sem.acquire()</span>
+    <span class="s1">should_quit.append(</span><span class="s2">True</span><span class="s1">)</span>
+
+
+<span class="s2">def </span><span class="s1">acquire_then_spawn(sem</span><span class="s2">, </span><span class="s1">should_quit):</span>
+    <span class="s2">if </span><span class="s1">should_quit:</span>
+        <span class="s2">return</span>
+    <span class="s1">sem.acquire()</span>
+    <span class="s1">g = FirstG.spawn(release_then_spawn</span><span class="s2">, </span><span class="s1">sem</span><span class="s2">, </span><span class="s1">should_quit)</span>
+    <span class="s1">g.join()</span>
+
+<span class="s2">def </span><span class="s1">release_then_spawn(sem</span><span class="s2">, </span><span class="s1">should_quit):</span>
+    <span class="s1">sem.release()</span>
+    <span class="s2">if </span><span class="s1">should_quit: </span><span class="s0"># pragma: no cover</span>
+        <span class="s2">return</span>
+    <span class="s1">g = FirstG.spawn(acquire_then_spawn</span><span class="s2">, </span><span class="s1">sem</span><span class="s2">, </span><span class="s1">should_quit)</span>
+    <span class="s1">g.join()</span>
+
+<span class="s2">class </span><span class="s1">TestSemaphoreFair(greentest.TestCase):</span>
+
+    <span class="s2">def </span><span class="s1">test_fair_or_hangs(self):</span>
+        <span class="s0"># If the lock isn't fair, this hangs, spinning between</span>
+        <span class="s0"># the last two greenlets.</span>
+        <span class="s0"># See https://github.com/gevent/gevent/issues/1487</span>
+        <span class="s1">sem = Semaphore()</span>
+        <span class="s1">should_quit = []</span>
+
+        <span class="s1">keep_going1 = FirstG.spawn(acquire_then_spawn</span><span class="s2">, </span><span class="s1">sem</span><span class="s2">, </span><span class="s1">should_quit)</span>
+        <span class="s1">keep_going2 = FirstG.spawn(acquire_then_spawn</span><span class="s2">, </span><span class="s1">sem</span><span class="s2">, </span><span class="s1">should_quit)</span>
+        <span class="s1">exiting = LastG.spawn(acquire_then_exit</span><span class="s2">, </span><span class="s1">sem</span><span class="s2">, </span><span class="s1">should_quit)</span>
+
+        <span class="s2">with </span><span class="s1">self.assertRaises(gevent.exceptions.LoopExit):</span>
+            <span class="s1">gevent.joinall([keep_going1</span><span class="s2">, </span><span class="s1">keep_going2</span><span class="s2">, </span><span class="s1">exiting])</span>
+
+        <span class="s1">self.assertTrue(exiting.dead</span><span class="s2">, </span><span class="s1">exiting)</span>
+        <span class="s1">self.assertTrue(keep_going2.dead</span><span class="s2">, </span><span class="s1">keep_going2)</span>
+        <span class="s1">self.assertFalse(keep_going1.dead</span><span class="s2">, </span><span class="s1">keep_going1)</span>
+
+        <span class="s1">sem.release()</span>
+        <span class="s1">keep_going1.kill()</span>
+        <span class="s1">keep_going2.kill()</span>
+        <span class="s1">exiting.kill()</span>
+
+        <span class="s1">gevent.idle()</span>
+
+<span class="s2">if </span><span class="s1">__name__ == </span><span class="s4">'__main__'</span><span class="s1">:</span>
+    <span class="s1">greentest.main()</span>
+</pre>
+</body>
+</html>

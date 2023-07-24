@@ -1,0 +1,414 @@
+<html>
+<head>
+<title>platform-1.0.14.tm</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #a9b7c6;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+platform-1.0.14.tm</font>
+</center></td></tr></table>
+<pre><span class="s0"># -*- tcl -*-</span>
+<span class="s0"># ### ### ### ######### ######### #########</span>
+<span class="s0">## Overview</span>
+
+<span class="s0"># Heuristics to assemble a platform identifier from publicly available</span>
+<span class="s0"># information. The identifier describes the platform of the currently</span>
+<span class="s0"># running tcl shell. This is a mixture of the runtime environment and</span>
+<span class="s0"># of build-time properties of the executable itself.</span>
+<span class="s0">#</span>
+<span class="s0"># Examples:</span>
+<span class="s0"># &lt;1&gt; A tcl shell executing on a x86_64 processor, but having a</span>
+<span class="s0">#   wordsize of 4 was compiled for the x86 environment, i.e. 32</span>
+<span class="s0">#   bit, and loaded packages have to match that, and not the</span>
+<span class="s0">#   actual cpu.</span>
+<span class="s0">#</span>
+<span class="s0"># &lt;2&gt; The hp/solaris 32/64 bit builds of the core cannot be</span>
+<span class="s0">#   distinguished by looking at tcl_platform. As packages have to</span>
+<span class="s0">#   match the 32/64 information we have to look in more places. In</span>
+<span class="s0">#   this case we inspect the executable itself (magic numbers,</span>
+<span class="s0">#   i.e. fileutil::magic::filetype).</span>
+<span class="s0">#</span>
+<span class="s0"># The basic information used comes out of the 'os' and 'machine'</span>
+<span class="s0"># entries of the 'tcl_platform' array. A number of general and</span>
+<span class="s0"># os/machine specific transformation are applied to get a canonical</span>
+<span class="s0"># result.</span>
+<span class="s0">#</span>
+<span class="s0"># General</span>
+<span class="s0"># Only the first element of 'os' is used - we don't care whether we</span>
+<span class="s0"># are on &quot;Windows NT&quot; or &quot;Windows XP&quot; or whatever.</span>
+<span class="s0">#</span>
+<span class="s0"># Machine specific</span>
+<span class="s0"># % arm*   -&gt; arm</span>
+<span class="s0"># % sun4*  -&gt; sparc</span>
+<span class="s0"># % intel  -&gt; ix86</span>
+<span class="s0"># % i*86*  -&gt; ix86</span>
+<span class="s0"># % Power* -&gt; powerpc</span>
+<span class="s0"># % x86_64 + wordSize 4 =&gt; x86 code</span>
+<span class="s0">#</span>
+<span class="s0"># OS specific</span>
+<span class="s0"># % AIX are always powerpc machines</span>
+<span class="s0"># % HP-UX 9000/800 etc means parisc</span>
+<span class="s0"># % linux has to take glibc version into account</span>
+<span class="s0"># % sunos -&gt; solaris, and keep version number</span>
+<span class="s0">#</span>
+<span class="s0"># NOTE: A platform like linux glibc 2.3, which can use glibc 2.2 stuff</span>
+<span class="s0"># has to provide all possible allowed platform identifiers when</span>
+<span class="s0"># searching search. Ditto a solaris 2.8 platform can use solaris 2.6</span>
+<span class="s0"># packages. Etc. This is handled by the other procedure, see below.</span>
+
+<span class="s0"># ### ### ### ######### ######### #########</span>
+<span class="s0">## Requirements</span>
+
+<span class="s0">namespace eval ::platform {}</span>
+
+<span class="s0"># ### ### ### ######### ######### #########</span>
+<span class="s0">## Implementation</span>
+
+<span class="s0"># -- platform::generic</span>
+<span class="s0">#</span>
+<span class="s0"># Assembles an identifier for the generic platform. It leaves out</span>
+<span class="s0"># details like kernel version, libc version, etc.</span>
+
+<span class="s0">proc ::platform::generic {} {</span>
+    <span class="s0">global tcl_platform</span>
+
+    <span class="s0">set plat [string tolower [lindex $tcl_platform(os) 0]]</span>
+    <span class="s0">set cpu  $tcl_platform(machine)</span>
+
+    <span class="s0">switch -glob -- $cpu {</span>
+	<span class="s0">sun4* {</span>
+	    <span class="s0">set cpu sparc</span>
+	<span class="s0">}</span>
+	<span class="s0">intel -</span>
+	<span class="s0">i*86* {</span>
+	    <span class="s0">set cpu ix86</span>
+	<span class="s0">}</span>
+	<span class="s0">x86_64 {</span>
+	    <span class="s0">if {$tcl_platform(wordSize) == 4} {</span>
+		<span class="s0"># See Example &lt;1&gt; at the top of this file.</span>
+		<span class="s0">set cpu ix86</span>
+	    <span class="s0">}</span>
+	<span class="s0">}</span>
+	<span class="s0">&quot;Power*&quot; {</span>
+	    <span class="s0">set cpu powerpc</span>
+	<span class="s0">}</span>
+	<span class="s0">&quot;arm*&quot; {</span>
+	    <span class="s0">set cpu arm</span>
+	<span class="s0">}</span>
+	<span class="s0">ia64 {</span>
+	    <span class="s0">if {$tcl_platform(wordSize) == 4} {</span>
+		<span class="s0">append cpu _32</span>
+	    <span class="s0">}</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+
+    <span class="s0">switch -glob -- $plat {</span>
+	<span class="s0">cygwin* {</span>
+	    <span class="s0">set plat cygwin</span>
+	<span class="s0">}</span>
+	<span class="s0">windows {</span>
+	    <span class="s0">if {$tcl_platform(platform) == &quot;unix&quot;} {</span>
+		<span class="s0">set plat cygwin</span>
+	    <span class="s0">} else {</span>
+		<span class="s0">set plat win32</span>
+	    <span class="s0">}</span>
+	    <span class="s0">if {$cpu eq &quot;amd64&quot;} {</span>
+		<span class="s0"># Do not check wordSize, win32-x64 is an IL32P64 platform.</span>
+		<span class="s0">set cpu x86_64</span>
+	    <span class="s0">}</span>
+	<span class="s0">}</span>
+	<span class="s0">sunos {</span>
+	    <span class="s0">set plat solaris</span>
+	    <span class="s0">if {[string match &quot;ix86&quot; $cpu]} {</span>
+		<span class="s0">if {$tcl_platform(wordSize) == 8} {</span>
+		    <span class="s0">set cpu x86_64</span>
+		<span class="s0">}</span>
+	    <span class="s0">} elseif {![string match &quot;ia64*&quot; $cpu]} {</span>
+		<span class="s0"># sparc</span>
+		<span class="s0">if {$tcl_platform(wordSize) == 8} {</span>
+		    <span class="s0">append cpu 64</span>
+		<span class="s0">}</span>
+	    <span class="s0">}</span>
+	<span class="s0">}</span>
+	<span class="s0">darwin {</span>
+	    <span class="s0">set plat macosx</span>
+	    <span class="s0"># Correctly identify the cpu when running as a 64bit</span>
+	    <span class="s0"># process on a machine with a 32bit kernel</span>
+	    <span class="s0">if {$cpu eq &quot;ix86&quot;} {</span>
+		<span class="s0">if {$tcl_platform(wordSize) == 8} {</span>
+		    <span class="s0">set cpu x86_64</span>
+		<span class="s0">}</span>
+	    <span class="s0">}</span>
+	<span class="s0">}</span>
+	<span class="s0">aix {</span>
+	    <span class="s0">set cpu powerpc</span>
+	    <span class="s0">if {$tcl_platform(wordSize) == 8} {</span>
+		<span class="s0">append cpu 64</span>
+	    <span class="s0">}</span>
+	<span class="s0">}</span>
+	<span class="s0">hp-ux {</span>
+	    <span class="s0">set plat hpux</span>
+	    <span class="s0">if {![string match &quot;ia64*&quot; $cpu]} {</span>
+		<span class="s0">set cpu parisc</span>
+		<span class="s0">if {$tcl_platform(wordSize) == 8} {</span>
+		    <span class="s0">append cpu 64</span>
+		<span class="s0">}</span>
+	    <span class="s0">}</span>
+	<span class="s0">}</span>
+	<span class="s0">osf1 {</span>
+	    <span class="s0">set plat tru64</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+
+    <span class="s0">return &quot;${plat}-${cpu}&quot;</span>
+<span class="s0">}</span>
+
+<span class="s0"># -- platform::identify</span>
+<span class="s0">#</span>
+<span class="s0"># Assembles an identifier for the exact platform, by extending the</span>
+<span class="s0"># generic identifier. I.e. it adds in details like kernel version,</span>
+<span class="s0"># libc version, etc., if they are relevant for the loading of</span>
+<span class="s0"># packages on the platform.</span>
+
+<span class="s0">proc ::platform::identify {} {</span>
+    <span class="s0">global tcl_platform</span>
+
+    <span class="s0">set id [generic]</span>
+    <span class="s0">regexp {^([^-]+)-([^-]+)$} $id -&gt; plat cpu</span>
+
+    <span class="s0">switch -- $plat {</span>
+	<span class="s0">solaris {</span>
+	    <span class="s0">regsub {^5} $tcl_platform(osVersion) 2 text</span>
+	    <span class="s0">append plat $text</span>
+	    <span class="s0">return &quot;${plat}-${cpu}&quot;</span>
+	<span class="s0">}</span>
+	<span class="s0">macosx {</span>
+	    <span class="s0">set major [lindex [split $tcl_platform(osVersion) .] 0]</span>
+	    <span class="s0">if {$major &gt; 8} {</span>
+		<span class="s0">incr major -4</span>
+		<span class="s0">append plat 10.$major</span>
+		<span class="s0">return &quot;${plat}-${cpu}&quot;</span>
+	    <span class="s0">}</span>
+	<span class="s0">}</span>
+	<span class="s0">linux {</span>
+	    <span class="s0"># Look for the libc*.so and determine its version</span>
+	    <span class="s0"># (libc5/6, libc6 further glibc 2.X)</span>
+
+	    <span class="s0">set v unknown</span>
+
+	    <span class="s0"># Determine in which directory to look. /lib, or /lib64.</span>
+	    <span class="s0"># For that we use the tcl_platform(wordSize).</span>
+	    <span class="s0">#</span>
+	    <span class="s0"># We could use the 'cpu' info, per the equivalence below,</span>
+	    <span class="s0"># that however would be restricted to intel. And this may</span>
+	    <span class="s0"># be a arm, mips, etc. system. The wordsize is more</span>
+	    <span class="s0"># fundamental.</span>
+	    <span class="s0">#</span>
+	    <span class="s0"># ix86   &lt;=&gt; (wordSize == 4) &lt;=&gt; 32 bit ==&gt; /lib</span>
+	    <span class="s0"># x86_64 &lt;=&gt; (wordSize == 8) &lt;=&gt; 64 bit ==&gt; /lib64</span>
+	    <span class="s0">#</span>
+	    <span class="s0"># Do not look into /lib64 even if present, if the cpu</span>
+	    <span class="s0"># doesn't fit.</span>
+
+	    <span class="s0"># TODO: Determine the prefixes (i386, x86_64, ...) for</span>
+	    <span class="s0"># other cpus.  The path after the generic one is utterly</span>
+	    <span class="s0"># specific to intel right now.  Ok, on Ubuntu, possibly</span>
+	    <span class="s0"># other Debian systems we may apparently be able to query</span>
+	    <span class="s0"># the necessary CPU code. If we can't we simply use the</span>
+	    <span class="s0"># hardwired fallback.</span>
+
+	    <span class="s0">switch -exact -- $tcl_platform(wordSize) {</span>
+		<span class="s0">4 {</span>
+		    <span class="s0">lappend bases /lib</span>
+		    <span class="s0">if {[catch {</span>
+			<span class="s0">exec dpkg-architecture -qDEB_HOST_MULTIARCH</span>
+		    <span class="s0">} res]} {</span>
+			<span class="s0">lappend bases /lib/i386-linux-gnu</span>
+		    <span class="s0">} else {</span>
+			<span class="s0"># dpkg-arch returns the full tripled, not just cpu.</span>
+			<span class="s0">lappend bases /lib/$res</span>
+		    <span class="s0">}</span>
+		<span class="s0">}</span>
+		<span class="s0">8 {</span>
+		    <span class="s0">lappend bases /lib64</span>
+		    <span class="s0">if {[catch {</span>
+			<span class="s0">exec dpkg-architecture -qDEB_HOST_MULTIARCH</span>
+		    <span class="s0">} res]} {</span>
+			<span class="s0">lappend bases /lib/x86_64-linux-gnu</span>
+		    <span class="s0">} else {</span>
+			<span class="s0"># dpkg-arch returns the full tripled, not just cpu.</span>
+			<span class="s0">lappend bases /lib/$res</span>
+		    <span class="s0">}</span>
+		<span class="s0">}</span>
+		<span class="s0">default {</span>
+		    <span class="s0">return -code error &quot;Bad wordSize $tcl_platform(wordSize), expected 4 or 8&quot;</span>
+		<span class="s0">}</span>
+	    <span class="s0">}</span>
+
+	    <span class="s0">foreach base $bases {</span>
+		<span class="s0">if {[LibcVersion $base -&gt; v]} break</span>
+	    <span class="s0">}</span>
+
+	    <span class="s0">append plat -$v</span>
+	    <span class="s0">return &quot;${plat}-${cpu}&quot;</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+
+    <span class="s0">return $id</span>
+<span class="s0">}</span>
+
+<span class="s0">proc ::platform::LibcVersion {base _-&gt;_ vv} {</span>
+    <span class="s0">upvar 1 $vv v</span>
+    <span class="s0">set libclist [lsort [glob -nocomplain -directory $base libc*]]</span>
+
+    <span class="s0">if {![llength $libclist]} { return 0 }</span>
+
+    <span class="s0">set libc [lindex $libclist 0]</span>
+
+    <span class="s0"># Try executing the library first. This should suceed</span>
+    <span class="s0"># for a glibc library, and return the version</span>
+    <span class="s0"># information.</span>
+
+    <span class="s0">if {![catch {</span>
+	<span class="s0">set vdata [lindex [split [exec $libc] \n] 0]</span>
+    <span class="s0">}]} {</span>
+	<span class="s0">regexp {version ([0-9]+(\.[0-9]+)*)} $vdata -&gt; v</span>
+	<span class="s0">foreach {major minor} [split $v .] break</span>
+	<span class="s0">set v glibc${major}.${minor}</span>
+	<span class="s0">return 1</span>
+    <span class="s0">} else {</span>
+	<span class="s0"># We had trouble executing the library. We are now</span>
+	<span class="s0"># inspecting its name to determine the version</span>
+	<span class="s0"># number. This code by Larry McVoy.</span>
+
+	<span class="s0">if {[regexp -- {libc-([0-9]+)\.([0-9]+)} $libc -&gt; major minor]} {</span>
+	    <span class="s0">set v glibc${major}.${minor}</span>
+	    <span class="s0">return 1</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+    <span class="s0">return 0</span>
+<span class="s0">}</span>
+
+<span class="s0"># -- platform::patterns</span>
+<span class="s0">#</span>
+<span class="s0"># Given an exact platform identifier, i.e. _not_ the generic</span>
+<span class="s0"># identifier it assembles a list of exact platform identifier</span>
+<span class="s0"># describing platform which should be compatible with the</span>
+<span class="s0"># input.</span>
+<span class="s0">#</span>
+<span class="s0"># I.e. packages for all platforms in the result list should be</span>
+<span class="s0"># loadable on the specified platform.</span>
+
+<span class="s0"># &lt;&lt; Should we add the generic identifier to the list as well ? In</span>
+<span class="s0">#    general it is not compatible I believe. So better not. In many</span>
+<span class="s0">#    cases the exact identifier is identical to the generic one</span>
+<span class="s0">#    anyway.</span>
+<span class="s0"># &gt;&gt;</span>
+
+<span class="s0">proc ::platform::patterns {id} {</span>
+    <span class="s0">set res [list $id]</span>
+    <span class="s0">if {$id eq &quot;tcl&quot;} {return $res}</span>
+
+    <span class="s0">switch -glob --  $id {</span>
+	<span class="s0">solaris*-* {</span>
+	    <span class="s0">if {[regexp {solaris([^-]*)-(.*)} $id -&gt; v cpu]} {</span>
+		<span class="s0">if {$v eq &quot;&quot;} {return $id}</span>
+		<span class="s0">foreach {major minor} [split $v .] break</span>
+		<span class="s0">incr minor -1</span>
+		<span class="s0">for {set j $minor} {$j &gt;= 6} {incr j -1} {</span>
+		    <span class="s0">lappend res solaris${major}.${j}-${cpu}</span>
+		<span class="s0">}</span>
+	    <span class="s0">}</span>
+	<span class="s0">}</span>
+	<span class="s0">linux*-* {</span>
+	    <span class="s0">if {[regexp {linux-glibc([^-]*)-(.*)} $id -&gt; v cpu]} {</span>
+		<span class="s0">foreach {major minor} [split $v .] break</span>
+		<span class="s0">incr minor -1</span>
+		<span class="s0">for {set j $minor} {$j &gt;= 0} {incr j -1} {</span>
+		    <span class="s0">lappend res linux-glibc${major}.${j}-${cpu}</span>
+		<span class="s0">}</span>
+	    <span class="s0">}</span>
+	<span class="s0">}</span>
+	<span class="s0">macosx-powerpc {</span>
+	    <span class="s0">lappend res macosx-universal</span>
+	<span class="s0">}</span>
+	<span class="s0">macosx-x86_64 {</span>
+	    <span class="s0">lappend res macosx-i386-x86_64</span>
+	<span class="s0">}</span>
+	<span class="s0">macosx-ix86 {</span>
+	    <span class="s0">lappend res macosx-universal macosx-i386-x86_64</span>
+	<span class="s0">}</span>
+	<span class="s0">macosx*-*    {</span>
+	    <span class="s0"># 10.5+</span>
+	    <span class="s0">if {[regexp {macosx([^-]*)-(.*)} $id -&gt; v cpu]} {</span>
+
+		<span class="s0">switch -exact -- $cpu {</span>
+		    <span class="s0">ix86    {</span>
+			<span class="s0">lappend alt i386-x86_64</span>
+			<span class="s0">lappend alt universal</span>
+		    <span class="s0">}</span>
+		    <span class="s0">x86_64  { lappend alt i386-x86_64 }</span>
+		    <span class="s0">default { set alt {} }</span>
+		<span class="s0">}</span>
+
+		<span class="s0">if {$v ne &quot;&quot;} {</span>
+		    <span class="s0">foreach {major minor} [split $v .] break</span>
+
+		    <span class="s0"># Add 10.5 to 10.minor to patterns.</span>
+		    <span class="s0">set res {}</span>
+		    <span class="s0">for {set j $minor} {$j &gt;= 5} {incr j -1} {</span>
+			<span class="s0">lappend res macosx${major}.${j}-${cpu}</span>
+			<span class="s0">foreach a $alt {</span>
+			    <span class="s0">lappend res macosx${major}.${j}-$a</span>
+			<span class="s0">}</span>
+		    <span class="s0">}</span>
+
+		    <span class="s0"># Add unversioned patterns for 10.3/10.4 builds.</span>
+		    <span class="s0">lappend res macosx-${cpu}</span>
+		    <span class="s0">foreach a $alt {</span>
+			<span class="s0">lappend res macosx-$a</span>
+		    <span class="s0">}</span>
+		<span class="s0">} else {</span>
+		    <span class="s0"># No version, just do unversioned patterns.</span>
+		    <span class="s0">foreach a $alt {</span>
+			<span class="s0">lappend res macosx-$a</span>
+		    <span class="s0">}</span>
+		<span class="s0">}</span>
+	    <span class="s0">} else {</span>
+		<span class="s0"># no v, no cpu ... nothing</span>
+	    <span class="s0">}</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+    <span class="s0">lappend res tcl ; # Pure tcl packages are always compatible.</span>
+    <span class="s0">return $res</span>
+<span class="s0">}</span>
+
+
+<span class="s0"># ### ### ### ######### ######### #########</span>
+<span class="s0">## Ready</span>
+
+<span class="s0">package provide platform 1.0.14</span>
+
+<span class="s0"># ### ### ### ######### ######### #########</span>
+<span class="s0">## Demo application</span>
+
+<span class="s0">if {[info exists argv0] &amp;&amp; ($argv0 eq [info script])} {</span>
+    <span class="s0">puts ====================================</span>
+    <span class="s0">parray tcl_platform</span>
+    <span class="s0">puts ====================================</span>
+    <span class="s0">puts Generic\ identification:\ [::platform::generic]</span>
+    <span class="s0">puts Exact\ identification:\ \ \ [::platform::identify]</span>
+    <span class="s0">puts ====================================</span>
+    <span class="s0">puts Search\ patterns:</span>
+    <span class="s0">puts *\ [join [::platform::patterns [::platform::identify]] \n*\ ]</span>
+    <span class="s0">puts ====================================</span>
+    <span class="s0">exit 0</span>
+<span class="s0">}</span>
+</pre>
+</body>
+</html>

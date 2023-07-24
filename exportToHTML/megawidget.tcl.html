@@ -1,0 +1,314 @@
+<html>
+<head>
+<title>megawidget.tcl</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #a9b7c6;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+megawidget.tcl</font>
+</center></td></tr></table>
+<pre><span class="s0"># megawidget.tcl</span>
+<span class="s0">#</span>
+<span class="s0">#	Basic megawidget support classes. Experimental for any use other than</span>
+<span class="s0">#	the ::tk::IconList megawdget, which is itself only designed for use in</span>
+<span class="s0">#	the Unix file dialogs.</span>
+<span class="s0">#</span>
+<span class="s0"># Copyright (c) 2009-2010 Donal K. Fellows</span>
+<span class="s0">#</span>
+<span class="s0"># See the file &quot;license.terms&quot; for information on usage and redistribution of</span>
+<span class="s0"># this file, and for a DISCLAIMER OF ALL WARRANTIES.</span>
+<span class="s0">#</span>
+
+<span class="s0">package require Tk 8.6</span>
+
+<span class="s0">::oo::class create ::tk::Megawidget {</span>
+    <span class="s0">superclass ::oo::class</span>
+    <span class="s0">method unknown {w args} {</span>
+	<span class="s0">if {[string match .* $w]} {</span>
+	    <span class="s0">[self] create $w {*}$args</span>
+	    <span class="s0">return $w</span>
+	<span class="s0">}</span>
+	<span class="s0">next $w {*}$args</span>
+    <span class="s0">}</span>
+    <span class="s0">unexport new unknown</span>
+    <span class="s0">self method create {name superclasses body} {</span>
+	<span class="s0">next $name [list \</span>
+		<span class="s0">superclass ::tk::MegawidgetClass {*}$superclasses]\;$body</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+
+<span class="s0">::oo::class create ::tk::MegawidgetClass {</span>
+    <span class="s0">variable w hull options IdleCallbacks</span>
+    <span class="s0">constructor args {</span>
+	<span class="s0"># Extract the &quot;widget name&quot; from the object name</span>
+	<span class="s0">set w [namespace tail [self]]</span>
+
+	<span class="s0"># Configure things</span>
+	<span class="s0">tclParseConfigSpec [my varname options] [my GetSpecs] &quot;&quot; $args</span>
+
+	<span class="s0"># Move the object out of the way of the hull widget</span>
+	<span class="s0">rename [self] _tmp</span>
+
+	<span class="s0"># Make the hull widget(s)</span>
+	<span class="s0">my CreateHull</span>
+	<span class="s0">bind $hull &lt;Destroy&gt; [list [namespace which my] destroy]</span>
+
+	<span class="s0"># Rename things into their final places</span>
+	<span class="s0">rename ::$w theWidget</span>
+	<span class="s0">rename [self] ::$w</span>
+
+	<span class="s0"># Make the contents</span>
+	<span class="s0">my Create</span>
+    <span class="s0">}</span>
+    <span class="s0">destructor {</span>
+	<span class="s0">foreach {name cb} [array get IdleCallbacks] {</span>
+	    <span class="s0">after cancel $cb</span>
+	    <span class="s0">unset IdleCallbacks($name)</span>
+	<span class="s0">}</span>
+	<span class="s0">if {[winfo exists $w]} {</span>
+	    <span class="s0">bind $hull &lt;Destroy&gt; {}</span>
+	    <span class="s0">destroy $w</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+
+    <span class="s0">####################################################################</span>
+    <span class="s0">#</span>
+    <span class="s0"># MegawidgetClass::configure --</span>
+    <span class="s0">#</span>
+    <span class="s0">#	Implementation of 'configure' for megawidgets. Emulates the operation</span>
+    <span class="s0">#	of the standard Tk configure method fairly closely, which makes things</span>
+    <span class="s0">#	substantially more complex than they otherwise would be.</span>
+    <span class="s0">#</span>
+    <span class="s0">#	This method assumes that the 'GetSpecs' method returns a description</span>
+    <span class="s0">#	of all the specifications of the options (i.e., as Tk returns except</span>
+    <span class="s0">#	with the actual values removed). It also assumes that the 'options'</span>
+    <span class="s0">#	array in the class holds all options; it is up to subclasses to set</span>
+    <span class="s0">#	traces on that array if they want to respond to configuration changes.</span>
+    <span class="s0">#</span>
+    <span class="s0">#	TODO: allow unambiguous abbreviations.</span>
+    <span class="s0">#</span>
+    <span class="s0">method configure args {</span>
+	<span class="s0"># Configure behaves differently depending on the number of arguments</span>
+	<span class="s0">set argc [llength $args]</span>
+	<span class="s0">if {$argc == 0} {</span>
+	    <span class="s0">return [lmap spec [my GetSpecs] {</span>
+		<span class="s0">lappend spec $options([lindex $spec 0])</span>
+	    <span class="s0">}]</span>
+	<span class="s0">} elseif {$argc == 1} {</span>
+	    <span class="s0">set opt [lindex $args 0]</span>
+	    <span class="s0">if {[info exists options($opt)]} {</span>
+		<span class="s0">set spec [lsearch -inline -index 0 -exact [my GetSpecs] $opt]</span>
+		<span class="s0">return [linsert $spec end $options($opt)]</span>
+	    <span class="s0">}</span>
+	<span class="s0">} elseif {$argc == 2} {</span>
+	    <span class="s0"># Special case for where we're setting a single option. This</span>
+	    <span class="s0"># avoids some of the costly operations. We still do the [array</span>
+	    <span class="s0"># get] as this gives a sufficiently-consistent trace.</span>
+	    <span class="s0">set opt [lindex $args 0]</span>
+	    <span class="s0">if {[dict exists [array get options] $opt]} {</span>
+		<span class="s0"># Actually set the new value of the option. Use a catch to</span>
+		<span class="s0"># allow a megawidget user to throw an error from a write trace</span>
+		<span class="s0"># on the options array to reject invalid values.</span>
+		<span class="s0">try {</span>
+		    <span class="s0">array set options $args</span>
+		<span class="s0">} on error {ret info} {</span>
+		    <span class="s0"># Rethrow the error to get a clean stack trace</span>
+		    <span class="s0">return -code error -errorcode [dict get $info -errorcode] $ret</span>
+		<span class="s0">}</span>
+		<span class="s0">return</span>
+	    <span class="s0">}</span>
+	<span class="s0">} elseif {$argc % 2 == 0} {</span>
+	    <span class="s0"># Check that all specified options exist. Any unknown option will</span>
+	    <span class="s0"># cause the merged dictionary to be bigger than the options array</span>
+	    <span class="s0">set merge [dict merge [array get options] $args]</span>
+	    <span class="s0">if {[dict size $merge] == [array size options]} {</span>
+		<span class="s0"># Actually set the new values of the options. Use a catch to</span>
+		<span class="s0"># allow a megawidget user to throw an error from a write trace</span>
+		<span class="s0"># on the options array to reject invalid values</span>
+		<span class="s0">try {</span>
+		    <span class="s0">array set options $args</span>
+		<span class="s0">} on error {ret info} {</span>
+		    <span class="s0"># Rethrow the error to get a clean stack trace</span>
+		    <span class="s0">return -code error -errorcode [dict get $info -errorcode] $ret</span>
+		<span class="s0">}</span>
+		<span class="s0">return</span>
+	    <span class="s0">}</span>
+	    <span class="s0"># Due to the order of the merge, the unknown options will be at</span>
+	    <span class="s0"># the end of the dict. This makes the first unknown option easy to</span>
+	    <span class="s0"># find.</span>
+	    <span class="s0">set opt [lindex [dict keys $merge] [array size options]]</span>
+	<span class="s0">} else {</span>
+	    <span class="s0">set opt [lindex $args end]</span>
+	    <span class="s0">return -code error -errorcode [list TK VALUE_MISSING] \</span>
+		<span class="s0">&quot;value for \&quot;$opt\&quot; missing&quot;</span>
+	<span class="s0">}</span>
+	<span class="s0">return -code error -errorcode [list TK LOOKUP OPTION $opt] \</span>
+	    <span class="s0">&quot;bad option \&quot;$opt\&quot;: must be [tclListValidFlags options]&quot;</span>
+    <span class="s0">}</span>
+
+    <span class="s0">####################################################################</span>
+    <span class="s0">#</span>
+    <span class="s0"># MegawidgetClass::cget --</span>
+    <span class="s0">#</span>
+    <span class="s0">#	Implementation of 'cget' for megawidgets. Emulates the operation of</span>
+    <span class="s0">#	the standard Tk cget method fairly closely.</span>
+    <span class="s0">#</span>
+    <span class="s0">#	This method assumes that the 'options' array in the class holds all</span>
+    <span class="s0">#	options; it is up to subclasses to set traces on that array if they</span>
+    <span class="s0">#	want to respond to configuration reads.</span>
+    <span class="s0">#</span>
+    <span class="s0">#	TODO: allow unambiguous abbreviations.</span>
+    <span class="s0">#</span>
+    <span class="s0">method cget option {</span>
+	<span class="s0">return $options($option)</span>
+    <span class="s0">}</span>
+
+    <span class="s0">####################################################################</span>
+    <span class="s0">#</span>
+    <span class="s0"># MegawidgetClass::TraceOption --</span>
+    <span class="s0">#</span>
+    <span class="s0">#	Sets up the tracing of an element of the options variable.</span>
+    <span class="s0">#</span>
+    <span class="s0">method TraceOption {option method args} {</span>
+	<span class="s0">set callback [list my $method {*}$args]</span>
+	<span class="s0">trace add variable options($option) write [namespace code $callback]</span>
+    <span class="s0">}</span>
+
+    <span class="s0">####################################################################</span>
+    <span class="s0">#</span>
+    <span class="s0"># MegawidgetClass::GetSpecs --</span>
+    <span class="s0">#</span>
+    <span class="s0">#	Return a list of descriptions of options supported by this</span>
+    <span class="s0">#	megawidget. Each option is described by the 4-tuple list, consisting</span>
+    <span class="s0">#	of the name of the option, the &quot;option database&quot; name, the &quot;option</span>
+    <span class="s0">#	database&quot; class-name, and the default value of the option. These are</span>
+    <span class="s0">#	the same values returned by calling the configure method of a widget,</span>
+    <span class="s0">#	except without the current values of the options.</span>
+    <span class="s0">#</span>
+    <span class="s0">method GetSpecs {} {</span>
+	<span class="s0">return {</span>
+	    <span class="s0">{-takefocus takeFocus TakeFocus {}}</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+
+    <span class="s0">####################################################################</span>
+    <span class="s0">#</span>
+    <span class="s0"># MegawidgetClass::CreateHull --</span>
+    <span class="s0">#</span>
+    <span class="s0">#	Creates the real main widget of the megawidget. This is often a frame</span>
+    <span class="s0">#	or toplevel widget, but isn't always (lightweight megawidgets might</span>
+    <span class="s0">#	use a content widget directly).</span>
+    <span class="s0">#</span>
+    <span class="s0">#	The name of the hull widget is given by the 'w' instance variable. The</span>
+    <span class="s0">#	name should be written into the 'hull' instance variable. The command</span>
+    <span class="s0">#	created by this method will be renamed.</span>
+    <span class="s0">#</span>
+    <span class="s0">method CreateHull {} {</span>
+	<span class="s0">return -code error -errorcode {TCL OO ABSTRACT_METHOD} \</span>
+	    <span class="s0">&quot;method must be overridden&quot;</span>
+    <span class="s0">}</span>
+
+    <span class="s0">####################################################################</span>
+    <span class="s0">#</span>
+    <span class="s0"># MegawidgetClass::Create --</span>
+    <span class="s0">#</span>
+    <span class="s0">#	Creates the content of the megawidget. The name of the widget to</span>
+    <span class="s0">#	create the content in will be in the 'hull' instance variable.</span>
+    <span class="s0">#</span>
+    <span class="s0">method Create {} {</span>
+	<span class="s0">return -code error -errorcode {TCL OO ABSTRACT_METHOD} \</span>
+	    <span class="s0">&quot;method must be overridden&quot;</span>
+    <span class="s0">}</span>
+
+    <span class="s0">####################################################################</span>
+    <span class="s0">#</span>
+    <span class="s0"># MegawidgetClass::WhenIdle --</span>
+    <span class="s0">#</span>
+    <span class="s0">#	Arrange for a method to be called on the current instance when Tk is</span>
+    <span class="s0">#	idle. Only one such method call per method will be queued; subsequent</span>
+    <span class="s0">#	queuing actions before the callback fires will be silently ignored.</span>
+    <span class="s0">#	The additional args will be passed to the callback, and the callbacks</span>
+    <span class="s0">#	will be properly cancelled if the widget is destroyed.</span>
+    <span class="s0">#</span>
+    <span class="s0">method WhenIdle {method args} {</span>
+	<span class="s0">if {![info exists IdleCallbacks($method)]} {</span>
+	    <span class="s0">set IdleCallbacks($method) [after idle [list \</span>
+		    <span class="s0">[namespace which my] DoWhenIdle $method $args]]</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+    <span class="s0">method DoWhenIdle {method arguments} {</span>
+	<span class="s0">unset IdleCallbacks($method)</span>
+	<span class="s0">tailcall my $method {*}$arguments</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+
+<span class="s0">####################################################################</span>
+<span class="s0">#</span>
+<span class="s0"># tk::SimpleWidget --</span>
+<span class="s0">#</span>
+<span class="s0">#	Simple megawidget class that makes it easy create widgets that behave</span>
+<span class="s0">#	like a ttk widget. It creates the hull as a ttk::frame and maps the</span>
+<span class="s0">#	state manipulation methods of the overall megawidget to the equivalent</span>
+<span class="s0">#	operations on the ttk::frame.</span>
+<span class="s0">#</span>
+<span class="s0">::tk::Megawidget create ::tk::SimpleWidget {} {</span>
+    <span class="s0">variable w hull options</span>
+    <span class="s0">method GetSpecs {} {</span>
+	<span class="s0">return {</span>
+	    <span class="s0">{-cursor cursor Cursor {}}</span>
+	    <span class="s0">{-takefocus takeFocus TakeFocus {}}</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+    <span class="s0">method CreateHull {} {</span>
+	<span class="s0">set hull [::ttk::frame $w -cursor $options(-cursor)]</span>
+	<span class="s0">my TraceOption -cursor UpdateCursorOption</span>
+    <span class="s0">}</span>
+    <span class="s0">method UpdateCursorOption args {</span>
+	<span class="s0">$hull configure -cursor $options(-cursor)</span>
+    <span class="s0">}</span>
+    <span class="s0"># Not fixed names, so can't forward</span>
+    <span class="s0">method state args {</span>
+	<span class="s0">tailcall $hull state {*}$args</span>
+    <span class="s0">}</span>
+    <span class="s0">method instate args {</span>
+	<span class="s0">tailcall $hull instate {*}$args</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+
+<span class="s0">####################################################################</span>
+<span class="s0">#</span>
+<span class="s0"># tk::FocusableWidget --</span>
+<span class="s0">#</span>
+<span class="s0">#	Simple megawidget class that makes a ttk-like widget that has a focus</span>
+<span class="s0">#	ring.</span>
+<span class="s0">#</span>
+<span class="s0">::tk::Megawidget create ::tk::FocusableWidget ::tk::SimpleWidget {</span>
+    <span class="s0">variable w hull options</span>
+    <span class="s0">method GetSpecs {} {</span>
+	<span class="s0">return {</span>
+	    <span class="s0">{-cursor cursor Cursor {}}</span>
+	    <span class="s0">{-takefocus takeFocus TakeFocus ::ttk::takefocus}</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+    <span class="s0">method CreateHull {} {</span>
+	<span class="s0">ttk::frame $w</span>
+	<span class="s0">set hull [ttk::entry $w.cHull -takefocus 0 -cursor $options(-cursor)]</span>
+	<span class="s0">pack $hull -expand yes -fill both -ipadx 2 -ipady 2</span>
+	<span class="s0">my TraceOption -cursor UpdateCursorOption</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+
+<span class="s0">return</span>
+
+<span class="s0"># Local Variables:</span>
+<span class="s0"># mode: tcl</span>
+<span class="s0"># fill-column: 78</span>
+<span class="s0"># End:</span>
+</pre>
+</body>
+</html>

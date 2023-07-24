@@ -1,0 +1,169 @@
+<html>
+<head>
+<title>monkey_test.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #cc7832;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #6897bb;}
+.s3 { color: #6a8759;}
+.s4 { color: #808080;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+monkey_test.py</font>
+</center></td></tr></table>
+<pre><span class="s0">import </span><span class="s1">sys</span>
+<span class="s0">import </span><span class="s1">os</span>
+
+
+<span class="s1">test_filename = sys.argv[</span><span class="s2">1</span><span class="s1">]</span>
+<span class="s0">del </span><span class="s1">sys.argv[</span><span class="s2">1</span><span class="s1">]</span>
+
+<span class="s0">if </span><span class="s1">test_filename == </span><span class="s3">'test_urllib2_localnet.py' </span><span class="s0">and </span><span class="s1">os.environ.get(</span><span class="s3">'APPVEYOR'</span><span class="s1">):</span>
+    <span class="s1">os.environ[</span><span class="s3">'GEVENT_DEBUG'</span><span class="s1">] = </span><span class="s3">'TRACE'</span>
+
+<span class="s1">print(</span><span class="s3">'Running with patch_all(): %s' </span><span class="s1">% (test_filename</span><span class="s0">,</span><span class="s1">))</span>
+
+<span class="s0">from </span><span class="s1">gevent </span><span class="s0">import </span><span class="s1">monkey</span>
+<span class="s4"># Only test the default set of patch arguments.</span>
+<span class="s1">monkey.patch_all()</span>
+
+<span class="s0">from </span><span class="s1">.sysinfo </span><span class="s0">import </span><span class="s1">PY3</span>
+<span class="s0">from </span><span class="s1">.patched_tests_setup </span><span class="s0">import </span><span class="s1">disable_tests_in_source</span>
+<span class="s0">from </span><span class="s1">. </span><span class="s0">import </span><span class="s1">support</span>
+<span class="s0">from </span><span class="s1">. </span><span class="s0">import </span><span class="s1">resources</span>
+<span class="s0">from </span><span class="s1">. </span><span class="s0">import </span><span class="s1">SkipTest</span>
+<span class="s0">from </span><span class="s1">. </span><span class="s0">import </span><span class="s1">util</span>
+
+
+<span class="s4"># This uses the internal built-in function ``_thread._count()``,</span>
+<span class="s4"># which we don't/can't monkey-patch, so it returns inaccurate information.</span>
+<span class="s0">def </span><span class="s1">threading_setup():</span>
+    <span class="s0">if </span><span class="s1">PY3:</span>
+        <span class="s0">return </span><span class="s1">(</span><span class="s2">1</span><span class="s0">, </span><span class="s1">())</span>
+    <span class="s0">return </span><span class="s1">(</span><span class="s2">1</span><span class="s0">,</span><span class="s1">)</span>
+<span class="s4"># This then tries to wait for that value to return to its original value;</span>
+<span class="s4"># but if we started worker threads that can never happen.</span>
+<span class="s0">def </span><span class="s1">threading_cleanup(*_args):</span>
+    <span class="s0">return</span>
+<span class="s1">support.threading_setup = threading_setup</span>
+<span class="s1">support.threading_cleanup = threading_cleanup</span>
+
+
+<span class="s4"># On all versions of Python 3.6+, this also uses ``_thread._count()``,</span>
+<span class="s4"># meaning it suffers from inaccuracies,</span>
+<span class="s4"># and test_socket.py constantly fails with an extra thread</span>
+<span class="s4"># on some random test. We disable it entirely.</span>
+<span class="s4"># XXX: Figure out how to make a *definition* in ./support.py actually</span>
+<span class="s4"># override the original in test.support, without having to</span>
+<span class="s4"># manually set it</span>
+<span class="s4">#</span>
+<span class="s0">import </span><span class="s1">contextlib</span>
+<span class="s1">@contextlib.contextmanager</span>
+<span class="s0">def </span><span class="s1">wait_threads_exit(timeout=</span><span class="s0">None</span><span class="s1">): </span><span class="s4"># pylint:disable=unused-argument</span>
+    <span class="s0">yield</span>
+<span class="s1">support.wait_threads_exit = wait_threads_exit</span>
+
+<span class="s4"># On Python 3.11, they changed the way that they deal with this,</span>
+<span class="s4"># meaning that this method no longer works. (Actually, it's not</span>
+<span class="s4"># clear that any of our patches to `support` are doing anything on</span>
+<span class="s4"># Python 3 at all? They certainly aren't on 3.11). This was a good</span>
+<span class="s4"># thing As it led to adding the timeout value for the threadpool</span>
+<span class="s4"># idle threads. But...the default of 5s meant that many tests in</span>
+<span class="s4"># test_socket were each taking at least 5s to run, leading to the</span>
+<span class="s4"># whole thing exceeding the allowed test timeout. We could set the</span>
+<span class="s4"># GEVENT_THREADPOOL_IDLE_TASK_TIMEOUT env variable to a smaller</span>
+<span class="s4"># value, and although that might stress the system nicely, it's</span>
+<span class="s4"># not indicative of what end users see. And it's still hard to get</span>
+<span class="s4"># a correct value.</span>
+<span class="s4">#</span>
+<span class="s4"># So try harder to make sure our patches apply.</span>
+<span class="s4">#</span>
+<span class="s4"># If this fails, symptoms are very long running tests that can be resolved</span>
+<span class="s4"># by setting that TASK_TIMEOUT value small, and/or setting GEVENT_RESOLVER=block.</span>
+<span class="s4"># Also, some number of warnings about dangling threads, or failures</span>
+<span class="s4"># from wait_threads_exit</span>
+<span class="s0">try</span><span class="s1">:</span>
+    <span class="s0">from </span><span class="s1">test </span><span class="s0">import </span><span class="s1">support </span><span class="s0">as </span><span class="s1">ts</span>
+<span class="s0">except </span><span class="s1">ImportError:</span>
+    <span class="s0">pass</span>
+<span class="s0">else</span><span class="s1">:</span>
+    <span class="s1">ts.threading_setup = threading_setup</span>
+    <span class="s1">ts.threading_cleanup = threading_cleanup</span>
+    <span class="s1">ts.wait_threads_exit = wait_threads_exit</span>
+
+<span class="s0">try</span><span class="s1">:</span>
+    <span class="s0">from </span><span class="s1">test.support </span><span class="s0">import </span><span class="s1">threading_helper</span>
+<span class="s0">except </span><span class="s1">ImportError:</span>
+    <span class="s0">pass</span>
+<span class="s0">else</span><span class="s1">:</span>
+    <span class="s1">threading_helper.wait_threads_exit = wait_threads_exit</span>
+    <span class="s1">threading_helper.threading_setup = threading_setup</span>
+    <span class="s1">threading_helper.threading_cleanup = threading_cleanup</span>
+
+<span class="s4"># Configure allowed resources</span>
+<span class="s1">resources.setup_resources()</span>
+
+<span class="s0">if not </span><span class="s1">os.path.exists(test_filename) </span><span class="s0">and </span><span class="s1">os.sep </span><span class="s0">not in </span><span class="s1">test_filename:</span>
+    <span class="s4"># A simple filename, given without a path, that doesn't exist.</span>
+    <span class="s4"># So we change to the appropriate directory, if we can find it.</span>
+    <span class="s4"># This happens when copy-pasting the output of the testrunner</span>
+    <span class="s0">for </span><span class="s1">d </span><span class="s0">in </span><span class="s1">util.find_stdlib_tests():</span>
+        <span class="s0">if </span><span class="s1">os.path.exists(os.path.join(d</span><span class="s0">, </span><span class="s1">test_filename)):</span>
+            <span class="s1">os.chdir(d)</span>
+            <span class="s0">break</span>
+
+<span class="s1">__file__ = os.path.join(os.getcwd()</span><span class="s0">, </span><span class="s1">test_filename)</span>
+
+<span class="s1">test_name = os.path.splitext(test_filename)[</span><span class="s2">0</span><span class="s1">]</span>
+
+<span class="s4"># It's important that the `module_source` be a native</span>
+<span class="s4"># string. Passing unicode to `compile` on Python 2 can</span>
+<span class="s4"># do bad things: it conflicts with a 'coding:' directive,</span>
+<span class="s4"># and it can cause some TypeError with string literals</span>
+<span class="s4"># We do use with; just not on the same line!</span>
+<span class="s0">if </span><span class="s1">sys.version_info[</span><span class="s2">0</span><span class="s1">] &gt;= </span><span class="s2">3</span><span class="s1">:</span>
+    <span class="s1">module_file = open(test_filename</span><span class="s0">, </span><span class="s1">encoding=</span><span class="s3">'utf-8'</span><span class="s1">) </span><span class="s4"># pylint:disable=consider-using-with</span>
+<span class="s0">else</span><span class="s1">:</span>
+    <span class="s1">module_file = open(test_filename) </span><span class="s4"># pylint:disable=consider-using-with,unspecified-encoding</span>
+<span class="s0">with </span><span class="s1">module_file:</span>
+    <span class="s1">module_source = module_file.read()</span>
+<span class="s1">module_source = disable_tests_in_source(module_source</span><span class="s0">, </span><span class="s1">test_name)</span>
+
+<span class="s4"># We write the module source to a file so that tracebacks</span>
+<span class="s4"># show correctly, since disabling the tests changes line</span>
+<span class="s4"># numbers. However, note that __file__ must still point to the</span>
+<span class="s4"># real location so that data files can be found.</span>
+<span class="s4"># See https://github.com/gevent/gevent/issues/1306</span>
+<span class="s0">import </span><span class="s1">tempfile</span>
+<span class="s1">temp_handle</span><span class="s0">, </span><span class="s1">temp_path = tempfile.mkstemp(prefix=test_name</span><span class="s0">, </span><span class="s1">suffix=</span><span class="s3">'.py'</span><span class="s0">, </span><span class="s1">text=</span><span class="s0">True</span><span class="s1">)</span>
+<span class="s1">os.write(temp_handle</span><span class="s0">,</span>
+         <span class="s1">module_source.encode(</span><span class="s3">'utf-8'</span><span class="s1">) </span><span class="s0">if not </span><span class="s1">isinstance(module_source</span><span class="s0">, </span><span class="s1">bytes) </span><span class="s0">else </span><span class="s1">module_source)</span>
+<span class="s1">os.close(temp_handle)</span>
+<span class="s0">try</span><span class="s1">:</span>
+    <span class="s1">module_code = compile(module_source</span><span class="s0">,</span>
+                          <span class="s1">temp_path</span><span class="s0">,</span>
+                          <span class="s3">'exec'</span><span class="s0">,</span>
+                          <span class="s1">dont_inherit=</span><span class="s0">True</span><span class="s1">)</span>
+    <span class="s1">exec(module_code</span><span class="s0">, </span><span class="s1">globals())</span>
+<span class="s0">except </span><span class="s1">SkipTest </span><span class="s0">as </span><span class="s1">e:</span>
+    <span class="s4"># Some tests can raise test.support.ResourceDenied</span>
+    <span class="s4"># in their main method before the testrunner takes over.</span>
+    <span class="s4"># That's a kind of SkipTest. we can't get a true skip count because it</span>
+    <span class="s4"># hasn't run, though.</span>
+    <span class="s1">print(e)</span>
+    <span class="s4"># Match the regular unittest output, including ending with skipped</span>
+    <span class="s1">print(</span><span class="s3">&quot;Ran 0 tests in 0.0s&quot;</span><span class="s1">)</span>
+    <span class="s1">print(</span><span class="s3">'OK (skipped=0)'</span><span class="s1">)</span>
+<span class="s0">finally</span><span class="s1">:</span>
+    <span class="s0">try</span><span class="s1">:</span>
+        <span class="s1">os.remove(temp_path)</span>
+    <span class="s0">except </span><span class="s1">OSError:</span>
+        <span class="s0">pass</span>
+</pre>
+</body>
+</html>

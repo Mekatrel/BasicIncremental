@@ -1,0 +1,133 @@
+<html>
+<head>
+<title>test__selectors.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #cc7832;}
+.s3 { color: #6897bb;}
+.s4 { color: #a5c261;}
+.s5 { color: #6a8759;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+test__selectors.py</font>
+</center></td></tr></table>
+<pre><span class="s0"># Tests for gevent.selectors in its native form, without</span>
+<span class="s0"># monkey-patching.</span>
+
+<span class="s2">import </span><span class="s1">gevent</span>
+<span class="s2">from </span><span class="s1">gevent </span><span class="s2">import </span><span class="s1">socket</span>
+<span class="s2">from </span><span class="s1">gevent </span><span class="s2">import </span><span class="s1">selectors</span>
+
+<span class="s2">import </span><span class="s1">gevent.testing </span><span class="s2">as </span><span class="s1">greentest</span>
+
+<span class="s2">class </span><span class="s1">SelectorTestMixin(object):</span>
+
+    <span class="s1">@staticmethod</span>
+    <span class="s2">def </span><span class="s1">run_selector_once(sel</span><span class="s2">, </span><span class="s1">timeout=</span><span class="s3">3</span><span class="s1">):</span>
+        <span class="s0"># Run in a background greenlet, leaving the main</span>
+        <span class="s0"># greenlet free to send data.</span>
+        <span class="s1">events = sel.select(timeout=timeout)</span>
+        <span class="s2">for </span><span class="s1">key</span><span class="s2">, </span><span class="s1">mask </span><span class="s2">in </span><span class="s1">events:</span>
+            <span class="s1">key.data(sel</span><span class="s2">, </span><span class="s1">key.fileobj</span><span class="s2">, </span><span class="s1">mask)</span>
+            <span class="s1">gevent.sleep()</span>
+
+    <span class="s1">unregister_after_send = </span><span class="s2">True</span>
+
+    <span class="s2">def </span><span class="s1">read_from_ready_socket_and_reply(self</span><span class="s2">, </span><span class="s1">selector</span><span class="s2">, </span><span class="s1">conn</span><span class="s2">, </span><span class="s1">_events):</span>
+        <span class="s1">data = conn.recv(</span><span class="s3">100</span><span class="s1">)  </span><span class="s0"># Should be ready</span>
+        <span class="s2">if </span><span class="s1">data:</span>
+            <span class="s1">conn.send(data)  </span><span class="s0"># Hope it won't block</span>
+
+        <span class="s0"># Must unregister before we close.</span>
+        <span class="s2">if </span><span class="s1">self.unregister_after_send:</span>
+            <span class="s1">selector.unregister(conn)</span>
+            <span class="s1">conn.close()</span>
+
+    <span class="s2">def </span><span class="s1">_check_selector(self</span><span class="s2">, </span><span class="s1">sel):</span>
+        <span class="s1">server</span><span class="s2">, </span><span class="s1">client = socket.socketpair()</span>
+        <span class="s1">glet = </span><span class="s2">None</span>
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s1">sel.register(server</span><span class="s2">, </span><span class="s1">selectors.EVENT_READ</span><span class="s2">, </span><span class="s1">self.read_from_ready_socket_and_reply)</span>
+            <span class="s1">glet = gevent.spawn(self.run_selector_once</span><span class="s2">, </span><span class="s1">sel)</span>
+            <span class="s1">DATA = </span><span class="s4">b'abcdef'</span>
+            <span class="s1">client.send(DATA)</span>
+            <span class="s1">data = client.recv(</span><span class="s3">50</span><span class="s1">) </span><span class="s0"># here is probably where we yield to the event loop</span>
+            <span class="s1">self.assertEqual(data</span><span class="s2">, </span><span class="s1">DATA)</span>
+        <span class="s2">finally</span><span class="s1">:</span>
+            <span class="s1">sel.close()</span>
+            <span class="s1">server.close()</span>
+            <span class="s1">client.close()</span>
+            <span class="s2">if </span><span class="s1">glet </span><span class="s2">is not None</span><span class="s1">:</span>
+                <span class="s1">glet.join(</span><span class="s3">10</span><span class="s1">)</span>
+        <span class="s1">self.assertTrue(glet </span><span class="s2">is not None and </span><span class="s1">glet.ready())</span>
+
+
+<span class="s2">class </span><span class="s1">GeventSelectorTest(SelectorTestMixin</span><span class="s2">,</span>
+                         <span class="s1">greentest.TestCase):</span>
+
+    <span class="s2">def </span><span class="s1">test_select_using_socketpair(self):</span>
+        <span class="s0"># Basic test.</span>
+        <span class="s2">with </span><span class="s1">selectors.GeventSelector() </span><span class="s2">as </span><span class="s1">sel:</span>
+            <span class="s1">self._check_selector(sel)</span>
+
+    <span class="s2">def </span><span class="s1">test_select_many_sockets(self):</span>
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s1">AF_UNIX = socket.AF_UNIX</span>
+        <span class="s2">except </span><span class="s1">AttributeError:</span>
+            <span class="s1">AF_UNIX = </span><span class="s2">None</span>
+
+        <span class="s1">pairs = [socket.socketpair() </span><span class="s2">for </span><span class="s1">_ </span><span class="s2">in </span><span class="s1">range(</span><span class="s3">10</span><span class="s1">)]</span>
+
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s1">server_sel = selectors.GeventSelector()</span>
+            <span class="s1">client_sel = selectors.GeventSelector()</span>
+            <span class="s2">for </span><span class="s1">i</span><span class="s2">, </span><span class="s1">pair </span><span class="s2">in </span><span class="s1">enumerate(pairs):</span>
+                <span class="s1">server</span><span class="s2">, </span><span class="s1">client = pair</span>
+                <span class="s1">server_sel.register(server</span><span class="s2">, </span><span class="s1">selectors.EVENT_READ</span><span class="s2">,</span>
+                                    <span class="s1">self.read_from_ready_socket_and_reply)</span>
+                <span class="s1">client_sel.register(client</span><span class="s2">, </span><span class="s1">selectors.EVENT_READ</span><span class="s2">, </span><span class="s1">i)</span>
+                <span class="s0"># Prime them all to be ready at once.</span>
+                <span class="s1">data = str(i).encode(</span><span class="s5">'ascii'</span><span class="s1">)</span>
+                <span class="s1">client.send(data)</span>
+
+            <span class="s0"># Read and reply to all the clients..</span>
+            <span class="s0"># Everyone should be ready, so we ask not to block.</span>
+            <span class="s0"># The call to gevent.idle() is there to make sure that</span>
+            <span class="s0"># all event loop implementations (looking at you, libuv)</span>
+            <span class="s0"># get a chance to poll for IO. Without it, libuv</span>
+            <span class="s0"># doesn't find any results here.</span>
+            <span class="s0"># Not blocking only works for AF_UNIX sockets, though.</span>
+            <span class="s0"># If we got AF_INET (Windows) the data may need some time to</span>
+            <span class="s0"># traverse through the layers.</span>
+            <span class="s1">gevent.idle()</span>
+            <span class="s1">self.run_selector_once(</span>
+                <span class="s1">server_sel</span><span class="s2">,</span>
+                <span class="s1">timeout=-</span><span class="s3">1 </span><span class="s2">if </span><span class="s1">pairs[</span><span class="s3">0</span><span class="s1">][</span><span class="s3">0</span><span class="s1">].family == AF_UNIX </span><span class="s2">else </span><span class="s3">3</span><span class="s1">)</span>
+
+            <span class="s1">found = </span><span class="s3">0</span>
+            <span class="s2">for </span><span class="s1">key</span><span class="s2">, </span><span class="s1">_ </span><span class="s2">in </span><span class="s1">client_sel.select(timeout=</span><span class="s3">3</span><span class="s1">):</span>
+                <span class="s1">expected = str(key.data).encode(</span><span class="s5">'ascii'</span><span class="s1">)</span>
+                <span class="s1">data = key.fileobj.recv(</span><span class="s3">50</span><span class="s1">)</span>
+                <span class="s1">self.assertEqual(data</span><span class="s2">, </span><span class="s1">expected)</span>
+                <span class="s1">found += </span><span class="s3">1</span>
+            <span class="s1">self.assertEqual(found</span><span class="s2">, </span><span class="s1">len(pairs))</span>
+        <span class="s2">finally</span><span class="s1">:</span>
+            <span class="s1">server_sel.close()</span>
+            <span class="s1">client_sel.close()</span>
+            <span class="s2">for </span><span class="s1">pair </span><span class="s2">in </span><span class="s1">pairs:</span>
+                <span class="s2">for </span><span class="s1">s </span><span class="s2">in </span><span class="s1">pair:</span>
+                    <span class="s1">s.close()</span>
+
+
+
+<span class="s2">if </span><span class="s1">__name__ == </span><span class="s5">'__main__'</span><span class="s1">:</span>
+    <span class="s1">greentest.main()</span>
+</pre>
+</body>
+</html>

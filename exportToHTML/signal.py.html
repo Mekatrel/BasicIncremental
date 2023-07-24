@@ -1,0 +1,163 @@
+<html>
+<head>
+<title>signal.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #629755; font-style: italic;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #cc7832;}
+.s3 { color: #808080;}
+.s4 { color: #6a8759;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+signal.py</font>
+</center></td></tr></table>
+<pre><span class="s0">&quot;&quot;&quot; 
+Cooperative implementation of special cases of :func:`signal.signal`. 
+ 
+This module is designed to work with libev's child watchers, as used 
+by default in :func:`gevent.os.fork` Note that each ``SIGCHLD`` 
+handler will be run in a new greenlet when the signal is delivered 
+(just like :class:`gevent.hub.signal`) 
+ 
+The implementations in this module are only monkey patched if 
+:func:`gevent.os.waitpid` is being used (the default) and if 
+:const:`signal.SIGCHLD` is available; see :func:`gevent.os.fork` for 
+information on configuring this not to be the case for advanced uses. 
+ 
+.. versionadded:: 1.1b4 
+.. versionchanged:: 1.5a4 
+   Previously there was a backwards compatibility alias 
+   ``gevent.signal``, introduced in 1.1b4, that partly shadowed this 
+   module, confusing humans and static analysis tools alike. That alias 
+   has been removed. (See `gevent.signal_handler`.) 
+&quot;&quot;&quot;</span>
+
+<span class="s2">from </span><span class="s1">__future__ </span><span class="s2">import </span><span class="s1">absolute_import</span>
+
+<span class="s2">from </span><span class="s1">gevent._util </span><span class="s2">import </span><span class="s1">_NONE </span><span class="s2">as </span><span class="s1">_INITIAL</span>
+<span class="s2">from </span><span class="s1">gevent._util </span><span class="s2">import </span><span class="s1">copy_globals</span>
+
+<span class="s2">import </span><span class="s1">signal </span><span class="s2">as </span><span class="s1">_signal</span>
+
+<span class="s1">__implements__ = []</span>
+<span class="s1">__extensions__ = []</span>
+
+
+<span class="s1">_child_handler = _INITIAL</span>
+
+<span class="s1">_signal_signal = _signal.signal</span>
+<span class="s1">_signal_getsignal = _signal.getsignal</span>
+
+
+<span class="s2">def </span><span class="s1">getsignal(signalnum):</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Exactly the same as :func:`signal.getsignal` except where 
+    :const:`signal.SIGCHLD` is concerned. 
+ 
+    For :const:`signal.SIGCHLD`, this cooperates with :func:`signal` 
+    to provide consistent answers. 
+    &quot;&quot;&quot;</span>
+    <span class="s2">if </span><span class="s1">signalnum != _signal.SIGCHLD:</span>
+        <span class="s2">return </span><span class="s1">_signal_getsignal(signalnum)</span>
+
+    <span class="s2">global </span><span class="s1">_child_handler</span>
+    <span class="s2">if </span><span class="s1">_child_handler </span><span class="s2">is </span><span class="s1">_INITIAL:</span>
+        <span class="s1">_child_handler = _signal_getsignal(_signal.SIGCHLD)</span>
+
+    <span class="s2">return </span><span class="s1">_child_handler</span>
+
+
+<span class="s2">def </span><span class="s1">signal(signalnum</span><span class="s2">, </span><span class="s1">handler):</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Exactly the same as :func:`signal.signal` except where 
+    :const:`signal.SIGCHLD` is concerned. 
+ 
+    .. note:: 
+ 
+       A :const:`signal.SIGCHLD` handler installed with this function 
+       will only be triggered for children that are forked using 
+       :func:`gevent.os.fork` (:func:`gevent.os.fork_and_watch`); 
+       children forked before monkey patching, or otherwise by the raw 
+       :func:`os.fork`, will not trigger the handler installed by this 
+       function. (It's unlikely that a SIGCHLD handler installed with 
+       the builtin :func:`signal.signal` would be triggered either; 
+       libev typically overwrites such a handler at the C level. At 
+       the very least, it's full of race conditions.) 
+ 
+    .. note:: 
+ 
+        Use of ``SIG_IGN`` and ``SIG_DFL`` may also have race conditions 
+        with libev child watchers and the :mod:`gevent.subprocess` module. 
+ 
+    .. versionchanged:: 1.2a1 
+         If ``SIG_IGN`` or ``SIG_DFL`` are used to ignore ``SIGCHLD``, a 
+         future use of ``gevent.subprocess`` and libev child watchers 
+         will once again work. However, on Python 2, use of ``os.popen`` 
+         will fail. 
+ 
+    .. versionchanged:: 1.1rc2 
+         Allow using ``SIG_IGN`` and ``SIG_DFL`` to reset and ignore ``SIGCHLD``. 
+         However, this allows the possibility of a race condition if ``gevent.subprocess`` 
+         had already been used. 
+    &quot;&quot;&quot;</span>
+    <span class="s2">if </span><span class="s1">signalnum != _signal.SIGCHLD:</span>
+        <span class="s2">return </span><span class="s1">_signal_signal(signalnum</span><span class="s2">, </span><span class="s1">handler)</span>
+
+    <span class="s3"># TODO: raise value error if not called from the main</span>
+    <span class="s3"># greenlet, just like threads</span>
+
+    <span class="s2">if </span><span class="s1">handler != _signal.SIG_IGN </span><span class="s2">and </span><span class="s1">handler != _signal.SIG_DFL </span><span class="s2">and not </span><span class="s1">callable(handler):</span>
+        <span class="s3"># exact same error message raised by the stdlib</span>
+        <span class="s2">raise </span><span class="s1">TypeError(</span><span class="s4">&quot;signal handler must be signal.SIG_IGN, signal.SIG_DFL, or a callable object&quot;</span><span class="s1">)</span>
+
+    <span class="s1">old_handler = getsignal(signalnum)</span>
+    <span class="s2">global </span><span class="s1">_child_handler</span>
+    <span class="s1">_child_handler = handler</span>
+    <span class="s2">if </span><span class="s1">handler </span><span class="s2">in </span><span class="s1">(_signal.SIG_IGN</span><span class="s2">, </span><span class="s1">_signal.SIG_DFL):</span>
+        <span class="s3"># Allow resetting/ignoring this signal at the process level.</span>
+        <span class="s3"># Note that this conflicts with gevent.subprocess and other users</span>
+        <span class="s3"># of child watchers, until the next time gevent.subprocess/loop.install_sigchld()</span>
+        <span class="s3"># is called.</span>
+        <span class="s2">from </span><span class="s1">gevent.hub </span><span class="s2">import </span><span class="s1">get_hub </span><span class="s3"># Are we always safe to import here?</span>
+        <span class="s1">_signal_signal(signalnum</span><span class="s2">, </span><span class="s1">handler)</span>
+        <span class="s1">get_hub().loop.reset_sigchld()</span>
+    <span class="s2">return </span><span class="s1">old_handler</span>
+
+
+<span class="s2">def </span><span class="s1">_on_child_hook():</span>
+    <span class="s3"># This is called in the hub greenlet. To let the function</span>
+    <span class="s3"># do more useful work, like use blocking functions,</span>
+    <span class="s3"># we run it in a new greenlet; see gevent.hub.signal</span>
+    <span class="s2">if </span><span class="s1">callable(_child_handler):</span>
+        <span class="s3"># None is a valid value for the frame argument</span>
+        <span class="s2">from </span><span class="s1">gevent </span><span class="s2">import </span><span class="s1">Greenlet</span>
+        <span class="s1">greenlet = Greenlet(_child_handler</span><span class="s2">, </span><span class="s1">_signal.SIGCHLD</span><span class="s2">, None</span><span class="s1">)</span>
+        <span class="s1">greenlet.switch()</span>
+
+
+<span class="s2">import </span><span class="s1">gevent.os</span>
+
+<span class="s2">if </span><span class="s4">'waitpid' </span><span class="s2">in </span><span class="s1">gevent.os.__implements__ </span><span class="s2">and </span><span class="s1">hasattr(_signal</span><span class="s2">, </span><span class="s4">'SIGCHLD'</span><span class="s1">):</span>
+    <span class="s3"># Tightly coupled here to gevent.os and its waitpid implementation; only use these</span>
+    <span class="s3"># if necessary.</span>
+    <span class="s1">gevent.os._on_child_hook = _on_child_hook</span>
+    <span class="s1">__implements__.append(</span><span class="s4">&quot;signal&quot;</span><span class="s1">)</span>
+    <span class="s1">__implements__.append(</span><span class="s4">&quot;getsignal&quot;</span><span class="s1">)</span>
+<span class="s2">else</span><span class="s1">:</span>
+    <span class="s3"># XXX: This breaks test__all__ on windows</span>
+    <span class="s1">__extensions__.append(</span><span class="s4">&quot;signal&quot;</span><span class="s1">)</span>
+    <span class="s1">__extensions__.append(</span><span class="s4">&quot;getsignal&quot;</span><span class="s1">)</span>
+
+<span class="s1">__imports__ = copy_globals(_signal</span><span class="s2">, </span><span class="s1">globals()</span><span class="s2">,</span>
+                           <span class="s1">names_to_ignore=__implements__ + __extensions__</span><span class="s2">,</span>
+                           <span class="s1">dunder_names_to_keep=())</span>
+
+<span class="s1">__all__ = __implements__ + __extensions__</span>
+</pre>
+</body>
+</html>

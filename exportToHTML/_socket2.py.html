@@ -1,0 +1,358 @@
+<html>
+<head>
+<title>_socket2.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #629755; font-style: italic;}
+.s3 { color: #cc7832;}
+.s4 { color: #6a8759;}
+.s5 { color: #6897bb;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+_socket2.py</font>
+</center></td></tr></table>
+<pre><span class="s0"># Copyright (c) 2009-2014 Denis Bilenko and gevent contributors. See LICENSE for details.</span>
+<span class="s2">&quot;&quot;&quot; 
+Python 2 socket module. 
+&quot;&quot;&quot;</span>
+<span class="s3">from </span><span class="s1">__future__ </span><span class="s3">import </span><span class="s1">absolute_import</span>
+<span class="s3">from </span><span class="s1">__future__ </span><span class="s3">import </span><span class="s1">print_function</span>
+
+<span class="s0"># Our import magic sadly makes this warning useless</span>
+<span class="s0"># pylint: disable=undefined-variable</span>
+<span class="s3">import </span><span class="s1">sys</span>
+
+<span class="s3">from </span><span class="s1">gevent </span><span class="s3">import </span><span class="s1">_socketcommon</span>
+<span class="s3">from </span><span class="s1">gevent._util </span><span class="s3">import </span><span class="s1">copy_globals</span>
+<span class="s3">from </span><span class="s1">gevent._compat </span><span class="s3">import </span><span class="s1">PYPY</span>
+
+<span class="s1">copy_globals(_socketcommon</span><span class="s3">, </span><span class="s1">globals()</span><span class="s3">,</span>
+             <span class="s1">names_to_ignore=_socketcommon.__py3_imports__ + _socketcommon.__extensions__</span><span class="s3">,</span>
+             <span class="s1">dunder_names_to_keep=())</span>
+
+<span class="s1">__socket__ = _socketcommon.__socket__</span>
+<span class="s1">__implements__ = _socketcommon._implements</span>
+<span class="s1">__extensions__ = _socketcommon.__extensions__</span>
+<span class="s1">__imports__ = [i </span><span class="s3">for </span><span class="s1">i </span><span class="s3">in </span><span class="s1">_socketcommon.__imports__ </span><span class="s3">if </span><span class="s1">i </span><span class="s3">not in </span><span class="s1">_socketcommon.__py3_imports__]</span>
+<span class="s1">__dns__ = _socketcommon.__dns__</span>
+<span class="s3">try</span><span class="s1">:</span>
+    <span class="s1">_fileobject = __socket__._fileobject</span>
+<span class="s3">except </span><span class="s1">AttributeError:</span>
+    <span class="s0"># Allow this module to be imported under Python 3</span>
+    <span class="s0"># for building the docs</span>
+    <span class="s1">_fileobject = object</span>
+<span class="s3">else</span><span class="s1">:</span>
+    <span class="s0"># Python 2 doesn't natively support with statements on _fileobject;</span>
+    <span class="s0"># but it substantially eases our test cases if we can do the same with on both Py3</span>
+    <span class="s0"># and Py2. (For this same reason we make the socket itself a context manager.)</span>
+    <span class="s0"># Implementation copied from Python 3</span>
+    <span class="s3">assert not </span><span class="s1">hasattr(_fileobject</span><span class="s3">, </span><span class="s4">'__enter__'</span><span class="s1">)</span>
+    <span class="s0"># we could either patch in place:</span>
+    <span class="s0">#_fileobject.__enter__ = lambda self: self</span>
+    <span class="s0">#_fileobject.__exit__ = lambda self, *args: self.close() if not self.closed else None</span>
+    <span class="s0"># or we could subclass. subclassing has the benefit of not</span>
+    <span class="s0"># changing the behaviour of the stdlib if we're just imported; OTOH,</span>
+    <span class="s0"># under Python 2.6/2.7, test_urllib2net.py asserts that the class IS</span>
+    <span class="s0"># socket._fileobject (sigh), so we have to work around that.</span>
+
+    <span class="s0"># We also make it call our custom socket closing method that disposes</span>
+    <span class="s0"># of IO watchers but not the actual socket itself.</span>
+
+    <span class="s0"># Python 2 relies on reference counting to close sockets, so this is all</span>
+    <span class="s0"># very ugly and fragile.</span>
+
+    <span class="s3">class </span><span class="s1">_fileobject(_fileobject): </span><span class="s0"># pylint:disable=function-redefined</span>
+        <span class="s1">__slots__ = (</span>
+            <span class="s4">'__weakref__'</span><span class="s3">,</span>
+        <span class="s1">)</span>
+
+        <span class="s3">def </span><span class="s1">__enter__(self):</span>
+            <span class="s3">return </span><span class="s1">self</span>
+
+        <span class="s3">def </span><span class="s1">__exit__(self</span><span class="s3">, </span><span class="s1">*args):</span>
+            <span class="s3">if not </span><span class="s1">self.closed:</span>
+                <span class="s1">self.close()</span>
+
+        <span class="s3">def </span><span class="s1">close(self):</span>
+            <span class="s3">if </span><span class="s1">self._sock </span><span class="s3">is not None</span><span class="s1">:</span>
+                <span class="s1">self._sock._drop_events_and_close(closefd=</span><span class="s3">False</span><span class="s1">)</span>
+            <span class="s1">super(_fileobject</span><span class="s3">, </span><span class="s1">self).close()</span>
+
+
+<span class="s3">class </span><span class="s1">_closedsocket(object):</span>
+    <span class="s1">__slots__ = ()</span>
+
+    <span class="s3">def </span><span class="s1">_dummy(*args</span><span class="s3">, </span><span class="s1">**kwargs): </span><span class="s0"># pylint:disable=no-method-argument,unused-argument</span>
+        <span class="s3">raise </span><span class="s1">error(EBADF</span><span class="s3">, </span><span class="s4">'Bad file descriptor'</span><span class="s1">)</span>
+    <span class="s0"># All _delegate_methods must also be initialized here.</span>
+    <span class="s1">send = recv = recv_into = sendto = recvfrom = recvfrom_into = _dummy</span>
+
+    <span class="s3">def </span><span class="s1">__nonzero__(self):</span>
+        <span class="s3">return False</span>
+
+    <span class="s1">__bool__ = __nonzero__</span>
+
+    <span class="s3">if </span><span class="s1">PYPY:</span>
+
+        <span class="s3">def </span><span class="s1">_drop(self):</span>
+            <span class="s3">pass</span>
+
+        <span class="s3">def </span><span class="s1">_reuse(self):</span>
+            <span class="s3">pass</span>
+
+    <span class="s1">__getattr__ = _dummy</span>
+
+
+<span class="s1">gtype = type</span>
+
+<span class="s1">_Base = _socketcommon.SocketMixin</span>
+
+<span class="s3">class </span><span class="s1">socket(_Base):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    gevent `socket.socket &lt;https://docs.python.org/2/library/socket.html#socket-objects&gt;`_ 
+    for Python 2. 
+ 
+    This object should have the same API as the standard library socket linked to above. Not all 
+    methods are specifically documented here; when they are they may point out a difference 
+    to be aware of or may document a method the standard library does not. 
+ 
+    .. versionchanged:: 1.5.0 
+        This object is a context manager, returning itself, like in Python 3. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s0"># pylint:disable=too-many-public-methods</span>
+
+    <span class="s1">__slots__ = (</span>
+
+    <span class="s1">)</span>
+
+    <span class="s3">def </span><span class="s1">__init__(self</span><span class="s3">, </span><span class="s1">family=AF_INET</span><span class="s3">, </span><span class="s1">type=SOCK_STREAM</span><span class="s3">, </span><span class="s1">proto=</span><span class="s5">0</span><span class="s3">, </span><span class="s1">_sock=</span><span class="s3">None</span><span class="s1">):</span>
+        <span class="s1">_Base.__init__(self)</span>
+        <span class="s1">timeout = _socket.getdefaulttimeout()</span>
+        <span class="s3">if </span><span class="s1">_sock </span><span class="s3">is None</span><span class="s1">:</span>
+            <span class="s1">self._sock = _realsocket(family</span><span class="s3">, </span><span class="s1">type</span><span class="s3">, </span><span class="s1">proto)</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s3">if </span><span class="s1">hasattr(_sock</span><span class="s3">, </span><span class="s4">'_sock'</span><span class="s1">):</span>
+                <span class="s1">timeout = getattr(_sock</span><span class="s3">, </span><span class="s4">'timeout'</span><span class="s3">, </span><span class="s1">timeout)</span>
+                <span class="s3">while </span><span class="s1">hasattr(_sock</span><span class="s3">, </span><span class="s4">'_sock'</span><span class="s1">):</span>
+                    <span class="s0"># passed a gevent socket or a native</span>
+                    <span class="s0"># socket._socketobject. Unwrap this all the way to the</span>
+                    <span class="s0"># native _socket.socket.</span>
+                    <span class="s1">_sock = _sock._sock</span>
+
+            <span class="s1">self._sock = _sock</span>
+
+            <span class="s3">if </span><span class="s1">PYPY:</span>
+                <span class="s1">self._sock._reuse()</span>
+        <span class="s1">self.timeout = timeout</span>
+        <span class="s1">self._sock.setblocking(</span><span class="s5">0</span><span class="s1">)</span>
+        <span class="s1">fileno = self._sock.fileno()</span>
+        <span class="s1">self.hub = get_hub()</span>
+        <span class="s1">io = self.hub.loop.io</span>
+        <span class="s1">self._read_event = io(fileno</span><span class="s3">, </span><span class="s5">1</span><span class="s1">)</span>
+        <span class="s1">self._write_event = io(fileno</span><span class="s3">, </span><span class="s5">2</span><span class="s1">)</span>
+
+    <span class="s3">def </span><span class="s1">__enter__(self):</span>
+        <span class="s3">return </span><span class="s1">self</span>
+
+    <span class="s3">def </span><span class="s1">__exit__(self</span><span class="s3">, </span><span class="s1">t</span><span class="s3">, </span><span class="s1">v</span><span class="s3">, </span><span class="s1">tb):</span>
+        <span class="s1">self.close()</span>
+
+    <span class="s3">def </span><span class="s1">__repr__(self):</span>
+        <span class="s3">return </span><span class="s4">'&lt;%s at %s %s&gt;' </span><span class="s1">% (type(self).__name__</span><span class="s3">, </span><span class="s1">hex(id(self))</span><span class="s3">, </span><span class="s1">self._formatinfo())</span>
+
+    <span class="s3">def </span><span class="s1">__str__(self):</span>
+        <span class="s3">return </span><span class="s4">'&lt;%s %s&gt;' </span><span class="s1">% (type(self).__name__</span><span class="s3">, </span><span class="s1">self._formatinfo())</span>
+
+    <span class="s3">def </span><span class="s1">_formatinfo(self):</span>
+        <span class="s0"># pylint:disable=broad-except</span>
+        <span class="s3">try</span><span class="s1">:</span>
+            <span class="s1">fileno = self.fileno()</span>
+        <span class="s3">except </span><span class="s1">Exception </span><span class="s3">as </span><span class="s1">ex:</span>
+            <span class="s1">fileno = str(ex)</span>
+        <span class="s3">try</span><span class="s1">:</span>
+            <span class="s1">sockname = self.getsockname()</span>
+            <span class="s1">sockname = </span><span class="s4">'%s:%s' </span><span class="s1">% sockname</span>
+        <span class="s3">except </span><span class="s1">Exception:</span>
+            <span class="s1">sockname = </span><span class="s3">None</span>
+        <span class="s3">try</span><span class="s1">:</span>
+            <span class="s1">peername = self.getpeername()</span>
+            <span class="s1">peername = </span><span class="s4">'%s:%s' </span><span class="s1">% peername</span>
+        <span class="s3">except </span><span class="s1">Exception:</span>
+            <span class="s1">peername = </span><span class="s3">None</span>
+        <span class="s1">result = </span><span class="s4">'fileno=%s' </span><span class="s1">% fileno</span>
+        <span class="s3">if </span><span class="s1">sockname </span><span class="s3">is not None</span><span class="s1">:</span>
+            <span class="s1">result += </span><span class="s4">' sock=' </span><span class="s1">+ str(sockname)</span>
+        <span class="s3">if </span><span class="s1">peername </span><span class="s3">is not None</span><span class="s1">:</span>
+            <span class="s1">result += </span><span class="s4">' peer=' </span><span class="s1">+ str(peername)</span>
+        <span class="s3">if </span><span class="s1">getattr(self</span><span class="s3">, </span><span class="s4">'timeout'</span><span class="s3">, None</span><span class="s1">) </span><span class="s3">is not None</span><span class="s1">:</span>
+            <span class="s1">result += </span><span class="s4">' timeout=' </span><span class="s1">+ str(self.timeout)</span>
+        <span class="s3">return </span><span class="s1">result</span>
+
+    <span class="s3">def </span><span class="s1">accept(self):</span>
+        <span class="s3">while </span><span class="s5">1</span><span class="s1">:</span>
+            <span class="s3">try</span><span class="s1">:</span>
+                <span class="s1">client_socket</span><span class="s3">, </span><span class="s1">address = self._sock.accept()</span>
+                <span class="s3">break</span>
+            <span class="s3">except </span><span class="s1">error </span><span class="s3">as </span><span class="s1">ex:</span>
+                <span class="s3">if </span><span class="s1">ex.args[</span><span class="s5">0</span><span class="s1">] != EWOULDBLOCK </span><span class="s3">or </span><span class="s1">self.timeout == </span><span class="s5">0.0</span><span class="s1">:</span>
+                    <span class="s3">raise</span>
+                <span class="s1">sys.exc_clear()</span>
+            <span class="s1">self._wait(self._read_event)</span>
+        <span class="s1">sockobj = socket(_sock=client_socket)</span>
+        <span class="s3">if </span><span class="s1">PYPY:</span>
+            <span class="s1">client_socket._drop()</span>
+        <span class="s3">return </span><span class="s1">sockobj</span><span class="s3">, </span><span class="s1">address</span>
+
+
+    <span class="s3">def </span><span class="s1">_drop_ref_on_close(self</span><span class="s3">, </span><span class="s1">sock):</span>
+        <span class="s0"># See the same method in _socket3.py. We just can't be as deterministic</span>
+        <span class="s0"># as we can on Python 3.</span>
+        <span class="s1">scheduled_new = self.hub.loop.closing_fd(sock.fileno())</span>
+        <span class="s3">if </span><span class="s1">PYPY:</span>
+            <span class="s1">meth = sock._drop</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s1">meth = sock.fileno </span><span class="s0"># Still keep it alive if we need to</span>
+        <span class="s3">if </span><span class="s1">scheduled_new:</span>
+            <span class="s1">self.hub.loop.run_callback(meth)</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s1">meth()</span>
+
+    <span class="s3">def </span><span class="s1">close(self</span><span class="s3">, </span><span class="s1">_closedsocket=_closedsocket):</span>
+        <span class="s3">if not </span><span class="s1">self._sock:</span>
+            <span class="s3">return</span>
+
+        <span class="s0"># This function should not reference any globals. See Python issue #808164.</span>
+
+        <span class="s0"># First, break any reference to the loop.io objects. Our</span>
+        <span class="s0"># fileno, which they were tied to, is about to be free to be</span>
+        <span class="s0"># reused, so these objects are no longer functional.</span>
+        <span class="s1">self._drop_events_and_close()</span>
+
+        <span class="s0"># Next, change self._sock. On CPython, this drops a</span>
+        <span class="s0"># reference, and if it was the last reference, __del__ will</span>
+        <span class="s0"># close it. (We cannot close it, makefile() relies on</span>
+        <span class="s0"># reference counting like this, and it may be shared among</span>
+        <span class="s0"># multiple wrapper objects). Methods *must not* cache</span>
+        <span class="s0"># `self._sock` separately from</span>
+        <span class="s0"># self._write_event/self._read_event, or they will be out of</span>
+        <span class="s0"># sync and we may get inappropriate errors. (See</span>
+        <span class="s0"># test__hub:TestCloseSocketWhilePolling for an example).</span>
+        <span class="s1">self._sock = _closedsocket()</span>
+
+    <span class="s1">@property</span>
+    <span class="s3">def </span><span class="s1">closed(self):</span>
+        <span class="s3">return </span><span class="s1">isinstance(self._sock</span><span class="s3">, </span><span class="s1">_closedsocket)</span>
+
+    <span class="s3">def </span><span class="s1">dup(self):</span>
+        <span class="s2">&quot;&quot;&quot;dup() -&gt; socket object 
+ 
+        Return a new socket object connected to the same system resource. 
+        Note, that the new socket does not inherit the timeout.&quot;&quot;&quot;</span>
+        <span class="s3">return </span><span class="s1">socket(_sock=self._sock)</span>
+
+    <span class="s3">def </span><span class="s1">makefile(self</span><span class="s3">, </span><span class="s1">mode=</span><span class="s4">'r'</span><span class="s3">, </span><span class="s1">bufsize=-</span><span class="s5">1</span><span class="s1">):</span>
+        <span class="s0"># Two things to look out for:</span>
+        <span class="s0"># 1) Closing the original socket object should not close the</span>
+        <span class="s0">#    fileobject (hence creating a new socket instance);</span>
+        <span class="s0">#    An alternate approach is what _socket3.py does, which is to</span>
+        <span class="s0">#    keep count of the times makefile objects have been opened (Py3's</span>
+        <span class="s0">#    SocketIO helps with that). But the newly created socket, which</span>
+        <span class="s0">#    has its own read/write watchers, does need those to be closed</span>
+        <span class="s0">#    when the fileobject is; our custom subclass does that. Note that</span>
+        <span class="s0">#    we can't pass the 'close=True' argument, as that causes reference counts</span>
+        <span class="s0">#    to get screwed up, and Python2 sockets rely on those.</span>
+        <span class="s0"># 2) The resulting fileobject must keep the timeout in order</span>
+        <span class="s0">#    to be compatible with the stdlib's socket.makefile.</span>
+        <span class="s0"># Pass self as _sock to preserve timeout.</span>
+        <span class="s1">fobj = _fileobject(type(self)(_sock=self)</span><span class="s3">, </span><span class="s1">mode</span><span class="s3">, </span><span class="s1">bufsize)</span>
+        <span class="s3">if </span><span class="s1">PYPY:</span>
+            <span class="s1">self._sock._drop()</span>
+        <span class="s3">return </span><span class="s1">fobj</span>
+
+    <span class="s3">def </span><span class="s1">sendall(self</span><span class="s3">, </span><span class="s1">data</span><span class="s3">, </span><span class="s1">flags=</span><span class="s5">0</span><span class="s1">):</span>
+        <span class="s3">if </span><span class="s1">isinstance(data</span><span class="s3">, </span><span class="s1">unicode):</span>
+            <span class="s1">data = data.encode()</span>
+        <span class="s3">return </span><span class="s1">_Base.sendall(self</span><span class="s3">, </span><span class="s1">data</span><span class="s3">, </span><span class="s1">flags)</span>
+
+    <span class="s3">if </span><span class="s1">PYPY:</span>
+
+        <span class="s3">def </span><span class="s1">_reuse(self):</span>
+            <span class="s1">self._sock._reuse()</span>
+
+        <span class="s3">def </span><span class="s1">_drop(self):</span>
+            <span class="s1">self._sock._drop()</span>
+
+
+<span class="s1">SocketType = socket</span>
+
+<span class="s3">if </span><span class="s1">hasattr(_socket</span><span class="s3">, </span><span class="s4">'socketpair'</span><span class="s1">):</span>
+    <span class="s0"># The native, low-level socketpair returns</span>
+    <span class="s0"># low-level objects</span>
+    <span class="s3">def </span><span class="s1">socketpair(family=getattr(_socket</span><span class="s3">, </span><span class="s4">'AF_UNIX'</span><span class="s3">, </span><span class="s1">_socket.AF_INET)</span><span class="s3">,</span>
+                   <span class="s1">type=_socket.SOCK_STREAM</span><span class="s3">, </span><span class="s1">proto=</span><span class="s5">0</span><span class="s1">):</span>
+        <span class="s1">one</span><span class="s3">, </span><span class="s1">two = _socket.socketpair(family</span><span class="s3">, </span><span class="s1">type</span><span class="s3">, </span><span class="s1">proto)</span>
+        <span class="s1">result = socket(_sock=one)</span><span class="s3">, </span><span class="s1">socket(_sock=two)</span>
+        <span class="s3">if </span><span class="s1">PYPY:</span>
+            <span class="s1">one._drop()</span>
+            <span class="s1">two._drop()</span>
+        <span class="s3">return </span><span class="s1">result</span>
+<span class="s3">elif </span><span class="s1">hasattr(__socket__</span><span class="s3">, </span><span class="s4">'socketpair'</span><span class="s1">):</span>
+    <span class="s0"># The high-level backport uses high-level socket APIs. It works</span>
+    <span class="s0"># cooperatively automatically if we're monkey-patched,</span>
+    <span class="s0"># else we must do it ourself.</span>
+    <span class="s1">_orig_socketpair = __socket__.socketpair</span>
+    <span class="s3">def </span><span class="s1">socketpair(family=_socket.AF_INET</span><span class="s3">, </span><span class="s1">type=_socket.SOCK_STREAM</span><span class="s3">, </span><span class="s1">proto=</span><span class="s5">0</span><span class="s1">):</span>
+        <span class="s1">one</span><span class="s3">, </span><span class="s1">two = _orig_socketpair(family</span><span class="s3">, </span><span class="s1">type</span><span class="s3">, </span><span class="s1">proto)</span>
+        <span class="s3">if not </span><span class="s1">isinstance(one</span><span class="s3">, </span><span class="s1">socket):</span>
+            <span class="s1">one = socket(_sock=one)</span>
+            <span class="s1">two = socket(_sock=two)</span>
+            <span class="s3">if </span><span class="s1">PYPY:</span>
+                <span class="s1">one._drop()</span>
+                <span class="s1">two._drop()</span>
+        <span class="s3">return </span><span class="s1">one</span><span class="s3">, </span><span class="s1">two</span>
+<span class="s3">elif </span><span class="s4">'socketpair' </span><span class="s3">in </span><span class="s1">__implements__:</span>
+    <span class="s1">__implements__.remove(</span><span class="s4">'socketpair'</span><span class="s1">)</span>
+
+<span class="s3">if </span><span class="s1">hasattr(_socket</span><span class="s3">, </span><span class="s4">'fromfd'</span><span class="s1">):</span>
+
+    <span class="s3">def </span><span class="s1">fromfd(fd</span><span class="s3">, </span><span class="s1">family</span><span class="s3">, </span><span class="s1">type</span><span class="s3">, </span><span class="s1">proto=</span><span class="s5">0</span><span class="s1">):</span>
+        <span class="s1">s = _socket.fromfd(fd</span><span class="s3">, </span><span class="s1">family</span><span class="s3">, </span><span class="s1">type</span><span class="s3">, </span><span class="s1">proto)</span>
+        <span class="s1">result = socket(_sock=s)</span>
+        <span class="s3">if </span><span class="s1">PYPY:</span>
+            <span class="s1">s._drop()</span>
+        <span class="s3">return </span><span class="s1">result</span>
+
+<span class="s3">elif </span><span class="s4">'fromfd' </span><span class="s3">in </span><span class="s1">__implements__:</span>
+    <span class="s1">__implements__.remove(</span><span class="s4">'fromfd'</span><span class="s1">)</span>
+
+<span class="s3">if </span><span class="s1">hasattr(__socket__</span><span class="s3">, </span><span class="s4">'ssl'</span><span class="s1">):</span>
+
+    <span class="s3">def </span><span class="s1">ssl(sock</span><span class="s3">, </span><span class="s1">keyfile=</span><span class="s3">None, </span><span class="s1">certfile=</span><span class="s3">None</span><span class="s1">):</span>
+        <span class="s0"># deprecated in 2.7.9 but still present;</span>
+        <span class="s0"># sometimes backported by distros. See ssl.py</span>
+        <span class="s0"># Note that we import gevent.ssl, not _ssl2, to get the correct</span>
+        <span class="s0"># version.</span>
+        <span class="s3">from </span><span class="s1">gevent </span><span class="s3">import </span><span class="s1">ssl </span><span class="s3">as </span><span class="s1">_sslmod</span>
+        <span class="s0"># wrap_socket is 2.7.9/backport, sslwrap_simple is older. They take</span>
+        <span class="s0"># the same arguments.</span>
+        <span class="s1">wrap = getattr(_sslmod</span><span class="s3">, </span><span class="s4">'wrap_socket'</span><span class="s3">, None</span><span class="s1">) </span><span class="s3">or </span><span class="s1">getattr(_sslmod</span><span class="s3">, </span><span class="s4">'sslwrap_simple'</span><span class="s1">)</span>
+        <span class="s3">return </span><span class="s1">wrap(sock</span><span class="s3">, </span><span class="s1">keyfile</span><span class="s3">, </span><span class="s1">certfile)</span>
+    <span class="s1">__implements__.append(</span><span class="s4">'ssl'</span><span class="s1">)</span>
+
+<span class="s3">if </span><span class="s1">hasattr(__socket__</span><span class="s3">, </span><span class="s4">'sethostname'</span><span class="s1">):</span>
+    <span class="s0"># This was added in 3.3, but PyPy 2.7-7.3.2</span>
+    <span class="s0"># leaked it back into Python 2.</span>
+    <span class="s1">sethostname = __socket__.sethostname</span>
+    <span class="s1">__imports__.append(</span><span class="s4">'sethostname'</span><span class="s1">)</span>
+
+<span class="s1">__all__ = __implements__ + __extensions__ + __imports__</span>
+</pre>
+</body>
+</html>

@@ -1,0 +1,221 @@
+<html>
+<head>
+<title>pyi_rth_pkgres.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #cc7832;}
+.s3 { color: #629755; font-style: italic;}
+.s4 { color: #6897bb;}
+.s5 { color: #6a8759;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+pyi_rth_pkgres.py</font>
+</center></td></tr></table>
+<pre><span class="s0">#-----------------------------------------------------------------------------</span>
+<span class="s0"># Copyright (c) 2013-2021, PyInstaller Development Team.</span>
+<span class="s0">#</span>
+<span class="s0"># Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);</span>
+<span class="s0"># you may not use this file except in compliance with the License.</span>
+<span class="s0">#</span>
+<span class="s0"># The full license is in the file COPYING.txt, distributed with this software.</span>
+<span class="s0">#</span>
+<span class="s0"># SPDX-License-Identifier: Apache-2.0</span>
+<span class="s0">#-----------------------------------------------------------------------------</span>
+
+<span class="s2">import </span><span class="s1">os</span>
+<span class="s2">import </span><span class="s1">pathlib</span>
+<span class="s2">import </span><span class="s1">sys</span>
+
+<span class="s2">import </span><span class="s1">pkg_resources</span>
+<span class="s2">from </span><span class="s1">pyimod03_importers </span><span class="s2">import </span><span class="s1">FrozenImporter</span>
+
+<span class="s1">SYS_PREFIX = pathlib.PurePath(sys._MEIPASS)</span>
+
+<span class="s0"># To make pkg_resources work with frozen modules we need to set the 'Provider' class for FrozenImporter. This class</span>
+<span class="s0"># decides where to look for resources and other stuff. 'pkg_resources.NullProvider' is dedicated to PEP302 import hooks</span>
+<span class="s0"># like FrozenImporter is. It uses method __loader__.get_data() in methods pkg_resources.resource_string() and</span>
+<span class="s0"># pkg_resources.resource_stream()</span>
+<span class="s0">#</span>
+<span class="s0"># We provide PyiFrozenProvider, which subclasses the NullProvider and implements _has(), _isdir(), and _listdir()</span>
+<span class="s0"># methods, which are needed for pkg_resources.resource_exists(), resource_isdir(), and resource_listdir() to work. We</span>
+<span class="s0"># cannot use the DefaultProvider, because it provides filesystem-only implementations (and overrides _get() with a</span>
+<span class="s0"># filesystem-only one), whereas our provider needs to also support embedded resources.</span>
+<span class="s0">#</span>
+<span class="s0"># The PyiFrozenProvider allows querying/listing both PYZ-embedded and on-filesystem resources in a frozen package. The</span>
+<span class="s0"># results are typically combined for both types of resources (e.g., when listing a directory or checking whether a</span>
+<span class="s0"># resource exists). When the order of precedence matters, the PYZ-embedded resources take precedence over the</span>
+<span class="s0"># on-filesystem ones, to keep the behavior consistent with the actual file content retrieval via _get() method (which in</span>
+<span class="s0"># turn uses FrozenImporter's get_data() method). For example, when checking whether a resource is a directory via</span>
+<span class="s0"># _isdir(), a PYZ-embedded file will take precedence over a potential on-filesystem directory. Also, in contrast to</span>
+<span class="s0"># unfrozen packages, the frozen ones do not contain source .py files, which are therefore absent from content listings.</span>
+
+
+<span class="s2">class </span><span class="s1">_TocFilesystem:</span>
+    <span class="s3">&quot;&quot;&quot; 
+    A prefix tree implementation for embedded filesystem reconstruction. 
+    &quot;&quot;&quot;</span>
+    <span class="s2">def </span><span class="s1">__init__(self</span><span class="s2">, </span><span class="s1">toc_files</span><span class="s2">, </span><span class="s1">toc_dirs=[]):</span>
+        <span class="s0"># Reconstruct the fileystem hierarchy by building a prefix tree from the given file and directory paths.</span>
+        <span class="s1">self._tree = dict()</span>
+
+        <span class="s0"># Data files</span>
+        <span class="s2">for </span><span class="s1">path </span><span class="s2">in </span><span class="s1">toc_files:</span>
+            <span class="s1">path = pathlib.PurePath(path)</span>
+            <span class="s1">current = self._tree</span>
+            <span class="s2">for </span><span class="s1">component </span><span class="s2">in </span><span class="s1">path.parts[:-</span><span class="s4">1</span><span class="s1">]:</span>
+                <span class="s1">current = current.setdefault(component</span><span class="s2">, </span><span class="s1">{})</span>
+            <span class="s1">current[path.parts[-</span><span class="s4">1</span><span class="s1">]] = </span><span class="s5">''</span>
+
+        <span class="s0"># Extra directories</span>
+        <span class="s2">for </span><span class="s1">path </span><span class="s2">in </span><span class="s1">toc_dirs:</span>
+            <span class="s1">path = pathlib.PurePath(path)</span>
+            <span class="s1">current = self._tree</span>
+            <span class="s2">for </span><span class="s1">component </span><span class="s2">in </span><span class="s1">path.parts:</span>
+                <span class="s1">current = current.setdefault(component</span><span class="s2">, </span><span class="s1">{})</span>
+
+    <span class="s2">def </span><span class="s1">_get_tree_node(self</span><span class="s2">, </span><span class="s1">path):</span>
+        <span class="s1">path = pathlib.PurePath(path)</span>
+        <span class="s1">current = self._tree</span>
+        <span class="s2">for </span><span class="s1">component </span><span class="s2">in </span><span class="s1">path.parts:</span>
+            <span class="s2">if </span><span class="s1">component </span><span class="s2">not in </span><span class="s1">current:</span>
+                <span class="s2">return None</span>
+            <span class="s1">current = current[component]</span>
+        <span class="s2">return </span><span class="s1">current</span>
+
+    <span class="s2">def </span><span class="s1">path_exists(self</span><span class="s2">, </span><span class="s1">path):</span>
+        <span class="s1">node = self._get_tree_node(path)</span>
+        <span class="s2">return </span><span class="s1">node </span><span class="s2">is not None  </span><span class="s0"># File or directory</span>
+
+    <span class="s2">def </span><span class="s1">path_isdir(self</span><span class="s2">, </span><span class="s1">path):</span>
+        <span class="s1">node = self._get_tree_node(path)</span>
+        <span class="s2">if </span><span class="s1">node </span><span class="s2">is None</span><span class="s1">:</span>
+            <span class="s2">return False  </span><span class="s0"># Non-existant</span>
+        <span class="s2">if </span><span class="s1">isinstance(node</span><span class="s2">, </span><span class="s1">str):</span>
+            <span class="s2">return False  </span><span class="s0"># File</span>
+        <span class="s2">return True</span>
+
+    <span class="s2">def </span><span class="s1">path_listdir(self</span><span class="s2">, </span><span class="s1">path):</span>
+        <span class="s1">node = self._get_tree_node(path)</span>
+        <span class="s2">if not </span><span class="s1">isinstance(node</span><span class="s2">, </span><span class="s1">dict):</span>
+            <span class="s2">return </span><span class="s1">[]  </span><span class="s0"># Non-existant or file</span>
+        <span class="s2">return </span><span class="s1">list(node.keys())</span>
+
+
+<span class="s0"># Cache for reconstructed embedded trees</span>
+<span class="s1">_toc_tree_cache = {}</span>
+
+
+<span class="s2">class </span><span class="s1">PyiFrozenProvider(pkg_resources.NullProvider):</span>
+    <span class="s3">&quot;&quot;&quot; 
+    Custom pkg_resourvces provider for FrozenImporter. 
+    &quot;&quot;&quot;</span>
+    <span class="s2">def </span><span class="s1">__init__(self</span><span class="s2">, </span><span class="s1">module):</span>
+        <span class="s1">super().__init__(module)</span>
+
+        <span class="s0"># Get top-level path; if &quot;module&quot; corresponds to a package, we need the path to the package itself. If &quot;module&quot;</span>
+        <span class="s0"># is a submodule in a package, we need the path to the parent package.</span>
+        <span class="s1">self._pkg_path = pathlib.PurePath(module.__file__).parent</span>
+
+        <span class="s0"># Defer initialization of PYZ-embedded resources tree to the first access.</span>
+        <span class="s1">self._embedded_tree = </span><span class="s2">None</span>
+
+    <span class="s2">def </span><span class="s1">_init_embedded_tree(self</span><span class="s2">, </span><span class="s1">rel_pkg_path</span><span class="s2">, </span><span class="s1">pkg_name):</span>
+        <span class="s0"># Collect relevant entries from TOC. We are interested in either files that are located in the package/module's</span>
+        <span class="s0"># directory (data files) or in packages that are prefixed with package/module's name (to reconstruct subpackage</span>
+        <span class="s0"># directories).</span>
+        <span class="s1">data_files = []</span>
+        <span class="s1">package_dirs = []</span>
+        <span class="s2">for </span><span class="s1">entry </span><span class="s2">in </span><span class="s1">self.loader.toc:</span>
+            <span class="s1">entry_path = pathlib.PurePath(entry)</span>
+            <span class="s2">if </span><span class="s1">rel_pkg_path </span><span class="s2">in </span><span class="s1">entry_path.parents:</span>
+                <span class="s0"># Data file path</span>
+                <span class="s1">data_files.append(entry_path)</span>
+            <span class="s2">elif </span><span class="s1">entry.startswith(pkg_name) </span><span class="s2">and </span><span class="s1">self.loader.is_package(entry):</span>
+                <span class="s0"># Package or subpackage; convert the name to directory path</span>
+                <span class="s1">package_dir = pathlib.PurePath(*entry.split(</span><span class="s5">'.'</span><span class="s1">))</span>
+                <span class="s1">package_dirs.append(package_dir)</span>
+
+        <span class="s0"># Reconstruct the filesystem</span>
+        <span class="s2">return </span><span class="s1">_TocFilesystem(data_files</span><span class="s2">, </span><span class="s1">package_dirs)</span>
+
+    <span class="s1">@property</span>
+    <span class="s2">def </span><span class="s1">embedded_tree(self):</span>
+        <span class="s2">if </span><span class="s1">self._embedded_tree </span><span class="s2">is None</span><span class="s1">:</span>
+            <span class="s0"># Construct a path relative to _MEIPASS directory for searching the TOC.</span>
+            <span class="s1">rel_pkg_path = self._pkg_path.relative_to(SYS_PREFIX)</span>
+
+            <span class="s0"># Reconstruct package name prefix (use package path to obtain correct prefix in case of a module).</span>
+            <span class="s1">pkg_name = </span><span class="s5">'.'</span><span class="s1">.join(rel_pkg_path.parts)</span>
+
+            <span class="s0"># Initialize and cache the tree, if necessary.</span>
+            <span class="s2">if </span><span class="s1">pkg_name </span><span class="s2">not in </span><span class="s1">_toc_tree_cache:</span>
+                <span class="s1">_toc_tree_cache[pkg_name] = \</span>
+                    <span class="s1">self._init_embedded_tree(rel_pkg_path</span><span class="s2">, </span><span class="s1">pkg_name)</span>
+            <span class="s1">self._embedded_tree = _toc_tree_cache[pkg_name]</span>
+        <span class="s2">return </span><span class="s1">self._embedded_tree</span>
+
+    <span class="s2">def </span><span class="s1">_normalize_path(self</span><span class="s2">, </span><span class="s1">path):</span>
+        <span class="s0"># Avoid using Path.resolve(), because it resolves symlinks. This is undesirable, because the pure path in</span>
+        <span class="s0"># self._pkg_path does not have symlinks resolved, so comparison between the two would be faulty. So use</span>
+        <span class="s0"># os.path.abspath() instead to normalize the path.</span>
+        <span class="s2">return </span><span class="s1">pathlib.Path(os.path.abspath(path))</span>
+
+    <span class="s2">def </span><span class="s1">_is_relative_to_package(self</span><span class="s2">, </span><span class="s1">path):</span>
+        <span class="s2">return </span><span class="s1">path == self._pkg_path </span><span class="s2">or </span><span class="s1">self._pkg_path </span><span class="s2">in </span><span class="s1">path.parents</span>
+
+    <span class="s2">def </span><span class="s1">_has(self</span><span class="s2">, </span><span class="s1">path):</span>
+        <span class="s0"># Prevent access outside the package.</span>
+        <span class="s1">path = self._normalize_path(path)</span>
+        <span class="s2">if not </span><span class="s1">self._is_relative_to_package(path):</span>
+            <span class="s2">return False</span>
+
+        <span class="s0"># Check the filesystem first to avoid unnecessarily computing the relative path...</span>
+        <span class="s2">if </span><span class="s1">path.exists():</span>
+            <span class="s2">return True</span>
+        <span class="s1">rel_path = path.relative_to(SYS_PREFIX)</span>
+        <span class="s2">return </span><span class="s1">self.embedded_tree.path_exists(rel_path)</span>
+
+    <span class="s2">def </span><span class="s1">_isdir(self</span><span class="s2">, </span><span class="s1">path):</span>
+        <span class="s0"># Prevent access outside the package.</span>
+        <span class="s1">path = self._normalize_path(path)</span>
+        <span class="s2">if not </span><span class="s1">self._is_relative_to_package(path):</span>
+            <span class="s2">return False</span>
+
+        <span class="s0"># Embedded resources have precedence over filesystem...</span>
+        <span class="s1">rel_path = path.relative_to(SYS_PREFIX)</span>
+        <span class="s1">node = self.embedded_tree._get_tree_node(rel_path)</span>
+        <span class="s2">if </span><span class="s1">node </span><span class="s2">is None</span><span class="s1">:</span>
+            <span class="s2">return </span><span class="s1">path.is_dir()  </span><span class="s0"># No match found; try the filesystem.</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s0"># str = file, dict = directory</span>
+            <span class="s2">return not </span><span class="s1">isinstance(node</span><span class="s2">, </span><span class="s1">str)</span>
+
+    <span class="s2">def </span><span class="s1">_listdir(self</span><span class="s2">, </span><span class="s1">path):</span>
+        <span class="s0"># Prevent access outside the package.</span>
+        <span class="s1">path = self._normalize_path(path)</span>
+        <span class="s2">if not </span><span class="s1">self._is_relative_to_package(path):</span>
+            <span class="s2">return </span><span class="s1">[]</span>
+
+        <span class="s0"># Relative path for searching embedded resources.</span>
+        <span class="s1">rel_path = path.relative_to(SYS_PREFIX)</span>
+        <span class="s0"># List content from embedded filesystem...</span>
+        <span class="s1">content = self.embedded_tree.path_listdir(rel_path)</span>
+        <span class="s0"># ... as well as the actual one.</span>
+        <span class="s2">if </span><span class="s1">path.is_dir():</span>
+            <span class="s0"># Use os.listdir() to avoid having to convert Path objects to strings... Also make sure to de-duplicate the</span>
+            <span class="s0"># results.</span>
+            <span class="s1">path = str(path)  </span><span class="s0"># not is_py36</span>
+            <span class="s1">content = list(set(content + os.listdir(path)))</span>
+        <span class="s2">return </span><span class="s1">content</span>
+
+
+<span class="s1">pkg_resources.register_loader_type(FrozenImporter</span><span class="s2">, </span><span class="s1">PyiFrozenProvider)</span>
+</pre>
+</body>
+</html>

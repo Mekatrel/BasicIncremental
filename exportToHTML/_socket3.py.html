@@ -1,0 +1,647 @@
+<html>
+<head>
+<title>_socket3.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #629755; font-style: italic;}
+.s3 { color: #cc7832;}
+.s4 { color: #6a8759;}
+.s5 { color: #6897bb;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+_socket3.py</font>
+</center></td></tr></table>
+<pre><span class="s0"># Port of Python 3.3's socket module to gevent</span>
+<span class="s2">&quot;&quot;&quot; 
+Python 3 socket module. 
+&quot;&quot;&quot;</span>
+<span class="s0"># Our import magic sadly makes this warning useless</span>
+<span class="s0"># pylint: disable=undefined-variable</span>
+<span class="s0"># pylint: disable=too-many-statements,too-many-branches</span>
+<span class="s0"># pylint: disable=too-many-public-methods,unused-argument</span>
+<span class="s3">from </span><span class="s1">__future__ </span><span class="s3">import </span><span class="s1">absolute_import</span>
+<span class="s3">import </span><span class="s1">io</span>
+<span class="s3">import </span><span class="s1">os</span>
+<span class="s3">import </span><span class="s1">sys</span>
+
+<span class="s3">from </span><span class="s1">gevent </span><span class="s3">import </span><span class="s1">_socketcommon</span>
+<span class="s3">from </span><span class="s1">gevent._util </span><span class="s3">import </span><span class="s1">copy_globals</span>
+<span class="s3">from </span><span class="s1">gevent._compat </span><span class="s3">import </span><span class="s1">PYPY</span>
+<span class="s3">import </span><span class="s1">_socket</span>
+<span class="s3">from </span><span class="s1">os </span><span class="s3">import </span><span class="s1">dup</span>
+
+
+<span class="s1">copy_globals(_socketcommon</span><span class="s3">, </span><span class="s1">globals()</span><span class="s3">,</span>
+             <span class="s1">names_to_ignore=_socketcommon.__extensions__</span><span class="s3">,</span>
+             <span class="s1">dunder_names_to_keep=())</span>
+
+
+<span class="s1">__socket__ = _socketcommon.__socket__</span>
+<span class="s1">__implements__ = _socketcommon._implements</span>
+<span class="s1">__extensions__ = _socketcommon.__extensions__</span>
+<span class="s1">__imports__ = _socketcommon.__imports__</span>
+<span class="s1">__dns__ = _socketcommon.__dns__</span>
+
+
+<span class="s1">SocketIO = __socket__.SocketIO </span><span class="s0"># pylint:disable=no-member</span>
+
+
+<span class="s3">class </span><span class="s1">_closedsocket(object):</span>
+    <span class="s1">__slots__ = (</span><span class="s4">'family'</span><span class="s3">, </span><span class="s4">'type'</span><span class="s3">, </span><span class="s4">'proto'</span><span class="s3">, </span><span class="s4">'orig_fileno'</span><span class="s3">, </span><span class="s4">'description'</span><span class="s1">)</span>
+
+    <span class="s3">def </span><span class="s1">__init__(self</span><span class="s3">, </span><span class="s1">family</span><span class="s3">, </span><span class="s1">type</span><span class="s3">, </span><span class="s1">proto</span><span class="s3">, </span><span class="s1">orig_fileno</span><span class="s3">, </span><span class="s1">description):</span>
+        <span class="s1">self.family = family</span>
+        <span class="s1">self.type = type</span>
+        <span class="s1">self.proto = proto</span>
+        <span class="s1">self.orig_fileno = orig_fileno</span>
+        <span class="s1">self.description = description</span>
+
+    <span class="s3">def </span><span class="s1">fileno(self):</span>
+        <span class="s3">return </span><span class="s1">-</span><span class="s5">1</span>
+
+    <span class="s3">def </span><span class="s1">close(self):</span>
+        <span class="s2">&quot;No-op&quot;</span>
+
+    <span class="s1">detach = fileno</span>
+
+    <span class="s3">def </span><span class="s1">_dummy(*args</span><span class="s3">, </span><span class="s1">**kwargs): </span><span class="s0"># pylint:disable=no-method-argument,unused-argument</span>
+        <span class="s3">raise </span><span class="s1">OSError(EBADF</span><span class="s3">, </span><span class="s4">'Bad file descriptor'</span><span class="s1">)</span>
+    <span class="s0"># All _delegate_methods must also be initialized here.</span>
+    <span class="s1">send = recv = recv_into = sendto = recvfrom = recvfrom_into = _dummy</span>
+    <span class="s1">getsockname = _dummy</span>
+
+    <span class="s3">def </span><span class="s1">__bool__(self):</span>
+        <span class="s3">return False</span>
+
+    <span class="s1">__getattr__ = _dummy</span>
+
+    <span class="s3">def </span><span class="s1">__repr__(self):</span>
+        <span class="s3">return </span><span class="s4">&quot;&lt;socket object [closed proxy at 0x%x fd=%s %s]&gt;&quot; </span><span class="s1">% (</span>
+            <span class="s1">id(self)</span><span class="s3">,</span>
+            <span class="s1">self.orig_fileno</span><span class="s3">,</span>
+            <span class="s1">self.description</span><span class="s3">,</span>
+        <span class="s1">)</span>
+
+<span class="s3">class </span><span class="s1">_wrefsocket(_socket.socket):</span>
+    <span class="s0"># Plain stdlib socket.socket objects subclass _socket.socket</span>
+    <span class="s0"># and add weakref ability. The ssl module, for one, counts on this.</span>
+    <span class="s0"># We don't create socket.socket objects (because they may have been</span>
+    <span class="s0"># monkey patched to be the object from this module), but we still</span>
+    <span class="s0"># need to make sure what we do create can be weakrefd.</span>
+
+    <span class="s1">__slots__ = (</span><span class="s4">&quot;__weakref__&quot;</span><span class="s3">, </span><span class="s1">)</span>
+
+    <span class="s3">if </span><span class="s1">PYPY:</span>
+        <span class="s0"># server.py unwraps the socket object to get the raw _sock;</span>
+        <span class="s0"># it depends on having a timeout property alias, which PyPy does not</span>
+        <span class="s0"># provide.</span>
+        <span class="s1">timeout = property(</span><span class="s3">lambda </span><span class="s1">s: s.gettimeout()</span><span class="s3">,</span>
+                           <span class="s3">lambda </span><span class="s1">s</span><span class="s3">, </span><span class="s1">nv: s.settimeout(nv))</span>
+
+
+<span class="s3">class </span><span class="s1">socket(_socketcommon.SocketMixin):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    gevent `socket.socket &lt;https://docs.python.org/3/library/socket.html#socket-objects&gt;`_ 
+    for Python 3. 
+ 
+    This object should have the same API as the standard library socket linked to above. Not all 
+    methods are specifically documented here; when they are they may point out a difference 
+    to be aware of or may document a method the standard library does not. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s0"># Subclasses can set this to customize the type of the</span>
+    <span class="s0"># native _socket.socket we create. It MUST be a subclass</span>
+    <span class="s0"># of _wrefsocket. (gevent internal usage only)</span>
+    <span class="s1">_gevent_sock_class = _wrefsocket</span>
+
+    <span class="s1">__slots__ = (</span>
+        <span class="s4">'_io_refs'</span><span class="s3">,</span>
+        <span class="s4">'_closed'</span><span class="s3">,</span>
+    <span class="s1">)</span>
+
+    <span class="s0"># Take the same approach as socket2: wrap a real socket object,</span>
+    <span class="s0"># don't subclass it. This lets code that needs the raw _sock (not tied to the hub)</span>
+    <span class="s0"># get it. This shows up in tests like test__example_udp_server.</span>
+
+    <span class="s3">if </span><span class="s1">sys.version_info[:</span><span class="s5">2</span><span class="s1">] &lt; (</span><span class="s5">3</span><span class="s3">, </span><span class="s5">7</span><span class="s1">):</span>
+        <span class="s3">def </span><span class="s1">__init__(self</span><span class="s3">, </span><span class="s1">family=AF_INET</span><span class="s3">, </span><span class="s1">type=SOCK_STREAM</span><span class="s3">, </span><span class="s1">proto=</span><span class="s5">0</span><span class="s3">, </span><span class="s1">fileno=</span><span class="s3">None</span><span class="s1">):</span>
+            <span class="s1">super().__init__()</span>
+            <span class="s1">self._closed = </span><span class="s3">False</span>
+            <span class="s1">self._sock = self._gevent_sock_class(family</span><span class="s3">, </span><span class="s1">type</span><span class="s3">, </span><span class="s1">proto</span><span class="s3">, </span><span class="s1">fileno)</span>
+            <span class="s1">self.timeout = </span><span class="s3">None</span>
+            <span class="s1">self.__init_common()</span>
+    <span class="s3">else</span><span class="s1">:</span>
+        <span class="s0"># In 3.7, socket changed to auto-detecting family, type, and proto</span>
+        <span class="s0"># when given a fileno.</span>
+        <span class="s3">def </span><span class="s1">__init__(self</span><span class="s3">, </span><span class="s1">family=-</span><span class="s5">1</span><span class="s3">, </span><span class="s1">type=-</span><span class="s5">1</span><span class="s3">, </span><span class="s1">proto=-</span><span class="s5">1</span><span class="s3">, </span><span class="s1">fileno=</span><span class="s3">None</span><span class="s1">):</span>
+            <span class="s1">super().__init__()</span>
+            <span class="s1">self._closed = </span><span class="s3">False</span>
+            <span class="s3">if </span><span class="s1">fileno </span><span class="s3">is None</span><span class="s1">:</span>
+                <span class="s3">if </span><span class="s1">family == -</span><span class="s5">1</span><span class="s1">:</span>
+                    <span class="s1">family = AF_INET</span>
+                <span class="s3">if </span><span class="s1">type == -</span><span class="s5">1</span><span class="s1">:</span>
+                    <span class="s1">type = SOCK_STREAM</span>
+                <span class="s3">if </span><span class="s1">proto == -</span><span class="s5">1</span><span class="s1">:</span>
+                    <span class="s1">proto = </span><span class="s5">0</span>
+            <span class="s1">self._sock = self._gevent_sock_class(family</span><span class="s3">, </span><span class="s1">type</span><span class="s3">, </span><span class="s1">proto</span><span class="s3">, </span><span class="s1">fileno)</span>
+            <span class="s1">self.timeout = </span><span class="s3">None</span>
+            <span class="s1">self.__init_common()</span>
+
+    <span class="s3">def </span><span class="s1">__init_common(self):</span>
+        <span class="s1">self._io_refs = </span><span class="s5">0</span>
+        <span class="s1">_socket.socket.setblocking(self._sock</span><span class="s3">, False</span><span class="s1">)</span>
+        <span class="s1">fileno = _socket.socket.fileno(self._sock)</span>
+        <span class="s1">self.hub = get_hub()</span>
+        <span class="s1">io_class = self.hub.loop.io</span>
+        <span class="s1">self._read_event = io_class(fileno</span><span class="s3">, </span><span class="s5">1</span><span class="s1">)</span>
+        <span class="s1">self._write_event = io_class(fileno</span><span class="s3">, </span><span class="s5">2</span><span class="s1">)</span>
+        <span class="s1">self.timeout = _socket.getdefaulttimeout()</span>
+
+    <span class="s3">def </span><span class="s1">__getattr__(self</span><span class="s3">, </span><span class="s1">name):</span>
+        <span class="s3">return </span><span class="s1">getattr(self._sock</span><span class="s3">, </span><span class="s1">name)</span>
+
+    <span class="s3">def </span><span class="s1">_accept(self):</span>
+        <span class="s0"># Python 3.11 started checking for this method on the class object,</span>
+        <span class="s0"># so we need to explicitly delegate.</span>
+        <span class="s3">return </span><span class="s1">self._sock._accept()</span>
+
+    <span class="s3">if </span><span class="s1">hasattr(_socket</span><span class="s3">, </span><span class="s4">'SOCK_NONBLOCK'</span><span class="s1">):</span>
+        <span class="s0"># Only defined under Linux</span>
+        <span class="s1">@property</span>
+        <span class="s3">def </span><span class="s1">type(self):</span>
+            <span class="s0"># See https://github.com/gevent/gevent/pull/399</span>
+            <span class="s3">if </span><span class="s1">self.timeout != </span><span class="s5">0.0</span><span class="s1">:</span>
+                <span class="s3">return </span><span class="s1">self._sock.type &amp; ~_socket.SOCK_NONBLOCK </span><span class="s0"># pylint:disable=no-member</span>
+            <span class="s3">return </span><span class="s1">self._sock.type</span>
+
+    <span class="s3">def </span><span class="s1">__enter__(self):</span>
+        <span class="s3">return </span><span class="s1">self</span>
+
+    <span class="s3">def </span><span class="s1">__exit__(self</span><span class="s3">, </span><span class="s1">*args):</span>
+        <span class="s3">if not </span><span class="s1">self._closed:</span>
+            <span class="s1">self.close()</span>
+
+    <span class="s3">def </span><span class="s1">__repr__(self):</span>
+        <span class="s2">&quot;&quot;&quot;Wrap __repr__() to reveal the real class name.&quot;&quot;&quot;</span>
+        <span class="s3">try</span><span class="s1">:</span>
+            <span class="s1">s = repr(self._sock)</span>
+        <span class="s3">except </span><span class="s1">Exception </span><span class="s3">as </span><span class="s1">ex: </span><span class="s0"># pylint:disable=broad-except</span>
+            <span class="s0"># Observed on Windows Py3.3, printing the repr of a socket</span>
+            <span class="s0"># that just suffered a ConnectionResetError [WinError 10054]:</span>
+            <span class="s0"># &quot;OverflowError: no printf formatter to display the socket descriptor in decimal&quot;</span>
+            <span class="s0"># Not sure what the actual cause is or if there's a better way to handle this</span>
+            <span class="s1">s = </span><span class="s4">'&lt;socket [%r]&gt;' </span><span class="s1">% ex</span>
+
+        <span class="s3">if </span><span class="s1">s.startswith(</span><span class="s4">&quot;&lt;socket object&quot;</span><span class="s1">):</span>
+            <span class="s1">s = </span><span class="s4">&quot;&lt;%s.%s%s at 0x%x%s%s&quot; </span><span class="s1">% (</span>
+                <span class="s1">self.__class__.__module__</span><span class="s3">,</span>
+                <span class="s1">self.__class__.__name__</span><span class="s3">,</span>
+                <span class="s1">getattr(self</span><span class="s3">, </span><span class="s4">'_closed'</span><span class="s3">, False</span><span class="s1">) </span><span class="s3">and </span><span class="s4">&quot; [closed]&quot; </span><span class="s3">or </span><span class="s4">&quot;&quot;</span><span class="s3">,</span>
+                <span class="s1">id(self)</span><span class="s3">,</span>
+                <span class="s1">self._extra_repr()</span><span class="s3">,</span>
+                <span class="s1">s[</span><span class="s5">7</span><span class="s1">:])</span>
+        <span class="s3">return </span><span class="s1">s</span>
+
+    <span class="s3">def </span><span class="s1">_extra_repr(self):</span>
+        <span class="s3">return </span><span class="s4">''</span>
+
+    <span class="s3">def </span><span class="s1">__getstate__(self):</span>
+        <span class="s3">raise </span><span class="s1">TypeError(</span><span class="s4">&quot;Cannot serialize socket object&quot;</span><span class="s1">)</span>
+
+    <span class="s3">def </span><span class="s1">dup(self):</span>
+        <span class="s2">&quot;&quot;&quot;dup() -&gt; socket object 
+ 
+        Return a new socket object connected to the same system resource. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">fd = dup(self.fileno())</span>
+        <span class="s1">sock = self.__class__(self.family</span><span class="s3">, </span><span class="s1">self.type</span><span class="s3">, </span><span class="s1">self.proto</span><span class="s3">, </span><span class="s1">fileno=fd)</span>
+        <span class="s1">sock.settimeout(self.gettimeout())</span>
+        <span class="s3">return </span><span class="s1">sock</span>
+
+    <span class="s3">def </span><span class="s1">accept(self):</span>
+        <span class="s2">&quot;&quot;&quot;accept() -&gt; (socket object, address info) 
+ 
+        Wait for an incoming connection.  Return a new socket 
+        representing the connection, and the address of the client. 
+        For IP sockets, the address info is a pair (hostaddr, port). 
+        &quot;&quot;&quot;</span>
+        <span class="s3">while True</span><span class="s1">:</span>
+            <span class="s3">try</span><span class="s1">:</span>
+                <span class="s1">fd</span><span class="s3">, </span><span class="s1">addr = self._accept()</span>
+                <span class="s3">break</span>
+            <span class="s3">except </span><span class="s1">BlockingIOError:</span>
+                <span class="s3">if </span><span class="s1">self.timeout == </span><span class="s5">0.0</span><span class="s1">:</span>
+                    <span class="s3">raise</span>
+            <span class="s1">self._wait(self._read_event)</span>
+        <span class="s1">sock = socket(self.family</span><span class="s3">, </span><span class="s1">self.type</span><span class="s3">, </span><span class="s1">self.proto</span><span class="s3">, </span><span class="s1">fileno=fd)</span>
+        <span class="s0"># Python Issue #7995: if no default timeout is set and the listening</span>
+        <span class="s0"># socket had a (non-zero) timeout, force the new socket in blocking</span>
+        <span class="s0"># mode to override platform-specific socket flags inheritance.</span>
+        <span class="s0"># XXX do we need to do this?</span>
+        <span class="s3">if </span><span class="s1">getdefaulttimeout() </span><span class="s3">is None and </span><span class="s1">self.gettimeout():</span>
+            <span class="s1">sock.setblocking(</span><span class="s3">True</span><span class="s1">)</span>
+        <span class="s3">return </span><span class="s1">sock</span><span class="s3">, </span><span class="s1">addr</span>
+
+    <span class="s3">def </span><span class="s1">makefile(self</span><span class="s3">, </span><span class="s1">mode=</span><span class="s4">&quot;r&quot;</span><span class="s3">, </span><span class="s1">buffering=</span><span class="s3">None, </span><span class="s1">*</span><span class="s3">,</span>
+                 <span class="s1">encoding=</span><span class="s3">None, </span><span class="s1">errors=</span><span class="s3">None, </span><span class="s1">newline=</span><span class="s3">None</span><span class="s1">):</span>
+        <span class="s2">&quot;&quot;&quot;Return an I/O stream connected to the socket 
+ 
+        The arguments are as for io.open() after the filename, 
+        except the only mode characters supported are 'r', 'w' and 'b'. 
+        The semantics are similar too. 
+        &quot;&quot;&quot;</span>
+        <span class="s0"># XXX refactor to share code? We ought to be able to use our FileObject,</span>
+        <span class="s0"># adding the appropriate amount of refcounting. At the very least we can use our</span>
+        <span class="s0"># OpenDescriptor to handle the parsing.</span>
+        <span class="s3">for </span><span class="s1">c </span><span class="s3">in </span><span class="s1">mode:</span>
+            <span class="s3">if </span><span class="s1">c </span><span class="s3">not in </span><span class="s1">{</span><span class="s4">&quot;r&quot;</span><span class="s3">, </span><span class="s4">&quot;w&quot;</span><span class="s3">, </span><span class="s4">&quot;b&quot;</span><span class="s1">}:</span>
+                <span class="s3">raise </span><span class="s1">ValueError(</span><span class="s4">&quot;invalid mode %r (only r, w, b allowed)&quot;</span><span class="s1">)</span>
+        <span class="s1">writing = </span><span class="s4">&quot;w&quot; </span><span class="s3">in </span><span class="s1">mode</span>
+        <span class="s1">reading = </span><span class="s4">&quot;r&quot; </span><span class="s3">in </span><span class="s1">mode </span><span class="s3">or not </span><span class="s1">writing</span>
+        <span class="s3">assert </span><span class="s1">reading </span><span class="s3">or </span><span class="s1">writing</span>
+        <span class="s1">binary = </span><span class="s4">&quot;b&quot; </span><span class="s3">in </span><span class="s1">mode</span>
+        <span class="s1">rawmode = </span><span class="s4">&quot;&quot;</span>
+        <span class="s3">if </span><span class="s1">reading:</span>
+            <span class="s1">rawmode += </span><span class="s4">&quot;r&quot;</span>
+        <span class="s3">if </span><span class="s1">writing:</span>
+            <span class="s1">rawmode += </span><span class="s4">&quot;w&quot;</span>
+        <span class="s1">raw = SocketIO(self</span><span class="s3">, </span><span class="s1">rawmode)</span>
+        <span class="s1">self._io_refs += </span><span class="s5">1</span>
+        <span class="s3">if </span><span class="s1">buffering </span><span class="s3">is None</span><span class="s1">:</span>
+            <span class="s1">buffering = -</span><span class="s5">1</span>
+        <span class="s3">if </span><span class="s1">buffering &lt; </span><span class="s5">0</span><span class="s1">:</span>
+            <span class="s1">buffering = io.DEFAULT_BUFFER_SIZE</span>
+        <span class="s3">if </span><span class="s1">buffering == </span><span class="s5">0</span><span class="s1">:</span>
+            <span class="s3">if not </span><span class="s1">binary:</span>
+                <span class="s3">raise </span><span class="s1">ValueError(</span><span class="s4">&quot;unbuffered streams must be binary&quot;</span><span class="s1">)</span>
+            <span class="s3">return </span><span class="s1">raw</span>
+        <span class="s3">if </span><span class="s1">reading </span><span class="s3">and </span><span class="s1">writing:</span>
+            <span class="s1">buffer = io.BufferedRWPair(raw</span><span class="s3">, </span><span class="s1">raw</span><span class="s3">, </span><span class="s1">buffering)</span>
+        <span class="s3">elif </span><span class="s1">reading:</span>
+            <span class="s1">buffer = io.BufferedReader(raw</span><span class="s3">, </span><span class="s1">buffering)</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s3">assert </span><span class="s1">writing</span>
+            <span class="s1">buffer = io.BufferedWriter(raw</span><span class="s3">, </span><span class="s1">buffering)</span>
+        <span class="s3">if </span><span class="s1">binary:</span>
+            <span class="s3">return </span><span class="s1">buffer</span>
+        <span class="s1">text = io.TextIOWrapper(buffer</span><span class="s3">, </span><span class="s1">encoding</span><span class="s3">, </span><span class="s1">errors</span><span class="s3">, </span><span class="s1">newline)</span>
+        <span class="s1">text.mode = mode</span>
+        <span class="s3">return </span><span class="s1">text</span>
+
+    <span class="s3">def </span><span class="s1">_decref_socketios(self):</span>
+        <span class="s0"># Called by SocketIO when it is closed.</span>
+        <span class="s3">if </span><span class="s1">self._io_refs &gt; </span><span class="s5">0</span><span class="s1">:</span>
+            <span class="s1">self._io_refs -= </span><span class="s5">1</span>
+        <span class="s3">if </span><span class="s1">self._closed:</span>
+            <span class="s1">self.close()</span>
+
+    <span class="s3">def </span><span class="s1">_drop_ref_on_close(self</span><span class="s3">, </span><span class="s1">sock):</span>
+        <span class="s0"># Send the close event to wake up any watchers we don't know about</span>
+        <span class="s0"># so that (hopefully) they can be closed before we destroy</span>
+        <span class="s0"># the FD and invalidate them. We may be in the hub running pending</span>
+        <span class="s0"># callbacks now, or this may take until the next iteration.</span>
+        <span class="s1">scheduled_new = self.hub.loop.closing_fd(sock.fileno())</span>
+        <span class="s0"># Schedule the actual close to happen after that, but only if needed.</span>
+        <span class="s0"># (If we always defer, we wind up closing things much later than expected.)</span>
+        <span class="s3">if </span><span class="s1">scheduled_new:</span>
+            <span class="s1">self.hub.loop.run_callback(sock.close)</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s1">sock.close()</span>
+
+
+    <span class="s3">def </span><span class="s1">_detach_socket(self</span><span class="s3">, </span><span class="s1">reason):</span>
+        <span class="s3">if not </span><span class="s1">self._sock:</span>
+            <span class="s3">return</span>
+
+        <span class="s0"># Break any references to the underlying socket object. Tested</span>
+        <span class="s0"># by test__refcount. (Why does this matter?). Be sure to</span>
+        <span class="s0"># preserve our same family/type/proto if possible (if we</span>
+        <span class="s0"># don't, we can get TypeError instead of OSError; see</span>
+        <span class="s0"># test_socket.SendmsgUDP6Test.testSendmsgAfterClose)... but</span>
+        <span class="s0"># this isn't always possible (see test_socket.test_unknown_socket_family_repr)</span>
+        <span class="s1">sock = self._sock</span>
+        <span class="s1">family = -</span><span class="s5">1</span>
+        <span class="s1">type = -</span><span class="s5">1</span>
+        <span class="s1">proto = -</span><span class="s5">1</span>
+        <span class="s1">fileno = </span><span class="s3">None</span>
+        <span class="s3">try</span><span class="s1">:</span>
+            <span class="s1">family = sock.family</span>
+            <span class="s1">type = sock.type</span>
+            <span class="s1">proto = sock.proto</span>
+            <span class="s1">fileno = sock.fileno()</span>
+        <span class="s3">except </span><span class="s1">OSError:</span>
+            <span class="s3">pass</span>
+        <span class="s0"># Break any reference to the loop.io objects. Our fileno,</span>
+        <span class="s0"># which they were tied to, is about to be free to be reused, so these</span>
+        <span class="s0"># objects are no longer functional.</span>
+        <span class="s1">self._drop_events_and_close(closefd=(reason == </span><span class="s4">'closed'</span><span class="s1">))</span>
+
+        <span class="s1">self._sock = _closedsocket(family</span><span class="s3">, </span><span class="s1">type</span><span class="s3">, </span><span class="s1">proto</span><span class="s3">, </span><span class="s1">fileno</span><span class="s3">, </span><span class="s1">reason)</span>
+
+    <span class="s3">def </span><span class="s1">_real_close(self</span><span class="s3">, </span><span class="s1">_ss=_socket.socket):</span>
+        <span class="s0"># This function should not reference any globals. See Python issue #808164.</span>
+        <span class="s3">if not </span><span class="s1">self._sock:</span>
+            <span class="s3">return</span>
+
+        <span class="s1">self._detach_socket(</span><span class="s4">'closed'</span><span class="s1">)</span>
+
+
+    <span class="s3">def </span><span class="s1">close(self):</span>
+        <span class="s0"># This function should not reference any globals. See Python issue #808164.</span>
+        <span class="s1">self._closed = </span><span class="s3">True</span>
+        <span class="s3">if </span><span class="s1">self._io_refs &lt;= </span><span class="s5">0</span><span class="s1">:</span>
+            <span class="s1">self._real_close()</span>
+
+    <span class="s1">@property</span>
+    <span class="s3">def </span><span class="s1">closed(self):</span>
+        <span class="s3">return </span><span class="s1">self._closed</span>
+
+    <span class="s3">def </span><span class="s1">detach(self):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        detach() -&gt; file descriptor 
+ 
+        Close the socket object without closing the underlying file 
+        descriptor. The object cannot be used after this call; when the 
+        real file descriptor is closed, the number that was previously 
+        used here may be reused. The fileno() method, after this call, 
+        will return an invalid socket id. 
+ 
+        The previous descriptor is returned. 
+ 
+        .. versionchanged:: 1.5 
+ 
+           Also immediately drop any native event loop resources. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">self._closed = </span><span class="s3">True</span>
+        <span class="s1">sock = self._sock</span>
+        <span class="s1">self._detach_socket(</span><span class="s4">'detached'</span><span class="s1">)</span>
+        <span class="s3">return </span><span class="s1">sock.detach()</span>
+
+    <span class="s3">if </span><span class="s1">hasattr(_socket.socket</span><span class="s3">, </span><span class="s4">'recvmsg'</span><span class="s1">):</span>
+        <span class="s0"># Only on Unix; PyPy 3.5 5.10.0 provides sendmsg and recvmsg, but not</span>
+        <span class="s0"># recvmsg_into (at least on os x)</span>
+
+        <span class="s3">def </span><span class="s1">recvmsg(self</span><span class="s3">, </span><span class="s1">*args):</span>
+            <span class="s3">while True</span><span class="s1">:</span>
+                <span class="s3">try</span><span class="s1">:</span>
+                    <span class="s3">return </span><span class="s1">self._sock.recvmsg(*args)</span>
+                <span class="s3">except </span><span class="s1">error </span><span class="s3">as </span><span class="s1">ex:</span>
+                    <span class="s3">if </span><span class="s1">ex.args[</span><span class="s5">0</span><span class="s1">] != EWOULDBLOCK </span><span class="s3">or </span><span class="s1">self.timeout == </span><span class="s5">0.0</span><span class="s1">:</span>
+                        <span class="s3">raise</span>
+                <span class="s1">self._wait(self._read_event)</span>
+
+    <span class="s3">if </span><span class="s1">hasattr(_socket.socket</span><span class="s3">, </span><span class="s4">'recvmsg_into'</span><span class="s1">):</span>
+
+        <span class="s3">def </span><span class="s1">recvmsg_into(self</span><span class="s3">, </span><span class="s1">buffers</span><span class="s3">, </span><span class="s1">*args):</span>
+            <span class="s3">while True</span><span class="s1">:</span>
+                <span class="s3">try</span><span class="s1">:</span>
+                    <span class="s3">if </span><span class="s1">args:</span>
+                        <span class="s0"># The C code is sensitive about whether extra arguments are</span>
+                        <span class="s0"># passed or not.</span>
+                        <span class="s3">return </span><span class="s1">self._sock.recvmsg_into(buffers</span><span class="s3">, </span><span class="s1">*args)</span>
+                    <span class="s3">return </span><span class="s1">self._sock.recvmsg_into(buffers)</span>
+                <span class="s3">except </span><span class="s1">error </span><span class="s3">as </span><span class="s1">ex:</span>
+                    <span class="s3">if </span><span class="s1">ex.args[</span><span class="s5">0</span><span class="s1">] != EWOULDBLOCK </span><span class="s3">or </span><span class="s1">self.timeout == </span><span class="s5">0.0</span><span class="s1">:</span>
+                        <span class="s3">raise</span>
+                <span class="s1">self._wait(self._read_event)</span>
+
+    <span class="s3">if </span><span class="s1">hasattr(_socket.socket</span><span class="s3">, </span><span class="s4">'sendmsg'</span><span class="s1">):</span>
+        <span class="s0"># Only on Unix</span>
+        <span class="s3">def </span><span class="s1">sendmsg(self</span><span class="s3">, </span><span class="s1">buffers</span><span class="s3">, </span><span class="s1">ancdata=()</span><span class="s3">, </span><span class="s1">flags=</span><span class="s5">0</span><span class="s3">, </span><span class="s1">address=</span><span class="s3">None</span><span class="s1">):</span>
+            <span class="s3">try</span><span class="s1">:</span>
+                <span class="s3">return </span><span class="s1">self._sock.sendmsg(buffers</span><span class="s3">, </span><span class="s1">ancdata</span><span class="s3">, </span><span class="s1">flags</span><span class="s3">, </span><span class="s1">address)</span>
+            <span class="s3">except </span><span class="s1">error </span><span class="s3">as </span><span class="s1">ex:</span>
+                <span class="s3">if </span><span class="s1">flags &amp; getattr(_socket</span><span class="s3">, </span><span class="s4">'MSG_DONTWAIT'</span><span class="s3">, </span><span class="s5">0</span><span class="s1">):</span>
+                    <span class="s0"># Enable non-blocking behaviour</span>
+                    <span class="s0"># XXX: Do all platforms that have sendmsg have MSG_DONTWAIT?</span>
+                    <span class="s3">raise</span>
+
+                <span class="s3">if </span><span class="s1">ex.args[</span><span class="s5">0</span><span class="s1">] != EWOULDBLOCK </span><span class="s3">or </span><span class="s1">self.timeout == </span><span class="s5">0.0</span><span class="s1">:</span>
+                    <span class="s3">raise</span>
+                <span class="s1">self._wait(self._write_event)</span>
+                <span class="s3">try</span><span class="s1">:</span>
+                    <span class="s3">return </span><span class="s1">self._sock.sendmsg(buffers</span><span class="s3">, </span><span class="s1">ancdata</span><span class="s3">, </span><span class="s1">flags</span><span class="s3">, </span><span class="s1">address)</span>
+                <span class="s3">except </span><span class="s1">error </span><span class="s3">as </span><span class="s1">ex2:</span>
+                    <span class="s3">if </span><span class="s1">ex2.args[</span><span class="s5">0</span><span class="s1">] == EWOULDBLOCK:</span>
+                        <span class="s3">return </span><span class="s5">0</span>
+                    <span class="s3">raise</span>
+
+
+    <span class="s0"># sendfile: new in 3.5. But there's no real reason to not</span>
+    <span class="s0"># support it everywhere. Note that we can't use os.sendfile()</span>
+    <span class="s0"># because it's not cooperative.</span>
+    <span class="s3">def </span><span class="s1">_sendfile_use_sendfile(self</span><span class="s3">, </span><span class="s1">file</span><span class="s3">, </span><span class="s1">offset=</span><span class="s5">0</span><span class="s3">, </span><span class="s1">count=</span><span class="s3">None</span><span class="s1">):</span>
+        <span class="s0"># This is called directly by tests</span>
+        <span class="s3">raise </span><span class="s1">__socket__._GiveupOnSendfile() </span><span class="s0"># pylint:disable=no-member</span>
+
+    <span class="s3">def </span><span class="s1">_sendfile_use_send(self</span><span class="s3">, </span><span class="s1">file</span><span class="s3">, </span><span class="s1">offset=</span><span class="s5">0</span><span class="s3">, </span><span class="s1">count=</span><span class="s3">None</span><span class="s1">):</span>
+        <span class="s1">self._check_sendfile_params(file</span><span class="s3">, </span><span class="s1">offset</span><span class="s3">, </span><span class="s1">count)</span>
+        <span class="s3">if </span><span class="s1">self.gettimeout() == </span><span class="s5">0</span><span class="s1">:</span>
+            <span class="s3">raise </span><span class="s1">ValueError(</span><span class="s4">&quot;non-blocking sockets are not supported&quot;</span><span class="s1">)</span>
+        <span class="s3">if </span><span class="s1">offset:</span>
+            <span class="s1">file.seek(offset)</span>
+        <span class="s1">blocksize = min(count</span><span class="s3">, </span><span class="s5">8192</span><span class="s1">) </span><span class="s3">if </span><span class="s1">count </span><span class="s3">else </span><span class="s5">8192</span>
+        <span class="s1">total_sent = </span><span class="s5">0</span>
+        <span class="s0"># localize variable access to minimize overhead</span>
+        <span class="s1">file_read = file.read</span>
+        <span class="s1">sock_send = self.send</span>
+        <span class="s3">try</span><span class="s1">:</span>
+            <span class="s3">while True</span><span class="s1">:</span>
+                <span class="s3">if </span><span class="s1">count:</span>
+                    <span class="s1">blocksize = min(count - total_sent</span><span class="s3">, </span><span class="s1">blocksize)</span>
+                    <span class="s3">if </span><span class="s1">blocksize &lt;= </span><span class="s5">0</span><span class="s1">:</span>
+                        <span class="s3">break</span>
+                <span class="s1">data = memoryview(file_read(blocksize))</span>
+                <span class="s3">if not </span><span class="s1">data:</span>
+                    <span class="s3">break  </span><span class="s0"># EOF</span>
+                <span class="s3">while True</span><span class="s1">:</span>
+                    <span class="s3">try</span><span class="s1">:</span>
+                        <span class="s1">sent = sock_send(data)</span>
+                    <span class="s3">except </span><span class="s1">BlockingIOError:</span>
+                        <span class="s3">continue</span>
+                    <span class="s3">else</span><span class="s1">:</span>
+                        <span class="s1">total_sent += sent</span>
+                        <span class="s3">if </span><span class="s1">sent &lt; len(data):</span>
+                            <span class="s1">data = data[sent:]</span>
+                        <span class="s3">else</span><span class="s1">:</span>
+                            <span class="s3">break</span>
+            <span class="s3">return </span><span class="s1">total_sent</span>
+        <span class="s3">finally</span><span class="s1">:</span>
+            <span class="s3">if </span><span class="s1">total_sent &gt; </span><span class="s5">0 </span><span class="s3">and </span><span class="s1">hasattr(file</span><span class="s3">, </span><span class="s4">'seek'</span><span class="s1">):</span>
+                <span class="s1">file.seek(offset + total_sent)</span>
+
+    <span class="s3">def </span><span class="s1">_check_sendfile_params(self</span><span class="s3">, </span><span class="s1">file</span><span class="s3">, </span><span class="s1">offset</span><span class="s3">, </span><span class="s1">count):</span>
+        <span class="s3">if </span><span class="s4">'b' </span><span class="s3">not in </span><span class="s1">getattr(file</span><span class="s3">, </span><span class="s4">'mode'</span><span class="s3">, </span><span class="s4">'b'</span><span class="s1">):</span>
+            <span class="s3">raise </span><span class="s1">ValueError(</span><span class="s4">&quot;file should be opened in binary mode&quot;</span><span class="s1">)</span>
+        <span class="s3">if not </span><span class="s1">self.type &amp; SOCK_STREAM:</span>
+            <span class="s3">raise </span><span class="s1">ValueError(</span><span class="s4">&quot;only SOCK_STREAM type sockets are supported&quot;</span><span class="s1">)</span>
+        <span class="s3">if </span><span class="s1">count </span><span class="s3">is not None</span><span class="s1">:</span>
+            <span class="s3">if not </span><span class="s1">isinstance(count</span><span class="s3">, </span><span class="s1">int):</span>
+                <span class="s3">raise </span><span class="s1">TypeError(</span>
+                    <span class="s4">&quot;count must be a positive integer (got {!r})&quot;</span><span class="s1">.format(count))</span>
+            <span class="s3">if </span><span class="s1">count &lt;= </span><span class="s5">0</span><span class="s1">:</span>
+                <span class="s3">raise </span><span class="s1">ValueError(</span>
+                    <span class="s4">&quot;count must be a positive integer (got {!r})&quot;</span><span class="s1">.format(count))</span>
+
+    <span class="s3">def </span><span class="s1">sendfile(self</span><span class="s3">, </span><span class="s1">file</span><span class="s3">, </span><span class="s1">offset=</span><span class="s5">0</span><span class="s3">, </span><span class="s1">count=</span><span class="s3">None</span><span class="s1">):</span>
+        <span class="s2">&quot;&quot;&quot;sendfile(file[, offset[, count]]) -&gt; sent 
+ 
+        Send a file until EOF is reached by using high-performance 
+        os.sendfile() and return the total number of bytes which 
+        were sent. 
+        *file* must be a regular file object opened in binary mode. 
+        If os.sendfile() is not available (e.g. Windows) or file is 
+        not a regular file socket.send() will be used instead. 
+        *offset* tells from where to start reading the file. 
+        If specified, *count* is the total number of bytes to transmit 
+        as opposed to sending the file until EOF is reached. 
+        File position is updated on return or also in case of error in 
+        which case file.tell() can be used to figure out the number of 
+        bytes which were sent. 
+        The socket must be of SOCK_STREAM type. 
+        Non-blocking sockets are not supported. 
+ 
+        .. versionadded:: 1.1rc4 
+           Added in Python 3.5, but available under all Python 3 versions in 
+           gevent. 
+        &quot;&quot;&quot;</span>
+        <span class="s3">return </span><span class="s1">self._sendfile_use_send(file</span><span class="s3">, </span><span class="s1">offset</span><span class="s3">, </span><span class="s1">count)</span>
+
+
+    <span class="s3">if </span><span class="s1">os.name == </span><span class="s4">'nt'</span><span class="s1">:</span>
+        <span class="s3">def </span><span class="s1">get_inheritable(self):</span>
+            <span class="s3">return </span><span class="s1">os.get_handle_inheritable(self.fileno())</span>
+
+        <span class="s3">def </span><span class="s1">set_inheritable(self</span><span class="s3">, </span><span class="s1">inheritable):</span>
+            <span class="s1">os.set_handle_inheritable(self.fileno()</span><span class="s3">, </span><span class="s1">inheritable)</span>
+    <span class="s3">else</span><span class="s1">:</span>
+        <span class="s3">def </span><span class="s1">get_inheritable(self):</span>
+            <span class="s3">return </span><span class="s1">os.get_inheritable(self.fileno())</span>
+
+        <span class="s3">def </span><span class="s1">set_inheritable(self</span><span class="s3">, </span><span class="s1">inheritable):</span>
+            <span class="s1">os.set_inheritable(self.fileno()</span><span class="s3">, </span><span class="s1">inheritable)</span>
+
+    <span class="s1">get_inheritable.__doc__ = </span><span class="s4">&quot;Get the inheritable flag of the socket&quot;</span>
+    <span class="s1">set_inheritable.__doc__ = </span><span class="s4">&quot;Set the inheritable flag of the socket&quot;</span>
+
+
+
+<span class="s1">SocketType = socket</span>
+
+
+<span class="s3">def </span><span class="s1">fromfd(fd</span><span class="s3">, </span><span class="s1">family</span><span class="s3">, </span><span class="s1">type</span><span class="s3">, </span><span class="s1">proto=</span><span class="s5">0</span><span class="s1">):</span>
+    <span class="s2">&quot;&quot;&quot; fromfd(fd, family, type[, proto]) -&gt; socket object 
+ 
+    Create a socket object from a duplicate of the given file 
+    descriptor.  The remaining arguments are the same as for socket(). 
+    &quot;&quot;&quot;</span>
+    <span class="s1">nfd = dup(fd)</span>
+    <span class="s3">return </span><span class="s1">socket(family</span><span class="s3">, </span><span class="s1">type</span><span class="s3">, </span><span class="s1">proto</span><span class="s3">, </span><span class="s1">nfd)</span>
+
+
+<span class="s3">if </span><span class="s1">hasattr(_socket.socket</span><span class="s3">, </span><span class="s4">&quot;share&quot;</span><span class="s1">):</span>
+    <span class="s3">def </span><span class="s1">fromshare(info):</span>
+        <span class="s2">&quot;&quot;&quot; fromshare(info) -&gt; socket object 
+ 
+        Create a socket object from a the bytes object returned by 
+        socket.share(pid). 
+        &quot;&quot;&quot;</span>
+        <span class="s3">return </span><span class="s1">socket(</span><span class="s5">0</span><span class="s3">, </span><span class="s5">0</span><span class="s3">, </span><span class="s5">0</span><span class="s3">, </span><span class="s1">info)</span>
+
+    <span class="s1">__implements__.append(</span><span class="s4">'fromshare'</span><span class="s1">)</span>
+
+
+<span class="s3">if </span><span class="s1">hasattr(_socket</span><span class="s3">, </span><span class="s4">&quot;socketpair&quot;</span><span class="s1">):</span>
+
+    <span class="s3">def </span><span class="s1">socketpair(family=</span><span class="s3">None, </span><span class="s1">type=SOCK_STREAM</span><span class="s3">, </span><span class="s1">proto=</span><span class="s5">0</span><span class="s1">):</span>
+        <span class="s2">&quot;&quot;&quot;socketpair([family[, type[, proto]]]) -&gt; (socket object, socket object) 
+ 
+        Create a pair of socket objects from the sockets returned by the platform 
+        socketpair() function. 
+        The arguments are the same as for socket() except the default family is 
+        AF_UNIX if defined on the platform; otherwise, the default is AF_INET. 
+ 
+        .. versionchanged:: 1.2 
+           All Python 3 versions on Windows supply this function (natively 
+           supplied by Python 3.5 and above). 
+        &quot;&quot;&quot;</span>
+        <span class="s3">if </span><span class="s1">family </span><span class="s3">is None</span><span class="s1">:</span>
+            <span class="s3">try</span><span class="s1">:</span>
+                <span class="s1">family = AF_UNIX</span>
+            <span class="s3">except </span><span class="s1">NameError:</span>
+                <span class="s1">family = AF_INET</span>
+        <span class="s1">a</span><span class="s3">, </span><span class="s1">b = _socket.socketpair(family</span><span class="s3">, </span><span class="s1">type</span><span class="s3">, </span><span class="s1">proto)</span>
+        <span class="s1">a = socket(family</span><span class="s3">, </span><span class="s1">type</span><span class="s3">, </span><span class="s1">proto</span><span class="s3">, </span><span class="s1">a.detach())</span>
+        <span class="s1">b = socket(family</span><span class="s3">, </span><span class="s1">type</span><span class="s3">, </span><span class="s1">proto</span><span class="s3">, </span><span class="s1">b.detach())</span>
+        <span class="s3">return </span><span class="s1">a</span><span class="s3">, </span><span class="s1">b</span>
+
+<span class="s3">else</span><span class="s1">: </span><span class="s0"># pragma: no cover</span>
+    <span class="s0"># Origin: https://gist.github.com/4325783, by Geert Jansen.  Public domain.</span>
+
+    <span class="s0"># gevent: taken from 3.6 release, confirmed unchanged in 3.7 and</span>
+    <span class="s0"># 3.8a1. Expected to be used only on Win. Added to Win/3.5</span>
+
+    <span class="s1">_LOCALHOST = </span><span class="s4">'127.0.0.1'</span>
+    <span class="s1">_LOCALHOST_V6 = </span><span class="s4">'::1'</span>
+
+    <span class="s3">def </span><span class="s1">socketpair(family=AF_INET</span><span class="s3">, </span><span class="s1">type=SOCK_STREAM</span><span class="s3">, </span><span class="s1">proto=</span><span class="s5">0</span><span class="s1">):</span>
+        <span class="s3">if </span><span class="s1">family == AF_INET:</span>
+            <span class="s1">host = _LOCALHOST</span>
+        <span class="s3">elif </span><span class="s1">family == AF_INET6:</span>
+            <span class="s1">host = _LOCALHOST_V6</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s3">raise </span><span class="s1">ValueError(</span><span class="s4">&quot;Only AF_INET and AF_INET6 socket address families &quot;</span>
+                             <span class="s4">&quot;are supported&quot;</span><span class="s1">)</span>
+        <span class="s3">if </span><span class="s1">type != SOCK_STREAM:</span>
+            <span class="s3">raise </span><span class="s1">ValueError(</span><span class="s4">&quot;Only SOCK_STREAM socket type is supported&quot;</span><span class="s1">)</span>
+        <span class="s3">if </span><span class="s1">proto != </span><span class="s5">0</span><span class="s1">:</span>
+            <span class="s3">raise </span><span class="s1">ValueError(</span><span class="s4">&quot;Only protocol zero is supported&quot;</span><span class="s1">)</span>
+
+        <span class="s0"># We create a connected TCP socket. Note the trick with</span>
+        <span class="s0"># setblocking(False) that prevents us from having to create a thread.</span>
+        <span class="s1">lsock = socket(family</span><span class="s3">, </span><span class="s1">type</span><span class="s3">, </span><span class="s1">proto)</span>
+        <span class="s3">try</span><span class="s1">:</span>
+            <span class="s1">lsock.bind((host</span><span class="s3">, </span><span class="s5">0</span><span class="s1">))</span>
+            <span class="s1">lsock.listen()</span>
+            <span class="s0"># On IPv6, ignore flow_info and scope_id</span>
+            <span class="s1">addr</span><span class="s3">, </span><span class="s1">port = lsock.getsockname()[:</span><span class="s5">2</span><span class="s1">]</span>
+            <span class="s1">csock = socket(family</span><span class="s3">, </span><span class="s1">type</span><span class="s3">, </span><span class="s1">proto)</span>
+            <span class="s3">try</span><span class="s1">:</span>
+                <span class="s1">csock.setblocking(</span><span class="s3">False</span><span class="s1">)</span>
+                <span class="s3">try</span><span class="s1">:</span>
+                    <span class="s1">csock.connect((addr</span><span class="s3">, </span><span class="s1">port))</span>
+                <span class="s3">except </span><span class="s1">(BlockingIOError</span><span class="s3">, </span><span class="s1">InterruptedError):</span>
+                    <span class="s3">pass</span>
+                <span class="s1">csock.setblocking(</span><span class="s3">True</span><span class="s1">)</span>
+                <span class="s1">ssock</span><span class="s3">, </span><span class="s1">_ = lsock.accept()</span>
+            <span class="s3">except</span><span class="s1">:</span>
+                <span class="s1">csock.close()</span>
+                <span class="s3">raise</span>
+        <span class="s3">finally</span><span class="s1">:</span>
+            <span class="s1">lsock.close()</span>
+        <span class="s3">return </span><span class="s1">(ssock</span><span class="s3">, </span><span class="s1">csock)</span>
+
+
+<span class="s1">__all__ = __implements__ + __extensions__ + __imports__</span>
+<span class="s1">__version_specific__ = (</span>
+    <span class="s0"># Python 3.7b1+</span>
+    <span class="s4">'close'</span><span class="s3">,</span>
+    <span class="s0"># Python 3.10rc1+</span>
+    <span class="s4">'TCP_KEEPALIVE'</span><span class="s3">,</span>
+    <span class="s4">'TCP_KEEPCNT'</span><span class="s3">,</span>
+<span class="s1">)</span>
+<span class="s3">for </span><span class="s1">_x </span><span class="s3">in </span><span class="s1">__version_specific__:</span>
+    <span class="s3">if </span><span class="s1">hasattr(__socket__</span><span class="s3">, </span><span class="s1">_x):</span>
+        <span class="s1">vars()[_x] = getattr(__socket__</span><span class="s3">, </span><span class="s1">_x)</span>
+        <span class="s3">if </span><span class="s1">_x </span><span class="s3">not in </span><span class="s1">__all__:</span>
+            <span class="s1">__all__.append(_x)</span>
+<span class="s3">del </span><span class="s1">_x</span>
+</pre>
+</body>
+</html>

@@ -1,0 +1,1005 @@
+<html>
+<head>
+<title>xmfbox.tcl</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #a9b7c6;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+xmfbox.tcl</font>
+</center></td></tr></table>
+<pre><span class="s0"># xmfbox.tcl --</span>
+<span class="s0">#</span>
+<span class="s0">#	Implements the &quot;Motif&quot; style file selection dialog for the</span>
+<span class="s0">#	Unix platform. This implementation is used only if the</span>
+<span class="s0">#	&quot;::tk_strictMotif&quot; flag is set.</span>
+<span class="s0">#</span>
+<span class="s0"># Copyright (c) 1996 Sun Microsystems, Inc.</span>
+<span class="s0"># Copyright (c) 1998-2000 Scriptics Corporation</span>
+<span class="s0">#</span>
+<span class="s0"># See the file &quot;license.terms&quot; for information on usage and redistribution</span>
+<span class="s0"># of this file, and for a DISCLAIMER OF ALL WARRANTIES.</span>
+
+<span class="s0">namespace eval ::tk::dialog {}</span>
+<span class="s0">namespace eval ::tk::dialog::file {}</span>
+
+
+<span class="s0"># ::tk::MotifFDialog --</span>
+<span class="s0">#</span>
+<span class="s0">#	Implements a file dialog similar to the standard Motif file</span>
+<span class="s0">#	selection box.</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0">#	type		&quot;open&quot; or &quot;save&quot;</span>
+<span class="s0">#	args		Options parsed by the procedure.</span>
+<span class="s0">#</span>
+<span class="s0"># Results:</span>
+<span class="s0">#	When -multiple is set to 0, this returns the absolute pathname</span>
+<span class="s0">#	of the selected file. (NOTE: This is not the same as a single</span>
+<span class="s0">#	element list.)</span>
+<span class="s0">#</span>
+<span class="s0">#	When -multiple is set to &gt; 0, this returns a Tcl list of absolute</span>
+<span class="s0">#       pathnames. The argument for -multiple is ignored, but for consistency</span>
+<span class="s0">#       with Windows it defines the maximum amount of memory to allocate for</span>
+<span class="s0">#       the returned filenames.</span>
+
+<span class="s0">proc ::tk::MotifFDialog {type args} {</span>
+    <span class="s0">variable ::tk::Priv</span>
+    <span class="s0">set dataName __tk_filedialog</span>
+    <span class="s0">upvar ::tk::dialog::file::$dataName data</span>
+
+    <span class="s0">set w [MotifFDialog_Create $dataName $type $args]</span>
+
+    <span class="s0"># Set a grab and claim the focus too.</span>
+
+    <span class="s0">::tk::SetFocusGrab $w $data(sEnt)</span>
+    <span class="s0">$data(sEnt) selection range 0 end</span>
+
+    <span class="s0"># Wait for the user to respond, then restore the focus and</span>
+    <span class="s0"># return the index of the selected button.  Restore the focus</span>
+    <span class="s0"># before deleting the window, since otherwise the window manager</span>
+    <span class="s0"># may take the focus away so we can't redirect it.  Finally,</span>
+    <span class="s0"># restore any grab that was in effect.</span>
+
+    <span class="s0">vwait ::tk::Priv(selectFilePath)</span>
+    <span class="s0">set result $Priv(selectFilePath)</span>
+    <span class="s0">::tk::RestoreFocusGrab $w $data(sEnt) withdraw</span>
+
+    <span class="s0">return $result</span>
+<span class="s0">}</span>
+
+<span class="s0"># ::tk::MotifFDialog_Create --</span>
+<span class="s0">#</span>
+<span class="s0">#	Creates the Motif file dialog (if it doesn't exist yet) and</span>
+<span class="s0">#	initialize the internal data structure associated with the</span>
+<span class="s0">#	dialog.</span>
+<span class="s0">#</span>
+<span class="s0">#	This procedure is used by ::tk::MotifFDialog to create the</span>
+<span class="s0">#	dialog. It's also used by the test suite to test the Motif</span>
+<span class="s0">#	file dialog implementation. User code shouldn't call this</span>
+<span class="s0">#	procedure directly.</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0">#	dataName	Name of the global &quot;data&quot; array for the file dialog.</span>
+<span class="s0">#	type		&quot;Save&quot; or &quot;Open&quot;</span>
+<span class="s0">#	argList		Options parsed by the procedure.</span>
+<span class="s0">#</span>
+<span class="s0"># Results:</span>
+<span class="s0">#	Pathname of the file dialog.</span>
+
+<span class="s0">proc ::tk::MotifFDialog_Create {dataName type argList} {</span>
+    <span class="s0">upvar ::tk::dialog::file::$dataName data</span>
+
+    <span class="s0">MotifFDialog_Config $dataName $type $argList</span>
+
+    <span class="s0">if {$data(-parent) eq &quot;.&quot;} {</span>
+        <span class="s0">set w .$dataName</span>
+    <span class="s0">} else {</span>
+        <span class="s0">set w $data(-parent).$dataName</span>
+    <span class="s0">}</span>
+
+    <span class="s0"># (re)create the dialog box if necessary</span>
+    <span class="s0">#</span>
+    <span class="s0">if {![winfo exists $w]} {</span>
+	<span class="s0">MotifFDialog_BuildUI $w</span>
+    <span class="s0">} elseif {[winfo class $w] ne &quot;TkMotifFDialog&quot;} {</span>
+	<span class="s0">destroy $w</span>
+	<span class="s0">MotifFDialog_BuildUI $w</span>
+    <span class="s0">} else {</span>
+	<span class="s0">set data(fEnt) $w.top.f1.ent</span>
+	<span class="s0">set data(dList) $w.top.f2.a.l</span>
+	<span class="s0">set data(fList) $w.top.f2.b.l</span>
+	<span class="s0">set data(sEnt) $w.top.f3.ent</span>
+	<span class="s0">set data(okBtn) $w.bot.ok</span>
+	<span class="s0">set data(filterBtn) $w.bot.filter</span>
+	<span class="s0">set data(cancelBtn) $w.bot.cancel</span>
+    <span class="s0">}</span>
+    <span class="s0">MotifFDialog_SetListMode $w</span>
+
+    <span class="s0"># Dialog boxes should be transient with respect to their parent,</span>
+    <span class="s0"># so that they will always stay on top of their parent window.  However,</span>
+    <span class="s0"># some window managers will create the window as withdrawn if the parent</span>
+    <span class="s0"># window is withdrawn or iconified.  Combined with the grab we put on the</span>
+    <span class="s0"># window, this can hang the entire application.  Therefore we only make</span>
+    <span class="s0"># the dialog transient if the parent is viewable.</span>
+
+    <span class="s0">if {[winfo viewable [winfo toplevel $data(-parent)]] } {</span>
+	<span class="s0">wm transient $w $data(-parent)</span>
+    <span class="s0">}</span>
+
+    <span class="s0">MotifFDialog_FileTypes $w</span>
+    <span class="s0">MotifFDialog_Update $w</span>
+
+    <span class="s0"># Withdraw the window, then update all the geometry information</span>
+    <span class="s0"># so we know how big it wants to be, then center the window in the</span>
+    <span class="s0"># display (Motif style) and de-iconify it.</span>
+
+    <span class="s0">::tk::PlaceWindow $w</span>
+    <span class="s0">wm title $w $data(-title)</span>
+
+    <span class="s0">return $w</span>
+<span class="s0">}</span>
+
+<span class="s0"># ::tk::MotifFDialog_FileTypes --</span>
+<span class="s0">#</span>
+<span class="s0">#	Checks the -filetypes option. If present this adds a list of radio-</span>
+<span class="s0">#	buttons to pick the file types from.</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0">#	w		Pathname of the tk_get*File dialogue.</span>
+<span class="s0">#</span>
+<span class="s0"># Results:</span>
+<span class="s0">#	none</span>
+
+<span class="s0">proc ::tk::MotifFDialog_FileTypes {w} {</span>
+    <span class="s0">upvar ::tk::dialog::file::[winfo name $w] data</span>
+
+    <span class="s0">set f $w.top.f3.types</span>
+    <span class="s0">destroy $f</span>
+
+    <span class="s0"># No file types: use &quot;*&quot; as the filter and display no radio-buttons</span>
+    <span class="s0">if {$data(-filetypes) eq &quot;&quot;} {</span>
+	<span class="s0">set data(filter) *</span>
+	<span class="s0">return</span>
+    <span class="s0">}</span>
+
+    <span class="s0"># The filetypes radiobuttons</span>
+    <span class="s0"># set data(fileType) $data(-defaulttype)</span>
+    <span class="s0"># Default type to first entry</span>
+    <span class="s0">set initialTypeName [lindex $data(-filetypes) 0 0]</span>
+    <span class="s0">if {$data(-typevariable) ne &quot;&quot;} {</span>
+	<span class="s0">upvar #0 $data(-typevariable) typeVariable</span>
+	<span class="s0">if {[info exists typeVariable]} {</span>
+	    <span class="s0">set initialTypeName $typeVariable</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+    <span class="s0">set ix 0</span>
+    <span class="s0">set data(fileType) 0</span>
+    <span class="s0">foreach fltr $data(-filetypes) {</span>
+	<span class="s0">set fname [lindex $fltr 0]</span>
+	<span class="s0">if {[string first $initialTypeName $fname] == 0} {</span>
+	    <span class="s0">set data(fileType) $ix</span>
+	    <span class="s0">break</span>
+	<span class="s0">}</span>
+	<span class="s0">incr ix</span>
+    <span class="s0">}</span>
+
+    <span class="s0">MotifFDialog_SetFilter $w [lindex $data(-filetypes) $data(fileType)]</span>
+
+    <span class="s0">#don't produce radiobuttons for only one filetype</span>
+    <span class="s0">if {[llength $data(-filetypes)] == 1} {</span>
+	<span class="s0">return</span>
+    <span class="s0">}</span>
+
+    <span class="s0">frame $f</span>
+    <span class="s0">set cnt 0</span>
+    <span class="s0">if {$data(-filetypes) ne {}} {</span>
+	<span class="s0">foreach type $data(-filetypes) {</span>
+	    <span class="s0">set title  [lindex [lindex $type 0] 0]</span>
+	    <span class="s0">set filter [lindex $type 1]</span>
+	    <span class="s0">radiobutton $f.b$cnt \</span>
+		<span class="s0">-text $title \</span>
+		<span class="s0">-variable ::tk::dialog::file::[winfo name $w](fileType) \</span>
+		<span class="s0">-value $cnt \</span>
+		<span class="s0">-command [list tk::MotifFDialog_SetFilter $w $type]</span>
+	    <span class="s0">pack $f.b$cnt -side left</span>
+	    <span class="s0">incr cnt</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+    <span class="s0">$f.b$data(fileType) invoke</span>
+
+    <span class="s0">pack $f -side bottom -fill both</span>
+
+    <span class="s0">return</span>
+<span class="s0">}</span>
+
+<span class="s0"># This proc gets called whenever data(filter) is set</span>
+<span class="s0">#</span>
+<span class="s0">proc ::tk::MotifFDialog_SetFilter {w type} {</span>
+    <span class="s0">upvar ::tk::dialog::file::[winfo name $w] data</span>
+    <span class="s0">variable ::tk::Priv</span>
+
+    <span class="s0">set data(filter) [lindex $type 1]</span>
+    <span class="s0">set Priv(selectFileType) [lindex [lindex $type 0] 0]</span>
+
+    <span class="s0">MotifFDialog_Update $w</span>
+<span class="s0">}</span>
+
+<span class="s0"># ::tk::MotifFDialog_Config --</span>
+<span class="s0">#</span>
+<span class="s0">#	Iterates over the optional arguments to determine the option</span>
+<span class="s0">#	values for the Motif file dialog; gives default values to</span>
+<span class="s0">#	unspecified options.</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0">#	dataName	The name of the global variable in which</span>
+<span class="s0">#			data for the file dialog is stored.</span>
+<span class="s0">#	type		&quot;Save&quot; or &quot;Open&quot;</span>
+<span class="s0">#	argList		Options parsed by the procedure.</span>
+
+<span class="s0">proc ::tk::MotifFDialog_Config {dataName type argList} {</span>
+    <span class="s0">upvar ::tk::dialog::file::$dataName data</span>
+
+    <span class="s0">set data(type) $type</span>
+
+    <span class="s0"># 1: the configuration specs</span>
+    <span class="s0">#</span>
+    <span class="s0">set specs {</span>
+	<span class="s0">{-defaultextension &quot;&quot; &quot;&quot; &quot;&quot;}</span>
+	<span class="s0">{-filetypes &quot;&quot; &quot;&quot; &quot;&quot;}</span>
+	<span class="s0">{-initialdir &quot;&quot; &quot;&quot; &quot;&quot;}</span>
+	<span class="s0">{-initialfile &quot;&quot; &quot;&quot; &quot;&quot;}</span>
+	<span class="s0">{-parent &quot;&quot; &quot;&quot; &quot;.&quot;}</span>
+	<span class="s0">{-title &quot;&quot; &quot;&quot; &quot;&quot;}</span>
+	<span class="s0">{-typevariable &quot;&quot; &quot;&quot; &quot;&quot;}</span>
+    <span class="s0">}</span>
+    <span class="s0">if {$type eq &quot;open&quot;} {</span>
+	<span class="s0">lappend specs {-multiple &quot;&quot; &quot;&quot; &quot;0&quot;}</span>
+    <span class="s0">}</span>
+    <span class="s0">if {$type eq &quot;save&quot;} {</span>
+	<span class="s0">lappend specs {-confirmoverwrite &quot;&quot; &quot;&quot; &quot;1&quot;}</span>
+    <span class="s0">}</span>
+
+    <span class="s0">set data(-multiple) 0</span>
+    <span class="s0">set data(-confirmoverwrite) 1</span>
+    <span class="s0"># 2: default values depending on the type of the dialog</span>
+    <span class="s0">#</span>
+    <span class="s0">if {![info exists data(selectPath)]} {</span>
+	<span class="s0"># first time the dialog has been popped up</span>
+	<span class="s0">set data(selectPath) [pwd]</span>
+	<span class="s0">set data(selectFile) &quot;&quot;</span>
+    <span class="s0">}</span>
+
+    <span class="s0"># 3: parse the arguments</span>
+    <span class="s0">#</span>
+    <span class="s0">tclParseConfigSpec ::tk::dialog::file::$dataName $specs &quot;&quot; $argList</span>
+
+    <span class="s0">if {$data(-title) eq &quot;&quot;} {</span>
+	<span class="s0">if {$type eq &quot;open&quot;} {</span>
+	    <span class="s0">if {$data(-multiple) != 0} {</span>
+		<span class="s0">set data(-title) &quot;[mc {Open Multiple Files}]&quot;</span>
+	    <span class="s0">} else {</span>
+		<span class="s0">set data(-title) [mc &quot;Open&quot;]</span>
+	    <span class="s0">}</span>
+	<span class="s0">} else {</span>
+	    <span class="s0">set data(-title) [mc &quot;Save As&quot;]</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+
+    <span class="s0"># 4: set the default directory and selection according to the -initial</span>
+    <span class="s0">#    settings</span>
+    <span class="s0">#</span>
+    <span class="s0">if {$data(-initialdir) ne &quot;&quot;} {</span>
+	<span class="s0">if {[file isdirectory $data(-initialdir)]} {</span>
+	    <span class="s0">set data(selectPath) [lindex [glob $data(-initialdir)] 0]</span>
+	<span class="s0">} else {</span>
+	    <span class="s0">set data(selectPath) [pwd]</span>
+	<span class="s0">}</span>
+
+	<span class="s0"># Convert the initialdir to an absolute path name.</span>
+
+	<span class="s0">set old [pwd]</span>
+	<span class="s0">cd $data(selectPath)</span>
+	<span class="s0">set data(selectPath) [pwd]</span>
+	<span class="s0">cd $old</span>
+    <span class="s0">}</span>
+    <span class="s0">set data(selectFile) $data(-initialfile)</span>
+
+    <span class="s0"># 5. Parse the -filetypes option. It is not used by the motif</span>
+    <span class="s0">#    file dialog, but we check for validity of the value to make sure</span>
+    <span class="s0">#    the application code also runs fine with the TK file dialog.</span>
+    <span class="s0">#</span>
+    <span class="s0">set data(-filetypes) [::tk::FDGetFileTypes $data(-filetypes)]</span>
+
+    <span class="s0">if {![info exists data(filter)]} {</span>
+	<span class="s0">set data(filter) *</span>
+    <span class="s0">}</span>
+    <span class="s0">if {![winfo exists $data(-parent)]} {</span>
+	<span class="s0">return -code error -errorcode [list TK LOOKUP WINDOW $data(-parent)] \</span>
+	    <span class="s0">&quot;bad window path name \&quot;$data(-parent)\&quot;&quot;</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+
+<span class="s0"># ::tk::MotifFDialog_BuildUI --</span>
+<span class="s0">#</span>
+<span class="s0">#	Builds the UI components of the Motif file dialog.</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0"># 	w		Pathname of the dialog to build.</span>
+<span class="s0">#</span>
+<span class="s0"># Results:</span>
+<span class="s0"># 	None.</span>
+
+<span class="s0">proc ::tk::MotifFDialog_BuildUI {w} {</span>
+    <span class="s0">set dataName [lindex [split $w .] end]</span>
+    <span class="s0">upvar ::tk::dialog::file::$dataName data</span>
+
+    <span class="s0"># Create the dialog toplevel and internal frames.</span>
+    <span class="s0">#</span>
+    <span class="s0">toplevel $w -class TkMotifFDialog</span>
+    <span class="s0">set top [frame $w.top -relief raised -bd 1]</span>
+    <span class="s0">set bot [frame $w.bot -relief raised -bd 1]</span>
+
+    <span class="s0">pack $w.bot -side bottom -fill x</span>
+    <span class="s0">pack $w.top -side top -expand yes -fill both</span>
+
+    <span class="s0">set f1 [frame $top.f1]</span>
+    <span class="s0">set f2 [frame $top.f2]</span>
+    <span class="s0">set f3 [frame $top.f3]</span>
+
+    <span class="s0">pack $f1 -side top    -fill x</span>
+    <span class="s0">pack $f3 -side bottom -fill x</span>
+    <span class="s0">pack $f2 -expand yes -fill both</span>
+
+    <span class="s0">set f2a [frame $f2.a]</span>
+    <span class="s0">set f2b [frame $f2.b]</span>
+
+    <span class="s0">grid $f2a -row 0 -column 0 -rowspan 1 -columnspan 1 -padx 4 -pady 4 \</span>
+	<span class="s0">-sticky news</span>
+    <span class="s0">grid $f2b -row 0 -column 1 -rowspan 1 -columnspan 1 -padx 4 -pady 4 \</span>
+	<span class="s0">-sticky news</span>
+    <span class="s0">grid rowconfigure $f2 0    -minsize 0   -weight 1</span>
+    <span class="s0">grid columnconfigure $f2 0 -minsize 0   -weight 1</span>
+    <span class="s0">grid columnconfigure $f2 1 -minsize 150 -weight 2</span>
+
+    <span class="s0"># The Filter box</span>
+    <span class="s0">#</span>
+    <span class="s0">bind [::tk::AmpWidget label $f1.lab -text [mc &quot;Fil&amp;ter:&quot;] -anchor w] \</span>
+	<span class="s0">&lt;&lt;AltUnderlined&gt;&gt; [list focus $f1.ent]</span>
+    <span class="s0">entry $f1.ent</span>
+    <span class="s0">pack $f1.lab -side top -fill x -padx 6 -pady 4</span>
+    <span class="s0">pack $f1.ent -side top -fill x -padx 4 -pady 0</span>
+    <span class="s0">set data(fEnt) $f1.ent</span>
+
+    <span class="s0"># The file and directory lists</span>
+    <span class="s0">#</span>
+    <span class="s0">set data(dList) [MotifFDialog_MakeSList $w $f2a \</span>
+	    <span class="s0">[mc &quot;&amp;Directory:&quot;] DList]</span>
+    <span class="s0">set data(fList) [MotifFDialog_MakeSList $w $f2b \</span>
+	    <span class="s0">[mc &quot;Fi&amp;les:&quot;]     FList]</span>
+
+    <span class="s0"># The Selection box</span>
+    <span class="s0">#</span>
+    <span class="s0">bind [::tk::AmpWidget label $f3.lab -text [mc &quot;&amp;Selection:&quot;] -anchor w] \</span>
+	<span class="s0">&lt;&lt;AltUnderlined&gt;&gt; [list focus $f3.ent]</span>
+    <span class="s0">entry $f3.ent</span>
+    <span class="s0">pack $f3.lab -side top -fill x -padx 6 -pady 0</span>
+    <span class="s0">pack $f3.ent -side top -fill x -padx 4 -pady 4</span>
+    <span class="s0">set data(sEnt) $f3.ent</span>
+
+    <span class="s0"># The buttons</span>
+    <span class="s0">#</span>
+    <span class="s0">set maxWidth [::tk::mcmaxamp &amp;OK &amp;Filter &amp;Cancel]</span>
+    <span class="s0">set maxWidth [expr {$maxWidth&lt;6?6:$maxWidth}]</span>
+    <span class="s0">set data(okBtn) [::tk::AmpWidget button $bot.ok -text [mc &quot;&amp;OK&quot;] \</span>
+	    <span class="s0">-width $maxWidth \</span>
+	    <span class="s0">-command [list tk::MotifFDialog_OkCmd $w]]</span>
+    <span class="s0">set data(filterBtn) [::tk::AmpWidget button $bot.filter -text [mc &quot;&amp;Filter&quot;] \</span>
+	    <span class="s0">-width $maxWidth \</span>
+	    <span class="s0">-command [list tk::MotifFDialog_FilterCmd $w]]</span>
+    <span class="s0">set data(cancelBtn) [::tk::AmpWidget button $bot.cancel -text [mc &quot;&amp;Cancel&quot;] \</span>
+	    <span class="s0">-width $maxWidth \</span>
+	    <span class="s0">-command [list tk::MotifFDialog_CancelCmd $w]]</span>
+
+    <span class="s0">pack $bot.ok $bot.filter $bot.cancel -padx 10 -pady 10 -expand yes \</span>
+	<span class="s0">-side left</span>
+
+    <span class="s0"># Create the bindings:</span>
+    <span class="s0">#</span>
+    <span class="s0">bind $w &lt;Alt-Key&gt; [list ::tk::AltKeyInDialog $w %A]</span>
+
+    <span class="s0">bind $data(fEnt) &lt;Return&gt; [list tk::MotifFDialog_ActivateFEnt $w]</span>
+    <span class="s0">bind $data(sEnt) &lt;Return&gt; [list tk::MotifFDialog_ActivateSEnt $w]</span>
+    <span class="s0">bind $w &lt;Escape&gt; [list tk::MotifFDialog_CancelCmd $w]</span>
+    <span class="s0">bind $w.bot &lt;Destroy&gt; {set ::tk::Priv(selectFilePath) {}}</span>
+
+    <span class="s0">wm protocol $w WM_DELETE_WINDOW [list tk::MotifFDialog_CancelCmd $w]</span>
+<span class="s0">}</span>
+
+<span class="s0">proc ::tk::MotifFDialog_SetListMode {w} {</span>
+    <span class="s0">upvar ::tk::dialog::file::[winfo name $w] data</span>
+
+    <span class="s0">if {$data(-multiple) != 0} {</span>
+	<span class="s0">set selectmode extended</span>
+    <span class="s0">} else {</span>
+	<span class="s0">set selectmode browse</span>
+    <span class="s0">}</span>
+    <span class="s0">set f $w.top.f2.b</span>
+    <span class="s0">$f.l configure -selectmode $selectmode</span>
+<span class="s0">}</span>
+
+<span class="s0"># ::tk::MotifFDialog_MakeSList --</span>
+<span class="s0">#</span>
+<span class="s0">#	Create a scrolled-listbox and set the keyboard accelerator</span>
+<span class="s0">#	bindings so that the list selection follows what the user</span>
+<span class="s0">#	types.</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0">#	w		Pathname of the dialog box.</span>
+<span class="s0">#	f		Frame widget inside which to create the scrolled</span>
+<span class="s0">#			listbox. This frame widget already exists.</span>
+<span class="s0">#	label		The string to display on top of the listbox.</span>
+<span class="s0">#	under		Sets the -under option of the label.</span>
+<span class="s0">#	cmdPrefix	Specifies procedures to call when the listbox is</span>
+<span class="s0">#			browsed or activated.</span>
+
+<span class="s0">proc ::tk::MotifFDialog_MakeSList {w f label cmdPrefix} {</span>
+    <span class="s0">bind [::tk::AmpWidget label $f.lab -text $label -anchor w] \</span>
+	<span class="s0">&lt;&lt;AltUnderlined&gt;&gt; [list focus $f.l]</span>
+    <span class="s0">listbox $f.l -width 12 -height 5 -exportselection 0\</span>
+	<span class="s0">-xscrollcommand [list $f.h set]	-yscrollcommand [list $f.v set]</span>
+    <span class="s0">scrollbar $f.v -orient vertical   -takefocus 0 -command [list $f.l yview]</span>
+    <span class="s0">scrollbar $f.h -orient horizontal -takefocus 0 -command [list $f.l xview]</span>
+    <span class="s0">grid $f.lab -row 0 -column 0 -sticky news -rowspan 1 -columnspan 2 \</span>
+	<span class="s0">-padx 2 -pady 2</span>
+    <span class="s0">grid $f.l -row 1 -column 0 -rowspan 1 -columnspan 1 -sticky news</span>
+    <span class="s0">grid $f.v -row 1 -column 1 -rowspan 1 -columnspan 1 -sticky news</span>
+    <span class="s0">grid $f.h -row 2 -column 0 -rowspan 1 -columnspan 1 -sticky news</span>
+
+    <span class="s0">grid rowconfigure    $f 0 -weight 0 -minsize 0</span>
+    <span class="s0">grid rowconfigure    $f 1 -weight 1 -minsize 0</span>
+    <span class="s0">grid columnconfigure $f 0 -weight 1 -minsize 0</span>
+
+    <span class="s0"># bindings for the listboxes</span>
+    <span class="s0">#</span>
+    <span class="s0">set list $f.l</span>
+    <span class="s0">bind $list &lt;&lt;ListboxSelect&gt;&gt; [list tk::MotifFDialog_Browse$cmdPrefix $w]</span>
+    <span class="s0">bind $list &lt;Double-ButtonRelease-1&gt; \</span>
+	    <span class="s0">[list tk::MotifFDialog_Activate$cmdPrefix $w]</span>
+    <span class="s0">bind $list &lt;Return&gt;	&quot;tk::MotifFDialog_Browse$cmdPrefix [list $w]; \</span>
+	    <span class="s0">tk::MotifFDialog_Activate$cmdPrefix [list $w]&quot;</span>
+
+    <span class="s0">bindtags $list [list Listbox $list [winfo toplevel $list] all]</span>
+    <span class="s0">ListBoxKeyAccel_Set $list</span>
+
+    <span class="s0">return $f.l</span>
+<span class="s0">}</span>
+
+<span class="s0"># ::tk::MotifFDialog_InterpFilter --</span>
+<span class="s0">#</span>
+<span class="s0">#	Interpret the string in the filter entry into two components:</span>
+<span class="s0">#	the directory and the pattern. If the string is a relative</span>
+<span class="s0">#	pathname, give a warning to the user and restore the pattern</span>
+<span class="s0">#	to original.</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0">#	w		pathname of the dialog box.</span>
+<span class="s0">#</span>
+<span class="s0"># Results:</span>
+<span class="s0"># 	A list of two elements. The first element is the directory</span>
+<span class="s0"># 	specified # by the filter. The second element is the filter</span>
+<span class="s0"># 	pattern itself.</span>
+
+<span class="s0">proc ::tk::MotifFDialog_InterpFilter {w} {</span>
+    <span class="s0">upvar ::tk::dialog::file::[winfo name $w] data</span>
+
+    <span class="s0">set text [string trim [$data(fEnt) get]]</span>
+
+    <span class="s0"># Perform tilde substitution</span>
+    <span class="s0">#</span>
+    <span class="s0">set badTilde 0</span>
+    <span class="s0">if {[string index $text 0] eq &quot;~&quot;} {</span>
+	<span class="s0">set list [file split $text]</span>
+	<span class="s0">set tilde [lindex $list 0]</span>
+	<span class="s0">if {[catch {set tilde [glob $tilde]}]} {</span>
+	    <span class="s0">set badTilde 1</span>
+	<span class="s0">} else {</span>
+	    <span class="s0">set text [eval file join [concat $tilde [lrange $list 1 end]]]</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+
+    <span class="s0"># If the string is a relative pathname, combine it</span>
+    <span class="s0"># with the current selectPath.</span>
+
+    <span class="s0">set relative 0</span>
+    <span class="s0">if {[file pathtype $text] eq &quot;relative&quot;} {</span>
+	<span class="s0">set relative 1</span>
+    <span class="s0">} elseif {$badTilde} {</span>
+	<span class="s0">set relative 1</span>
+    <span class="s0">}</span>
+
+    <span class="s0">if {$relative} {</span>
+	<span class="s0">tk_messageBox -icon warning -type ok \</span>
+		<span class="s0">-message &quot;\&quot;$text\&quot; must be an absolute pathname&quot;</span>
+
+	<span class="s0">$data(fEnt) delete 0 end</span>
+	<span class="s0">$data(fEnt) insert 0 [::tk::dialog::file::JoinFile $data(selectPath) \</span>
+		<span class="s0">$data(filter)]</span>
+
+	<span class="s0">return [list $data(selectPath) $data(filter)]</span>
+    <span class="s0">}</span>
+
+    <span class="s0">set resolved [::tk::dialog::file::JoinFile [file dirname $text] [file tail $text]]</span>
+
+    <span class="s0">if {[file isdirectory $resolved]} {</span>
+	<span class="s0">set dir $resolved</span>
+	<span class="s0">set fil $data(filter)</span>
+    <span class="s0">} else {</span>
+	<span class="s0">set dir [file dirname $resolved]</span>
+	<span class="s0">set fil [file tail    $resolved]</span>
+    <span class="s0">}</span>
+
+    <span class="s0">return [list $dir $fil]</span>
+<span class="s0">}</span>
+
+<span class="s0"># ::tk::MotifFDialog_Update</span>
+<span class="s0">#</span>
+<span class="s0">#	Load the files and synchronize the &quot;filter&quot; and &quot;selection&quot; fields</span>
+<span class="s0">#	boxes.</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0"># 	w 		pathname of the dialog box.</span>
+<span class="s0">#</span>
+<span class="s0"># Results:</span>
+<span class="s0">#	None.</span>
+
+<span class="s0">proc ::tk::MotifFDialog_Update {w} {</span>
+    <span class="s0">upvar ::tk::dialog::file::[winfo name $w] data</span>
+
+    <span class="s0">$data(fEnt) delete 0 end</span>
+    <span class="s0">$data(fEnt) insert 0 \</span>
+            <span class="s0">[::tk::dialog::file::JoinFile $data(selectPath) $data(filter)]</span>
+    <span class="s0">$data(sEnt) delete 0 end</span>
+    <span class="s0">$data(sEnt) insert 0 [::tk::dialog::file::JoinFile $data(selectPath) \</span>
+	    <span class="s0">$data(selectFile)]</span>
+
+    <span class="s0">MotifFDialog_LoadFiles $w</span>
+<span class="s0">}</span>
+
+<span class="s0"># ::tk::MotifFDialog_LoadFiles --</span>
+<span class="s0">#</span>
+<span class="s0">#	Loads the files and directories into the two listboxes according</span>
+<span class="s0">#	to the filter setting.</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0"># 	w 		pathname of the dialog box.</span>
+<span class="s0">#</span>
+<span class="s0"># Results:</span>
+<span class="s0">#	None.</span>
+
+<span class="s0">proc ::tk::MotifFDialog_LoadFiles {w} {</span>
+    <span class="s0">upvar ::tk::dialog::file::[winfo name $w] data</span>
+
+    <span class="s0">$data(dList) delete 0 end</span>
+    <span class="s0">$data(fList) delete 0 end</span>
+
+    <span class="s0">set appPWD [pwd]</span>
+    <span class="s0">if {[catch {cd $data(selectPath)}]} {</span>
+	<span class="s0">cd $appPWD</span>
+
+	<span class="s0">$data(dList) insert end &quot;..&quot;</span>
+	<span class="s0">return</span>
+    <span class="s0">}</span>
+
+    <span class="s0"># Make the dir and file lists</span>
+    <span class="s0">#</span>
+    <span class="s0"># For speed we only have one glob, which reduces the file system</span>
+    <span class="s0"># calls (good for slow NFS networks).</span>
+    <span class="s0">#</span>
+    <span class="s0"># We also do two smaller sorts (files + dirs) instead of one large sort,</span>
+    <span class="s0"># which gives a small speed increase.</span>
+    <span class="s0">#</span>
+    <span class="s0">set top 0</span>
+    <span class="s0">set dlist &quot;&quot;</span>
+    <span class="s0">set flist &quot;&quot;</span>
+    <span class="s0">foreach f [glob -nocomplain .* *] {</span>
+	<span class="s0">if {[file isdir ./$f]} {</span>
+	    <span class="s0">lappend dlist $f</span>
+	<span class="s0">} else {</span>
+            <span class="s0">foreach pat $data(filter) {</span>
+                <span class="s0">if {[string match $pat $f]} {</span>
+		    <span class="s0">if {[string match .* $f]} {</span>
+			<span class="s0">incr top</span>
+		    <span class="s0">}</span>
+		    <span class="s0">lappend flist $f</span>
+                    <span class="s0">break</span>
+		<span class="s0">}</span>
+            <span class="s0">}</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+    <span class="s0">eval [list $data(dList) insert end] [lsort -dictionary $dlist]</span>
+    <span class="s0">eval [list $data(fList) insert end] [lsort -dictionary $flist]</span>
+
+    <span class="s0"># The user probably doesn't want to see the . files. We adjust the view</span>
+    <span class="s0"># so that the listbox displays all the non-dot files</span>
+    <span class="s0">$data(fList) yview $top</span>
+
+    <span class="s0">cd $appPWD</span>
+<span class="s0">}</span>
+
+<span class="s0"># ::tk::MotifFDialog_BrowseDList --</span>
+<span class="s0">#</span>
+<span class="s0">#	This procedure is called when the directory list is browsed</span>
+<span class="s0">#	(clicked-over) by the user.</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0"># 	w		The pathname of the dialog box.</span>
+<span class="s0">#</span>
+<span class="s0"># Results:</span>
+<span class="s0">#	None.</span>
+
+<span class="s0">proc ::tk::MotifFDialog_BrowseDList {w} {</span>
+    <span class="s0">upvar ::tk::dialog::file::[winfo name $w] data</span>
+
+    <span class="s0">focus $data(dList)</span>
+    <span class="s0">if {[$data(dList) curselection] eq &quot;&quot;} {</span>
+	<span class="s0">return</span>
+    <span class="s0">}</span>
+    <span class="s0">set subdir [$data(dList) get [$data(dList) curselection]]</span>
+    <span class="s0">if {$subdir eq &quot;&quot;} {</span>
+	<span class="s0">return</span>
+    <span class="s0">}</span>
+
+    <span class="s0">$data(fList) selection clear 0 end</span>
+
+    <span class="s0">set list [MotifFDialog_InterpFilter $w]</span>
+    <span class="s0">set data(filter) [lindex $list 1]</span>
+
+    <span class="s0">switch -- $subdir {</span>
+	<span class="s0">. {</span>
+	    <span class="s0">set newSpec [::tk::dialog::file::JoinFile $data(selectPath) $data(filter)]</span>
+	<span class="s0">}</span>
+	<span class="s0">.. {</span>
+	    <span class="s0">set newSpec [::tk::dialog::file::JoinFile [file dirname $data(selectPath)] \</span>
+		<span class="s0">$data(filter)]</span>
+	<span class="s0">}</span>
+	<span class="s0">default {</span>
+	    <span class="s0">set newSpec [::tk::dialog::file::JoinFile [::tk::dialog::file::JoinFile \</span>
+		    <span class="s0">$data(selectPath) $subdir] $data(filter)]</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+
+    <span class="s0">$data(fEnt) delete 0 end</span>
+    <span class="s0">$data(fEnt) insert 0 $newSpec</span>
+<span class="s0">}</span>
+
+<span class="s0"># ::tk::MotifFDialog_ActivateDList --</span>
+<span class="s0">#</span>
+<span class="s0">#	This procedure is called when the directory list is activated</span>
+<span class="s0">#	(double-clicked) by the user.</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0"># 	w		The pathname of the dialog box.</span>
+<span class="s0">#</span>
+<span class="s0"># Results:</span>
+<span class="s0">#	None.</span>
+
+<span class="s0">proc ::tk::MotifFDialog_ActivateDList {w} {</span>
+    <span class="s0">upvar ::tk::dialog::file::[winfo name $w] data</span>
+
+    <span class="s0">if {[$data(dList) curselection] eq &quot;&quot;} {</span>
+	<span class="s0">return</span>
+    <span class="s0">}</span>
+    <span class="s0">set subdir [$data(dList) get [$data(dList) curselection]]</span>
+    <span class="s0">if {$subdir eq &quot;&quot;} {</span>
+	<span class="s0">return</span>
+    <span class="s0">}</span>
+
+    <span class="s0">$data(fList) selection clear 0 end</span>
+
+    <span class="s0">switch -- $subdir {</span>
+	<span class="s0">. {</span>
+	    <span class="s0">set newDir $data(selectPath)</span>
+	<span class="s0">}</span>
+	<span class="s0">.. {</span>
+	    <span class="s0">set newDir [file dirname $data(selectPath)]</span>
+	<span class="s0">}</span>
+	<span class="s0">default {</span>
+	    <span class="s0">set newDir [::tk::dialog::file::JoinFile $data(selectPath) $subdir]</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+
+    <span class="s0">set data(selectPath) $newDir</span>
+    <span class="s0">MotifFDialog_Update $w</span>
+
+    <span class="s0">if {$subdir ne &quot;..&quot;} {</span>
+	<span class="s0">$data(dList) selection set 0</span>
+	<span class="s0">$data(dList) activate 0</span>
+    <span class="s0">} else {</span>
+	<span class="s0">$data(dList) selection set 1</span>
+	<span class="s0">$data(dList) activate 1</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+
+<span class="s0"># ::tk::MotifFDialog_BrowseFList --</span>
+<span class="s0">#</span>
+<span class="s0">#	This procedure is called when the file list is browsed</span>
+<span class="s0">#	(clicked-over) by the user.</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0"># 	w		The pathname of the dialog box.</span>
+<span class="s0">#</span>
+<span class="s0"># Results:</span>
+<span class="s0">#	None.</span>
+
+<span class="s0">proc ::tk::MotifFDialog_BrowseFList {w} {</span>
+    <span class="s0">upvar ::tk::dialog::file::[winfo name $w] data</span>
+
+    <span class="s0">focus $data(fList)</span>
+    <span class="s0">set data(selectFile) &quot;&quot;</span>
+    <span class="s0">foreach item [$data(fList) curselection] {</span>
+	<span class="s0">lappend data(selectFile) [$data(fList) get $item]</span>
+    <span class="s0">}</span>
+    <span class="s0">if {[llength $data(selectFile)] == 0} {</span>
+	<span class="s0">return</span>
+    <span class="s0">}</span>
+
+    <span class="s0">$data(dList) selection clear 0 end</span>
+
+    <span class="s0">$data(fEnt) delete 0 end</span>
+    <span class="s0">$data(fEnt) insert 0 [::tk::dialog::file::JoinFile $data(selectPath) \</span>
+	    <span class="s0">$data(filter)]</span>
+    <span class="s0">$data(fEnt) xview end</span>
+
+    <span class="s0"># if it's a multiple selection box, just put in the filenames</span>
+    <span class="s0"># otherwise put in the full path as usual</span>
+    <span class="s0">$data(sEnt) delete 0 end</span>
+    <span class="s0">if {$data(-multiple) != 0} {</span>
+	<span class="s0">$data(sEnt) insert 0 $data(selectFile)</span>
+    <span class="s0">} else {</span>
+	<span class="s0">$data(sEnt) insert 0 [::tk::dialog::file::JoinFile $data(selectPath) \</span>
+		<span class="s0">[lindex $data(selectFile) 0]]</span>
+    <span class="s0">}</span>
+    <span class="s0">$data(sEnt) xview end</span>
+<span class="s0">}</span>
+
+<span class="s0"># ::tk::MotifFDialog_ActivateFList --</span>
+<span class="s0">#</span>
+<span class="s0">#	This procedure is called when the file list is activated</span>
+<span class="s0">#	(double-clicked) by the user.</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0"># 	w		The pathname of the dialog box.</span>
+<span class="s0">#</span>
+<span class="s0"># Results:</span>
+<span class="s0">#	None.</span>
+
+<span class="s0">proc ::tk::MotifFDialog_ActivateFList {w} {</span>
+    <span class="s0">upvar ::tk::dialog::file::[winfo name $w] data</span>
+
+    <span class="s0">if {[$data(fList) curselection] eq &quot;&quot;} {</span>
+	<span class="s0">return</span>
+    <span class="s0">}</span>
+    <span class="s0">set data(selectFile) [$data(fList) get [$data(fList) curselection]]</span>
+    <span class="s0">if {$data(selectFile) eq &quot;&quot;} {</span>
+	<span class="s0">return</span>
+    <span class="s0">} else {</span>
+	<span class="s0">MotifFDialog_ActivateSEnt $w</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+
+<span class="s0"># ::tk::MotifFDialog_ActivateFEnt --</span>
+<span class="s0">#</span>
+<span class="s0">#	This procedure is called when the user presses Return inside</span>
+<span class="s0">#	the &quot;filter&quot; entry. It updates the dialog according to the</span>
+<span class="s0">#	text inside the filter entry.</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0"># 	w		The pathname of the dialog box.</span>
+<span class="s0">#</span>
+<span class="s0"># Results:</span>
+<span class="s0">#	None.</span>
+
+<span class="s0">proc ::tk::MotifFDialog_ActivateFEnt {w} {</span>
+    <span class="s0">upvar ::tk::dialog::file::[winfo name $w] data</span>
+
+    <span class="s0">set list [MotifFDialog_InterpFilter $w]</span>
+    <span class="s0">set data(selectPath) [lindex $list 0]</span>
+    <span class="s0">set data(filter)    [lindex $list 1]</span>
+
+    <span class="s0">MotifFDialog_Update $w</span>
+<span class="s0">}</span>
+
+<span class="s0"># ::tk::MotifFDialog_ActivateSEnt --</span>
+<span class="s0">#</span>
+<span class="s0">#	This procedure is called when the user presses Return inside</span>
+<span class="s0">#	the &quot;selection&quot; entry. It sets the ::tk::Priv(selectFilePath)</span>
+<span class="s0">#	variable so that the vwait loop in tk::MotifFDialog will be</span>
+<span class="s0">#	terminated.</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0"># 	w		The pathname of the dialog box.</span>
+<span class="s0">#</span>
+<span class="s0"># Results:</span>
+<span class="s0">#	None.</span>
+
+<span class="s0">proc ::tk::MotifFDialog_ActivateSEnt {w} {</span>
+    <span class="s0">variable ::tk::Priv</span>
+    <span class="s0">upvar ::tk::dialog::file::[winfo name $w] data</span>
+
+    <span class="s0">set selectFilePath [string trim [$data(sEnt) get]]</span>
+
+    <span class="s0">if {$selectFilePath eq &quot;&quot;} {</span>
+	<span class="s0">MotifFDialog_FilterCmd $w</span>
+	<span class="s0">return</span>
+    <span class="s0">}</span>
+
+    <span class="s0">if {$data(-multiple) == 0} {</span>
+	<span class="s0">set selectFilePath [list $selectFilePath]</span>
+    <span class="s0">}</span>
+
+    <span class="s0">if {[file isdirectory [lindex $selectFilePath 0]]} {</span>
+	<span class="s0">set data(selectPath) [lindex [glob $selectFilePath] 0]</span>
+	<span class="s0">set data(selectFile) &quot;&quot;</span>
+	<span class="s0">MotifFDialog_Update $w</span>
+	<span class="s0">return</span>
+    <span class="s0">}</span>
+
+    <span class="s0">set newFileList &quot;&quot;</span>
+    <span class="s0">foreach item $selectFilePath {</span>
+	<span class="s0">if {[file pathtype $item] ne &quot;absolute&quot;} {</span>
+	    <span class="s0">set item [file join $data(selectPath) $item]</span>
+	<span class="s0">} elseif {![file exists [file dirname $item]]} {</span>
+	    <span class="s0">tk_messageBox -icon warning -type ok \</span>
+		    <span class="s0">-message [mc {Directory &quot;%1$s&quot; does not exist.} \</span>
+		    <span class="s0">[file dirname $item]]</span>
+	    <span class="s0">return</span>
+	<span class="s0">}</span>
+
+	<span class="s0">if {![file exists $item]} {</span>
+	    <span class="s0">if {$data(type) eq &quot;open&quot;} {</span>
+		<span class="s0">tk_messageBox -icon warning -type ok \</span>
+			<span class="s0">-message [mc {File &quot;%1$s&quot; does not exist.} $item]</span>
+		<span class="s0">return</span>
+	    <span class="s0">}</span>
+	<span class="s0">} elseif {$data(type) eq &quot;save&quot; &amp;&amp; $data(-confirmoverwrite)} {</span>
+	    <span class="s0">set message [format %s%s \</span>
+		    <span class="s0">[mc &quot;File \&quot;%1\$s\&quot; already exists.\n\n&quot; $selectFilePath] \</span>
+		    <span class="s0">[mc {Replace existing file?}]]</span>
+	    <span class="s0">set answer [tk_messageBox -icon warning -type yesno \</span>
+		    <span class="s0">-message $message]</span>
+	    <span class="s0">if {$answer eq &quot;no&quot;} {</span>
+		<span class="s0">return</span>
+	    <span class="s0">}</span>
+	<span class="s0">}</span>
+
+	<span class="s0">lappend newFileList $item</span>
+    <span class="s0">}</span>
+
+    <span class="s0"># Return selected filter</span>
+    <span class="s0">if {[info exists data(-typevariable)] &amp;&amp; $data(-typevariable) ne &quot;&quot;</span>
+	    <span class="s0">&amp;&amp; [info exists data(-filetypes)] &amp;&amp; $data(-filetypes) ne &quot;&quot;} {</span>
+	<span class="s0">upvar #0 $data(-typevariable) typeVariable</span>
+	<span class="s0">set typeVariable [lindex $data(-filetypes) $data(fileType) 0]</span>
+    <span class="s0">}</span>
+
+    <span class="s0">if {$data(-multiple) != 0} {</span>
+	<span class="s0">set Priv(selectFilePath) $newFileList</span>
+    <span class="s0">} else {</span>
+	<span class="s0">set Priv(selectFilePath) [lindex $newFileList 0]</span>
+    <span class="s0">}</span>
+
+    <span class="s0"># Set selectFile and selectPath to first item in list</span>
+    <span class="s0">set Priv(selectFile)     [file tail    [lindex $newFileList 0]]</span>
+    <span class="s0">set Priv(selectPath)     [file dirname [lindex $newFileList 0]]</span>
+<span class="s0">}</span>
+
+
+<span class="s0">proc ::tk::MotifFDialog_OkCmd {w} {</span>
+    <span class="s0">upvar ::tk::dialog::file::[winfo name $w] data</span>
+
+    <span class="s0">MotifFDialog_ActivateSEnt $w</span>
+<span class="s0">}</span>
+
+<span class="s0">proc ::tk::MotifFDialog_FilterCmd {w} {</span>
+    <span class="s0">upvar ::tk::dialog::file::[winfo name $w] data</span>
+
+    <span class="s0">MotifFDialog_ActivateFEnt $w</span>
+<span class="s0">}</span>
+
+<span class="s0">proc ::tk::MotifFDialog_CancelCmd {w} {</span>
+    <span class="s0">variable ::tk::Priv</span>
+
+    <span class="s0">set Priv(selectFilePath) &quot;&quot;</span>
+    <span class="s0">set Priv(selectFile)     &quot;&quot;</span>
+    <span class="s0">set Priv(selectPath)     &quot;&quot;</span>
+<span class="s0">}</span>
+
+<span class="s0">proc ::tk::ListBoxKeyAccel_Set {w} {</span>
+    <span class="s0">bind Listbox &lt;Any-KeyPress&gt; &quot;&quot;</span>
+    <span class="s0">bind $w &lt;Destroy&gt; [list tk::ListBoxKeyAccel_Unset $w]</span>
+    <span class="s0">bind $w &lt;Any-KeyPress&gt; [list tk::ListBoxKeyAccel_Key $w %A]</span>
+<span class="s0">}</span>
+
+<span class="s0">proc ::tk::ListBoxKeyAccel_Unset {w} {</span>
+    <span class="s0">variable ::tk::Priv</span>
+
+    <span class="s0">catch {after cancel $Priv(lbAccel,$w,afterId)}</span>
+    <span class="s0">unset -nocomplain Priv(lbAccel,$w) Priv(lbAccel,$w,afterId)</span>
+<span class="s0">}</span>
+
+<span class="s0"># ::tk::ListBoxKeyAccel_Key--</span>
+<span class="s0">#</span>
+<span class="s0">#	This procedure maintains a list of recently entered keystrokes</span>
+<span class="s0">#	over a listbox widget. It arranges an idle event to move the</span>
+<span class="s0">#	selection of the listbox to the entry that begins with the</span>
+<span class="s0">#	keystrokes.</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0"># 	w		The pathname of the listbox.</span>
+<span class="s0">#	key		The key which the user just pressed.</span>
+<span class="s0">#</span>
+<span class="s0"># Results:</span>
+<span class="s0">#	None.</span>
+
+<span class="s0">proc ::tk::ListBoxKeyAccel_Key {w key} {</span>
+    <span class="s0">variable ::tk::Priv</span>
+
+    <span class="s0">if { $key eq &quot;&quot; } {</span>
+	<span class="s0">return</span>
+    <span class="s0">}</span>
+    <span class="s0">append Priv(lbAccel,$w) $key</span>
+    <span class="s0">ListBoxKeyAccel_Goto $w $Priv(lbAccel,$w)</span>
+    <span class="s0">catch {</span>
+	<span class="s0">after cancel $Priv(lbAccel,$w,afterId)</span>
+    <span class="s0">}</span>
+    <span class="s0">set Priv(lbAccel,$w,afterId) [after 500 \</span>
+	    <span class="s0">[list tk::ListBoxKeyAccel_Reset $w]]</span>
+<span class="s0">}</span>
+
+<span class="s0">proc ::tk::ListBoxKeyAccel_Goto {w string} {</span>
+    <span class="s0">variable ::tk::Priv</span>
+
+    <span class="s0">set string [string tolower $string]</span>
+    <span class="s0">set end [$w index end]</span>
+    <span class="s0">set theIndex -1</span>
+
+    <span class="s0">for {set i 0} {$i &lt; $end} {incr i} {</span>
+	<span class="s0">set item [string tolower [$w get $i]]</span>
+	<span class="s0">if {[string compare $string $item] &gt;= 0} {</span>
+	    <span class="s0">set theIndex $i</span>
+	<span class="s0">}</span>
+	<span class="s0">if {[string compare $string $item] &lt;= 0} {</span>
+	    <span class="s0">set theIndex $i</span>
+	    <span class="s0">break</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+
+    <span class="s0">if {$theIndex &gt;= 0} {</span>
+	<span class="s0">$w selection clear 0 end</span>
+	<span class="s0">$w selection set $theIndex $theIndex</span>
+	<span class="s0">$w activate $theIndex</span>
+	<span class="s0">$w see $theIndex</span>
+	<span class="s0">event generate $w &lt;&lt;ListboxSelect&gt;&gt;</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+
+<span class="s0">proc ::tk::ListBoxKeyAccel_Reset {w} {</span>
+    <span class="s0">variable ::tk::Priv</span>
+
+    <span class="s0">unset -nocomplain Priv(lbAccel,$w)</span>
+<span class="s0">}</span>
+
+<span class="s0">proc ::tk_getFileType {} {</span>
+    <span class="s0">variable ::tk::Priv</span>
+
+    <span class="s0">return $Priv(selectFileType)</span>
+<span class="s0">}</span>
+
+</pre>
+</body>
+</html>

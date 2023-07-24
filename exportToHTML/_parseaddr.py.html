@@ -1,0 +1,568 @@
+<html>
+<head>
+<title>_parseaddr.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #629755; font-style: italic;}
+.s3 { color: #cc7832;}
+.s4 { color: #6a8759;}
+.s5 { color: #6897bb;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+_parseaddr.py</font>
+</center></td></tr></table>
+<pre><span class="s0"># Copyright (C) 2002-2007 Python Software Foundation</span>
+<span class="s0"># Contact: email-sig@python.org</span>
+
+<span class="s2">&quot;&quot;&quot;Email address parsing code. 
+ 
+Lifted directly from rfc822.py.  This should eventually be rewritten. 
+&quot;&quot;&quot;</span>
+
+<span class="s3">from </span><span class="s1">__future__ </span><span class="s3">import </span><span class="s1">unicode_literals</span>
+<span class="s3">from </span><span class="s1">__future__ </span><span class="s3">import </span><span class="s1">print_function</span>
+<span class="s3">from </span><span class="s1">__future__ </span><span class="s3">import </span><span class="s1">division</span>
+<span class="s3">from </span><span class="s1">__future__ </span><span class="s3">import </span><span class="s1">absolute_import</span>
+<span class="s3">from </span><span class="s1">future.builtins </span><span class="s3">import </span><span class="s1">int</span>
+
+<span class="s1">__all__ = [</span>
+    <span class="s4">'mktime_tz'</span><span class="s3">,</span>
+    <span class="s4">'parsedate'</span><span class="s3">,</span>
+    <span class="s4">'parsedate_tz'</span><span class="s3">,</span>
+    <span class="s4">'quote'</span><span class="s3">,</span>
+    <span class="s1">]</span>
+
+<span class="s3">import </span><span class="s1">time</span><span class="s3">, </span><span class="s1">calendar</span>
+
+<span class="s1">SPACE = </span><span class="s4">' '</span>
+<span class="s1">EMPTYSTRING = </span><span class="s4">''</span>
+<span class="s1">COMMASPACE = </span><span class="s4">', '</span>
+
+<span class="s0"># Parse a date field</span>
+<span class="s1">_monthnames = [</span><span class="s4">'jan'</span><span class="s3">, </span><span class="s4">'feb'</span><span class="s3">, </span><span class="s4">'mar'</span><span class="s3">, </span><span class="s4">'apr'</span><span class="s3">, </span><span class="s4">'may'</span><span class="s3">, </span><span class="s4">'jun'</span><span class="s3">, </span><span class="s4">'jul'</span><span class="s3">,</span>
+               <span class="s4">'aug'</span><span class="s3">, </span><span class="s4">'sep'</span><span class="s3">, </span><span class="s4">'oct'</span><span class="s3">, </span><span class="s4">'nov'</span><span class="s3">, </span><span class="s4">'dec'</span><span class="s3">,</span>
+               <span class="s4">'january'</span><span class="s3">, </span><span class="s4">'february'</span><span class="s3">, </span><span class="s4">'march'</span><span class="s3">, </span><span class="s4">'april'</span><span class="s3">, </span><span class="s4">'may'</span><span class="s3">, </span><span class="s4">'june'</span><span class="s3">, </span><span class="s4">'july'</span><span class="s3">,</span>
+               <span class="s4">'august'</span><span class="s3">, </span><span class="s4">'september'</span><span class="s3">, </span><span class="s4">'october'</span><span class="s3">, </span><span class="s4">'november'</span><span class="s3">, </span><span class="s4">'december'</span><span class="s1">]</span>
+
+<span class="s1">_daynames = [</span><span class="s4">'mon'</span><span class="s3">, </span><span class="s4">'tue'</span><span class="s3">, </span><span class="s4">'wed'</span><span class="s3">, </span><span class="s4">'thu'</span><span class="s3">, </span><span class="s4">'fri'</span><span class="s3">, </span><span class="s4">'sat'</span><span class="s3">, </span><span class="s4">'sun'</span><span class="s1">]</span>
+
+<span class="s0"># The timezone table does not include the military time zones defined</span>
+<span class="s0"># in RFC822, other than Z.  According to RFC1123, the description in</span>
+<span class="s0"># RFC822 gets the signs wrong, so we can't rely on any such time</span>
+<span class="s0"># zones.  RFC1123 recommends that numeric timezone indicators be used</span>
+<span class="s0"># instead of timezone names.</span>
+
+<span class="s1">_timezones = {</span><span class="s4">'UT'</span><span class="s1">:</span><span class="s5">0</span><span class="s3">, </span><span class="s4">'UTC'</span><span class="s1">:</span><span class="s5">0</span><span class="s3">, </span><span class="s4">'GMT'</span><span class="s1">:</span><span class="s5">0</span><span class="s3">, </span><span class="s4">'Z'</span><span class="s1">:</span><span class="s5">0</span><span class="s3">,</span>
+              <span class="s4">'AST'</span><span class="s1">: -</span><span class="s5">400</span><span class="s3">, </span><span class="s4">'ADT'</span><span class="s1">: -</span><span class="s5">300</span><span class="s3">,  </span><span class="s0"># Atlantic (used in Canada)</span>
+              <span class="s4">'EST'</span><span class="s1">: -</span><span class="s5">500</span><span class="s3">, </span><span class="s4">'EDT'</span><span class="s1">: -</span><span class="s5">400</span><span class="s3">,  </span><span class="s0"># Eastern</span>
+              <span class="s4">'CST'</span><span class="s1">: -</span><span class="s5">600</span><span class="s3">, </span><span class="s4">'CDT'</span><span class="s1">: -</span><span class="s5">500</span><span class="s3">,  </span><span class="s0"># Central</span>
+              <span class="s4">'MST'</span><span class="s1">: -</span><span class="s5">700</span><span class="s3">, </span><span class="s4">'MDT'</span><span class="s1">: -</span><span class="s5">600</span><span class="s3">,  </span><span class="s0"># Mountain</span>
+              <span class="s4">'PST'</span><span class="s1">: -</span><span class="s5">800</span><span class="s3">, </span><span class="s4">'PDT'</span><span class="s1">: -</span><span class="s5">700   </span><span class="s0"># Pacific</span>
+              <span class="s1">}</span>
+
+
+<span class="s3">def </span><span class="s1">parsedate_tz(data):</span>
+    <span class="s2">&quot;&quot;&quot;Convert a date string to a time tuple. 
+ 
+    Accounts for military timezones. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">res = _parsedate_tz(data)</span>
+    <span class="s3">if not </span><span class="s1">res:</span>
+        <span class="s3">return</span>
+    <span class="s3">if </span><span class="s1">res[</span><span class="s5">9</span><span class="s1">] </span><span class="s3">is None</span><span class="s1">:</span>
+        <span class="s1">res[</span><span class="s5">9</span><span class="s1">] = </span><span class="s5">0</span>
+    <span class="s3">return </span><span class="s1">tuple(res)</span>
+
+<span class="s3">def </span><span class="s1">_parsedate_tz(data):</span>
+    <span class="s2">&quot;&quot;&quot;Convert date to extended time tuple. 
+ 
+    The last (additional) element is the time zone offset in seconds, except if 
+    the timezone was specified as -0000.  In that case the last element is 
+    None.  This indicates a UTC timestamp that explicitly declaims knowledge of 
+    the source timezone, as opposed to a +0000 timestamp that indicates the 
+    source timezone really was UTC. 
+ 
+    &quot;&quot;&quot;</span>
+    <span class="s3">if not </span><span class="s1">data:</span>
+        <span class="s3">return</span>
+    <span class="s1">data = data.split()</span>
+    <span class="s0"># The FWS after the comma after the day-of-week is optional, so search and</span>
+    <span class="s0"># adjust for this.</span>
+    <span class="s3">if </span><span class="s1">data[</span><span class="s5">0</span><span class="s1">].endswith(</span><span class="s4">','</span><span class="s1">) </span><span class="s3">or </span><span class="s1">data[</span><span class="s5">0</span><span class="s1">].lower() </span><span class="s3">in </span><span class="s1">_daynames:</span>
+        <span class="s0"># There's a dayname here. Skip it</span>
+        <span class="s3">del </span><span class="s1">data[</span><span class="s5">0</span><span class="s1">]</span>
+    <span class="s3">else</span><span class="s1">:</span>
+        <span class="s1">i = data[</span><span class="s5">0</span><span class="s1">].rfind(</span><span class="s4">','</span><span class="s1">)</span>
+        <span class="s3">if </span><span class="s1">i &gt;= </span><span class="s5">0</span><span class="s1">:</span>
+            <span class="s1">data[</span><span class="s5">0</span><span class="s1">] = data[</span><span class="s5">0</span><span class="s1">][i+</span><span class="s5">1</span><span class="s1">:]</span>
+    <span class="s3">if </span><span class="s1">len(data) == </span><span class="s5">3</span><span class="s1">: </span><span class="s0"># RFC 850 date, deprecated</span>
+        <span class="s1">stuff = data[</span><span class="s5">0</span><span class="s1">].split(</span><span class="s4">'-'</span><span class="s1">)</span>
+        <span class="s3">if </span><span class="s1">len(stuff) == </span><span class="s5">3</span><span class="s1">:</span>
+            <span class="s1">data = stuff + data[</span><span class="s5">1</span><span class="s1">:]</span>
+    <span class="s3">if </span><span class="s1">len(data) == </span><span class="s5">4</span><span class="s1">:</span>
+        <span class="s1">s = data[</span><span class="s5">3</span><span class="s1">]</span>
+        <span class="s1">i = s.find(</span><span class="s4">'+'</span><span class="s1">)</span>
+        <span class="s3">if </span><span class="s1">i == -</span><span class="s5">1</span><span class="s1">:</span>
+            <span class="s1">i = s.find(</span><span class="s4">'-'</span><span class="s1">)</span>
+        <span class="s3">if </span><span class="s1">i &gt; </span><span class="s5">0</span><span class="s1">:</span>
+            <span class="s1">data[</span><span class="s5">3</span><span class="s1">:] = [s[:i]</span><span class="s3">, </span><span class="s1">s[i:]]</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s1">data.append(</span><span class="s4">''</span><span class="s1">) </span><span class="s0"># Dummy tz</span>
+    <span class="s3">if </span><span class="s1">len(data) &lt; </span><span class="s5">5</span><span class="s1">:</span>
+        <span class="s3">return None</span>
+    <span class="s1">data = data[:</span><span class="s5">5</span><span class="s1">]</span>
+    <span class="s1">[dd</span><span class="s3">, </span><span class="s1">mm</span><span class="s3">, </span><span class="s1">yy</span><span class="s3">, </span><span class="s1">tm</span><span class="s3">, </span><span class="s1">tz] = data</span>
+    <span class="s1">mm = mm.lower()</span>
+    <span class="s3">if </span><span class="s1">mm </span><span class="s3">not in </span><span class="s1">_monthnames:</span>
+        <span class="s1">dd</span><span class="s3">, </span><span class="s1">mm = mm</span><span class="s3">, </span><span class="s1">dd.lower()</span>
+        <span class="s3">if </span><span class="s1">mm </span><span class="s3">not in </span><span class="s1">_monthnames:</span>
+            <span class="s3">return None</span>
+    <span class="s1">mm = _monthnames.index(mm) + </span><span class="s5">1</span>
+    <span class="s3">if </span><span class="s1">mm &gt; </span><span class="s5">12</span><span class="s1">:</span>
+        <span class="s1">mm -= </span><span class="s5">12</span>
+    <span class="s3">if </span><span class="s1">dd[-</span><span class="s5">1</span><span class="s1">] == </span><span class="s4">','</span><span class="s1">:</span>
+        <span class="s1">dd = dd[:-</span><span class="s5">1</span><span class="s1">]</span>
+    <span class="s1">i = yy.find(</span><span class="s4">':'</span><span class="s1">)</span>
+    <span class="s3">if </span><span class="s1">i &gt; </span><span class="s5">0</span><span class="s1">:</span>
+        <span class="s1">yy</span><span class="s3">, </span><span class="s1">tm = tm</span><span class="s3">, </span><span class="s1">yy</span>
+    <span class="s3">if </span><span class="s1">yy[-</span><span class="s5">1</span><span class="s1">] == </span><span class="s4">','</span><span class="s1">:</span>
+        <span class="s1">yy = yy[:-</span><span class="s5">1</span><span class="s1">]</span>
+    <span class="s3">if not </span><span class="s1">yy[</span><span class="s5">0</span><span class="s1">].isdigit():</span>
+        <span class="s1">yy</span><span class="s3">, </span><span class="s1">tz = tz</span><span class="s3">, </span><span class="s1">yy</span>
+    <span class="s3">if </span><span class="s1">tm[-</span><span class="s5">1</span><span class="s1">] == </span><span class="s4">','</span><span class="s1">:</span>
+        <span class="s1">tm = tm[:-</span><span class="s5">1</span><span class="s1">]</span>
+    <span class="s1">tm = tm.split(</span><span class="s4">':'</span><span class="s1">)</span>
+    <span class="s3">if </span><span class="s1">len(tm) == </span><span class="s5">2</span><span class="s1">:</span>
+        <span class="s1">[thh</span><span class="s3">, </span><span class="s1">tmm] = tm</span>
+        <span class="s1">tss = </span><span class="s4">'0'</span>
+    <span class="s3">elif </span><span class="s1">len(tm) == </span><span class="s5">3</span><span class="s1">:</span>
+        <span class="s1">[thh</span><span class="s3">, </span><span class="s1">tmm</span><span class="s3">, </span><span class="s1">tss] = tm</span>
+    <span class="s3">elif </span><span class="s1">len(tm) == </span><span class="s5">1 </span><span class="s3">and </span><span class="s4">'.' </span><span class="s3">in </span><span class="s1">tm[</span><span class="s5">0</span><span class="s1">]:</span>
+        <span class="s0"># Some non-compliant MUAs use '.' to separate time elements.</span>
+        <span class="s1">tm = tm[</span><span class="s5">0</span><span class="s1">].split(</span><span class="s4">'.'</span><span class="s1">)</span>
+        <span class="s3">if </span><span class="s1">len(tm) == </span><span class="s5">2</span><span class="s1">:</span>
+            <span class="s1">[thh</span><span class="s3">, </span><span class="s1">tmm] = tm</span>
+            <span class="s1">tss = </span><span class="s5">0</span>
+        <span class="s3">elif </span><span class="s1">len(tm) == </span><span class="s5">3</span><span class="s1">:</span>
+            <span class="s1">[thh</span><span class="s3">, </span><span class="s1">tmm</span><span class="s3">, </span><span class="s1">tss] = tm</span>
+    <span class="s3">else</span><span class="s1">:</span>
+        <span class="s3">return None</span>
+    <span class="s3">try</span><span class="s1">:</span>
+        <span class="s1">yy = int(yy)</span>
+        <span class="s1">dd = int(dd)</span>
+        <span class="s1">thh = int(thh)</span>
+        <span class="s1">tmm = int(tmm)</span>
+        <span class="s1">tss = int(tss)</span>
+    <span class="s3">except </span><span class="s1">ValueError:</span>
+        <span class="s3">return None</span>
+    <span class="s0"># Check for a yy specified in two-digit format, then convert it to the</span>
+    <span class="s0"># appropriate four-digit format, according to the POSIX standard. RFC 822</span>
+    <span class="s0"># calls for a two-digit yy, but RFC 2822 (which obsoletes RFC 822)</span>
+    <span class="s0"># mandates a 4-digit yy. For more information, see the documentation for</span>
+    <span class="s0"># the time module.</span>
+    <span class="s3">if </span><span class="s1">yy &lt; </span><span class="s5">100</span><span class="s1">:</span>
+        <span class="s0"># The year is between 1969 and 1999 (inclusive).</span>
+        <span class="s3">if </span><span class="s1">yy &gt; </span><span class="s5">68</span><span class="s1">:</span>
+            <span class="s1">yy += </span><span class="s5">1900</span>
+        <span class="s0"># The year is between 2000 and 2068 (inclusive).</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s1">yy += </span><span class="s5">2000</span>
+    <span class="s1">tzoffset = </span><span class="s3">None</span>
+    <span class="s1">tz = tz.upper()</span>
+    <span class="s3">if </span><span class="s1">tz </span><span class="s3">in </span><span class="s1">_timezones:</span>
+        <span class="s1">tzoffset = _timezones[tz]</span>
+    <span class="s3">else</span><span class="s1">:</span>
+        <span class="s3">try</span><span class="s1">:</span>
+            <span class="s1">tzoffset = int(tz)</span>
+        <span class="s3">except </span><span class="s1">ValueError:</span>
+            <span class="s3">pass</span>
+        <span class="s3">if </span><span class="s1">tzoffset==</span><span class="s5">0 </span><span class="s3">and </span><span class="s1">tz.startswith(</span><span class="s4">'-'</span><span class="s1">):</span>
+            <span class="s1">tzoffset = </span><span class="s3">None</span>
+    <span class="s0"># Convert a timezone offset into seconds ; -0500 -&gt; -18000</span>
+    <span class="s3">if </span><span class="s1">tzoffset:</span>
+        <span class="s3">if </span><span class="s1">tzoffset &lt; </span><span class="s5">0</span><span class="s1">:</span>
+            <span class="s1">tzsign = -</span><span class="s5">1</span>
+            <span class="s1">tzoffset = -tzoffset</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s1">tzsign = </span><span class="s5">1</span>
+        <span class="s1">tzoffset = tzsign * ( (tzoffset//</span><span class="s5">100</span><span class="s1">)*</span><span class="s5">3600 </span><span class="s1">+ (tzoffset % </span><span class="s5">100</span><span class="s1">)*</span><span class="s5">60</span><span class="s1">)</span>
+    <span class="s0"># Daylight Saving Time flag is set to -1, since DST is unknown.</span>
+    <span class="s3">return </span><span class="s1">[yy</span><span class="s3">, </span><span class="s1">mm</span><span class="s3">, </span><span class="s1">dd</span><span class="s3">, </span><span class="s1">thh</span><span class="s3">, </span><span class="s1">tmm</span><span class="s3">, </span><span class="s1">tss</span><span class="s3">, </span><span class="s5">0</span><span class="s3">, </span><span class="s5">1</span><span class="s3">, </span><span class="s1">-</span><span class="s5">1</span><span class="s3">, </span><span class="s1">tzoffset]</span>
+
+
+<span class="s3">def </span><span class="s1">parsedate(data):</span>
+    <span class="s2">&quot;&quot;&quot;Convert a time string to a time tuple.&quot;&quot;&quot;</span>
+    <span class="s1">t = parsedate_tz(data)</span>
+    <span class="s3">if </span><span class="s1">isinstance(t</span><span class="s3">, </span><span class="s1">tuple):</span>
+        <span class="s3">return </span><span class="s1">t[:</span><span class="s5">9</span><span class="s1">]</span>
+    <span class="s3">else</span><span class="s1">:</span>
+        <span class="s3">return </span><span class="s1">t</span>
+
+
+<span class="s3">def </span><span class="s1">mktime_tz(data):</span>
+    <span class="s2">&quot;&quot;&quot;Turn a 10-tuple as returned by parsedate_tz() into a POSIX timestamp.&quot;&quot;&quot;</span>
+    <span class="s3">if </span><span class="s1">data[</span><span class="s5">9</span><span class="s1">] </span><span class="s3">is None</span><span class="s1">:</span>
+        <span class="s0"># No zone info, so localtime is better assumption than GMT</span>
+        <span class="s3">return </span><span class="s1">time.mktime(data[:</span><span class="s5">8</span><span class="s1">] + (-</span><span class="s5">1</span><span class="s3">,</span><span class="s1">))</span>
+    <span class="s3">else</span><span class="s1">:</span>
+        <span class="s1">t = calendar.timegm(data)</span>
+        <span class="s3">return </span><span class="s1">t - data[</span><span class="s5">9</span><span class="s1">]</span>
+
+
+<span class="s3">def </span><span class="s1">quote(str):</span>
+    <span class="s2">&quot;&quot;&quot;Prepare string to be used in a quoted string. 
+ 
+    Turns backslash and double quote characters into quoted pairs.  These 
+    are the only characters that need to be quoted inside a quoted string. 
+    Does not add the surrounding double quotes. 
+    &quot;&quot;&quot;</span>
+    <span class="s3">return </span><span class="s1">str.replace(</span><span class="s4">'</span><span class="s3">\\</span><span class="s4">'</span><span class="s3">, </span><span class="s4">'</span><span class="s3">\\\\</span><span class="s4">'</span><span class="s1">).replace(</span><span class="s4">'&quot;'</span><span class="s3">, </span><span class="s4">'</span><span class="s3">\\</span><span class="s4">&quot;'</span><span class="s1">)</span>
+
+
+<span class="s3">class </span><span class="s1">AddrlistClass(object):</span>
+    <span class="s2">&quot;&quot;&quot;Address parser class by Ben Escoto. 
+ 
+    To understand what this class does, it helps to have a copy of RFC 2822 in 
+    front of you. 
+ 
+    Note: this class interface is deprecated and may be removed in the future. 
+    Use email.utils.AddressList instead. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s3">def </span><span class="s1">__init__(self</span><span class="s3">, </span><span class="s1">field):</span>
+        <span class="s2">&quot;&quot;&quot;Initialize a new instance. 
+ 
+        `field' is an unparsed address header field, containing 
+        one or more addresses. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">self.specials = </span><span class="s4">'()&lt;&gt;@,:;.</span><span class="s3">\&quot;</span><span class="s4">[]'</span>
+        <span class="s1">self.pos = </span><span class="s5">0</span>
+        <span class="s1">self.LWS = </span><span class="s4">' </span><span class="s3">\t</span><span class="s4">'</span>
+        <span class="s1">self.CR = </span><span class="s4">'</span><span class="s3">\r\n</span><span class="s4">'</span>
+        <span class="s1">self.FWS = self.LWS + self.CR</span>
+        <span class="s1">self.atomends = self.specials + self.LWS + self.CR</span>
+        <span class="s0"># Note that RFC 2822 now specifies `.' as obs-phrase, meaning that it</span>
+        <span class="s0"># is obsolete syntax.  RFC 2822 requires that we recognize obsolete</span>
+        <span class="s0"># syntax, so allow dots in phrases.</span>
+        <span class="s1">self.phraseends = self.atomends.replace(</span><span class="s4">'.'</span><span class="s3">, </span><span class="s4">''</span><span class="s1">)</span>
+        <span class="s1">self.field = field</span>
+        <span class="s1">self.commentlist = []</span>
+
+    <span class="s3">def </span><span class="s1">gotonext(self):</span>
+        <span class="s2">&quot;&quot;&quot;Skip white space and extract comments.&quot;&quot;&quot;</span>
+        <span class="s1">wslist = []</span>
+        <span class="s3">while </span><span class="s1">self.pos &lt; len(self.field):</span>
+            <span class="s3">if </span><span class="s1">self.field[self.pos] </span><span class="s3">in </span><span class="s1">self.LWS + </span><span class="s4">'</span><span class="s3">\n\r</span><span class="s4">'</span><span class="s1">:</span>
+                <span class="s3">if </span><span class="s1">self.field[self.pos] </span><span class="s3">not in </span><span class="s4">'</span><span class="s3">\n\r</span><span class="s4">'</span><span class="s1">:</span>
+                    <span class="s1">wslist.append(self.field[self.pos])</span>
+                <span class="s1">self.pos += </span><span class="s5">1</span>
+            <span class="s3">elif </span><span class="s1">self.field[self.pos] == </span><span class="s4">'('</span><span class="s1">:</span>
+                <span class="s1">self.commentlist.append(self.getcomment())</span>
+            <span class="s3">else</span><span class="s1">:</span>
+                <span class="s3">break</span>
+        <span class="s3">return </span><span class="s1">EMPTYSTRING.join(wslist)</span>
+
+    <span class="s3">def </span><span class="s1">getaddrlist(self):</span>
+        <span class="s2">&quot;&quot;&quot;Parse all addresses. 
+ 
+        Returns a list containing all of the addresses. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">result = []</span>
+        <span class="s3">while </span><span class="s1">self.pos &lt; len(self.field):</span>
+            <span class="s1">ad = self.getaddress()</span>
+            <span class="s3">if </span><span class="s1">ad:</span>
+                <span class="s1">result += ad</span>
+            <span class="s3">else</span><span class="s1">:</span>
+                <span class="s1">result.append((</span><span class="s4">''</span><span class="s3">, </span><span class="s4">''</span><span class="s1">))</span>
+        <span class="s3">return </span><span class="s1">result</span>
+
+    <span class="s3">def </span><span class="s1">getaddress(self):</span>
+        <span class="s2">&quot;&quot;&quot;Parse the next address.&quot;&quot;&quot;</span>
+        <span class="s1">self.commentlist = []</span>
+        <span class="s1">self.gotonext()</span>
+
+        <span class="s1">oldpos = self.pos</span>
+        <span class="s1">oldcl = self.commentlist</span>
+        <span class="s1">plist = self.getphraselist()</span>
+
+        <span class="s1">self.gotonext()</span>
+        <span class="s1">returnlist = []</span>
+
+        <span class="s3">if </span><span class="s1">self.pos &gt;= len(self.field):</span>
+            <span class="s0"># Bad email address technically, no domain.</span>
+            <span class="s3">if </span><span class="s1">plist:</span>
+                <span class="s1">returnlist = [(SPACE.join(self.commentlist)</span><span class="s3">, </span><span class="s1">plist[</span><span class="s5">0</span><span class="s1">])]</span>
+
+        <span class="s3">elif </span><span class="s1">self.field[self.pos] </span><span class="s3">in </span><span class="s4">'.@'</span><span class="s1">:</span>
+            <span class="s0"># email address is just an addrspec</span>
+            <span class="s0"># this isn't very efficient since we start over</span>
+            <span class="s1">self.pos = oldpos</span>
+            <span class="s1">self.commentlist = oldcl</span>
+            <span class="s1">addrspec = self.getaddrspec()</span>
+            <span class="s1">returnlist = [(SPACE.join(self.commentlist)</span><span class="s3">, </span><span class="s1">addrspec)]</span>
+
+        <span class="s3">elif </span><span class="s1">self.field[self.pos] == </span><span class="s4">':'</span><span class="s1">:</span>
+            <span class="s0"># address is a group</span>
+            <span class="s1">returnlist = []</span>
+
+            <span class="s1">fieldlen = len(self.field)</span>
+            <span class="s1">self.pos += </span><span class="s5">1</span>
+            <span class="s3">while </span><span class="s1">self.pos &lt; len(self.field):</span>
+                <span class="s1">self.gotonext()</span>
+                <span class="s3">if </span><span class="s1">self.pos &lt; fieldlen </span><span class="s3">and </span><span class="s1">self.field[self.pos] == </span><span class="s4">';'</span><span class="s1">:</span>
+                    <span class="s1">self.pos += </span><span class="s5">1</span>
+                    <span class="s3">break</span>
+                <span class="s1">returnlist = returnlist + self.getaddress()</span>
+
+        <span class="s3">elif </span><span class="s1">self.field[self.pos] == </span><span class="s4">'&lt;'</span><span class="s1">:</span>
+            <span class="s0"># Address is a phrase then a route addr</span>
+            <span class="s1">routeaddr = self.getrouteaddr()</span>
+
+            <span class="s3">if </span><span class="s1">self.commentlist:</span>
+                <span class="s1">returnlist = [(SPACE.join(plist) + </span><span class="s4">' (' </span><span class="s1">+</span>
+                               <span class="s4">' '</span><span class="s1">.join(self.commentlist) + </span><span class="s4">')'</span><span class="s3">, </span><span class="s1">routeaddr)]</span>
+            <span class="s3">else</span><span class="s1">:</span>
+                <span class="s1">returnlist = [(SPACE.join(plist)</span><span class="s3">, </span><span class="s1">routeaddr)]</span>
+
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s3">if </span><span class="s1">plist:</span>
+                <span class="s1">returnlist = [(SPACE.join(self.commentlist)</span><span class="s3">, </span><span class="s1">plist[</span><span class="s5">0</span><span class="s1">])]</span>
+            <span class="s3">elif </span><span class="s1">self.field[self.pos] </span><span class="s3">in </span><span class="s1">self.specials:</span>
+                <span class="s1">self.pos += </span><span class="s5">1</span>
+
+        <span class="s1">self.gotonext()</span>
+        <span class="s3">if </span><span class="s1">self.pos &lt; len(self.field) </span><span class="s3">and </span><span class="s1">self.field[self.pos] == </span><span class="s4">','</span><span class="s1">:</span>
+            <span class="s1">self.pos += </span><span class="s5">1</span>
+        <span class="s3">return </span><span class="s1">returnlist</span>
+
+    <span class="s3">def </span><span class="s1">getrouteaddr(self):</span>
+        <span class="s2">&quot;&quot;&quot;Parse a route address (Return-path value). 
+ 
+        This method just skips all the route stuff and returns the addrspec. 
+        &quot;&quot;&quot;</span>
+        <span class="s3">if </span><span class="s1">self.field[self.pos] != </span><span class="s4">'&lt;'</span><span class="s1">:</span>
+            <span class="s3">return</span>
+
+        <span class="s1">expectroute = </span><span class="s3">False</span>
+        <span class="s1">self.pos += </span><span class="s5">1</span>
+        <span class="s1">self.gotonext()</span>
+        <span class="s1">adlist = </span><span class="s4">''</span>
+        <span class="s3">while </span><span class="s1">self.pos &lt; len(self.field):</span>
+            <span class="s3">if </span><span class="s1">expectroute:</span>
+                <span class="s1">self.getdomain()</span>
+                <span class="s1">expectroute = </span><span class="s3">False</span>
+            <span class="s3">elif </span><span class="s1">self.field[self.pos] == </span><span class="s4">'&gt;'</span><span class="s1">:</span>
+                <span class="s1">self.pos += </span><span class="s5">1</span>
+                <span class="s3">break</span>
+            <span class="s3">elif </span><span class="s1">self.field[self.pos] == </span><span class="s4">'@'</span><span class="s1">:</span>
+                <span class="s1">self.pos += </span><span class="s5">1</span>
+                <span class="s1">expectroute = </span><span class="s3">True</span>
+            <span class="s3">elif </span><span class="s1">self.field[self.pos] == </span><span class="s4">':'</span><span class="s1">:</span>
+                <span class="s1">self.pos += </span><span class="s5">1</span>
+            <span class="s3">else</span><span class="s1">:</span>
+                <span class="s1">adlist = self.getaddrspec()</span>
+                <span class="s1">self.pos += </span><span class="s5">1</span>
+                <span class="s3">break</span>
+            <span class="s1">self.gotonext()</span>
+
+        <span class="s3">return </span><span class="s1">adlist</span>
+
+    <span class="s3">def </span><span class="s1">getaddrspec(self):</span>
+        <span class="s2">&quot;&quot;&quot;Parse an RFC 2822 addr-spec.&quot;&quot;&quot;</span>
+        <span class="s1">aslist = []</span>
+
+        <span class="s1">self.gotonext()</span>
+        <span class="s3">while </span><span class="s1">self.pos &lt; len(self.field):</span>
+            <span class="s1">preserve_ws = </span><span class="s3">True</span>
+            <span class="s3">if </span><span class="s1">self.field[self.pos] == </span><span class="s4">'.'</span><span class="s1">:</span>
+                <span class="s3">if </span><span class="s1">aslist </span><span class="s3">and not </span><span class="s1">aslist[-</span><span class="s5">1</span><span class="s1">].strip():</span>
+                    <span class="s1">aslist.pop()</span>
+                <span class="s1">aslist.append(</span><span class="s4">'.'</span><span class="s1">)</span>
+                <span class="s1">self.pos += </span><span class="s5">1</span>
+                <span class="s1">preserve_ws = </span><span class="s3">False</span>
+            <span class="s3">elif </span><span class="s1">self.field[self.pos] == </span><span class="s4">'&quot;'</span><span class="s1">:</span>
+                <span class="s1">aslist.append(</span><span class="s4">'&quot;%s&quot;' </span><span class="s1">% quote(self.getquote()))</span>
+            <span class="s3">elif </span><span class="s1">self.field[self.pos] </span><span class="s3">in </span><span class="s1">self.atomends:</span>
+                <span class="s3">if </span><span class="s1">aslist </span><span class="s3">and not </span><span class="s1">aslist[-</span><span class="s5">1</span><span class="s1">].strip():</span>
+                    <span class="s1">aslist.pop()</span>
+                <span class="s3">break</span>
+            <span class="s3">else</span><span class="s1">:</span>
+                <span class="s1">aslist.append(self.getatom())</span>
+            <span class="s1">ws = self.gotonext()</span>
+            <span class="s3">if </span><span class="s1">preserve_ws </span><span class="s3">and </span><span class="s1">ws:</span>
+                <span class="s1">aslist.append(ws)</span>
+
+        <span class="s3">if </span><span class="s1">self.pos &gt;= len(self.field) </span><span class="s3">or </span><span class="s1">self.field[self.pos] != </span><span class="s4">'@'</span><span class="s1">:</span>
+            <span class="s3">return </span><span class="s1">EMPTYSTRING.join(aslist)</span>
+
+        <span class="s1">aslist.append(</span><span class="s4">'@'</span><span class="s1">)</span>
+        <span class="s1">self.pos += </span><span class="s5">1</span>
+        <span class="s1">self.gotonext()</span>
+        <span class="s3">return </span><span class="s1">EMPTYSTRING.join(aslist) + self.getdomain()</span>
+
+    <span class="s3">def </span><span class="s1">getdomain(self):</span>
+        <span class="s2">&quot;&quot;&quot;Get the complete domain name from an address.&quot;&quot;&quot;</span>
+        <span class="s1">sdlist = []</span>
+        <span class="s3">while </span><span class="s1">self.pos &lt; len(self.field):</span>
+            <span class="s3">if </span><span class="s1">self.field[self.pos] </span><span class="s3">in </span><span class="s1">self.LWS:</span>
+                <span class="s1">self.pos += </span><span class="s5">1</span>
+            <span class="s3">elif </span><span class="s1">self.field[self.pos] == </span><span class="s4">'('</span><span class="s1">:</span>
+                <span class="s1">self.commentlist.append(self.getcomment())</span>
+            <span class="s3">elif </span><span class="s1">self.field[self.pos] == </span><span class="s4">'['</span><span class="s1">:</span>
+                <span class="s1">sdlist.append(self.getdomainliteral())</span>
+            <span class="s3">elif </span><span class="s1">self.field[self.pos] == </span><span class="s4">'.'</span><span class="s1">:</span>
+                <span class="s1">self.pos += </span><span class="s5">1</span>
+                <span class="s1">sdlist.append(</span><span class="s4">'.'</span><span class="s1">)</span>
+            <span class="s3">elif </span><span class="s1">self.field[self.pos] </span><span class="s3">in </span><span class="s1">self.atomends:</span>
+                <span class="s3">break</span>
+            <span class="s3">else</span><span class="s1">:</span>
+                <span class="s1">sdlist.append(self.getatom())</span>
+        <span class="s3">return </span><span class="s1">EMPTYSTRING.join(sdlist)</span>
+
+    <span class="s3">def </span><span class="s1">getdelimited(self</span><span class="s3">, </span><span class="s1">beginchar</span><span class="s3">, </span><span class="s1">endchars</span><span class="s3">, </span><span class="s1">allowcomments=</span><span class="s3">True</span><span class="s1">):</span>
+        <span class="s2">&quot;&quot;&quot;Parse a header fragment delimited by special characters. 
+ 
+        `beginchar' is the start character for the fragment. 
+        If self is not looking at an instance of `beginchar' then 
+        getdelimited returns the empty string. 
+ 
+        `endchars' is a sequence of allowable end-delimiting characters. 
+        Parsing stops when one of these is encountered. 
+ 
+        If `allowcomments' is non-zero, embedded RFC 2822 comments are allowed 
+        within the parsed fragment. 
+        &quot;&quot;&quot;</span>
+        <span class="s3">if </span><span class="s1">self.field[self.pos] != beginchar:</span>
+            <span class="s3">return </span><span class="s4">''</span>
+
+        <span class="s1">slist = [</span><span class="s4">''</span><span class="s1">]</span>
+        <span class="s1">quote = </span><span class="s3">False</span>
+        <span class="s1">self.pos += </span><span class="s5">1</span>
+        <span class="s3">while </span><span class="s1">self.pos &lt; len(self.field):</span>
+            <span class="s3">if </span><span class="s1">quote:</span>
+                <span class="s1">slist.append(self.field[self.pos])</span>
+                <span class="s1">quote = </span><span class="s3">False</span>
+            <span class="s3">elif </span><span class="s1">self.field[self.pos] </span><span class="s3">in </span><span class="s1">endchars:</span>
+                <span class="s1">self.pos += </span><span class="s5">1</span>
+                <span class="s3">break</span>
+            <span class="s3">elif </span><span class="s1">allowcomments </span><span class="s3">and </span><span class="s1">self.field[self.pos] == </span><span class="s4">'('</span><span class="s1">:</span>
+                <span class="s1">slist.append(self.getcomment())</span>
+                <span class="s3">continue        </span><span class="s0"># have already advanced pos from getcomment</span>
+            <span class="s3">elif </span><span class="s1">self.field[self.pos] == </span><span class="s4">'</span><span class="s3">\\</span><span class="s4">'</span><span class="s1">:</span>
+                <span class="s1">quote = </span><span class="s3">True</span>
+            <span class="s3">else</span><span class="s1">:</span>
+                <span class="s1">slist.append(self.field[self.pos])</span>
+            <span class="s1">self.pos += </span><span class="s5">1</span>
+
+        <span class="s3">return </span><span class="s1">EMPTYSTRING.join(slist)</span>
+
+    <span class="s3">def </span><span class="s1">getquote(self):</span>
+        <span class="s2">&quot;&quot;&quot;Get a quote-delimited fragment from self's field.&quot;&quot;&quot;</span>
+        <span class="s3">return </span><span class="s1">self.getdelimited(</span><span class="s4">'&quot;'</span><span class="s3">, </span><span class="s4">'&quot;</span><span class="s3">\r</span><span class="s4">'</span><span class="s3">, False</span><span class="s1">)</span>
+
+    <span class="s3">def </span><span class="s1">getcomment(self):</span>
+        <span class="s2">&quot;&quot;&quot;Get a parenthesis-delimited fragment from self's field.&quot;&quot;&quot;</span>
+        <span class="s3">return </span><span class="s1">self.getdelimited(</span><span class="s4">'('</span><span class="s3">, </span><span class="s4">')</span><span class="s3">\r</span><span class="s4">'</span><span class="s3">, True</span><span class="s1">)</span>
+
+    <span class="s3">def </span><span class="s1">getdomainliteral(self):</span>
+        <span class="s2">&quot;&quot;&quot;Parse an RFC 2822 domain-literal.&quot;&quot;&quot;</span>
+        <span class="s3">return </span><span class="s4">'[%s]' </span><span class="s1">% self.getdelimited(</span><span class="s4">'['</span><span class="s3">, </span><span class="s4">']</span><span class="s3">\r</span><span class="s4">'</span><span class="s3">, False</span><span class="s1">)</span>
+
+    <span class="s3">def </span><span class="s1">getatom(self</span><span class="s3">, </span><span class="s1">atomends=</span><span class="s3">None</span><span class="s1">):</span>
+        <span class="s2">&quot;&quot;&quot;Parse an RFC 2822 atom. 
+ 
+        Optional atomends specifies a different set of end token delimiters 
+        (the default is to use self.atomends).  This is used e.g. in 
+        getphraselist() since phrase endings must not include the `.' (which 
+        is legal in phrases).&quot;&quot;&quot;</span>
+        <span class="s1">atomlist = [</span><span class="s4">''</span><span class="s1">]</span>
+        <span class="s3">if </span><span class="s1">atomends </span><span class="s3">is None</span><span class="s1">:</span>
+            <span class="s1">atomends = self.atomends</span>
+
+        <span class="s3">while </span><span class="s1">self.pos &lt; len(self.field):</span>
+            <span class="s3">if </span><span class="s1">self.field[self.pos] </span><span class="s3">in </span><span class="s1">atomends:</span>
+                <span class="s3">break</span>
+            <span class="s3">else</span><span class="s1">:</span>
+                <span class="s1">atomlist.append(self.field[self.pos])</span>
+            <span class="s1">self.pos += </span><span class="s5">1</span>
+
+        <span class="s3">return </span><span class="s1">EMPTYSTRING.join(atomlist)</span>
+
+    <span class="s3">def </span><span class="s1">getphraselist(self):</span>
+        <span class="s2">&quot;&quot;&quot;Parse a sequence of RFC 2822 phrases. 
+ 
+        A phrase is a sequence of words, which are in turn either RFC 2822 
+        atoms or quoted-strings.  Phrases are canonicalized by squeezing all 
+        runs of continuous whitespace into one space. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">plist = []</span>
+
+        <span class="s3">while </span><span class="s1">self.pos &lt; len(self.field):</span>
+            <span class="s3">if </span><span class="s1">self.field[self.pos] </span><span class="s3">in </span><span class="s1">self.FWS:</span>
+                <span class="s1">self.pos += </span><span class="s5">1</span>
+            <span class="s3">elif </span><span class="s1">self.field[self.pos] == </span><span class="s4">'&quot;'</span><span class="s1">:</span>
+                <span class="s1">plist.append(self.getquote())</span>
+            <span class="s3">elif </span><span class="s1">self.field[self.pos] == </span><span class="s4">'('</span><span class="s1">:</span>
+                <span class="s1">self.commentlist.append(self.getcomment())</span>
+            <span class="s3">elif </span><span class="s1">self.field[self.pos] </span><span class="s3">in </span><span class="s1">self.phraseends:</span>
+                <span class="s3">break</span>
+            <span class="s3">else</span><span class="s1">:</span>
+                <span class="s1">plist.append(self.getatom(self.phraseends))</span>
+
+        <span class="s3">return </span><span class="s1">plist</span>
+
+<span class="s3">class </span><span class="s1">AddressList(AddrlistClass):</span>
+    <span class="s2">&quot;&quot;&quot;An AddressList encapsulates a list of parsed RFC 2822 addresses.&quot;&quot;&quot;</span>
+    <span class="s3">def </span><span class="s1">__init__(self</span><span class="s3">, </span><span class="s1">field):</span>
+        <span class="s1">AddrlistClass.__init__(self</span><span class="s3">, </span><span class="s1">field)</span>
+        <span class="s3">if </span><span class="s1">field:</span>
+            <span class="s1">self.addresslist = self.getaddrlist()</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s1">self.addresslist = []</span>
+
+    <span class="s3">def </span><span class="s1">__len__(self):</span>
+        <span class="s3">return </span><span class="s1">len(self.addresslist)</span>
+
+    <span class="s3">def </span><span class="s1">__add__(self</span><span class="s3">, </span><span class="s1">other):</span>
+        <span class="s0"># Set union</span>
+        <span class="s1">newaddr = AddressList(</span><span class="s3">None</span><span class="s1">)</span>
+        <span class="s1">newaddr.addresslist = self.addresslist[:]</span>
+        <span class="s3">for </span><span class="s1">x </span><span class="s3">in </span><span class="s1">other.addresslist:</span>
+            <span class="s3">if not </span><span class="s1">x </span><span class="s3">in </span><span class="s1">self.addresslist:</span>
+                <span class="s1">newaddr.addresslist.append(x)</span>
+        <span class="s3">return </span><span class="s1">newaddr</span>
+
+    <span class="s3">def </span><span class="s1">__iadd__(self</span><span class="s3">, </span><span class="s1">other):</span>
+        <span class="s0"># Set union, in-place</span>
+        <span class="s3">for </span><span class="s1">x </span><span class="s3">in </span><span class="s1">other.addresslist:</span>
+            <span class="s3">if not </span><span class="s1">x </span><span class="s3">in </span><span class="s1">self.addresslist:</span>
+                <span class="s1">self.addresslist.append(x)</span>
+        <span class="s3">return </span><span class="s1">self</span>
+
+    <span class="s3">def </span><span class="s1">__sub__(self</span><span class="s3">, </span><span class="s1">other):</span>
+        <span class="s0"># Set difference</span>
+        <span class="s1">newaddr = AddressList(</span><span class="s3">None</span><span class="s1">)</span>
+        <span class="s3">for </span><span class="s1">x </span><span class="s3">in </span><span class="s1">self.addresslist:</span>
+            <span class="s3">if not </span><span class="s1">x </span><span class="s3">in </span><span class="s1">other.addresslist:</span>
+                <span class="s1">newaddr.addresslist.append(x)</span>
+        <span class="s3">return </span><span class="s1">newaddr</span>
+
+    <span class="s3">def </span><span class="s1">__isub__(self</span><span class="s3">, </span><span class="s1">other):</span>
+        <span class="s0"># Set difference, in-place</span>
+        <span class="s3">for </span><span class="s1">x </span><span class="s3">in </span><span class="s1">other.addresslist:</span>
+            <span class="s3">if </span><span class="s1">x </span><span class="s3">in </span><span class="s1">self.addresslist:</span>
+                <span class="s1">self.addresslist.remove(x)</span>
+        <span class="s3">return </span><span class="s1">self</span>
+
+    <span class="s3">def </span><span class="s1">__getitem__(self</span><span class="s3">, </span><span class="s1">index):</span>
+        <span class="s0"># Make indexing, slices, and 'in' work</span>
+        <span class="s3">return </span><span class="s1">self.addresslist[index]</span>
+</pre>
+</body>
+</html>

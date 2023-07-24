@@ -1,0 +1,196 @@
+<html>
+<head>
+<title>winutils.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #629755; font-style: italic;}
+.s3 { color: #cc7832;}
+.s4 { color: #6a8759;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+winutils.py</font>
+</center></td></tr></table>
+<pre><span class="s0">#-----------------------------------------------------------------------------</span>
+<span class="s0"># Copyright (c) 2013-2021, PyInstaller Development Team.</span>
+<span class="s0">#</span>
+<span class="s0"># Distributed under the terms of the GNU General Public License (version 2</span>
+<span class="s0"># or later) with exception for distributing the bootloader.</span>
+<span class="s0">#</span>
+<span class="s0"># The full license is in the file COPYING.txt, distributed with this software.</span>
+<span class="s0">#</span>
+<span class="s0"># SPDX-License-Identifier: (GPL-2.0-or-later WITH Bootloader-exception)</span>
+<span class="s0">#-----------------------------------------------------------------------------</span>
+<span class="s2">&quot;&quot;&quot; 
+Utilities for Windows platform. 
+&quot;&quot;&quot;</span>
+
+<span class="s3">import </span><span class="s1">os</span>
+<span class="s3">import </span><span class="s1">sys</span>
+
+<span class="s3">import </span><span class="s1">PyInstaller.log </span><span class="s3">as </span><span class="s1">logging</span>
+<span class="s3">from </span><span class="s1">PyInstaller </span><span class="s3">import </span><span class="s1">compat</span>
+
+<span class="s1">logger = logging.getLogger(__name__)</span>
+
+
+<span class="s3">def </span><span class="s1">get_windows_dir():</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Return the Windows directory, e.g., C:\\Windows. 
+    &quot;&quot;&quot;</span>
+    <span class="s0"># Imported here to avoid circular import.</span>
+    <span class="s3">from </span><span class="s1">PyInstaller </span><span class="s3">import </span><span class="s1">compat</span>
+    <span class="s1">windir = compat.win32api.GetWindowsDirectory()</span>
+    <span class="s3">if not </span><span class="s1">windir:</span>
+        <span class="s3">raise </span><span class="s1">SystemExit(</span><span class="s4">&quot;Error: Cannot determine Windows directory!&quot;</span><span class="s1">)</span>
+    <span class="s3">return </span><span class="s1">windir</span>
+
+
+<span class="s3">def </span><span class="s1">get_system_path():</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Return the required Windows system paths. 
+    &quot;&quot;&quot;</span>
+    <span class="s0"># Imported here to avoid circular import.</span>
+    <span class="s3">from </span><span class="s1">PyInstaller </span><span class="s3">import </span><span class="s1">compat</span>
+    <span class="s1">_bpath = []</span>
+    <span class="s1">sys_dir = compat.win32api.GetSystemDirectory()</span>
+    <span class="s0"># Ensure C:\Windows\system32  and C:\Windows directories are always present in PATH variable.</span>
+    <span class="s0"># C:\Windows\system32 is valid even for 64-bit Windows. Access do DLLs are transparently redirected to</span>
+    <span class="s0"># C:\Windows\syswow64 for 64bit applactions.</span>
+    <span class="s0"># See http://msdn.microsoft.com/en-us/library/aa384187(v=vs.85).aspx</span>
+    <span class="s1">_bpath = [sys_dir</span><span class="s3">, </span><span class="s1">get_windows_dir()]</span>
+    <span class="s3">return </span><span class="s1">_bpath</span>
+
+
+<span class="s3">def </span><span class="s1">extend_system_path(paths):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Add new paths at the beginning of environment variable PATH. 
+ 
+    Some hooks might extend PATH where PyInstaller should look for dlls. 
+    &quot;&quot;&quot;</span>
+    <span class="s0"># imported here to avoid circular import</span>
+    <span class="s3">from </span><span class="s1">PyInstaller </span><span class="s3">import </span><span class="s1">compat</span>
+    <span class="s1">old_path = compat.getenv(</span><span class="s4">'PATH'</span><span class="s3">, </span><span class="s4">''</span><span class="s1">)</span>
+    <span class="s1">paths.append(old_path)</span>
+    <span class="s1">new_path = os.pathsep.join(paths)</span>
+    <span class="s1">compat.setenv(</span><span class="s4">'PATH'</span><span class="s3">, </span><span class="s1">new_path)</span>
+
+
+<span class="s3">def </span><span class="s1">import_pywin32_module(module_name):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Import and return the PyWin32 module with the passed name. 
+ 
+    When imported, the `pywintypes` and `pythoncom` modules both internally import dynamic libraries 
+    (e.g., `pywintypes.py` imports `pywintypes34.dll` under Python 3.4). The Anaconda Python distribution for Windows 
+    installs these libraries to non-standard directories, resulting in 
+    `&quot;ImportError: No system module 'pywintypes' (pywintypes34.dll)&quot;` 
+    exceptions. This function catches these exceptions, searches for these libraries, adds their directories to 
+    `sys.path`, and retries. 
+ 
+    Parameters 
+    ---------- 
+    module_name : str 
+        Fully-qualified name of this module. 
+ 
+    Returns 
+    ---------- 
+    types.ModuleType 
+        The desired module. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">module = </span><span class="s3">None</span>
+
+    <span class="s3">try</span><span class="s1">:</span>
+        <span class="s1">module = __import__(module_name</span><span class="s3">, </span><span class="s1">globals={}</span><span class="s3">, </span><span class="s1">locals={}</span><span class="s3">, </span><span class="s1">fromlist=[</span><span class="s4">''</span><span class="s1">])</span>
+    <span class="s3">except </span><span class="s1">ImportError </span><span class="s3">as </span><span class="s1">exc:</span>
+        <span class="s3">if </span><span class="s1">str(exc).startswith(</span><span class="s4">'No system module'</span><span class="s1">):</span>
+            <span class="s0"># True if &quot;sys.frozen&quot; is currently set.</span>
+            <span class="s1">is_sys_frozen = hasattr(sys</span><span class="s3">, </span><span class="s4">'frozen'</span><span class="s1">)</span>
+
+            <span class="s0"># Current value of &quot;sys.frozen&quot; if any.</span>
+            <span class="s1">sys_frozen = getattr(sys</span><span class="s3">, </span><span class="s4">'frozen'</span><span class="s3">, None</span><span class="s1">)</span>
+
+            <span class="s0"># Force PyWin32 to search &quot;sys.path&quot; for DLLs. By default, PyWin32 only searches &quot;site-packages\win32\lib&quot;,</span>
+            <span class="s0"># &quot;sys.prefix&quot;, and Windows system directories (e.g., &quot;C:\Windows\System32&quot;). This is an ugly hack, but</span>
+            <span class="s0"># there is no other way.</span>
+            <span class="s1">sys.frozen = </span><span class="s4">'|_|GLYH@CK'</span>
+
+            <span class="s0"># If isolated to a venv, the preferred site.getsitepackages() function is unreliable. Fall back to searching</span>
+            <span class="s0"># &quot;sys.path&quot; instead.</span>
+            <span class="s3">if </span><span class="s1">compat.is_venv:</span>
+                <span class="s1">sys_paths = sys.path</span>
+            <span class="s3">else</span><span class="s1">:</span>
+                <span class="s1">sys_paths = compat.getsitepackages()</span>
+
+            <span class="s3">for </span><span class="s1">sys_path </span><span class="s3">in </span><span class="s1">sys_paths:</span>
+                <span class="s0"># Absolute path of the directory containing PyWin32 DLLs.</span>
+                <span class="s1">pywin32_dll_dir = os.path.join(sys_path</span><span class="s3">, </span><span class="s4">'pywin32_system32'</span><span class="s1">)</span>
+                <span class="s3">if </span><span class="s1">os.path.isdir(pywin32_dll_dir):</span>
+                    <span class="s1">sys.path.append(pywin32_dll_dir)</span>
+                    <span class="s3">try</span><span class="s1">:</span>
+                        <span class="s1">module = __import__(name=module_name</span><span class="s3">, </span><span class="s1">globals={}</span><span class="s3">, </span><span class="s1">locals={}</span><span class="s3">, </span><span class="s1">fromlist=[</span><span class="s4">''</span><span class="s1">])</span>
+                        <span class="s3">break</span>
+                    <span class="s3">except </span><span class="s1">ImportError:</span>
+                        <span class="s3">pass</span>
+
+            <span class="s0"># If &quot;sys.frozen&quot; was previously set, restore its prior value.</span>
+            <span class="s3">if </span><span class="s1">is_sys_frozen:</span>
+                <span class="s1">sys.frozen = sys_frozen</span>
+            <span class="s0"># Else, undo this hack entirely.</span>
+            <span class="s3">else</span><span class="s1">:</span>
+                <span class="s3">del </span><span class="s1">sys.frozen</span>
+
+        <span class="s0"># If this module remains unimportable, PyWin32 is not installed. Fail.</span>
+        <span class="s3">if </span><span class="s1">module </span><span class="s3">is None</span><span class="s1">:</span>
+            <span class="s3">raise</span>
+
+    <span class="s3">return </span><span class="s1">module</span>
+
+
+<span class="s3">def </span><span class="s1">convert_dll_name_to_str(dll_name):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Convert dll names from 'bytes' to 'str'. 
+ 
+    Latest pefile returns type 'bytes'. 
+    :param dll_name: 
+    :return: 
+    &quot;&quot;&quot;</span>
+    <span class="s0"># Imported here to avoid circular import.</span>
+    <span class="s3">if </span><span class="s1">isinstance(dll_name</span><span class="s3">, </span><span class="s1">bytes):</span>
+        <span class="s3">return </span><span class="s1">str(dll_name</span><span class="s3">, </span><span class="s1">encoding=</span><span class="s4">'UTF-8'</span><span class="s1">)</span>
+    <span class="s3">else</span><span class="s1">:</span>
+        <span class="s3">return </span><span class="s1">dll_name</span>
+
+
+<span class="s3">def </span><span class="s1">fixup_exe_headers(exe_path</span><span class="s3">, </span><span class="s1">timestamp=</span><span class="s3">None</span><span class="s1">):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Set executable's checksum and build timestamp in its headers. 
+ 
+    This optional checksum is supposed to protect the executable against corruption but some anti-viral software have 
+    taken to flagging anything without it set correctly as malware. See issue #5579. 
+    &quot;&quot;&quot;</span>
+    <span class="s3">import </span><span class="s1">pefile</span>
+    <span class="s1">pe = pefile.PE(exe_path</span><span class="s3">, </span><span class="s1">fast_load=</span><span class="s3">False</span><span class="s1">)  </span><span class="s0"># full load because we need all headers</span>
+    <span class="s0"># Set build timestamp.</span>
+    <span class="s0"># See: https://0xc0decafe.com/malware-analyst-guide-to-pe-timestamps</span>
+    <span class="s3">if </span><span class="s1">timestamp </span><span class="s3">is not None</span><span class="s1">:</span>
+        <span class="s1">timestamp = int(timestamp)</span>
+        <span class="s0"># Set timestamp field in FILE_HEADER</span>
+        <span class="s1">pe.FILE_HEADER.TimeDateStamp = timestamp</span>
+        <span class="s0"># MSVC-compiled executables contain (at least?) one DIRECTORY_ENTRY_DEBUG entry that also contains timestamp</span>
+        <span class="s0"># with same value as set in FILE_HEADER. So modify that as well, as long as it is set.</span>
+        <span class="s1">debug_entries = getattr(pe</span><span class="s3">, </span><span class="s4">'DIRECTORY_ENTRY_DEBUG'</span><span class="s3">, </span><span class="s1">[])</span>
+        <span class="s3">for </span><span class="s1">debug_entry </span><span class="s3">in </span><span class="s1">debug_entries:</span>
+            <span class="s3">if </span><span class="s1">debug_entry.struct.TimeDateStamp:</span>
+                <span class="s1">debug_entry.struct.TimeDateStamp = timestamp</span>
+    <span class="s0"># Set PE checksum</span>
+    <span class="s1">pe.OPTIONAL_HEADER.CheckSum = pe.generate_checksum()</span>
+    <span class="s1">pe.close()</span>
+    <span class="s1">pe.write(exe_path)</span>
+</pre>
+</body>
+</html>

@@ -1,0 +1,180 @@
+<html>
+<head>
+<title>test__timeout.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #cc7832;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #6897bb;}
+.s3 { color: #6a8759;}
+.s4 { color: #808080;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+test__timeout.py</font>
+</center></td></tr></table>
+<pre><span class="s0">import </span><span class="s1">gevent.testing </span><span class="s0">as </span><span class="s1">greentest</span>
+<span class="s0">import </span><span class="s1">gevent</span>
+<span class="s0">from </span><span class="s1">gevent.hub </span><span class="s0">import </span><span class="s1">get_hub</span>
+<span class="s0">import </span><span class="s1">sys</span>
+
+<span class="s1">SHOULD_EXPIRE = </span><span class="s2">0.01</span>
+<span class="s0">if not </span><span class="s1">greentest.RUNNING_ON_CI:</span>
+    <span class="s1">SHOULD_NOT_EXPIRE = SHOULD_EXPIRE * </span><span class="s2">2.0</span>
+<span class="s0">else</span><span class="s1">:</span>
+    <span class="s1">SHOULD_NOT_EXPIRE = SHOULD_EXPIRE * </span><span class="s2">20.0</span>
+
+
+<span class="s0">class </span><span class="s1">TestDirectRaise(greentest.TestCase):</span>
+    <span class="s1">switch_expected = </span><span class="s0">False</span>
+
+    <span class="s0">def </span><span class="s1">test_direct_raise_class(self):</span>
+        <span class="s0">try</span><span class="s1">:</span>
+            <span class="s0">raise </span><span class="s1">gevent.Timeout</span>
+        <span class="s0">except </span><span class="s1">gevent.Timeout </span><span class="s0">as </span><span class="s1">t:</span>
+            <span class="s0">assert not </span><span class="s1">t.pending</span><span class="s0">, </span><span class="s1">repr(t)</span>
+
+    <span class="s0">def </span><span class="s1">test_direct_raise_instance(self):</span>
+        <span class="s1">timeout = gevent.Timeout()</span>
+        <span class="s0">try</span><span class="s1">:</span>
+            <span class="s0">raise </span><span class="s1">timeout</span>
+        <span class="s0">except </span><span class="s1">gevent.Timeout </span><span class="s0">as </span><span class="s1">t:</span>
+            <span class="s0">assert </span><span class="s1">timeout </span><span class="s0">is </span><span class="s1">t</span><span class="s0">, </span><span class="s1">(timeout</span><span class="s0">, </span><span class="s1">t)</span>
+            <span class="s0">assert not </span><span class="s1">t.pending</span><span class="s0">, </span><span class="s1">repr(t)</span>
+
+
+<span class="s0">class </span><span class="s1">Test(greentest.TestCase):</span>
+
+    <span class="s0">def </span><span class="s1">_test(self</span><span class="s0">, </span><span class="s1">timeout</span><span class="s0">, </span><span class="s1">close):</span>
+        <span class="s0">try</span><span class="s1">:</span>
+            <span class="s1">get_hub().switch()</span>
+            <span class="s1">self.fail(</span><span class="s3">'Must raise Timeout'</span><span class="s1">)</span>
+        <span class="s0">except </span><span class="s1">gevent.Timeout </span><span class="s0">as </span><span class="s1">ex:</span>
+            <span class="s0">if </span><span class="s1">ex </span><span class="s0">is not </span><span class="s1">timeout:</span>
+                <span class="s0">raise</span>
+            <span class="s0">if </span><span class="s1">close:</span>
+                <span class="s1">ex.close()</span>
+            <span class="s0">return </span><span class="s1">ex</span>
+
+    <span class="s0">def </span><span class="s1">_check_expires(self</span><span class="s0">, </span><span class="s1">timeout):</span>
+        <span class="s1">timeout.start()</span>
+        <span class="s1">self._test(timeout</span><span class="s0">, False</span><span class="s1">)</span>
+        <span class="s4"># Restart</span>
+        <span class="s1">timeout.start()</span>
+        <span class="s0">return </span><span class="s1">self._test(timeout</span><span class="s0">, True</span><span class="s1">)</span>
+
+    <span class="s0">def </span><span class="s1">test_expires(self):</span>
+        <span class="s1">timeout = gevent.Timeout(SHOULD_EXPIRE)</span>
+        <span class="s1">self._check_expires(timeout)</span>
+
+    <span class="s0">def </span><span class="s1">test_expires_false(self):</span>
+        <span class="s4"># A False exception value only matters to a</span>
+        <span class="s4"># context manager</span>
+        <span class="s1">timeout = gevent.Timeout(SHOULD_EXPIRE</span><span class="s0">, False</span><span class="s1">)</span>
+        <span class="s1">self._check_expires(timeout)</span>
+
+    <span class="s0">def </span><span class="s1">test_expires_str(self):</span>
+        <span class="s4"># str values are accepted but not documented; they change</span>
+        <span class="s4"># the message</span>
+        <span class="s1">timeout = gevent.Timeout(SHOULD_EXPIRE</span><span class="s0">, </span><span class="s3">'XXX'</span><span class="s1">)</span>
+        <span class="s1">ex = self._check_expires(timeout)</span>
+        <span class="s1">self.assertTrue(str(ex).endswith(</span><span class="s3">'XXX'</span><span class="s1">))</span>
+
+    <span class="s0">def </span><span class="s1">assert_type_err(self</span><span class="s0">, </span><span class="s1">ex):</span>
+        <span class="s4"># PyPy3 uses 'exceptions must derive', everyone else uses &quot;exceptions must be&quot;</span>
+        <span class="s1">self.assertTrue(</span><span class="s3">&quot;exceptions must be&quot; </span><span class="s0">in </span><span class="s1">str(ex) </span><span class="s0">or </span><span class="s3">&quot;exceptions must derive&quot; </span><span class="s0">in </span><span class="s1">str(ex)</span><span class="s0">, </span><span class="s1">str(ex))</span>
+
+    <span class="s0">def </span><span class="s1">test_expires_non_exception(self):</span>
+        <span class="s1">timeout = gevent.Timeout(SHOULD_EXPIRE</span><span class="s0">, </span><span class="s1">object())</span>
+        <span class="s1">timeout.start()</span>
+        <span class="s0">try</span><span class="s1">:</span>
+            <span class="s1">get_hub().switch()</span>
+            <span class="s1">self.fail(</span><span class="s3">&quot;Most raise TypeError&quot;</span><span class="s1">)</span>
+        <span class="s0">except </span><span class="s1">TypeError </span><span class="s0">as </span><span class="s1">ex:</span>
+            <span class="s1">self.assert_type_err(ex)</span>
+        <span class="s1">timeout.close()</span>
+
+        <span class="s0">class </span><span class="s1">OldStyle:</span>
+            <span class="s0">pass</span>
+        <span class="s1">timeout = gevent.Timeout(SHOULD_EXPIRE</span><span class="s0">, </span><span class="s1">OldStyle) </span><span class="s4"># Type</span>
+        <span class="s1">timeout.start()</span>
+        <span class="s0">try</span><span class="s1">:</span>
+            <span class="s1">get_hub().switch()</span>
+            <span class="s1">self.fail(</span><span class="s3">&quot;Must raise OldStyle&quot;</span><span class="s1">)</span>
+        <span class="s0">except </span><span class="s1">TypeError </span><span class="s0">as </span><span class="s1">ex:</span>
+            <span class="s1">self.assertTrue(greentest.PY3</span><span class="s0">, </span><span class="s3">&quot;Py3 raises a TypeError for non-BaseExceptions&quot;</span><span class="s1">)</span>
+            <span class="s1">self.assert_type_err(ex)</span>
+        <span class="s0">except</span><span class="s1">: </span><span class="s4"># pylint:disable=bare-except</span>
+            <span class="s1">self.assertTrue(greentest.PY2</span><span class="s0">, </span><span class="s3">&quot;Old style classes can only be raised on Py2&quot;</span><span class="s1">)</span>
+            <span class="s1">t = sys.exc_info()[</span><span class="s2">0</span><span class="s1">]</span>
+            <span class="s1">self.assertEqual(t</span><span class="s0">, </span><span class="s1">OldStyle)</span>
+        <span class="s1">timeout.close()</span>
+
+        <span class="s1">timeout = gevent.Timeout(SHOULD_EXPIRE</span><span class="s0">, </span><span class="s1">OldStyle()) </span><span class="s4"># instance</span>
+        <span class="s1">timeout.start()</span>
+        <span class="s0">try</span><span class="s1">:</span>
+            <span class="s1">get_hub().switch()</span>
+            <span class="s1">self.fail(</span><span class="s3">&quot;Must raise OldStyle&quot;</span><span class="s1">)</span>
+        <span class="s0">except </span><span class="s1">TypeError </span><span class="s0">as </span><span class="s1">ex:</span>
+            <span class="s1">self.assertTrue(greentest.PY3</span><span class="s0">, </span><span class="s3">&quot;Py3 raises a TypeError for non-BaseExceptions&quot;</span><span class="s1">)</span>
+            <span class="s1">self.assert_type_err(ex)</span>
+        <span class="s0">except</span><span class="s1">: </span><span class="s4"># pylint:disable=bare-except</span>
+            <span class="s1">self.assertTrue(greentest.PY2</span><span class="s0">, </span><span class="s3">&quot;Old style classes can only be raised on Py2&quot;</span><span class="s1">)</span>
+            <span class="s1">t = sys.exc_info()[</span><span class="s2">0</span><span class="s1">]</span>
+            <span class="s1">self.assertEqual(t</span><span class="s0">, </span><span class="s1">OldStyle)</span>
+        <span class="s1">timeout.close()</span>
+
+    <span class="s0">def </span><span class="s1">_check_context_manager_expires(self</span><span class="s0">, </span><span class="s1">timeout</span><span class="s0">, </span><span class="s1">raises=</span><span class="s0">True</span><span class="s1">):</span>
+        <span class="s0">try</span><span class="s1">:</span>
+            <span class="s0">with </span><span class="s1">timeout:</span>
+                <span class="s1">get_hub().switch()</span>
+        <span class="s0">except </span><span class="s1">gevent.Timeout </span><span class="s0">as </span><span class="s1">ex:</span>
+            <span class="s0">if </span><span class="s1">ex </span><span class="s0">is not </span><span class="s1">timeout:</span>
+                <span class="s0">raise</span>
+            <span class="s0">return </span><span class="s1">ex</span>
+
+        <span class="s0">if </span><span class="s1">raises:</span>
+            <span class="s1">self.fail(</span><span class="s3">&quot;Must raise Timeout&quot;</span><span class="s1">)</span>
+
+    <span class="s0">def </span><span class="s1">test_context_manager(self):</span>
+        <span class="s1">timeout = gevent.Timeout(SHOULD_EXPIRE)</span>
+        <span class="s1">self._check_context_manager_expires(timeout)</span>
+
+    <span class="s0">def </span><span class="s1">test_context_manager_false(self):</span>
+        <span class="s4"># Suppress the exception</span>
+        <span class="s1">timeout = gevent.Timeout(SHOULD_EXPIRE</span><span class="s0">, False</span><span class="s1">)</span>
+        <span class="s1">self._check_context_manager_expires(timeout</span><span class="s0">, </span><span class="s1">raises=</span><span class="s0">False</span><span class="s1">)</span>
+        <span class="s1">self.assertTrue(str(timeout).endswith(</span><span class="s3">'(silent)'</span><span class="s1">)</span><span class="s0">, </span><span class="s1">str(timeout))</span>
+
+    <span class="s0">def </span><span class="s1">test_context_manager_str(self):</span>
+        <span class="s1">timeout = gevent.Timeout(SHOULD_EXPIRE</span><span class="s0">, </span><span class="s3">'XXX'</span><span class="s1">)</span>
+        <span class="s1">ex = self._check_context_manager_expires(timeout)</span>
+        <span class="s1">self.assertTrue(str(ex).endswith(</span><span class="s3">'XXX'</span><span class="s1">)</span><span class="s0">, </span><span class="s1">str(ex))</span>
+
+    <span class="s0">def </span><span class="s1">test_cancel(self):</span>
+        <span class="s1">timeout = gevent.Timeout(SHOULD_EXPIRE)</span>
+        <span class="s1">timeout.start()</span>
+        <span class="s1">timeout.cancel()</span>
+        <span class="s1">gevent.sleep(SHOULD_NOT_EXPIRE)</span>
+        <span class="s1">self.assertFalse(timeout.pending</span><span class="s0">, </span><span class="s1">timeout)</span>
+        <span class="s1">timeout.close()</span>
+
+    <span class="s1">@greentest.ignores_leakcheck</span>
+    <span class="s0">def </span><span class="s1">test_with_timeout(self):</span>
+        <span class="s0">with </span><span class="s1">self.assertRaises(gevent.Timeout):</span>
+            <span class="s1">gevent.with_timeout(SHOULD_EXPIRE</span><span class="s0">, </span><span class="s1">gevent.sleep</span><span class="s0">, </span><span class="s1">SHOULD_NOT_EXPIRE)</span>
+        <span class="s1">X = object()</span>
+        <span class="s1">r = gevent.with_timeout(SHOULD_EXPIRE</span><span class="s0">, </span><span class="s1">gevent.sleep</span><span class="s0">, </span><span class="s1">SHOULD_NOT_EXPIRE</span><span class="s0">, </span><span class="s1">timeout_value=X)</span>
+        <span class="s1">self.assertIs(r</span><span class="s0">, </span><span class="s1">X)</span>
+        <span class="s1">r = gevent.with_timeout(SHOULD_NOT_EXPIRE</span><span class="s0">, </span><span class="s1">gevent.sleep</span><span class="s0">, </span><span class="s1">SHOULD_EXPIRE</span><span class="s0">, </span><span class="s1">timeout_value=X)</span>
+        <span class="s1">self.assertIsNone(r)</span>
+
+
+<span class="s0">if </span><span class="s1">__name__ == </span><span class="s3">'__main__'</span><span class="s1">:</span>
+    <span class="s1">greentest.main()</span>
+</pre>
+</body>
+</html>

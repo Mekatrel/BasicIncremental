@@ -1,0 +1,167 @@
+<html>
+<head>
+<title>greenlet_thread_support.hpp</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #cc7832;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #808080;}
+.s3 { color: #6a8759;}
+.s4 { color: #6897bb;}
+.s5 { color: #ab51ba;}
+.s6 { color: #0f9795;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+greenlet_thread_support.hpp</font>
+</center></td></tr></table>
+<pre><span class="s0">#ifndef </span><span class="s1">GREENLET_THREAD_SUPPORT_HPP</span>
+<span class="s0">#define </span><span class="s1">GREENLET_THREAD_SUPPORT_HPP</span>
+
+<span class="s2">/** 
+ * Defines various utility functions to help greenlet integrate well 
+ * with threads. When possible, we use portable C++ 11 threading; when 
+ * not possible, we will use platform specific APIs if needed and 
+ * available. (Currently, this is only for Python 2.7 on Windows.) 
+ */</span>
+
+<span class="s0">#include </span><span class="s1">&lt;stdexcept&gt;</span>
+<span class="s0">#include </span><span class="s3">&quot;greenlet_compiler_compat.hpp&quot;</span>
+
+<span class="s2">// Allow setting this to 0 on the command line so that we</span>
+<span class="s2">// can test these code paths on compilers that otherwise support</span>
+<span class="s2">// standard threads.</span>
+<span class="s0">#ifndef </span><span class="s1">G_USE_STANDARD_THREADING</span>
+<span class="s0">#if </span><span class="s1">__cplusplus &gt;= </span><span class="s4">201103</span>
+<span class="s2">// Cool. We should have standard support</span>
+<span class="s1">#    define G_USE_STANDARD_THREADING </span><span class="s4">1</span>
+<span class="s1">#elif defined(_MSC_VER)</span>
+<span class="s2">// MSVC doesn't use a modern version of __cplusplus automatically, you</span>
+<span class="s2">// have to opt-in to update it with /Zc:__cplusplus, but that's not</span>
+<span class="s2">// available on our old version of visual studio for Python 2.7</span>
+<span class="s1">#    </span><span class="s0">if </span><span class="s1">_MSC_VER &lt;= </span><span class="s4">1500</span>
+<span class="s2">// Python 2.7 on Windows. Use the Python thread state and native Win32 APIs.</span>
+<span class="s1">#        define G_USE_STANDARD_THREADING </span><span class="s4">0</span>
+<span class="s1">#    </span><span class="s0">else</span>
+<span class="s2">// Assume we have a compiler that supports it. The Appveyor compilers</span>
+<span class="s2">// we use all do have standard support</span>
+<span class="s1">#        define G_USE_STANDARD_THREADING </span><span class="s4">1</span>
+<span class="s1">#    endif</span>
+<span class="s1">#elif defined(__GNUC__) || defined(__clang__)</span>
+<span class="s2">// All tested versions either do, or can with the right --std argument, support what we need</span>
+<span class="s1">#    define G_USE_STANDARD_THREADING </span><span class="s4">1</span>
+<span class="s0">#else</span>
+<span class="s1">#    define G_USE_STANDARD_THREADING </span><span class="s4">0</span>
+<span class="s0">#endif</span>
+<span class="s0">#endif </span><span class="s2">/* G_USE_STANDARD_THREADING */</span>
+
+<span class="s5">namespace </span><span class="s1">greenlet {</span>
+    <span class="s5">class </span><span class="s1">LockInitError : </span><span class="s5">public </span><span class="s1">std::runtime_error</span>
+    <span class="s1">{</span>
+    <span class="s5">public</span><span class="s1">:</span>
+        <span class="s1">LockInitError(</span><span class="s0">const char</span><span class="s1">* what) : std::runtime_error(what)</span>
+        <span class="s1">{};</span>
+    <span class="s1">};</span>
+<span class="s1">};</span>
+
+
+<span class="s0">#if </span><span class="s1">G_USE_STANDARD_THREADING == </span><span class="s4">1</span>
+<span class="s1">#    define G_THREAD_LOCAL_SUPPORTS_DESTRUCTOR </span><span class="s4">1</span>
+<span class="s1">#    include &lt;thread&gt;</span>
+<span class="s1">#    include &lt;mutex&gt;</span>
+<span class="s1">#    define G_THREAD_LOCAL_VAR thread_local</span>
+<span class="s5">namespace </span><span class="s1">greenlet {</span>
+    <span class="s0">typedef </span><span class="s1">std::mutex Mutex;</span>
+    <span class="s0">typedef </span><span class="s1">std::lock_guard&lt;Mutex&gt; LockGuard;</span>
+<span class="s1">};</span>
+<span class="s0">#else</span>
+<span class="s2">// NOTE: At this writing, the mutex isn't currently required;</span>
+<span class="s2">// we don't use a shared cleanup queue or Py_AddPendingCall in this</span>
+<span class="s2">// model, we rely on the thread state dictionary for cleanup.</span>
+<span class="s1">#    </span><span class="s0">if </span><span class="s1">defined(_MSC_VER)</span>
+<span class="s2">//       We should only hit this case for Python 2.7 on Windows.</span>
+<span class="s1">#        define G_THREAD_LOCAL_VAR __declspec(thread)</span>
+<span class="s1">#        include &lt;windows.h&gt;</span>
+<span class="s5">namespace </span><span class="s1">greenlet {</span>
+    <span class="s5">class </span><span class="s1">Mutex</span>
+    <span class="s1">{</span>
+        <span class="s1">CRITICAL_SECTION _mutex;</span>
+        <span class="s1">G_NO_COPIES_OF_CLS(Mutex);</span>
+    <span class="s5">public</span><span class="s1">:</span>
+        <span class="s1">Mutex()</span>
+        <span class="s1">{</span>
+            <span class="s1">InitializeCriticalSection(&amp;</span><span class="s5">this</span><span class="s6">-&gt;</span><span class="s1">_mutex);</span>
+        <span class="s1">};</span>
+
+        <span class="s0">void </span><span class="s1">Lock()</span>
+        <span class="s1">{</span>
+            <span class="s1">EnterCriticalSection(&amp;</span><span class="s5">this</span><span class="s6">-&gt;</span><span class="s1">_mutex);</span>
+        <span class="s1">};</span>
+
+        <span class="s0">void </span><span class="s1">UnLock()</span>
+        <span class="s1">{</span>
+            <span class="s1">LeaveCriticalSection(&amp;</span><span class="s5">this</span><span class="s6">-&gt;</span><span class="s1">_mutex);</span>
+        <span class="s1">};</span>
+    <span class="s1">};</span>
+<span class="s1">};</span>
+<span class="s1">#    elif (defined(__GNUC__) || defined(__clang__)) || (defined(__SUNPRO_C))</span>
+<span class="s2">// GCC, clang, SunStudio all use __thread for thread-local variables.</span>
+<span class="s2">// For locks, we can use PyThread APIs, officially added in 3.2, but</span>
+<span class="s2">// present back to 2.7</span>
+<span class="s1">#        define G_THREAD_LOCAL_VAR __thread</span>
+<span class="s1">#        include </span><span class="s3">&quot;pythread.h&quot;</span>
+<span class="s5">namespace </span><span class="s1">greenlet {</span>
+    <span class="s5">class </span><span class="s1">Mutex</span>
+    <span class="s1">{</span>
+        <span class="s1">PyThread_type_lock _mutex;</span>
+        <span class="s1">G_NO_COPIES_OF_CLS(Mutex);</span>
+    <span class="s5">public</span><span class="s1">:</span>
+        <span class="s1">Mutex()</span>
+        <span class="s1">{</span>
+            <span class="s5">this</span><span class="s6">-&gt;</span><span class="s1">_mutex = PyThread_allocate_lock();</span>
+            <span class="s0">if </span><span class="s1">(!</span><span class="s5">this</span><span class="s6">-&gt;</span><span class="s1">_mutex) {</span>
+                <span class="s5">throw </span><span class="s1">LockInitError(</span><span class="s3">&quot;Failed to initialize mutex.&quot;</span><span class="s1">);</span>
+            <span class="s1">}</span>
+        <span class="s1">};</span>
+
+        <span class="s0">void </span><span class="s1">Lock()</span>
+        <span class="s1">{</span>
+            <span class="s1">PyThread_acquire_lock(</span><span class="s5">this</span><span class="s6">-&gt;</span><span class="s1">_mutex, WAIT_LOCK);</span>
+        <span class="s1">};</span>
+
+        <span class="s0">void </span><span class="s1">UnLock()</span>
+        <span class="s1">{</span>
+            <span class="s1">PyThread_release_lock(</span><span class="s5">this</span><span class="s6">-&gt;</span><span class="s1">_mutex);</span>
+        <span class="s1">};</span>
+    <span class="s1">};</span>
+<span class="s1">};</span>
+<span class="s1">#    </span><span class="s0">else</span>
+<span class="s1">#        error Unable to declare thread-local variables.</span>
+<span class="s1">#    endif</span>
+<span class="s2">// the RAII lock keeper for all non-standard threading platforms.</span>
+<span class="s5">namespace </span><span class="s1">greenlet {</span>
+    <span class="s5">class </span><span class="s1">LockGuard</span>
+    <span class="s1">{</span>
+        <span class="s1">Mutex&amp; _mutex;</span>
+        <span class="s1">G_NO_COPIES_OF_CLS(LockGuard);</span>
+    <span class="s5">public</span><span class="s1">:</span>
+        <span class="s1">LockGuard(Mutex&amp; m) : _mutex(m)</span>
+        <span class="s1">{</span>
+            <span class="s5">this</span><span class="s6">-&gt;</span><span class="s1">_mutex.Lock();</span>
+        <span class="s1">};</span>
+        <span class="s1">~LockGuard()</span>
+        <span class="s1">{</span>
+            <span class="s5">this</span><span class="s6">-&gt;</span><span class="s1">_mutex.UnLock();</span>
+        <span class="s1">};</span>
+    <span class="s1">};</span>
+
+<span class="s1">};</span>
+<span class="s0">#endif </span><span class="s2">/* G_USE_STANDARD_THREADING == 1 */</span>
+
+<span class="s0">#endif </span><span class="s2">/* GREENLET_THREAD_SUPPORT_HPP */</span>
+</pre>
+</body>
+</html>

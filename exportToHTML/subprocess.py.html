@@ -1,0 +1,2081 @@
+<html>
+<head>
+<title>subprocess.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #629755; font-style: italic;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #cc7832;}
+.s3 { color: #808080;}
+.s4 { color: #6a8759;}
+.s5 { color: #6897bb;}
+.s6 { color: #a5c261;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+subprocess.py</font>
+</center></td></tr></table>
+<pre><span class="s0">&quot;&quot;&quot; 
+Cooperative ``subprocess`` module. 
+ 
+.. caution:: On POSIX platforms, this module is not usable from native 
+   threads other than the main thread; attempting to do so will raise 
+   a :exc:`TypeError`. This module depends on libev's fork watchers. 
+   On POSIX systems, fork watchers are implemented using signals, and 
+   the thread to which process-directed signals are delivered `is not 
+   defined`_. Because each native thread has its own gevent/libev 
+   loop, this means that a fork watcher registered with one loop 
+   (thread) may never see the signal about a child it spawned if the 
+   signal is sent to a different thread. 
+ 
+.. note:: The interface of this module is intended to match that of 
+   the standard library :mod:`subprocess` module (with many backwards 
+   compatible extensions from Python 3 backported to Python 2). There 
+   are some small differences between the Python 2 and Python 3 
+   versions of that module (the Python 2 ``TimeoutExpired`` exception, 
+   notably, extends ``Timeout`` and there is no ``SubprocessError``) and between the 
+   POSIX and Windows versions. The HTML documentation here can only 
+   describe one version; for definitive documentation, see the 
+   standard library or the source code. 
+ 
+.. _is not defined: http://www.linuxprogrammingblog.com/all-about-linux-signals?page=11 
+&quot;&quot;&quot;</span>
+<span class="s2">from </span><span class="s1">__future__ </span><span class="s2">import </span><span class="s1">absolute_import</span><span class="s2">, </span><span class="s1">print_function</span>
+<span class="s3"># Can we split this up to make it cleaner? See https://github.com/gevent/gevent/issues/748</span>
+<span class="s3"># pylint: disable=too-many-lines</span>
+<span class="s3"># Most of this we inherit from the standard lib</span>
+<span class="s3"># pylint: disable=bare-except,too-many-locals,too-many-statements,attribute-defined-outside-init</span>
+<span class="s3"># pylint: disable=too-many-branches,too-many-instance-attributes</span>
+<span class="s3"># Most of this is cross-platform</span>
+<span class="s3"># pylint: disable=no-member,expression-not-assigned,unused-argument,unused-variable</span>
+<span class="s2">import </span><span class="s1">errno</span>
+<span class="s2">import </span><span class="s1">gc</span>
+<span class="s2">import </span><span class="s1">os</span>
+<span class="s2">import </span><span class="s1">signal</span>
+<span class="s2">import </span><span class="s1">sys</span>
+<span class="s2">import </span><span class="s1">traceback</span>
+<span class="s3"># Python 3.9</span>
+<span class="s2">try</span><span class="s1">:</span>
+    <span class="s2">from </span><span class="s1">types </span><span class="s2">import </span><span class="s1">GenericAlias</span>
+<span class="s2">except </span><span class="s1">ImportError:</span>
+    <span class="s1">GenericAlias = </span><span class="s2">None</span>
+
+<span class="s2">try</span><span class="s1">:</span>
+    <span class="s2">import </span><span class="s1">grp</span>
+<span class="s2">except </span><span class="s1">ImportError:</span>
+    <span class="s1">grp = </span><span class="s2">None</span>
+
+<span class="s2">try</span><span class="s1">:</span>
+    <span class="s2">import </span><span class="s1">pwd</span>
+<span class="s2">except </span><span class="s1">ImportError:</span>
+    <span class="s1">pwd = </span><span class="s2">None</span>
+
+<span class="s2">from </span><span class="s1">gevent.event </span><span class="s2">import </span><span class="s1">AsyncResult</span>
+<span class="s2">from </span><span class="s1">gevent.hub </span><span class="s2">import </span><span class="s1">_get_hub_noargs </span><span class="s2">as </span><span class="s1">get_hub</span>
+<span class="s2">from </span><span class="s1">gevent.hub </span><span class="s2">import </span><span class="s1">linkproxy</span>
+<span class="s2">from </span><span class="s1">gevent.hub </span><span class="s2">import </span><span class="s1">sleep</span>
+<span class="s2">from </span><span class="s1">gevent.hub </span><span class="s2">import </span><span class="s1">getcurrent</span>
+<span class="s2">from </span><span class="s1">gevent._compat </span><span class="s2">import </span><span class="s1">integer_types</span><span class="s2">, </span><span class="s1">string_types</span><span class="s2">, </span><span class="s1">xrange</span>
+<span class="s2">from </span><span class="s1">gevent._compat </span><span class="s2">import </span><span class="s1">PY3</span>
+<span class="s2">from </span><span class="s1">gevent._compat </span><span class="s2">import </span><span class="s1">PY35</span>
+<span class="s2">from </span><span class="s1">gevent._compat </span><span class="s2">import </span><span class="s1">PY36</span>
+<span class="s2">from </span><span class="s1">gevent._compat </span><span class="s2">import </span><span class="s1">PY37</span>
+<span class="s2">from </span><span class="s1">gevent._compat </span><span class="s2">import </span><span class="s1">PY38</span>
+<span class="s2">from </span><span class="s1">gevent._compat </span><span class="s2">import </span><span class="s1">PY311</span>
+<span class="s2">from </span><span class="s1">gevent._compat </span><span class="s2">import </span><span class="s1">PYPY</span>
+<span class="s2">from </span><span class="s1">gevent._compat </span><span class="s2">import </span><span class="s1">reraise</span>
+<span class="s2">from </span><span class="s1">gevent._compat </span><span class="s2">import </span><span class="s1">fsdecode</span>
+<span class="s2">from </span><span class="s1">gevent._compat </span><span class="s2">import </span><span class="s1">fsencode</span>
+<span class="s2">from </span><span class="s1">gevent._compat </span><span class="s2">import </span><span class="s1">PathLike</span>
+<span class="s2">from </span><span class="s1">gevent._util </span><span class="s2">import </span><span class="s1">_NONE</span>
+<span class="s2">from </span><span class="s1">gevent._util </span><span class="s2">import </span><span class="s1">copy_globals</span>
+
+<span class="s2">from </span><span class="s1">gevent.greenlet </span><span class="s2">import </span><span class="s1">Greenlet</span><span class="s2">, </span><span class="s1">joinall</span>
+<span class="s1">spawn = Greenlet.spawn</span>
+<span class="s2">import </span><span class="s1">subprocess </span><span class="s2">as </span><span class="s1">__subprocess__</span>
+
+
+<span class="s3"># Standard functions and classes that this module re-implements in a gevent-aware way.</span>
+<span class="s1">__implements__ = [</span>
+    <span class="s4">'Popen'</span><span class="s2">,</span>
+    <span class="s4">'call'</span><span class="s2">,</span>
+    <span class="s4">'check_call'</span><span class="s2">,</span>
+    <span class="s4">'check_output'</span><span class="s2">,</span>
+<span class="s1">]</span>
+<span class="s2">if </span><span class="s1">PY3 </span><span class="s2">and not </span><span class="s1">sys.platform.startswith(</span><span class="s4">'win32'</span><span class="s1">):</span>
+    <span class="s1">__implements__.append(</span><span class="s4">&quot;_posixsubprocess&quot;</span><span class="s1">)</span>
+    <span class="s1">_posixsubprocess = </span><span class="s2">None</span>
+
+
+<span class="s3"># Some symbols we define that we expect to export;</span>
+<span class="s3"># useful for static analysis</span>
+<span class="s1">PIPE = </span><span class="s4">&quot;PIPE should be imported&quot;</span>
+
+<span class="s3"># Standard functions and classes that this module re-imports.</span>
+<span class="s1">__imports__ = [</span>
+    <span class="s4">'PIPE'</span><span class="s2">,</span>
+    <span class="s4">'STDOUT'</span><span class="s2">,</span>
+    <span class="s4">'CalledProcessError'</span><span class="s2">,</span>
+    <span class="s3"># Windows:</span>
+    <span class="s4">'CREATE_NEW_CONSOLE'</span><span class="s2">,</span>
+    <span class="s4">'CREATE_NEW_PROCESS_GROUP'</span><span class="s2">,</span>
+    <span class="s4">'STD_INPUT_HANDLE'</span><span class="s2">,</span>
+    <span class="s4">'STD_OUTPUT_HANDLE'</span><span class="s2">,</span>
+    <span class="s4">'STD_ERROR_HANDLE'</span><span class="s2">,</span>
+    <span class="s4">'SW_HIDE'</span><span class="s2">,</span>
+    <span class="s4">'STARTF_USESTDHANDLES'</span><span class="s2">,</span>
+    <span class="s4">'STARTF_USESHOWWINDOW'</span><span class="s2">,</span>
+<span class="s1">]</span>
+
+
+<span class="s1">__extra__ = [</span>
+    <span class="s4">'MAXFD'</span><span class="s2">,</span>
+    <span class="s4">'_eintr_retry_call'</span><span class="s2">,</span>
+    <span class="s4">'STARTUPINFO'</span><span class="s2">,</span>
+    <span class="s4">'pywintypes'</span><span class="s2">,</span>
+    <span class="s4">'list2cmdline'</span><span class="s2">,</span>
+    <span class="s4">'_subprocess'</span><span class="s2">,</span>
+    <span class="s4">'_winapi'</span><span class="s2">,</span>
+    <span class="s3"># Python 2.5 does not have _subprocess, so we don't use it</span>
+    <span class="s3"># XXX We don't run on Py 2.5 anymore; can/could/should we use _subprocess?</span>
+    <span class="s3"># It's only used on mswindows</span>
+    <span class="s4">'WAIT_OBJECT_0'</span><span class="s2">,</span>
+    <span class="s4">'WaitForSingleObject'</span><span class="s2">,</span>
+    <span class="s4">'GetExitCodeProcess'</span><span class="s2">,</span>
+    <span class="s4">'GetStdHandle'</span><span class="s2">,</span>
+    <span class="s4">'CreatePipe'</span><span class="s2">,</span>
+    <span class="s4">'DuplicateHandle'</span><span class="s2">,</span>
+    <span class="s4">'GetCurrentProcess'</span><span class="s2">,</span>
+    <span class="s4">'DUPLICATE_SAME_ACCESS'</span><span class="s2">,</span>
+    <span class="s4">'GetModuleFileName'</span><span class="s2">,</span>
+    <span class="s4">'GetVersion'</span><span class="s2">,</span>
+    <span class="s4">'CreateProcess'</span><span class="s2">,</span>
+    <span class="s4">'INFINITE'</span><span class="s2">,</span>
+    <span class="s4">'TerminateProcess'</span><span class="s2">,</span>
+    <span class="s4">'STILL_ACTIVE'</span><span class="s2">,</span>
+
+    <span class="s3"># These were added for 3.5, but we make them available everywhere.</span>
+    <span class="s4">'run'</span><span class="s2">,</span>
+    <span class="s4">'CompletedProcess'</span><span class="s2">,</span>
+<span class="s1">]</span>
+
+<span class="s2">if </span><span class="s1">PY3:</span>
+    <span class="s1">__imports__ += [</span>
+        <span class="s4">'DEVNULL'</span><span class="s2">,</span>
+        <span class="s4">'getstatusoutput'</span><span class="s2">,</span>
+        <span class="s4">'getoutput'</span><span class="s2">,</span>
+        <span class="s4">'SubprocessError'</span><span class="s2">,</span>
+        <span class="s4">'TimeoutExpired'</span><span class="s2">,</span>
+    <span class="s1">]</span>
+<span class="s2">else</span><span class="s1">:</span>
+    <span class="s1">__extra__.append(</span><span class="s4">&quot;TimeoutExpired&quot;</span><span class="s1">)</span>
+
+
+<span class="s2">if </span><span class="s1">PY35:</span>
+    <span class="s1">__extra__.remove(</span><span class="s4">'run'</span><span class="s1">)</span>
+    <span class="s1">__extra__.remove(</span><span class="s4">'CompletedProcess'</span><span class="s1">)</span>
+    <span class="s1">__implements__.append(</span><span class="s4">'run'</span><span class="s1">)</span>
+    <span class="s1">__implements__.append(</span><span class="s4">'CompletedProcess'</span><span class="s1">)</span>
+
+    <span class="s3"># Removed in Python 3.5; this is the exact code that was removed:</span>
+    <span class="s3"># https://hg.python.org/cpython/rev/f98b0a5e5ef5</span>
+    <span class="s1">__extra__.remove(</span><span class="s4">'MAXFD'</span><span class="s1">)</span>
+    <span class="s2">try</span><span class="s1">:</span>
+        <span class="s1">MAXFD = os.sysconf(</span><span class="s4">&quot;SC_OPEN_MAX&quot;</span><span class="s1">)</span>
+    <span class="s2">except</span><span class="s1">:</span>
+        <span class="s1">MAXFD = </span><span class="s5">256</span>
+
+<span class="s2">if </span><span class="s1">PY36:</span>
+    <span class="s3"># This was added to __all__ for windows in 3.6</span>
+    <span class="s1">__extra__.remove(</span><span class="s4">'STARTUPINFO'</span><span class="s1">)</span>
+    <span class="s1">__imports__.append(</span><span class="s4">'STARTUPINFO'</span><span class="s1">)</span>
+
+<span class="s2">if </span><span class="s1">PY37:</span>
+    <span class="s1">__imports__.extend([</span>
+        <span class="s4">'ABOVE_NORMAL_PRIORITY_CLASS'</span><span class="s2">, </span><span class="s4">'BELOW_NORMAL_PRIORITY_CLASS'</span><span class="s2">,</span>
+        <span class="s4">'HIGH_PRIORITY_CLASS'</span><span class="s2">, </span><span class="s4">'IDLE_PRIORITY_CLASS'</span><span class="s2">,</span>
+        <span class="s4">'NORMAL_PRIORITY_CLASS'</span><span class="s2">,</span>
+        <span class="s4">'REALTIME_PRIORITY_CLASS'</span><span class="s2">,</span>
+        <span class="s4">'CREATE_NO_WINDOW'</span><span class="s2">, </span><span class="s4">'DETACHED_PROCESS'</span><span class="s2">,</span>
+        <span class="s4">'CREATE_DEFAULT_ERROR_MODE'</span><span class="s2">,</span>
+        <span class="s4">'CREATE_BREAKAWAY_FROM_JOB'</span>
+    <span class="s1">])</span>
+
+<span class="s2">if </span><span class="s1">PY38:</span>
+    <span class="s3"># Using os.posix_spawn() to start subprocesses</span>
+    <span class="s3"># bypasses our child watchers on certain operating systems,</span>
+    <span class="s3"># and with certain library versions. Possibly the right</span>
+    <span class="s3"># fix is to monkey-patch os.posix_spawn like we do os.fork?</span>
+    <span class="s3"># These have no effect, they're just here to match the stdlib.</span>
+    <span class="s3"># TODO: When available, given a monkey patch on them, I think</span>
+    <span class="s3"># we ought to be able to use them if the stdlib has identified them</span>
+    <span class="s3"># as suitable.</span>
+    <span class="s1">__implements__.extend([</span>
+        <span class="s4">'_use_posix_spawn'</span><span class="s2">,</span>
+    <span class="s1">])</span>
+
+    <span class="s2">def </span><span class="s1">_use_posix_spawn():</span>
+        <span class="s2">return False</span>
+
+    <span class="s1">_USE_POSIX_SPAWN = </span><span class="s2">False</span>
+
+    <span class="s2">if </span><span class="s1">__subprocess__._USE_POSIX_SPAWN:</span>
+        <span class="s1">__implements__.extend([</span>
+            <span class="s4">'_USE_POSIX_SPAWN'</span><span class="s2">,</span>
+        <span class="s1">])</span>
+    <span class="s2">else</span><span class="s1">:</span>
+        <span class="s1">__imports__.extend([</span>
+            <span class="s4">'_USE_POSIX_SPAWN'</span><span class="s2">,</span>
+        <span class="s1">])</span>
+
+<span class="s2">if </span><span class="s1">PY311:</span>
+    <span class="s3"># Python 3.11 added some module-level attributes to control the</span>
+    <span class="s3"># use of vfork. The docs specifically say that you should not try to read</span>
+    <span class="s3"># them, only set them, so we don't provide them.</span>
+    <span class="s3">#</span>
+    <span class="s3"># Python 3.11 also added a test,  test_surrogates_error_message, that behaves</span>
+    <span class="s3"># differently based on whether or not the pure python implementation of forking</span>
+    <span class="s3"># is in use, or the one written in C from _posixsubprocess. Obviously we don't call</span>
+    <span class="s3"># that, so we need to make us look like a pure python version; it checks that this attribute</span>
+    <span class="s3"># is none for that.</span>
+    <span class="s1">_fork_exec = </span><span class="s2">None</span>
+    <span class="s1">__implements__.extend([</span>
+        <span class="s4">'_fork_exec'</span><span class="s2">,</span>
+    <span class="s1">] </span><span class="s2">if </span><span class="s1">sys.platform != </span><span class="s4">'win32' </span><span class="s2">else </span><span class="s1">[</span>
+    <span class="s1">])</span>
+
+<span class="s1">actually_imported = copy_globals(__subprocess__</span><span class="s2">, </span><span class="s1">globals()</span><span class="s2">,</span>
+                                 <span class="s1">only_names=__imports__</span><span class="s2">,</span>
+                                 <span class="s1">ignore_missing_names=</span><span class="s2">True</span><span class="s1">)</span>
+<span class="s3"># anything we couldn't import from here we may need to find</span>
+<span class="s3"># elsewhere</span>
+<span class="s1">__extra__.extend(set(__imports__).difference(set(actually_imported)))</span>
+<span class="s1">__imports__ = actually_imported</span>
+<span class="s2">del </span><span class="s1">actually_imported</span>
+
+
+<span class="s3"># In Python 3 on Windows, a lot of the functions previously</span>
+<span class="s3"># in _subprocess moved to _winapi</span>
+<span class="s1">_subprocess = getattr(__subprocess__</span><span class="s2">, </span><span class="s4">'_subprocess'</span><span class="s2">, </span><span class="s1">_NONE)</span>
+<span class="s1">_winapi = getattr(__subprocess__</span><span class="s2">, </span><span class="s4">'_winapi'</span><span class="s2">, </span><span class="s1">_NONE)</span>
+
+<span class="s1">_attr_resolution_order = [__subprocess__</span><span class="s2">, </span><span class="s1">_subprocess</span><span class="s2">, </span><span class="s1">_winapi]</span>
+
+<span class="s2">for </span><span class="s1">name </span><span class="s2">in </span><span class="s1">list(__extra__):</span>
+    <span class="s2">if </span><span class="s1">name </span><span class="s2">in </span><span class="s1">globals():</span>
+        <span class="s2">continue</span>
+    <span class="s1">value = _NONE</span>
+    <span class="s2">for </span><span class="s1">place </span><span class="s2">in </span><span class="s1">_attr_resolution_order:</span>
+        <span class="s1">value = getattr(place</span><span class="s2">, </span><span class="s1">name</span><span class="s2">, </span><span class="s1">_NONE)</span>
+        <span class="s2">if </span><span class="s1">value </span><span class="s2">is not </span><span class="s1">_NONE:</span>
+            <span class="s2">break</span>
+
+    <span class="s2">if </span><span class="s1">value </span><span class="s2">is </span><span class="s1">_NONE:</span>
+        <span class="s1">__extra__.remove(name)</span>
+    <span class="s2">else</span><span class="s1">:</span>
+        <span class="s1">globals()[name] = value</span>
+
+<span class="s2">del </span><span class="s1">_attr_resolution_order</span>
+<span class="s1">__all__ = __implements__ + __imports__</span>
+<span class="s3"># Some other things we want to document</span>
+<span class="s2">for </span><span class="s1">_x </span><span class="s2">in </span><span class="s1">(</span><span class="s4">'run'</span><span class="s2">, </span><span class="s4">'CompletedProcess'</span><span class="s2">, </span><span class="s4">'TimeoutExpired'</span><span class="s1">):</span>
+    <span class="s2">if </span><span class="s1">_x </span><span class="s2">not in </span><span class="s1">__all__:</span>
+        <span class="s1">__all__.append(_x)</span>
+
+
+
+<span class="s1">mswindows = sys.platform == </span><span class="s4">'win32'</span>
+<span class="s2">if </span><span class="s1">mswindows:</span>
+    <span class="s2">import </span><span class="s1">msvcrt </span><span class="s3"># pylint: disable=import-error</span>
+    <span class="s2">if </span><span class="s1">PY3:</span>
+        <span class="s2">class </span><span class="s1">Handle(int):</span>
+            <span class="s1">closed = </span><span class="s2">False</span>
+
+            <span class="s2">def </span><span class="s1">Close(self):</span>
+                <span class="s2">if not </span><span class="s1">self.closed:</span>
+                    <span class="s1">self.closed = </span><span class="s2">True</span>
+                    <span class="s1">_winapi.CloseHandle(self)</span>
+
+            <span class="s2">def </span><span class="s1">Detach(self):</span>
+                <span class="s2">if not </span><span class="s1">self.closed:</span>
+                    <span class="s1">self.closed = </span><span class="s2">True</span>
+                    <span class="s2">return </span><span class="s1">int(self)</span>
+                <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s4">&quot;already closed&quot;</span><span class="s1">)</span>
+
+            <span class="s2">def </span><span class="s1">__repr__(self):</span>
+                <span class="s2">return </span><span class="s4">&quot;Handle(%d)&quot; </span><span class="s1">% int(self)</span>
+
+            <span class="s1">__del__ = Close</span>
+            <span class="s1">__str__ = __repr__</span>
+<span class="s2">else</span><span class="s1">:</span>
+    <span class="s2">import </span><span class="s1">fcntl</span>
+    <span class="s2">import </span><span class="s1">pickle</span>
+    <span class="s2">from </span><span class="s1">gevent </span><span class="s2">import </span><span class="s1">monkey</span>
+    <span class="s1">fork = monkey.get_original(</span><span class="s4">'os'</span><span class="s2">, </span><span class="s4">'fork'</span><span class="s1">)</span>
+    <span class="s2">from </span><span class="s1">gevent.os </span><span class="s2">import </span><span class="s1">fork_and_watch</span>
+
+<span class="s2">try</span><span class="s1">:</span>
+    <span class="s1">BrokenPipeError </span><span class="s3"># pylint:disable=used-before-assignment</span>
+<span class="s2">except </span><span class="s1">NameError: </span><span class="s3"># Python 2</span>
+    <span class="s2">class </span><span class="s1">BrokenPipeError(Exception):</span>
+        <span class="s0">&quot;Never raised, never caught.&quot;</span>
+
+
+<span class="s2">def </span><span class="s1">call(*popenargs</span><span class="s2">, </span><span class="s1">**kwargs):</span>
+    <span class="s0">&quot;&quot;&quot; 
+    call(args, *, stdin=None, stdout=None, stderr=None, shell=False, timeout=None) -&gt; returncode 
+ 
+    Run command with arguments. Wait for command to complete or 
+    timeout, then return the returncode attribute. 
+ 
+    The arguments are the same as for the Popen constructor.  Example:: 
+ 
+        retcode = call([&quot;ls&quot;, &quot;-l&quot;]) 
+ 
+    .. versionchanged:: 1.2a1 
+       The ``timeout`` keyword argument is now accepted on all supported 
+       versions of Python (not just Python 3) and if it expires will raise a 
+       :exc:`TimeoutExpired` exception (under Python 2 this is a subclass of :exc:`~.Timeout`). 
+    &quot;&quot;&quot;</span>
+    <span class="s1">timeout = kwargs.pop(</span><span class="s4">'timeout'</span><span class="s2">, None</span><span class="s1">)</span>
+    <span class="s2">with </span><span class="s1">Popen(*popenargs</span><span class="s2">, </span><span class="s1">**kwargs) </span><span class="s2">as </span><span class="s1">p:</span>
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s2">return </span><span class="s1">p.wait(timeout=timeout</span><span class="s2">, </span><span class="s1">_raise_exc=</span><span class="s2">True</span><span class="s1">)</span>
+        <span class="s2">except</span><span class="s1">:</span>
+            <span class="s1">p.kill()</span>
+            <span class="s1">p.wait()</span>
+            <span class="s2">raise</span>
+
+<span class="s2">def </span><span class="s1">check_call(*popenargs</span><span class="s2">, </span><span class="s1">**kwargs):</span>
+    <span class="s0">&quot;&quot;&quot; 
+    check_call(args, *, stdin=None, stdout=None, stderr=None, shell=False, timeout=None) -&gt; 0 
+ 
+    Run command with arguments.  Wait for command to complete.  If 
+    the exit code was zero then return, otherwise raise 
+    :exc:`CalledProcessError`.  The ``CalledProcessError`` object will have the 
+    return code in the returncode attribute. 
+ 
+    The arguments are the same as for the Popen constructor.  Example:: 
+ 
+        retcode = check_call([&quot;ls&quot;, &quot;-l&quot;]) 
+    &quot;&quot;&quot;</span>
+    <span class="s1">retcode = call(*popenargs</span><span class="s2">, </span><span class="s1">**kwargs)</span>
+    <span class="s2">if </span><span class="s1">retcode:</span>
+        <span class="s1">cmd = kwargs.get(</span><span class="s4">&quot;args&quot;</span><span class="s1">)</span>
+        <span class="s2">if </span><span class="s1">cmd </span><span class="s2">is None</span><span class="s1">:</span>
+            <span class="s1">cmd = popenargs[</span><span class="s5">0</span><span class="s1">]</span>
+        <span class="s2">raise </span><span class="s1">CalledProcessError(retcode</span><span class="s2">, </span><span class="s1">cmd) </span><span class="s3"># pylint:disable=undefined-variable</span>
+    <span class="s2">return </span><span class="s5">0</span>
+
+<span class="s2">def </span><span class="s1">check_output(*popenargs</span><span class="s2">, </span><span class="s1">**kwargs):</span>
+    <span class="s0">r&quot;&quot;&quot; 
+    check_output(args, *, input=None, stdin=None, stderr=None, shell=False, universal_newlines=False, timeout=None) -&gt; output 
+ 
+    Run command with arguments and return its output. 
+ 
+    If the exit code was non-zero it raises a :exc:`CalledProcessError`.  The 
+    ``CalledProcessError`` object will have the return code in the returncode 
+    attribute and output in the output attribute. 
+ 
+ 
+    The arguments are the same as for the Popen constructor.  Example:: 
+ 
+        &gt;&gt;&gt; check_output([&quot;ls&quot;, &quot;-1&quot;, &quot;/dev/null&quot;]) 
+        '/dev/null\n' 
+ 
+    The ``stdout`` argument is not allowed as it is used internally. 
+ 
+    To capture standard error in the result, use ``stderr=STDOUT``:: 
+ 
+        &gt;&gt;&gt; print(check_output([&quot;/bin/sh&quot;, &quot;-c&quot;, 
+        ...               &quot;ls -l non_existent_file ; exit 0&quot;], 
+        ...              stderr=STDOUT).decode('ascii').strip()) 
+        ls: non_existent_file: No such file or directory 
+ 
+    There is an additional optional argument, &quot;input&quot;, allowing you to 
+    pass a string to the subprocess's stdin.  If you use this argument 
+    you may not also use the Popen constructor's &quot;stdin&quot; argument, as 
+    it too will be used internally.  Example:: 
+ 
+        &gt;&gt;&gt; check_output([&quot;sed&quot;, &quot;-e&quot;, &quot;s/foo/bar/&quot;], 
+        ...              input=b&quot;when in the course of fooman events\n&quot;) 
+        'when in the course of barman events\n' 
+ 
+    If ``universal_newlines=True`` is passed, the return value will be a 
+    string rather than bytes. 
+ 
+    .. versionchanged:: 1.2a1 
+       The ``timeout`` keyword argument is now accepted on all supported 
+       versions of Python (not just Python 3) and if it expires will raise a 
+       :exc:`TimeoutExpired` exception (under Python 2 this is a subclass of :exc:`~.Timeout`). 
+    .. versionchanged:: 1.2a1 
+       The ``input`` keyword argument is now accepted on all supported 
+       versions of Python, not just Python 3 
+    .. versionchanged:: 22.08.0 
+       Passing the ``check`` keyword argument is forbidden, just as in Python 3.11. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">timeout = kwargs.pop(</span><span class="s4">'timeout'</span><span class="s2">, None</span><span class="s1">)</span>
+    <span class="s2">if </span><span class="s4">'stdout' </span><span class="s2">in </span><span class="s1">kwargs:</span>
+        <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s4">'stdout argument not allowed, it will be overridden.'</span><span class="s1">)</span>
+    <span class="s2">if </span><span class="s4">'check' </span><span class="s2">in </span><span class="s1">kwargs:</span>
+        <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s4">'check argument not allowed, it will be overridden.'</span><span class="s1">)</span>
+    <span class="s2">if </span><span class="s4">'input' </span><span class="s2">in </span><span class="s1">kwargs:</span>
+        <span class="s2">if </span><span class="s4">'stdin' </span><span class="s2">in </span><span class="s1">kwargs:</span>
+            <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s4">'stdin and input arguments may not both be used.'</span><span class="s1">)</span>
+        <span class="s1">inputdata = kwargs[</span><span class="s4">'input'</span><span class="s1">]</span>
+        <span class="s2">del </span><span class="s1">kwargs[</span><span class="s4">'input'</span><span class="s1">]</span>
+        <span class="s1">kwargs[</span><span class="s4">'stdin'</span><span class="s1">] = PIPE</span>
+    <span class="s2">else</span><span class="s1">:</span>
+        <span class="s1">inputdata = </span><span class="s2">None</span>
+    <span class="s2">with </span><span class="s1">Popen(*popenargs</span><span class="s2">, </span><span class="s1">stdout=PIPE</span><span class="s2">, </span><span class="s1">**kwargs) </span><span class="s2">as </span><span class="s1">process:</span>
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s1">output</span><span class="s2">, </span><span class="s1">unused_err = process.communicate(inputdata</span><span class="s2">, </span><span class="s1">timeout=timeout)</span>
+        <span class="s2">except </span><span class="s1">TimeoutExpired:</span>
+            <span class="s1">process.kill()</span>
+            <span class="s1">output</span><span class="s2">, </span><span class="s1">unused_err = process.communicate()</span>
+            <span class="s2">raise </span><span class="s1">TimeoutExpired(process.args</span><span class="s2">, </span><span class="s1">timeout</span><span class="s2">, </span><span class="s1">output=output)</span>
+        <span class="s2">except</span><span class="s1">:</span>
+            <span class="s1">process.kill()</span>
+            <span class="s1">process.wait()</span>
+            <span class="s2">raise</span>
+        <span class="s1">retcode = process.poll()</span>
+        <span class="s2">if </span><span class="s1">retcode:</span>
+            <span class="s3"># pylint:disable=undefined-variable</span>
+            <span class="s2">raise </span><span class="s1">CalledProcessError(retcode</span><span class="s2">, </span><span class="s1">process.args</span><span class="s2">, </span><span class="s1">output=output)</span>
+    <span class="s2">return </span><span class="s1">output</span>
+
+<span class="s1">_PLATFORM_DEFAULT_CLOSE_FDS = object()</span>
+
+<span class="s2">if </span><span class="s4">'TimeoutExpired' </span><span class="s2">not in </span><span class="s1">globals():</span>
+    <span class="s3"># Python 2</span>
+
+    <span class="s3"># Make TimeoutExpired inherit from _Timeout so it can be caught</span>
+    <span class="s3"># the way we used to throw things (except Timeout), but make sure it doesn't</span>
+    <span class="s3"># init a timer. Note that we can't have a fake 'SubprocessError' that inherits</span>
+    <span class="s3"># from exception, because we need TimeoutExpired to just be a BaseException for</span>
+    <span class="s3"># bwc.</span>
+    <span class="s2">from </span><span class="s1">gevent.timeout </span><span class="s2">import </span><span class="s1">Timeout </span><span class="s2">as </span><span class="s1">_Timeout</span>
+
+    <span class="s2">class </span><span class="s1">TimeoutExpired(_Timeout):</span>
+        <span class="s0">&quot;&quot;&quot; 
+        This exception is raised when the timeout expires while waiting for 
+        a child process in `communicate`. 
+ 
+        Under Python 2, this is a gevent extension with the same name as the 
+        Python 3 class for source-code forward compatibility. However, it extends 
+        :class:`gevent.timeout.Timeout` for backwards compatibility (because 
+        we used to just raise a plain ``Timeout``); note that ``Timeout`` is a 
+        ``BaseException``, *not* an ``Exception``. 
+ 
+        .. versionadded:: 1.2a1 
+        &quot;&quot;&quot;</span>
+
+        <span class="s2">def </span><span class="s1">__init__(self</span><span class="s2">, </span><span class="s1">cmd</span><span class="s2">, </span><span class="s1">timeout</span><span class="s2">, </span><span class="s1">output=</span><span class="s2">None</span><span class="s1">):</span>
+            <span class="s1">_Timeout.__init__(self</span><span class="s2">, None</span><span class="s1">)</span>
+            <span class="s1">self.cmd = cmd</span>
+            <span class="s1">self.seconds = timeout</span>
+            <span class="s1">self.output = output</span>
+
+        <span class="s1">@property</span>
+        <span class="s2">def </span><span class="s1">timeout(self):</span>
+            <span class="s2">return </span><span class="s1">self.seconds</span>
+
+        <span class="s2">def </span><span class="s1">__str__(self):</span>
+            <span class="s2">return </span><span class="s1">(</span><span class="s4">&quot;Command '%s' timed out after %s seconds&quot; </span><span class="s1">%</span>
+                    <span class="s1">(self.cmd</span><span class="s2">, </span><span class="s1">self.timeout))</span>
+
+
+<span class="s2">if </span><span class="s1">hasattr(os</span><span class="s2">, </span><span class="s4">'set_inheritable'</span><span class="s1">):</span>
+    <span class="s1">_set_inheritable = os.set_inheritable</span>
+<span class="s2">else</span><span class="s1">:</span>
+    <span class="s1">_set_inheritable = </span><span class="s2">lambda </span><span class="s1">i</span><span class="s2">, </span><span class="s1">v: </span><span class="s2">True</span>
+
+
+<span class="s2">def </span><span class="s1">FileObject(*args</span><span class="s2">, </span><span class="s1">**kwargs):</span>
+    <span class="s3"># Defer importing FileObject until we need it</span>
+    <span class="s3"># to allow it to be configured more easily.</span>
+    <span class="s2">from </span><span class="s1">gevent.fileobject </span><span class="s2">import </span><span class="s1">FileObject </span><span class="s2">as </span><span class="s1">_FileObject</span>
+    <span class="s2">if not </span><span class="s1">PY3:</span>
+        <span class="s3"># Make write behave like the old Python 2 file</span>
+        <span class="s3"># write and loop to consume output, even when not</span>
+        <span class="s3"># buffered.</span>
+        <span class="s1">__FileObject = _FileObject</span>
+        <span class="s2">def </span><span class="s1">_FileObject(*args</span><span class="s2">, </span><span class="s1">**kwargs):</span>
+            <span class="s1">kwargs[</span><span class="s4">'atomic_write'</span><span class="s1">] = </span><span class="s2">True</span>
+            <span class="s2">return </span><span class="s1">__FileObject(*args</span><span class="s2">, </span><span class="s1">**kwargs)</span>
+    <span class="s1">globals()[</span><span class="s4">'FileObject'</span><span class="s1">] = _FileObject</span>
+    <span class="s2">return </span><span class="s1">_FileObject(*args)</span>
+
+
+<span class="s2">class </span><span class="s1">_CommunicatingGreenlets(object):</span>
+    <span class="s3"># At most, exactly one of these objects may be created</span>
+    <span class="s3"># for a given Popen object. This ensures that only one background</span>
+    <span class="s3"># greenlet at a time will be reading from the file object. This matters because</span>
+    <span class="s3"># if a timeout exception is raised, the user may call back into communicate() to</span>
+    <span class="s3"># get the output (usually after killing the process; see run()). We must not</span>
+    <span class="s3"># lose output in that case (Python 3 specifically documents that raising a timeout</span>
+    <span class="s3"># doesn't lose output). Also, attempting to read from a pipe while it's already</span>
+    <span class="s3"># being read from results in `RuntimeError: reentrant call in io.BufferedReader`;</span>
+    <span class="s3"># the same thing happens if you attempt to close() it while that's in progress.</span>
+    <span class="s1">__slots__ = (</span>
+        <span class="s4">'stdin'</span><span class="s2">,</span>
+        <span class="s4">'stdout'</span><span class="s2">,</span>
+        <span class="s4">'stderr'</span><span class="s2">,</span>
+        <span class="s4">'_all_greenlets'</span><span class="s2">,</span>
+    <span class="s1">)</span>
+
+    <span class="s2">def </span><span class="s1">__init__(self</span><span class="s2">, </span><span class="s1">popen</span><span class="s2">, </span><span class="s1">input_data):</span>
+        <span class="s1">self.stdin = self.stdout = self.stderr = </span><span class="s2">None</span>
+        <span class="s2">if </span><span class="s1">popen.stdin: </span><span class="s3"># Even if no data, we need to close</span>
+            <span class="s1">self.stdin = spawn(self._write_and_close</span><span class="s2">, </span><span class="s1">popen.stdin</span><span class="s2">, </span><span class="s1">input_data)</span>
+
+        <span class="s3"># If the timeout parameter is used, and the caller calls back after</span>
+        <span class="s3"># getting a TimeoutExpired exception, we can wind up with multiple</span>
+        <span class="s3"># greenlets trying to run and read from and close stdout/stderr.</span>
+        <span class="s3"># That's bad because it can lead to 'RuntimeError: reentrant call in io.BufferedReader'.</span>
+        <span class="s3"># We can't just kill the previous greenlets when a timeout happens,</span>
+        <span class="s3"># though, because we risk losing the output collected by that greenlet</span>
+        <span class="s3"># (and Python 3, where timeout is an official parameter, explicitly says</span>
+        <span class="s3"># that no output should be lost in the event of a timeout.) Instead, we're</span>
+        <span class="s3"># watching for the exception and ignoring it. It's not elegant,</span>
+        <span class="s3"># but it works</span>
+        <span class="s2">if </span><span class="s1">popen.stdout:</span>
+            <span class="s1">self.stdout = spawn(self._read_and_close</span><span class="s2">, </span><span class="s1">popen.stdout)</span>
+
+        <span class="s2">if </span><span class="s1">popen.stderr:</span>
+            <span class="s1">self.stderr = spawn(self._read_and_close</span><span class="s2">, </span><span class="s1">popen.stderr)</span>
+
+        <span class="s1">all_greenlets = []</span>
+        <span class="s2">for </span><span class="s1">g </span><span class="s2">in </span><span class="s1">self.stdin</span><span class="s2">, </span><span class="s1">self.stdout</span><span class="s2">, </span><span class="s1">self.stderr:</span>
+            <span class="s2">if </span><span class="s1">g </span><span class="s2">is not None</span><span class="s1">:</span>
+                <span class="s1">all_greenlets.append(g)</span>
+        <span class="s1">self._all_greenlets = tuple(all_greenlets)</span>
+
+    <span class="s2">def </span><span class="s1">__iter__(self):</span>
+        <span class="s2">return </span><span class="s1">iter(self._all_greenlets)</span>
+
+    <span class="s2">def </span><span class="s1">__bool__(self):</span>
+        <span class="s2">return </span><span class="s1">bool(self._all_greenlets)</span>
+
+    <span class="s1">__nonzero__ = __bool__</span>
+
+    <span class="s2">def </span><span class="s1">__len__(self):</span>
+        <span class="s2">return </span><span class="s1">len(self._all_greenlets)</span>
+
+    <span class="s1">@staticmethod</span>
+    <span class="s2">def </span><span class="s1">_write_and_close(fobj</span><span class="s2">, </span><span class="s1">data):</span>
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s2">if </span><span class="s1">data:</span>
+                <span class="s1">fobj.write(data)</span>
+                <span class="s2">if </span><span class="s1">hasattr(fobj</span><span class="s2">, </span><span class="s4">'flush'</span><span class="s1">):</span>
+                    <span class="s3"># 3.6 started expecting flush to be called.</span>
+                    <span class="s1">fobj.flush()</span>
+        <span class="s2">except </span><span class="s1">(OSError</span><span class="s2">, </span><span class="s1">IOError</span><span class="s2">, </span><span class="s1">BrokenPipeError) </span><span class="s2">as </span><span class="s1">ex:</span>
+            <span class="s3"># Test cases from the stdlib can raise BrokenPipeError</span>
+            <span class="s3"># without setting an errno value. This matters because</span>
+            <span class="s3"># Python 2 doesn't have a BrokenPipeError.</span>
+            <span class="s2">if </span><span class="s1">isinstance(ex</span><span class="s2">, </span><span class="s1">BrokenPipeError) </span><span class="s2">and </span><span class="s1">ex.errno </span><span class="s2">is None</span><span class="s1">:</span>
+                <span class="s1">ex.errno = errno.EPIPE</span>
+            <span class="s2">if </span><span class="s1">ex.errno </span><span class="s2">not in </span><span class="s1">(errno.EPIPE</span><span class="s2">, </span><span class="s1">errno.EINVAL):</span>
+                <span class="s2">raise</span>
+        <span class="s2">finally</span><span class="s1">:</span>
+            <span class="s2">try</span><span class="s1">:</span>
+                <span class="s1">fobj.close()</span>
+            <span class="s2">except </span><span class="s1">EnvironmentError:</span>
+                <span class="s2">pass</span>
+
+    <span class="s1">@staticmethod</span>
+    <span class="s2">def </span><span class="s1">_read_and_close(fobj):</span>
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s2">return </span><span class="s1">fobj.read()</span>
+        <span class="s2">finally</span><span class="s1">:</span>
+            <span class="s2">try</span><span class="s1">:</span>
+                <span class="s1">fobj.close()</span>
+            <span class="s2">except </span><span class="s1">EnvironmentError:</span>
+                <span class="s2">pass</span>
+
+
+<span class="s2">class </span><span class="s1">Popen(object):</span>
+    <span class="s0">&quot;&quot;&quot; 
+    The underlying process creation and management in this module is 
+    handled by the Popen class. It offers a lot of flexibility so that 
+    developers are able to handle the less common cases not covered by 
+    the convenience functions. 
+ 
+    .. seealso:: :class:`subprocess.Popen` 
+       This class should have the same interface as the standard library class. 
+ 
+    .. caution:: 
+ 
+       The default values of some arguments, notably ``buffering``, differ 
+       between Python 2 and Python 3. For the most consistent behaviour across 
+       versions, it's best to explicitly pass the desired values. 
+ 
+    .. caution:: 
+ 
+       On Python 2, the ``read`` method of the ``stdout`` and ``stderr`` attributes 
+       will not be buffered unless buffering is explicitly requested (e.g., `bufsize=-1`). 
+       This is different than the ``read`` method of the standard library attributes, 
+       which will buffer internally even if no buffering has been requested. This 
+       matches the Python 3 behaviour. For portability, please explicitly request 
+       buffering if you want ``read(n)`` to return all ``n`` bytes, making more than 
+       one system call if needed. See `issue 1701 &lt;https://github.com/gevent/gevent/issues/1701&gt;`_ 
+       for more context. 
+ 
+    .. versionchanged:: 1.2a1 
+       Instances can now be used as context managers under Python 2.7. Previously 
+       this was restricted to Python 3. 
+ 
+    .. versionchanged:: 1.2a1 
+       Instances now save the ``args`` attribute under Python 2.7. Previously this was 
+       restricted to Python 3. 
+ 
+    .. versionchanged:: 1.2b1 
+        Add the ``encoding`` and ``errors`` parameters for Python 3. 
+ 
+    .. versionchanged:: 1.3a1 
+       Accept &quot;path-like&quot; objects for the *cwd* parameter on all platforms. 
+       This was added to Python 3.6. Previously with gevent, it only worked 
+       on POSIX platforms on 3.6. 
+ 
+    .. versionchanged:: 1.3a1 
+       Add the ``text`` argument as a synonym for ``universal_newlines``, 
+       as added on Python 3.7. 
+ 
+    .. versionchanged:: 1.3a2 
+       Allow the same keyword arguments under Python 2 as Python 3: 
+       ``pass_fds``, ``start_new_session``, ``restore_signals``, ``encoding`` 
+       and ``errors``. Under Python 2, ``encoding`` and ``errors`` are ignored 
+       because native handling of universal newlines is used. 
+ 
+    .. versionchanged:: 1.3a2 
+       Under Python 2, ``restore_signals`` defaults to ``False``. Previously it 
+       defaulted to ``True``, the same as it did in Python 3. 
+ 
+    .. versionchanged:: 20.6.0 
+       Add the *group*, *extra_groups*, *user*, and *umask* arguments. These 
+       were added to Python 3.9, but are available in any gevent version, provided 
+       the underlying platform support is present. 
+ 
+    .. versionchanged:: 20.12.0 
+       On Python 2 only, if unbuffered binary communication is requested, 
+       the ``stdin`` attribute of this object will have a ``write`` method that 
+       actually performs internal buffering and looping, similar to the standard library. 
+       It guarantees to write all the data given to it in a single call (but internally 
+       it may make many system calls and/or trips around the event loop to accomplish this). 
+       See :issue:`1711`. 
+ 
+    .. versionchanged:: 21.12.0 
+       Added the ``pipesize`` argument for compatibility with Python 3.10. 
+       This is ignored on all platforms. 
+ 
+    .. versionchanged:: 22.08.0 
+       Added the ``process_group`` and ``check`` arguments for compatibility with 
+       Python 3.11. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s2">if </span><span class="s1">GenericAlias </span><span class="s2">is not None</span><span class="s1">:</span>
+        <span class="s3"># 3.9, annoying typing is creeping everywhere.</span>
+        <span class="s1">__class_getitem__ = classmethod(GenericAlias)</span>
+
+    <span class="s3"># The value returned from communicate() when there was nothing to read.</span>
+    <span class="s3"># Changes if we're in text mode or universal newlines mode.</span>
+    <span class="s1">_communicate_empty_value = </span><span class="s6">b''</span>
+
+    <span class="s2">def </span><span class="s1">__init__(self</span><span class="s2">, </span><span class="s1">args</span><span class="s2">,</span>
+                 <span class="s1">bufsize=-</span><span class="s5">1 </span><span class="s2">if </span><span class="s1">PY3 </span><span class="s2">else </span><span class="s5">0</span><span class="s2">,</span>
+                 <span class="s1">executable=</span><span class="s2">None,</span>
+                 <span class="s1">stdin=</span><span class="s2">None, </span><span class="s1">stdout=</span><span class="s2">None, </span><span class="s1">stderr=</span><span class="s2">None,</span>
+                 <span class="s1">preexec_fn=</span><span class="s2">None, </span><span class="s1">close_fds=_PLATFORM_DEFAULT_CLOSE_FDS</span><span class="s2">, </span><span class="s1">shell=</span><span class="s2">False,</span>
+                 <span class="s1">cwd=</span><span class="s2">None, </span><span class="s1">env=</span><span class="s2">None, </span><span class="s1">universal_newlines=</span><span class="s2">None,</span>
+                 <span class="s1">startupinfo=</span><span class="s2">None, </span><span class="s1">creationflags=</span><span class="s5">0</span><span class="s2">,</span>
+                 <span class="s1">restore_signals=PY3</span><span class="s2">, </span><span class="s1">start_new_session=</span><span class="s2">False,</span>
+                 <span class="s1">pass_fds=()</span><span class="s2">,</span>
+                 <span class="s3"># Added in 3.6. These are kept as ivars</span>
+                 <span class="s1">encoding=</span><span class="s2">None, </span><span class="s1">errors=</span><span class="s2">None,</span>
+                 <span class="s3"># Added in 3.7. Not an ivar directly.</span>
+                 <span class="s1">text=</span><span class="s2">None,</span>
+                 <span class="s3"># Added in 3.9</span>
+                 <span class="s1">group=</span><span class="s2">None, </span><span class="s1">extra_groups=</span><span class="s2">None, </span><span class="s1">user=</span><span class="s2">None,</span>
+                 <span class="s1">umask=-</span><span class="s5">1</span><span class="s2">,</span>
+                 <span class="s3"># Added in 3.10, but ignored.</span>
+                 <span class="s1">pipesize=-</span><span class="s5">1</span><span class="s2">,</span>
+                 <span class="s3"># Added in 3.11</span>
+                 <span class="s1">process_group=</span><span class="s2">None,</span>
+                 <span class="s3"># gevent additions</span>
+                 <span class="s1">threadpool=</span><span class="s2">None</span><span class="s1">):</span>
+
+        <span class="s1">self.encoding = encoding</span>
+        <span class="s1">self.errors = errors</span>
+
+        <span class="s1">hub = get_hub()</span>
+
+        <span class="s2">if </span><span class="s1">bufsize </span><span class="s2">is None</span><span class="s1">:</span>
+            <span class="s3"># Python 2 doesn't allow None at all, but Python 3 treats</span>
+            <span class="s3"># it the same as the default. We do as well.</span>
+            <span class="s1">bufsize = -</span><span class="s5">1 </span><span class="s2">if </span><span class="s1">PY3 </span><span class="s2">else </span><span class="s5">0</span>
+        <span class="s2">if not </span><span class="s1">isinstance(bufsize</span><span class="s2">, </span><span class="s1">integer_types):</span>
+            <span class="s2">raise </span><span class="s1">TypeError(</span><span class="s4">&quot;bufsize must be an integer&quot;</span><span class="s1">)</span>
+
+        <span class="s2">if </span><span class="s1">mswindows:</span>
+            <span class="s2">if </span><span class="s1">preexec_fn </span><span class="s2">is not None</span><span class="s1">:</span>
+                <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s4">&quot;preexec_fn is not supported on Windows &quot;</span>
+                                 <span class="s4">&quot;platforms&quot;</span><span class="s1">)</span>
+            <span class="s2">if </span><span class="s1">PY37:</span>
+                <span class="s2">if </span><span class="s1">close_fds </span><span class="s2">is </span><span class="s1">_PLATFORM_DEFAULT_CLOSE_FDS:</span>
+                    <span class="s1">close_fds = </span><span class="s2">True</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s1">any_stdio_set = (stdin </span><span class="s2">is not None or </span><span class="s1">stdout </span><span class="s2">is not None or</span>
+                                 <span class="s1">stderr </span><span class="s2">is not None</span><span class="s1">)</span>
+                <span class="s2">if </span><span class="s1">close_fds </span><span class="s2">is </span><span class="s1">_PLATFORM_DEFAULT_CLOSE_FDS:</span>
+                    <span class="s2">if </span><span class="s1">any_stdio_set:</span>
+                        <span class="s1">close_fds = </span><span class="s2">False</span>
+                    <span class="s2">else</span><span class="s1">:</span>
+                        <span class="s1">close_fds = </span><span class="s2">True</span>
+                <span class="s2">elif </span><span class="s1">close_fds </span><span class="s2">and </span><span class="s1">any_stdio_set:</span>
+                    <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s4">&quot;close_fds is not supported on Windows &quot;</span>
+                                     <span class="s4">&quot;platforms if you redirect stdin/stdout/stderr&quot;</span><span class="s1">)</span>
+            <span class="s2">if </span><span class="s1">threadpool </span><span class="s2">is None</span><span class="s1">:</span>
+                <span class="s1">threadpool = hub.threadpool</span>
+            <span class="s1">self.threadpool = threadpool</span>
+            <span class="s1">self._waiting = </span><span class="s2">False</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s3"># POSIX</span>
+            <span class="s2">if </span><span class="s1">close_fds </span><span class="s2">is </span><span class="s1">_PLATFORM_DEFAULT_CLOSE_FDS:</span>
+                <span class="s3"># close_fds has different defaults on Py3/Py2</span>
+                <span class="s2">if </span><span class="s1">PY3: </span><span class="s3"># pylint: disable=simplifiable-if-statement</span>
+                    <span class="s1">close_fds = </span><span class="s2">True</span>
+                <span class="s2">else</span><span class="s1">:</span>
+                    <span class="s1">close_fds = </span><span class="s2">False</span>
+
+            <span class="s2">if </span><span class="s1">pass_fds </span><span class="s2">and not </span><span class="s1">close_fds:</span>
+                <span class="s2">import </span><span class="s1">warnings</span>
+                <span class="s1">warnings.warn(</span><span class="s4">&quot;pass_fds overriding close_fds.&quot;</span><span class="s2">, </span><span class="s1">RuntimeWarning)</span>
+                <span class="s1">close_fds = </span><span class="s2">True</span>
+            <span class="s2">if </span><span class="s1">startupinfo </span><span class="s2">is not None</span><span class="s1">:</span>
+                <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s4">&quot;startupinfo is only supported on Windows &quot;</span>
+                                 <span class="s4">&quot;platforms&quot;</span><span class="s1">)</span>
+            <span class="s2">if </span><span class="s1">creationflags != </span><span class="s5">0</span><span class="s1">:</span>
+                <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s4">&quot;creationflags is only supported on Windows &quot;</span>
+                                 <span class="s4">&quot;platforms&quot;</span><span class="s1">)</span>
+            <span class="s2">assert </span><span class="s1">threadpool </span><span class="s2">is None</span>
+            <span class="s1">self._loop = hub.loop</span>
+
+        <span class="s3"># Validate the combinations of text and universal_newlines</span>
+        <span class="s2">if </span><span class="s1">(text </span><span class="s2">is not None and </span><span class="s1">universal_newlines </span><span class="s2">is not None</span>
+                <span class="s2">and </span><span class="s1">bool(universal_newlines) != bool(text)):</span>
+            <span class="s3"># pylint:disable=undefined-variable</span>
+            <span class="s2">raise </span><span class="s1">SubprocessError(</span><span class="s4">'Cannot disambiguate when both text '</span>
+                                  <span class="s4">'and universal_newlines are supplied but '</span>
+                                  <span class="s4">'different. Pass one or the other.'</span><span class="s1">)</span>
+
+        <span class="s1">self.args = args </span><span class="s3"># Previously this was Py3 only.</span>
+        <span class="s1">self.stdin = </span><span class="s2">None</span>
+        <span class="s1">self.stdout = </span><span class="s2">None</span>
+        <span class="s1">self.stderr = </span><span class="s2">None</span>
+        <span class="s1">self.pid = </span><span class="s2">None</span>
+        <span class="s1">self.returncode = </span><span class="s2">None</span>
+        <span class="s1">self.universal_newlines = universal_newlines</span>
+        <span class="s1">self.result = AsyncResult()</span>
+
+        <span class="s3"># Input and output objects. The general principle is like</span>
+        <span class="s3"># this:</span>
+        <span class="s3">#</span>
+        <span class="s3"># Parent                   Child</span>
+        <span class="s3"># ------                   -----</span>
+        <span class="s3"># p2cwrite   ---stdin---&gt;  p2cread</span>
+        <span class="s3"># c2pread    &lt;--stdout---  c2pwrite</span>
+        <span class="s3"># errread    &lt;--stderr---  errwrite</span>
+        <span class="s3">#</span>
+        <span class="s3"># On POSIX, the child objects are file descriptors.  On</span>
+        <span class="s3"># Windows, these are Windows file handles.  The parent objects</span>
+        <span class="s3"># are file descriptors on both platforms.  The parent objects</span>
+        <span class="s3"># are -1 when not using PIPEs. The child objects are -1</span>
+        <span class="s3"># when not redirecting.</span>
+
+        <span class="s1">(p2cread</span><span class="s2">, </span><span class="s1">p2cwrite</span><span class="s2">,</span>
+         <span class="s1">c2pread</span><span class="s2">, </span><span class="s1">c2pwrite</span><span class="s2">,</span>
+         <span class="s1">errread</span><span class="s2">, </span><span class="s1">errwrite) = self._get_handles(stdin</span><span class="s2">, </span><span class="s1">stdout</span><span class="s2">, </span><span class="s1">stderr)</span>
+
+        <span class="s3"># We wrap OS handles *before* launching the child, otherwise a</span>
+        <span class="s3"># quickly terminating child could make our fds unwrappable</span>
+        <span class="s3"># (see #8458).</span>
+        <span class="s2">if </span><span class="s1">mswindows:</span>
+            <span class="s2">if </span><span class="s1">p2cwrite != -</span><span class="s5">1</span><span class="s1">:</span>
+                <span class="s1">p2cwrite = msvcrt.open_osfhandle(p2cwrite.Detach()</span><span class="s2">, </span><span class="s5">0</span><span class="s1">)</span>
+            <span class="s2">if </span><span class="s1">c2pread != -</span><span class="s5">1</span><span class="s1">:</span>
+                <span class="s1">c2pread = msvcrt.open_osfhandle(c2pread.Detach()</span><span class="s2">, </span><span class="s5">0</span><span class="s1">)</span>
+            <span class="s2">if </span><span class="s1">errread != -</span><span class="s5">1</span><span class="s1">:</span>
+                <span class="s1">errread = msvcrt.open_osfhandle(errread.Detach()</span><span class="s2">, </span><span class="s5">0</span><span class="s1">)</span>
+
+        <span class="s1">text_mode = PY3 </span><span class="s2">and </span><span class="s1">(self.encoding </span><span class="s2">or </span><span class="s1">self.errors </span><span class="s2">or </span><span class="s1">universal_newlines </span><span class="s2">or </span><span class="s1">text)</span>
+        <span class="s2">if </span><span class="s1">text_mode </span><span class="s2">or </span><span class="s1">universal_newlines:</span>
+            <span class="s3"># Always a native str in universal_newlines mode, even when that</span>
+            <span class="s3"># str type is bytes. Additionally, text_mode is only true under</span>
+            <span class="s3"># Python 3, so it's actually a unicode str</span>
+            <span class="s1">self._communicate_empty_value = </span><span class="s4">''</span>
+
+        <span class="s1">uid</span><span class="s2">, </span><span class="s1">gid</span><span class="s2">, </span><span class="s1">gids = self.__handle_uids(user</span><span class="s2">, </span><span class="s1">group</span><span class="s2">, </span><span class="s1">extra_groups)</span>
+
+        <span class="s2">if </span><span class="s1">p2cwrite != -</span><span class="s5">1</span><span class="s1">:</span>
+            <span class="s2">if </span><span class="s1">PY3 </span><span class="s2">and </span><span class="s1">text_mode:</span>
+                <span class="s3"># Under Python 3, if we left on the 'b' we'd get different results</span>
+                <span class="s3"># depending on whether we used FileObjectPosix or FileObjectThread</span>
+                <span class="s1">self.stdin = FileObject(p2cwrite</span><span class="s2">, </span><span class="s4">'w'</span><span class="s2">, </span><span class="s1">bufsize</span><span class="s2">,</span>
+                                        <span class="s1">encoding=self.encoding</span><span class="s2">, </span><span class="s1">errors=self.errors)</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s1">self.stdin = FileObject(p2cwrite</span><span class="s2">, </span><span class="s4">'wb'</span><span class="s2">, </span><span class="s1">bufsize)</span>
+
+        <span class="s2">if </span><span class="s1">c2pread != -</span><span class="s5">1</span><span class="s1">:</span>
+            <span class="s2">if </span><span class="s1">universal_newlines </span><span class="s2">or </span><span class="s1">text_mode:</span>
+                <span class="s2">if </span><span class="s1">PY3:</span>
+                    <span class="s1">self.stdout = FileObject(c2pread</span><span class="s2">, </span><span class="s4">'r'</span><span class="s2">, </span><span class="s1">bufsize</span><span class="s2">,</span>
+                                             <span class="s1">encoding=self.encoding</span><span class="s2">, </span><span class="s1">errors=self.errors)</span>
+                    <span class="s3"># NOTE: Universal Newlines are broken on Windows/Py3, at least</span>
+                    <span class="s3"># in some cases. This is true in the stdlib subprocess module</span>
+                    <span class="s3"># as well; the following line would fix the test cases in</span>
+                    <span class="s3"># test__subprocess.py that depend on python_universal_newlines,</span>
+                    <span class="s3"># but would be inconsistent with the stdlib:</span>
+                <span class="s2">else</span><span class="s1">:</span>
+                    <span class="s1">self.stdout = FileObject(c2pread</span><span class="s2">, </span><span class="s4">'rU'</span><span class="s2">, </span><span class="s1">bufsize)</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s1">self.stdout = FileObject(c2pread</span><span class="s2">, </span><span class="s4">'rb'</span><span class="s2">, </span><span class="s1">bufsize)</span>
+        <span class="s2">if </span><span class="s1">errread != -</span><span class="s5">1</span><span class="s1">:</span>
+            <span class="s2">if </span><span class="s1">universal_newlines </span><span class="s2">or </span><span class="s1">text_mode:</span>
+                <span class="s2">if </span><span class="s1">PY3:</span>
+                    <span class="s1">self.stderr = FileObject(errread</span><span class="s2">, </span><span class="s4">'r'</span><span class="s2">, </span><span class="s1">bufsize</span><span class="s2">,</span>
+                                             <span class="s1">encoding=encoding</span><span class="s2">, </span><span class="s1">errors=errors)</span>
+                <span class="s2">else</span><span class="s1">:</span>
+                    <span class="s1">self.stderr = FileObject(errread</span><span class="s2">, </span><span class="s4">'rU'</span><span class="s2">, </span><span class="s1">bufsize)</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s1">self.stderr = FileObject(errread</span><span class="s2">, </span><span class="s4">'rb'</span><span class="s2">, </span><span class="s1">bufsize)</span>
+
+        <span class="s1">self._closed_child_pipe_fds = </span><span class="s2">False</span>
+        <span class="s3"># Convert here for the sake of all platforms. os.chdir accepts</span>
+        <span class="s3"># path-like objects natively under 3.6, but CreateProcess</span>
+        <span class="s3"># doesn't.</span>
+        <span class="s1">cwd = fsdecode(cwd) </span><span class="s2">if </span><span class="s1">cwd </span><span class="s2">is not None else None</span>
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s1">self._execute_child(args</span><span class="s2">, </span><span class="s1">executable</span><span class="s2">, </span><span class="s1">preexec_fn</span><span class="s2">, </span><span class="s1">close_fds</span><span class="s2">,</span>
+                                <span class="s1">pass_fds</span><span class="s2">, </span><span class="s1">cwd</span><span class="s2">, </span><span class="s1">env</span><span class="s2">, </span><span class="s1">universal_newlines</span><span class="s2">,</span>
+                                <span class="s1">startupinfo</span><span class="s2">, </span><span class="s1">creationflags</span><span class="s2">, </span><span class="s1">shell</span><span class="s2">,</span>
+                                <span class="s1">p2cread</span><span class="s2">, </span><span class="s1">p2cwrite</span><span class="s2">,</span>
+                                <span class="s1">c2pread</span><span class="s2">, </span><span class="s1">c2pwrite</span><span class="s2">,</span>
+                                <span class="s1">errread</span><span class="s2">, </span><span class="s1">errwrite</span><span class="s2">,</span>
+                                <span class="s1">restore_signals</span><span class="s2">,</span>
+                                <span class="s1">gid</span><span class="s2">, </span><span class="s1">gids</span><span class="s2">, </span><span class="s1">uid</span><span class="s2">, </span><span class="s1">umask</span><span class="s2">,</span>
+                                <span class="s1">start_new_session</span><span class="s2">, </span><span class="s1">process_group)</span>
+        <span class="s2">except</span><span class="s1">:</span>
+            <span class="s3"># Cleanup if the child failed starting.</span>
+            <span class="s3"># (gevent: New in python3, but reported as gevent bug in #347.</span>
+            <span class="s3"># Note that under Py2, any error raised below will replace the</span>
+            <span class="s3"># original error so we have to use reraise)</span>
+            <span class="s2">if not </span><span class="s1">PY3:</span>
+                <span class="s1">exc_info = sys.exc_info()</span>
+            <span class="s2">for </span><span class="s1">f </span><span class="s2">in </span><span class="s1">filter(</span><span class="s2">None, </span><span class="s1">(self.stdin</span><span class="s2">, </span><span class="s1">self.stdout</span><span class="s2">, </span><span class="s1">self.stderr)):</span>
+                <span class="s2">try</span><span class="s1">:</span>
+                    <span class="s1">f.close()</span>
+                <span class="s2">except </span><span class="s1">(OSError</span><span class="s2">, </span><span class="s1">IOError):</span>
+                    <span class="s2">pass  </span><span class="s3"># Ignore EBADF or other errors.</span>
+
+            <span class="s2">if not </span><span class="s1">self._closed_child_pipe_fds:</span>
+                <span class="s1">to_close = []</span>
+                <span class="s2">if </span><span class="s1">stdin == PIPE:</span>
+                    <span class="s1">to_close.append(p2cread)</span>
+                <span class="s2">if </span><span class="s1">stdout == PIPE:</span>
+                    <span class="s1">to_close.append(c2pwrite)</span>
+                <span class="s2">if </span><span class="s1">stderr == PIPE:</span>
+                    <span class="s1">to_close.append(errwrite)</span>
+                <span class="s2">if </span><span class="s1">hasattr(self</span><span class="s2">, </span><span class="s4">'_devnull'</span><span class="s1">):</span>
+                    <span class="s1">to_close.append(self._devnull)</span>
+                <span class="s2">for </span><span class="s1">fd </span><span class="s2">in </span><span class="s1">to_close:</span>
+                    <span class="s2">try</span><span class="s1">:</span>
+                        <span class="s1">os.close(fd)</span>
+                    <span class="s2">except </span><span class="s1">(OSError</span><span class="s2">, </span><span class="s1">IOError):</span>
+                        <span class="s2">pass</span>
+            <span class="s2">if not </span><span class="s1">PY3:</span>
+                <span class="s2">try</span><span class="s1">:</span>
+                    <span class="s1">reraise(*exc_info)</span>
+                <span class="s2">finally</span><span class="s1">:</span>
+                    <span class="s2">del </span><span class="s1">exc_info</span>
+            <span class="s2">raise</span>
+
+    <span class="s2">def </span><span class="s1">__handle_uids(self</span><span class="s2">, </span><span class="s1">user</span><span class="s2">, </span><span class="s1">group</span><span class="s2">, </span><span class="s1">extra_groups):</span>
+        <span class="s1">gid = </span><span class="s2">None</span>
+        <span class="s2">if </span><span class="s1">group </span><span class="s2">is not None</span><span class="s1">:</span>
+            <span class="s2">if not </span><span class="s1">hasattr(os</span><span class="s2">, </span><span class="s4">'setregid'</span><span class="s1">):</span>
+                <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s4">&quot;The 'group' parameter is not supported on the &quot;</span>
+                                 <span class="s4">&quot;current platform&quot;</span><span class="s1">)</span>
+
+            <span class="s2">if </span><span class="s1">isinstance(group</span><span class="s2">, </span><span class="s1">str):</span>
+                <span class="s2">if </span><span class="s1">grp </span><span class="s2">is None</span><span class="s1">:</span>
+                    <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s4">&quot;The group parameter cannot be a string &quot;</span>
+                                     <span class="s4">&quot;on systems without the grp module&quot;</span><span class="s1">)</span>
+
+                <span class="s1">gid = grp.getgrnam(group).gr_gid</span>
+            <span class="s2">elif </span><span class="s1">isinstance(group</span><span class="s2">, </span><span class="s1">int):</span>
+                <span class="s1">gid = group</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s2">raise </span><span class="s1">TypeError(</span><span class="s4">&quot;Group must be a string or an integer, not {}&quot;</span>
+                                <span class="s1">.format(type(group)))</span>
+
+            <span class="s2">if </span><span class="s1">gid &lt; </span><span class="s5">0</span><span class="s1">:</span>
+                <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s4">&quot;Group ID cannot be negative, got %s&quot; </span><span class="s1">% gid)</span>
+
+        <span class="s1">gids = </span><span class="s2">None</span>
+        <span class="s2">if </span><span class="s1">extra_groups </span><span class="s2">is not None</span><span class="s1">:</span>
+            <span class="s2">if not </span><span class="s1">hasattr(os</span><span class="s2">, </span><span class="s4">'setgroups'</span><span class="s1">):</span>
+                <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s4">&quot;The 'extra_groups' parameter is not &quot;</span>
+                                 <span class="s4">&quot;supported on the current platform&quot;</span><span class="s1">)</span>
+
+            <span class="s2">if </span><span class="s1">isinstance(extra_groups</span><span class="s2">, </span><span class="s1">str):</span>
+                <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s4">&quot;Groups must be a list, not a string&quot;</span><span class="s1">)</span>
+
+            <span class="s1">gids = []</span>
+            <span class="s2">for </span><span class="s1">extra_group </span><span class="s2">in </span><span class="s1">extra_groups:</span>
+                <span class="s2">if </span><span class="s1">isinstance(extra_group</span><span class="s2">, </span><span class="s1">str):</span>
+                    <span class="s2">if </span><span class="s1">grp </span><span class="s2">is None</span><span class="s1">:</span>
+                        <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s4">&quot;Items in extra_groups cannot be &quot;</span>
+                                         <span class="s4">&quot;strings on systems without the &quot;</span>
+                                         <span class="s4">&quot;grp module&quot;</span><span class="s1">)</span>
+
+                    <span class="s1">gids.append(grp.getgrnam(extra_group).gr_gid)</span>
+                <span class="s2">elif </span><span class="s1">isinstance(extra_group</span><span class="s2">, </span><span class="s1">int):</span>
+                    <span class="s2">if </span><span class="s1">extra_group &gt;= </span><span class="s5">2</span><span class="s1">**</span><span class="s5">64</span><span class="s1">:</span>
+                        <span class="s3"># This check is implicit in the C version of _Py_Gid_Converter.</span>
+                        <span class="s3">#</span>
+                        <span class="s3"># We actually need access to the C type ``gid_t`` to get</span>
+                        <span class="s3"># its actual length. This just makes the test that was added</span>
+                        <span class="s3"># for the bug pass. That's OK though, if we guess too big here,</span>
+                        <span class="s3"># we should get an OverflowError from the setgroups()</span>
+                        <span class="s3"># call we make. The only difference is the type of exception.</span>
+                        <span class="s3">#</span>
+                        <span class="s3"># See https://bugs.python.org/issue42655</span>
+                        <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s4">&quot;Item in extra_groups is too large&quot;</span><span class="s1">)</span>
+                    <span class="s1">gids.append(extra_group)</span>
+                <span class="s2">else</span><span class="s1">:</span>
+                    <span class="s2">raise </span><span class="s1">TypeError(</span><span class="s4">&quot;Items in extra_groups must be a string &quot;</span>
+                                    <span class="s4">&quot;or integer, not {}&quot;</span>
+                                    <span class="s1">.format(type(extra_group)))</span>
+
+            <span class="s3"># make sure that the gids are all positive here so we can do less</span>
+            <span class="s3"># checking in the C code</span>
+            <span class="s2">for </span><span class="s1">gid_check </span><span class="s2">in </span><span class="s1">gids:</span>
+                <span class="s2">if </span><span class="s1">gid_check &lt; </span><span class="s5">0</span><span class="s1">:</span>
+                    <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s4">&quot;Group ID cannot be negative, got %s&quot; </span><span class="s1">% (gid_check</span><span class="s2">,</span><span class="s1">))</span>
+
+        <span class="s1">uid = </span><span class="s2">None</span>
+        <span class="s2">if </span><span class="s1">user </span><span class="s2">is not None</span><span class="s1">:</span>
+            <span class="s2">if not </span><span class="s1">hasattr(os</span><span class="s2">, </span><span class="s4">'setreuid'</span><span class="s1">):</span>
+                <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s4">&quot;The 'user' parameter is not supported on &quot;</span>
+                                 <span class="s4">&quot;the current platform&quot;</span><span class="s1">)</span>
+
+            <span class="s2">if </span><span class="s1">isinstance(user</span><span class="s2">, </span><span class="s1">str):</span>
+                <span class="s2">if </span><span class="s1">pwd </span><span class="s2">is None</span><span class="s1">:</span>
+                    <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s4">&quot;The user parameter cannot be a string &quot;</span>
+                                     <span class="s4">&quot;on systems without the pwd module&quot;</span><span class="s1">)</span>
+
+                <span class="s1">uid = pwd.getpwnam(user).pw_uid</span>
+            <span class="s2">elif </span><span class="s1">isinstance(user</span><span class="s2">, </span><span class="s1">int):</span>
+                <span class="s1">uid = user</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s2">raise </span><span class="s1">TypeError(</span><span class="s4">&quot;User must be a string or an integer&quot;</span><span class="s1">)</span>
+
+            <span class="s2">if </span><span class="s1">uid &lt; </span><span class="s5">0</span><span class="s1">:</span>
+                <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s4">&quot;User ID cannot be negative, got %s&quot; </span><span class="s1">% (uid</span><span class="s2">,</span><span class="s1">))</span>
+
+        <span class="s2">return </span><span class="s1">uid</span><span class="s2">, </span><span class="s1">gid</span><span class="s2">, </span><span class="s1">gids</span>
+
+    <span class="s2">def </span><span class="s1">__repr__(self):</span>
+        <span class="s2">return </span><span class="s4">'&lt;%s at 0x%x pid=%r returncode=%r&gt;' </span><span class="s1">% (self.__class__.__name__</span><span class="s2">, </span><span class="s1">id(self)</span><span class="s2">, </span><span class="s1">self.pid</span><span class="s2">, </span><span class="s1">self.returncode)</span>
+
+    <span class="s2">def </span><span class="s1">_on_child(self</span><span class="s2">, </span><span class="s1">watcher):</span>
+        <span class="s1">watcher.stop()</span>
+        <span class="s1">status = watcher.rstatus</span>
+        <span class="s2">if </span><span class="s1">os.WIFSIGNALED(status):</span>
+            <span class="s1">self.returncode = -os.WTERMSIG(status)</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">self.returncode = os.WEXITSTATUS(status)</span>
+        <span class="s1">self.result.set(self.returncode)</span>
+
+    <span class="s2">def </span><span class="s1">_get_devnull(self):</span>
+        <span class="s2">if not </span><span class="s1">hasattr(self</span><span class="s2">, </span><span class="s4">'_devnull'</span><span class="s1">):</span>
+            <span class="s1">self._devnull = os.open(os.devnull</span><span class="s2">, </span><span class="s1">os.O_RDWR)</span>
+        <span class="s2">return </span><span class="s1">self._devnull</span>
+
+    <span class="s1">_communicating_greenlets = </span><span class="s2">None</span>
+
+    <span class="s2">def </span><span class="s1">communicate(self</span><span class="s2">, </span><span class="s1">input=</span><span class="s2">None, </span><span class="s1">timeout=</span><span class="s2">None</span><span class="s1">):</span>
+        <span class="s0">&quot;&quot;&quot; 
+        Interact with process and return its output and error. 
+ 
+        - Send *input* data to stdin. 
+        - Read data from stdout and stderr, until end-of-file is reached. 
+        - Wait for process to terminate. 
+ 
+        The optional *input* argument should be a 
+        string to be sent to the child process, or None, if no data 
+        should be sent to the child. 
+ 
+        communicate() returns a tuple (stdout, stderr). 
+ 
+        :keyword timeout: Under Python 2, this is a gevent extension; if 
+           given and it expires, we will raise :exc:`TimeoutExpired`, which 
+           extends :exc:`gevent.timeout.Timeout` (note that this only extends :exc:`BaseException`, 
+           *not* :exc:`Exception`) 
+           Under Python 3, this raises the standard :exc:`TimeoutExpired` exception. 
+ 
+        .. versionchanged:: 1.1a2 
+           Under Python 2, if the *timeout* elapses, raise the :exc:`gevent.timeout.Timeout` 
+           exception. Previously, we silently returned. 
+        .. versionchanged:: 1.1b5 
+           Honor a *timeout* even if there's no way to communicate with the child 
+           (stdin, stdout, and stderr are not pipes). 
+        &quot;&quot;&quot;</span>
+        <span class="s2">if </span><span class="s1">self._communicating_greenlets </span><span class="s2">is None</span><span class="s1">:</span>
+            <span class="s1">self._communicating_greenlets = _CommunicatingGreenlets(self</span><span class="s2">, </span><span class="s1">input)</span>
+        <span class="s1">greenlets = self._communicating_greenlets</span>
+
+        <span class="s3"># If we were given stdin=stdout=stderr=None, we have no way to</span>
+        <span class="s3"># communicate with the child, and thus no greenlets to wait</span>
+        <span class="s3"># on. This is a nonsense case, but it comes up in the test</span>
+        <span class="s3"># case for Python 3.5 (test_subprocess.py</span>
+        <span class="s3"># RunFuncTestCase.test_timeout). Instead, we go directly to</span>
+        <span class="s3"># self.wait</span>
+        <span class="s2">if not </span><span class="s1">greenlets </span><span class="s2">and </span><span class="s1">timeout </span><span class="s2">is not None</span><span class="s1">:</span>
+            <span class="s1">self.wait(timeout=timeout</span><span class="s2">, </span><span class="s1">_raise_exc=</span><span class="s2">True</span><span class="s1">)</span>
+
+        <span class="s1">done = joinall(greenlets</span><span class="s2">, </span><span class="s1">timeout=timeout)</span>
+        <span class="s3"># Allow finished greenlets, if any, to raise. This takes priority over</span>
+        <span class="s3"># the timeout exception.</span>
+        <span class="s2">for </span><span class="s1">greenlet </span><span class="s2">in </span><span class="s1">done:</span>
+            <span class="s1">greenlet.get()</span>
+        <span class="s2">if </span><span class="s1">timeout </span><span class="s2">is not None and </span><span class="s1">len(done) != len(self._communicating_greenlets):</span>
+            <span class="s2">raise </span><span class="s1">TimeoutExpired(self.args</span><span class="s2">, </span><span class="s1">timeout)</span>
+
+        <span class="s3"># Close only after we're sure that everything is done</span>
+        <span class="s3"># (there was no timeout, or there was, but everything finished).</span>
+        <span class="s3"># There should be no greenlets still running, even from a prior</span>
+        <span class="s3"># attempt. If there are, then this can raise RuntimeError: 'reentrant call'.</span>
+        <span class="s3"># So we ensure that previous greenlets are dead.</span>
+        <span class="s2">for </span><span class="s1">pipe </span><span class="s2">in </span><span class="s1">(self.stdout</span><span class="s2">, </span><span class="s1">self.stderr):</span>
+            <span class="s2">if </span><span class="s1">pipe:</span>
+                <span class="s2">try</span><span class="s1">:</span>
+                    <span class="s1">pipe.close()</span>
+                <span class="s2">except </span><span class="s1">RuntimeError:</span>
+                    <span class="s2">pass</span>
+
+        <span class="s1">self.wait()</span>
+
+        <span class="s2">return </span><span class="s1">(</span><span class="s2">None if </span><span class="s1">greenlets.stdout </span><span class="s2">is None else </span><span class="s1">greenlets.stdout.get()</span><span class="s2">,</span>
+                <span class="s2">None if </span><span class="s1">greenlets.stderr </span><span class="s2">is None else </span><span class="s1">greenlets.stderr.get())</span>
+
+    <span class="s2">def </span><span class="s1">poll(self):</span>
+        <span class="s0">&quot;&quot;&quot;Check if child process has terminated. Set and return :attr:`returncode` attribute.&quot;&quot;&quot;</span>
+        <span class="s2">return </span><span class="s1">self._internal_poll()</span>
+
+    <span class="s2">def </span><span class="s1">__enter__(self):</span>
+        <span class="s2">return </span><span class="s1">self</span>
+
+    <span class="s2">def </span><span class="s1">__exit__(self</span><span class="s2">, </span><span class="s1">t</span><span class="s2">, </span><span class="s1">v</span><span class="s2">, </span><span class="s1">tb):</span>
+        <span class="s2">if </span><span class="s1">self.stdout:</span>
+            <span class="s1">self.stdout.close()</span>
+        <span class="s2">if </span><span class="s1">self.stderr:</span>
+            <span class="s1">self.stderr.close()</span>
+        <span class="s2">try</span><span class="s1">:  </span><span class="s3"># Flushing a BufferedWriter may raise an error</span>
+            <span class="s2">if </span><span class="s1">self.stdin:</span>
+                <span class="s1">self.stdin.close()</span>
+        <span class="s2">finally</span><span class="s1">:</span>
+            <span class="s3"># Wait for the process to terminate, to avoid zombies.</span>
+            <span class="s3"># JAM: gevent: If the process never terminates, this</span>
+            <span class="s3"># blocks forever.</span>
+            <span class="s1">self.wait()</span>
+
+    <span class="s2">def </span><span class="s1">_gevent_result_wait(self</span><span class="s2">, </span><span class="s1">timeout=</span><span class="s2">None, </span><span class="s1">raise_exc=PY3):</span>
+        <span class="s1">result = self.result.wait(timeout=timeout)</span>
+        <span class="s2">if </span><span class="s1">raise_exc </span><span class="s2">and </span><span class="s1">timeout </span><span class="s2">is not None and not </span><span class="s1">self.result.ready():</span>
+            <span class="s2">raise </span><span class="s1">TimeoutExpired(self.args</span><span class="s2">, </span><span class="s1">timeout)</span>
+        <span class="s2">return </span><span class="s1">result</span>
+
+
+    <span class="s2">if </span><span class="s1">mswindows:</span>
+        <span class="s3">#</span>
+        <span class="s3"># Windows methods</span>
+        <span class="s3">#</span>
+        <span class="s2">def </span><span class="s1">_get_handles(self</span><span class="s2">, </span><span class="s1">stdin</span><span class="s2">, </span><span class="s1">stdout</span><span class="s2">, </span><span class="s1">stderr):</span>
+            <span class="s0">&quot;&quot;&quot;Construct and return tuple with IO objects: 
+            p2cread, p2cwrite, c2pread, c2pwrite, errread, errwrite 
+            &quot;&quot;&quot;</span>
+            <span class="s3"># pylint:disable=undefined-variable</span>
+            <span class="s2">if </span><span class="s1">stdin </span><span class="s2">is None and </span><span class="s1">stdout </span><span class="s2">is None and </span><span class="s1">stderr </span><span class="s2">is None</span><span class="s1">:</span>
+                <span class="s2">return </span><span class="s1">(-</span><span class="s5">1</span><span class="s2">, </span><span class="s1">-</span><span class="s5">1</span><span class="s2">, </span><span class="s1">-</span><span class="s5">1</span><span class="s2">, </span><span class="s1">-</span><span class="s5">1</span><span class="s2">, </span><span class="s1">-</span><span class="s5">1</span><span class="s2">, </span><span class="s1">-</span><span class="s5">1</span><span class="s1">)</span>
+
+            <span class="s1">p2cread</span><span class="s2">, </span><span class="s1">p2cwrite = -</span><span class="s5">1</span><span class="s2">, </span><span class="s1">-</span><span class="s5">1</span>
+            <span class="s1">c2pread</span><span class="s2">, </span><span class="s1">c2pwrite = -</span><span class="s5">1</span><span class="s2">, </span><span class="s1">-</span><span class="s5">1</span>
+            <span class="s1">errread</span><span class="s2">, </span><span class="s1">errwrite = -</span><span class="s5">1</span><span class="s2">, </span><span class="s1">-</span><span class="s5">1</span>
+
+            <span class="s2">try</span><span class="s1">:</span>
+                <span class="s1">DEVNULL</span>
+            <span class="s2">except </span><span class="s1">NameError:</span>
+                <span class="s1">_devnull = object()</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s1">_devnull = DEVNULL</span>
+
+            <span class="s2">if </span><span class="s1">stdin </span><span class="s2">is None</span><span class="s1">:</span>
+                <span class="s1">p2cread = GetStdHandle(STD_INPUT_HANDLE)</span>
+                <span class="s2">if </span><span class="s1">p2cread </span><span class="s2">is None</span><span class="s1">:</span>
+                    <span class="s1">p2cread</span><span class="s2">, </span><span class="s1">_ = CreatePipe(</span><span class="s2">None, </span><span class="s5">0</span><span class="s1">)</span>
+                    <span class="s2">if </span><span class="s1">PY3:</span>
+                        <span class="s1">p2cread = Handle(p2cread)</span>
+                        <span class="s1">_winapi.CloseHandle(_)</span>
+            <span class="s2">elif </span><span class="s1">stdin == PIPE:</span>
+                <span class="s1">p2cread</span><span class="s2">, </span><span class="s1">p2cwrite = CreatePipe(</span><span class="s2">None, </span><span class="s5">0</span><span class="s1">)</span>
+                <span class="s2">if </span><span class="s1">PY3:</span>
+                    <span class="s1">p2cread</span><span class="s2">, </span><span class="s1">p2cwrite = Handle(p2cread)</span><span class="s2">, </span><span class="s1">Handle(p2cwrite)</span>
+            <span class="s2">elif </span><span class="s1">stdin == _devnull:</span>
+                <span class="s1">p2cread = msvcrt.get_osfhandle(self._get_devnull())</span>
+            <span class="s2">elif </span><span class="s1">isinstance(stdin</span><span class="s2">, </span><span class="s1">int):</span>
+                <span class="s1">p2cread = msvcrt.get_osfhandle(stdin)</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s3"># Assuming file-like object</span>
+                <span class="s1">p2cread = msvcrt.get_osfhandle(stdin.fileno())</span>
+            <span class="s1">p2cread = self._make_inheritable(p2cread)</span>
+
+            <span class="s2">if </span><span class="s1">stdout </span><span class="s2">is None</span><span class="s1">:</span>
+                <span class="s1">c2pwrite = GetStdHandle(STD_OUTPUT_HANDLE)</span>
+                <span class="s2">if </span><span class="s1">c2pwrite </span><span class="s2">is None</span><span class="s1">:</span>
+                    <span class="s1">_</span><span class="s2">, </span><span class="s1">c2pwrite = CreatePipe(</span><span class="s2">None, </span><span class="s5">0</span><span class="s1">)</span>
+                    <span class="s2">if </span><span class="s1">PY3:</span>
+                        <span class="s1">c2pwrite = Handle(c2pwrite)</span>
+                        <span class="s1">_winapi.CloseHandle(_)</span>
+            <span class="s2">elif </span><span class="s1">stdout == PIPE:</span>
+                <span class="s1">c2pread</span><span class="s2">, </span><span class="s1">c2pwrite = CreatePipe(</span><span class="s2">None, </span><span class="s5">0</span><span class="s1">)</span>
+                <span class="s2">if </span><span class="s1">PY3:</span>
+                    <span class="s1">c2pread</span><span class="s2">, </span><span class="s1">c2pwrite = Handle(c2pread)</span><span class="s2">, </span><span class="s1">Handle(c2pwrite)</span>
+            <span class="s2">elif </span><span class="s1">stdout == _devnull:</span>
+                <span class="s1">c2pwrite = msvcrt.get_osfhandle(self._get_devnull())</span>
+            <span class="s2">elif </span><span class="s1">isinstance(stdout</span><span class="s2">, </span><span class="s1">int):</span>
+                <span class="s1">c2pwrite = msvcrt.get_osfhandle(stdout)</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s3"># Assuming file-like object</span>
+                <span class="s1">c2pwrite = msvcrt.get_osfhandle(stdout.fileno())</span>
+            <span class="s1">c2pwrite = self._make_inheritable(c2pwrite)</span>
+
+            <span class="s2">if </span><span class="s1">stderr </span><span class="s2">is None</span><span class="s1">:</span>
+                <span class="s1">errwrite = GetStdHandle(STD_ERROR_HANDLE)</span>
+                <span class="s2">if </span><span class="s1">errwrite </span><span class="s2">is None</span><span class="s1">:</span>
+                    <span class="s1">_</span><span class="s2">, </span><span class="s1">errwrite = CreatePipe(</span><span class="s2">None, </span><span class="s5">0</span><span class="s1">)</span>
+                    <span class="s2">if </span><span class="s1">PY3:</span>
+                        <span class="s1">errwrite = Handle(errwrite)</span>
+                        <span class="s1">_winapi.CloseHandle(_)</span>
+            <span class="s2">elif </span><span class="s1">stderr == PIPE:</span>
+                <span class="s1">errread</span><span class="s2">, </span><span class="s1">errwrite = CreatePipe(</span><span class="s2">None, </span><span class="s5">0</span><span class="s1">)</span>
+                <span class="s2">if </span><span class="s1">PY3:</span>
+                    <span class="s1">errread</span><span class="s2">, </span><span class="s1">errwrite = Handle(errread)</span><span class="s2">, </span><span class="s1">Handle(errwrite)</span>
+            <span class="s2">elif </span><span class="s1">stderr == STDOUT:</span>
+                <span class="s1">errwrite = c2pwrite</span>
+            <span class="s2">elif </span><span class="s1">stderr == _devnull:</span>
+                <span class="s1">errwrite = msvcrt.get_osfhandle(self._get_devnull())</span>
+            <span class="s2">elif </span><span class="s1">isinstance(stderr</span><span class="s2">, </span><span class="s1">int):</span>
+                <span class="s1">errwrite = msvcrt.get_osfhandle(stderr)</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s3"># Assuming file-like object</span>
+                <span class="s1">errwrite = msvcrt.get_osfhandle(stderr.fileno())</span>
+            <span class="s1">errwrite = self._make_inheritable(errwrite)</span>
+
+            <span class="s2">return </span><span class="s1">(p2cread</span><span class="s2">, </span><span class="s1">p2cwrite</span><span class="s2">,</span>
+                    <span class="s1">c2pread</span><span class="s2">, </span><span class="s1">c2pwrite</span><span class="s2">,</span>
+                    <span class="s1">errread</span><span class="s2">, </span><span class="s1">errwrite)</span>
+
+        <span class="s2">def </span><span class="s1">_make_inheritable(self</span><span class="s2">, </span><span class="s1">handle):</span>
+            <span class="s0">&quot;&quot;&quot;Return a duplicate of handle, which is inheritable&quot;&quot;&quot;</span>
+            <span class="s3"># pylint:disable=undefined-variable</span>
+            <span class="s2">return </span><span class="s1">DuplicateHandle(GetCurrentProcess()</span><span class="s2">,</span>
+                                   <span class="s1">handle</span><span class="s2">, </span><span class="s1">GetCurrentProcess()</span><span class="s2">, </span><span class="s5">0</span><span class="s2">, </span><span class="s5">1</span><span class="s2">,</span>
+                                   <span class="s1">DUPLICATE_SAME_ACCESS)</span>
+
+        <span class="s2">def </span><span class="s1">_find_w9xpopen(self):</span>
+            <span class="s0">&quot;&quot;&quot;Find and return absolute path to w9xpopen.exe&quot;&quot;&quot;</span>
+            <span class="s3"># pylint:disable=undefined-variable</span>
+            <span class="s1">w9xpopen = os.path.join(os.path.dirname(GetModuleFileName(</span><span class="s5">0</span><span class="s1">))</span><span class="s2">,</span>
+                                    <span class="s4">&quot;w9xpopen.exe&quot;</span><span class="s1">)</span>
+            <span class="s2">if not </span><span class="s1">os.path.exists(w9xpopen):</span>
+                <span class="s3"># Eeek - file-not-found - possibly an embedding</span>
+                <span class="s3"># situation - see if we can locate it in sys.exec_prefix</span>
+                <span class="s1">w9xpopen = os.path.join(os.path.dirname(sys.exec_prefix)</span><span class="s2">,</span>
+                                        <span class="s4">&quot;w9xpopen.exe&quot;</span><span class="s1">)</span>
+                <span class="s2">if not </span><span class="s1">os.path.exists(w9xpopen):</span>
+                    <span class="s2">raise </span><span class="s1">RuntimeError(</span><span class="s4">&quot;Cannot locate w9xpopen.exe, which is &quot;</span>
+                                       <span class="s4">&quot;needed for Popen to work with your &quot;</span>
+                                       <span class="s4">&quot;shell or platform.&quot;</span><span class="s1">)</span>
+            <span class="s2">return </span><span class="s1">w9xpopen</span>
+
+
+        <span class="s2">def </span><span class="s1">_filter_handle_list(self</span><span class="s2">, </span><span class="s1">handle_list):</span>
+            <span class="s0">&quot;&quot;&quot;Filter out console handles that can't be used 
+            in lpAttributeList[&quot;handle_list&quot;] and make sure the list 
+            isn't empty. This also removes duplicate handles.&quot;&quot;&quot;</span>
+            <span class="s3"># An handle with it's lowest two bits set might be a special console</span>
+            <span class="s3"># handle that if passed in lpAttributeList[&quot;handle_list&quot;], will</span>
+            <span class="s3"># cause it to fail.</span>
+            <span class="s3"># Only works on 3.7+</span>
+            <span class="s2">return </span><span class="s1">list({handle </span><span class="s2">for </span><span class="s1">handle </span><span class="s2">in </span><span class="s1">handle_list</span>
+                         <span class="s2">if </span><span class="s1">handle &amp; </span><span class="s5">0x3 </span><span class="s1">!= </span><span class="s5">0x3</span>
+                         <span class="s2">or </span><span class="s1">_winapi.GetFileType(handle) !=</span>
+                         <span class="s1">_winapi.FILE_TYPE_CHAR})</span>
+
+
+        <span class="s2">def </span><span class="s1">_execute_child(self</span><span class="s2">, </span><span class="s1">args</span><span class="s2">, </span><span class="s1">executable</span><span class="s2">, </span><span class="s1">preexec_fn</span><span class="s2">, </span><span class="s1">close_fds</span><span class="s2">,</span>
+                           <span class="s1">pass_fds</span><span class="s2">, </span><span class="s1">cwd</span><span class="s2">, </span><span class="s1">env</span><span class="s2">, </span><span class="s1">universal_newlines</span><span class="s2">,</span>
+                           <span class="s1">startupinfo</span><span class="s2">, </span><span class="s1">creationflags</span><span class="s2">, </span><span class="s1">shell</span><span class="s2">,</span>
+                           <span class="s1">p2cread</span><span class="s2">, </span><span class="s1">p2cwrite</span><span class="s2">,</span>
+                           <span class="s1">c2pread</span><span class="s2">, </span><span class="s1">c2pwrite</span><span class="s2">,</span>
+                           <span class="s1">errread</span><span class="s2">, </span><span class="s1">errwrite</span><span class="s2">,</span>
+                           <span class="s1">unused_restore_signals</span><span class="s2">,</span>
+                           <span class="s1">unused_gid</span><span class="s2">, </span><span class="s1">unused_gids</span><span class="s2">, </span><span class="s1">unused_uid</span><span class="s2">, </span><span class="s1">unused_umask</span><span class="s2">,</span>
+                           <span class="s1">unused_start_new_session</span><span class="s2">, </span><span class="s1">unused_process_group):</span>
+            <span class="s0">&quot;&quot;&quot;Execute program (MS Windows version)&quot;&quot;&quot;</span>
+            <span class="s3"># pylint:disable=undefined-variable</span>
+            <span class="s2">assert not </span><span class="s1">pass_fds</span><span class="s2">, </span><span class="s4">&quot;pass_fds not supported on Windows.&quot;</span>
+            <span class="s2">if </span><span class="s1">isinstance(args</span><span class="s2">, </span><span class="s1">str):</span>
+                <span class="s2">pass</span>
+            <span class="s2">elif </span><span class="s1">isinstance(args</span><span class="s2">, </span><span class="s1">bytes):</span>
+                <span class="s2">if </span><span class="s1">shell </span><span class="s2">and </span><span class="s1">PY3:</span>
+                    <span class="s2">raise </span><span class="s1">TypeError(</span><span class="s4">'bytes args is not allowed on Windows'</span><span class="s1">)</span>
+                <span class="s1">args = list2cmdline([args])</span>
+            <span class="s2">elif </span><span class="s1">isinstance(args</span><span class="s2">, </span><span class="s1">PathLike):</span>
+                <span class="s2">if </span><span class="s1">shell:</span>
+                    <span class="s2">raise </span><span class="s1">TypeError(</span><span class="s4">'path-like args is not allowed when '</span>
+                                    <span class="s4">'shell is true'</span><span class="s1">)</span>
+                <span class="s1">args = list2cmdline([args])</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s1">args = list2cmdline(args)</span>
+
+            <span class="s2">if </span><span class="s1">executable </span><span class="s2">is not None</span><span class="s1">:</span>
+                <span class="s1">executable = fsdecode(executable)</span>
+
+            <span class="s2">if not </span><span class="s1">isinstance(args</span><span class="s2">, </span><span class="s1">string_types):</span>
+                <span class="s1">args = list2cmdline(args)</span>
+
+            <span class="s3"># Process startup details</span>
+            <span class="s2">if </span><span class="s1">startupinfo </span><span class="s2">is None</span><span class="s1">:</span>
+                <span class="s1">startupinfo = STARTUPINFO()</span>
+            <span class="s2">elif </span><span class="s1">hasattr(startupinfo</span><span class="s2">, </span><span class="s4">'copy'</span><span class="s1">):</span>
+                <span class="s3"># bpo-34044: Copy STARTUPINFO since it is modified below,</span>
+                <span class="s3"># so the caller can reuse it multiple times.</span>
+                <span class="s1">startupinfo = startupinfo.copy()</span>
+            <span class="s2">elif </span><span class="s1">hasattr(startupinfo</span><span class="s2">, </span><span class="s4">'_copy'</span><span class="s1">):</span>
+                <span class="s3"># When the fix was backported to Python 3.7, copy() was</span>
+                <span class="s3"># made private as _copy.</span>
+                <span class="s1">startupinfo = startupinfo._copy()</span>
+
+            <span class="s1">use_std_handles = -</span><span class="s5">1 </span><span class="s2">not in </span><span class="s1">(p2cread</span><span class="s2">, </span><span class="s1">c2pwrite</span><span class="s2">, </span><span class="s1">errwrite)</span>
+            <span class="s2">if </span><span class="s1">use_std_handles:</span>
+                <span class="s1">startupinfo.dwFlags |= STARTF_USESTDHANDLES</span>
+                <span class="s1">startupinfo.hStdInput = p2cread</span>
+                <span class="s1">startupinfo.hStdOutput = c2pwrite</span>
+                <span class="s1">startupinfo.hStdError = errwrite</span>
+
+            <span class="s2">if </span><span class="s1">hasattr(startupinfo</span><span class="s2">, </span><span class="s4">'lpAttributeList'</span><span class="s1">):</span>
+                <span class="s3"># Support for Python &gt;= 3.7</span>
+
+                <span class="s1">attribute_list = startupinfo.lpAttributeList</span>
+                <span class="s1">have_handle_list = bool(attribute_list </span><span class="s2">and</span>
+                                        <span class="s4">&quot;handle_list&quot; </span><span class="s2">in </span><span class="s1">attribute_list </span><span class="s2">and</span>
+                                        <span class="s1">attribute_list[</span><span class="s4">&quot;handle_list&quot;</span><span class="s1">])</span>
+
+                <span class="s3"># If we were given an handle_list or need to create one</span>
+                <span class="s2">if </span><span class="s1">have_handle_list </span><span class="s2">or </span><span class="s1">(use_std_handles </span><span class="s2">and </span><span class="s1">close_fds):</span>
+                    <span class="s2">if </span><span class="s1">attribute_list </span><span class="s2">is None</span><span class="s1">:</span>
+                        <span class="s1">attribute_list = startupinfo.lpAttributeList = {}</span>
+                    <span class="s1">handle_list = attribute_list[</span><span class="s4">&quot;handle_list&quot;</span><span class="s1">] = \</span>
+                        <span class="s1">list(attribute_list.get(</span><span class="s4">&quot;handle_list&quot;</span><span class="s2">, </span><span class="s1">[]))</span>
+
+                    <span class="s2">if </span><span class="s1">use_std_handles:</span>
+                        <span class="s1">handle_list += [int(p2cread)</span><span class="s2">, </span><span class="s1">int(c2pwrite)</span><span class="s2">, </span><span class="s1">int(errwrite)]</span>
+
+                    <span class="s1">handle_list[:] = self._filter_handle_list(handle_list)</span>
+
+                    <span class="s2">if </span><span class="s1">handle_list:</span>
+                        <span class="s2">if not </span><span class="s1">close_fds:</span>
+                            <span class="s2">import </span><span class="s1">warnings</span>
+                            <span class="s1">warnings.warn(</span><span class="s4">&quot;startupinfo.lpAttributeList['handle_list'] &quot;</span>
+                                          <span class="s4">&quot;overriding close_fds&quot;</span><span class="s2">, </span><span class="s1">RuntimeWarning)</span>
+
+                        <span class="s3"># When using the handle_list we always request to inherit</span>
+                        <span class="s3"># handles but the only handles that will be inherited are</span>
+                        <span class="s3"># the ones in the handle_list</span>
+                        <span class="s1">close_fds = </span><span class="s2">False</span>
+
+            <span class="s2">if </span><span class="s1">shell:</span>
+                <span class="s1">startupinfo.dwFlags |= STARTF_USESHOWWINDOW</span>
+                <span class="s1">startupinfo.wShowWindow = SW_HIDE</span>
+                <span class="s1">comspec = os.environ.get(</span><span class="s4">&quot;COMSPEC&quot;</span><span class="s2">, </span><span class="s4">&quot;cmd.exe&quot;</span><span class="s1">)</span>
+                <span class="s1">args = </span><span class="s4">'{} /c &quot;{}&quot;'</span><span class="s1">.format(comspec</span><span class="s2">, </span><span class="s1">args)</span>
+                <span class="s2">if </span><span class="s1">GetVersion() &gt;= </span><span class="s5">0x80000000 </span><span class="s2">or </span><span class="s1">os.path.basename(comspec).lower() == </span><span class="s4">&quot;command.com&quot;</span><span class="s1">:</span>
+                    <span class="s3"># Win9x, or using command.com on NT. We need to</span>
+                    <span class="s3"># use the w9xpopen intermediate program. For more</span>
+                    <span class="s3"># information, see KB Q150956</span>
+                    <span class="s3"># (http://web.archive.org/web/20011105084002/http://support.microsoft.com/support/kb/articles/Q150/9/56.asp)</span>
+                    <span class="s1">w9xpopen = self._find_w9xpopen()</span>
+                    <span class="s1">args = </span><span class="s4">'&quot;%s&quot; %s' </span><span class="s1">% (w9xpopen</span><span class="s2">, </span><span class="s1">args)</span>
+                    <span class="s3"># Not passing CREATE_NEW_CONSOLE has been known to</span>
+                    <span class="s3"># cause random failures on win9x.  Specifically a</span>
+                    <span class="s3"># dialog: &quot;Your program accessed mem currently in</span>
+                    <span class="s3"># use at xxx&quot; and a hopeful warning about the</span>
+                    <span class="s3"># stability of your system.  Cost is Ctrl+C wont</span>
+                    <span class="s3"># kill children.</span>
+                    <span class="s1">creationflags |= CREATE_NEW_CONSOLE</span>
+
+            <span class="s3"># PyPy 2.7 7.3.6 is now producing these errors. This</span>
+            <span class="s3"># happens automatically on Posix platforms, and is built</span>
+            <span class="s3"># in to the CreateProcess call on CPython 2 &amp; 3. It's not</span>
+            <span class="s3"># clear why we don't pick it up for free from the</span>
+            <span class="s3"># CreateProcess call on PyPy. Currently we don't test PyPy3 on Windows,</span>
+            <span class="s3"># so we don't know for sure if it's built into CreateProcess there.</span>
+            <span class="s2">if </span><span class="s1">PYPY:</span>
+                <span class="s2">def </span><span class="s1">_check_nul(s</span><span class="s2">, </span><span class="s1">err_kind=(ValueError </span><span class="s2">if </span><span class="s1">PY3 </span><span class="s2">else </span><span class="s1">TypeError)):</span>
+                    <span class="s2">if not </span><span class="s1">s:</span>
+                        <span class="s2">return</span>
+                    <span class="s1">nul = </span><span class="s6">b'</span><span class="s2">\0</span><span class="s6">' </span><span class="s2">if </span><span class="s1">isinstance(s</span><span class="s2">, </span><span class="s1">bytes) </span><span class="s2">else </span><span class="s4">'</span><span class="s2">\0</span><span class="s4">'</span>
+                    <span class="s2">if </span><span class="s1">nul </span><span class="s2">in </span><span class="s1">s:</span>
+                        <span class="s3"># PyPy 2 expects a TypeError; Python 3 raises ValueError always.</span>
+                        <span class="s2">raise </span><span class="s1">err_kind(</span><span class="s4">&quot;argument must be a string without NUL characters&quot;</span><span class="s1">)</span>
+                <span class="s2">def </span><span class="s1">_check_env():</span>
+                    <span class="s2">if not </span><span class="s1">env:</span>
+                        <span class="s2">return</span>
+                    <span class="s2">for </span><span class="s1">k</span><span class="s2">, </span><span class="s1">v </span><span class="s2">in </span><span class="s1">env.items():</span>
+                        <span class="s1">_check_nul(k)</span>
+                        <span class="s1">_check_nul(v)</span>
+                        <span class="s2">if </span><span class="s4">'=' </span><span class="s2">in </span><span class="s1">k:</span>
+                            <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s4">&quot;'=' not allowed in environment keys&quot;</span><span class="s1">)</span>
+
+                <span class="s1">_check_nul(executable)</span>
+                <span class="s1">_check_nul(args)</span>
+                <span class="s1">_check_env()</span>
+
+            <span class="s3"># Start the process</span>
+            <span class="s2">try</span><span class="s1">:</span>
+                <span class="s1">hp</span><span class="s2">, </span><span class="s1">ht</span><span class="s2">, </span><span class="s1">pid</span><span class="s2">, </span><span class="s1">tid = CreateProcess(executable</span><span class="s2">, </span><span class="s1">args</span><span class="s2">,</span>
+                                                 <span class="s3"># no special security</span>
+                                                 <span class="s2">None, None,</span>
+                                                 <span class="s1">int(</span><span class="s2">not </span><span class="s1">close_fds)</span><span class="s2">,</span>
+                                                 <span class="s1">creationflags</span><span class="s2">,</span>
+                                                 <span class="s1">env</span><span class="s2">,</span>
+                                                 <span class="s1">cwd</span><span class="s2">, </span><span class="s3"># fsdecode handled earlier</span>
+                                                 <span class="s1">startupinfo)</span>
+            <span class="s2">except </span><span class="s1">IOError </span><span class="s2">as </span><span class="s1">e: </span><span class="s3"># From 2.6 on, pywintypes.error was defined as IOError</span>
+                <span class="s3"># Translate pywintypes.error to WindowsError, which is</span>
+                <span class="s3"># a subclass of OSError.  FIXME: We should really</span>
+                <span class="s3"># translate errno using _sys_errlist (or similar), but</span>
+                <span class="s3"># how can this be done from Python?</span>
+                <span class="s2">if </span><span class="s1">PY3:</span>
+                    <span class="s2">raise </span><span class="s3"># don't remap here</span>
+                <span class="s2">raise </span><span class="s1">WindowsError(*e.args)</span>
+            <span class="s2">finally</span><span class="s1">:</span>
+                <span class="s3"># Child is launched. Close the parent's copy of those pipe</span>
+                <span class="s3"># handles that only the child should have open.  You need</span>
+                <span class="s3"># to make sure that no handles to the write end of the</span>
+                <span class="s3"># output pipe are maintained in this process or else the</span>
+                <span class="s3"># pipe will not close when the child process exits and the</span>
+                <span class="s3"># ReadFile will hang.</span>
+                <span class="s2">def </span><span class="s1">_close(x):</span>
+                    <span class="s2">if </span><span class="s1">x </span><span class="s2">is not None and </span><span class="s1">x != -</span><span class="s5">1</span><span class="s1">:</span>
+                        <span class="s2">if </span><span class="s1">hasattr(x</span><span class="s2">, </span><span class="s4">'Close'</span><span class="s1">):</span>
+                            <span class="s1">x.Close()</span>
+                        <span class="s2">else</span><span class="s1">:</span>
+                            <span class="s1">_winapi.CloseHandle(x)</span>
+
+                <span class="s1">_close(p2cread)</span>
+                <span class="s1">_close(c2pwrite)</span>
+                <span class="s1">_close(errwrite)</span>
+                <span class="s2">if </span><span class="s1">hasattr(self</span><span class="s2">, </span><span class="s4">'_devnull'</span><span class="s1">):</span>
+                    <span class="s1">os.close(self._devnull)</span>
+
+            <span class="s3"># Retain the process handle, but close the thread handle</span>
+            <span class="s1">self._child_created = </span><span class="s2">True</span>
+            <span class="s1">self._handle = Handle(hp) </span><span class="s2">if not </span><span class="s1">hasattr(hp</span><span class="s2">, </span><span class="s4">'Close'</span><span class="s1">) </span><span class="s2">else </span><span class="s1">hp</span>
+            <span class="s1">self.pid = pid</span>
+            <span class="s1">_winapi.CloseHandle(ht) </span><span class="s2">if not </span><span class="s1">hasattr(ht</span><span class="s2">, </span><span class="s4">'Close'</span><span class="s1">) </span><span class="s2">else </span><span class="s1">ht.Close()</span>
+
+        <span class="s2">def </span><span class="s1">_internal_poll(self):</span>
+            <span class="s0">&quot;&quot;&quot;Check if child process has terminated.  Returns returncode 
+            attribute. 
+            &quot;&quot;&quot;</span>
+            <span class="s3"># pylint:disable=undefined-variable</span>
+            <span class="s2">if </span><span class="s1">self.returncode </span><span class="s2">is None</span><span class="s1">:</span>
+                <span class="s2">if </span><span class="s1">WaitForSingleObject(self._handle</span><span class="s2">, </span><span class="s5">0</span><span class="s1">) == WAIT_OBJECT_0:</span>
+                    <span class="s1">self.returncode = GetExitCodeProcess(self._handle)</span>
+                    <span class="s1">self.result.set(self.returncode)</span>
+            <span class="s2">return </span><span class="s1">self.returncode</span>
+
+        <span class="s2">def </span><span class="s1">rawlink(self</span><span class="s2">, </span><span class="s1">callback):</span>
+            <span class="s2">if not </span><span class="s1">self.result.ready() </span><span class="s2">and not </span><span class="s1">self._waiting:</span>
+                <span class="s1">self._waiting = </span><span class="s2">True</span>
+                <span class="s1">Greenlet.spawn(self._wait)</span>
+            <span class="s1">self.result.rawlink(linkproxy(callback</span><span class="s2">, </span><span class="s1">self))</span>
+            <span class="s3"># XXX unlink</span>
+
+        <span class="s2">def </span><span class="s1">_blocking_wait(self):</span>
+            <span class="s3"># pylint:disable=undefined-variable</span>
+            <span class="s1">WaitForSingleObject(self._handle</span><span class="s2">, </span><span class="s1">INFINITE)</span>
+            <span class="s1">self.returncode = GetExitCodeProcess(self._handle)</span>
+            <span class="s2">return </span><span class="s1">self.returncode</span>
+
+        <span class="s2">def </span><span class="s1">_wait(self):</span>
+            <span class="s1">self.threadpool.spawn(self._blocking_wait).rawlink(self.result)</span>
+
+        <span class="s2">def </span><span class="s1">wait(self</span><span class="s2">, </span><span class="s1">timeout=</span><span class="s2">None, </span><span class="s1">_raise_exc=PY3):</span>
+            <span class="s0">&quot;&quot;&quot;Wait for child process to terminate.  Returns returncode 
+            attribute.&quot;&quot;&quot;</span>
+            <span class="s2">if </span><span class="s1">self.returncode </span><span class="s2">is None</span><span class="s1">:</span>
+                <span class="s2">if not </span><span class="s1">self._waiting:</span>
+                    <span class="s1">self._waiting = </span><span class="s2">True</span>
+                    <span class="s1">self._wait()</span>
+            <span class="s2">return </span><span class="s1">self._gevent_result_wait(timeout</span><span class="s2">, </span><span class="s1">_raise_exc)</span>
+
+        <span class="s2">def </span><span class="s1">send_signal(self</span><span class="s2">, </span><span class="s1">sig):</span>
+            <span class="s0">&quot;&quot;&quot;Send a signal to the process 
+            &quot;&quot;&quot;</span>
+            <span class="s2">if </span><span class="s1">sig == signal.SIGTERM:</span>
+                <span class="s1">self.terminate()</span>
+            <span class="s2">elif </span><span class="s1">sig == signal.CTRL_C_EVENT:</span>
+                <span class="s1">os.kill(self.pid</span><span class="s2">, </span><span class="s1">signal.CTRL_C_EVENT)</span>
+            <span class="s2">elif </span><span class="s1">sig == signal.CTRL_BREAK_EVENT:</span>
+                <span class="s1">os.kill(self.pid</span><span class="s2">, </span><span class="s1">signal.CTRL_BREAK_EVENT)</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s4">&quot;Unsupported signal: {}&quot;</span><span class="s1">.format(sig))</span>
+
+        <span class="s2">def </span><span class="s1">terminate(self):</span>
+            <span class="s0">&quot;&quot;&quot;Terminates the process 
+            &quot;&quot;&quot;</span>
+            <span class="s3"># pylint:disable=undefined-variable</span>
+            <span class="s3"># Don't terminate a process that we know has already died.</span>
+            <span class="s2">if </span><span class="s1">self.returncode </span><span class="s2">is not None</span><span class="s1">:</span>
+                <span class="s2">return</span>
+            <span class="s2">try</span><span class="s1">:</span>
+                <span class="s1">TerminateProcess(self._handle</span><span class="s2">, </span><span class="s5">1</span><span class="s1">)</span>
+            <span class="s2">except </span><span class="s1">OSError </span><span class="s2">as </span><span class="s1">e:</span>
+                <span class="s3"># ERROR_ACCESS_DENIED (winerror 5) is received when the</span>
+                <span class="s3"># process already died.</span>
+                <span class="s2">if </span><span class="s1">e.winerror != </span><span class="s5">5</span><span class="s1">:</span>
+                    <span class="s2">raise</span>
+                <span class="s1">rc = GetExitCodeProcess(self._handle)</span>
+                <span class="s2">if </span><span class="s1">rc == STILL_ACTIVE:</span>
+                    <span class="s2">raise</span>
+                <span class="s1">self.returncode = rc</span>
+                <span class="s1">self.result.set(self.returncode)</span>
+
+        <span class="s1">kill = terminate</span>
+
+    <span class="s2">else</span><span class="s1">:</span>
+        <span class="s3">#</span>
+        <span class="s3"># POSIX methods</span>
+        <span class="s3">#</span>
+
+        <span class="s2">def </span><span class="s1">rawlink(self</span><span class="s2">, </span><span class="s1">callback):</span>
+            <span class="s3"># Not public documented, part of the link protocol</span>
+            <span class="s1">self.result.rawlink(linkproxy(callback</span><span class="s2">, </span><span class="s1">self))</span>
+        <span class="s3"># XXX unlink</span>
+
+        <span class="s2">def </span><span class="s1">_get_handles(self</span><span class="s2">, </span><span class="s1">stdin</span><span class="s2">, </span><span class="s1">stdout</span><span class="s2">, </span><span class="s1">stderr):</span>
+            <span class="s0">&quot;&quot;&quot;Construct and return tuple with IO objects: 
+            p2cread, p2cwrite, c2pread, c2pwrite, errread, errwrite 
+            &quot;&quot;&quot;</span>
+            <span class="s1">p2cread</span><span class="s2">, </span><span class="s1">p2cwrite = -</span><span class="s5">1</span><span class="s2">, </span><span class="s1">-</span><span class="s5">1</span>
+            <span class="s1">c2pread</span><span class="s2">, </span><span class="s1">c2pwrite = -</span><span class="s5">1</span><span class="s2">, </span><span class="s1">-</span><span class="s5">1</span>
+            <span class="s1">errread</span><span class="s2">, </span><span class="s1">errwrite = -</span><span class="s5">1</span><span class="s2">, </span><span class="s1">-</span><span class="s5">1</span>
+
+            <span class="s2">try</span><span class="s1">:</span>
+                <span class="s1">DEVNULL</span>
+            <span class="s2">except </span><span class="s1">NameError:</span>
+                <span class="s1">_devnull = object()</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s1">_devnull = DEVNULL</span>
+
+            <span class="s2">if </span><span class="s1">stdin </span><span class="s2">is None</span><span class="s1">:</span>
+                <span class="s2">pass</span>
+            <span class="s2">elif </span><span class="s1">stdin == PIPE:</span>
+                <span class="s1">p2cread</span><span class="s2">, </span><span class="s1">p2cwrite = self.pipe_cloexec()</span>
+            <span class="s2">elif </span><span class="s1">stdin == _devnull:</span>
+                <span class="s1">p2cread = self._get_devnull()</span>
+            <span class="s2">elif </span><span class="s1">isinstance(stdin</span><span class="s2">, </span><span class="s1">int):</span>
+                <span class="s1">p2cread = stdin</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s3"># Assuming file-like object</span>
+                <span class="s1">p2cread = stdin.fileno()</span>
+
+            <span class="s2">if </span><span class="s1">stdout </span><span class="s2">is None</span><span class="s1">:</span>
+                <span class="s2">pass</span>
+            <span class="s2">elif </span><span class="s1">stdout == PIPE:</span>
+                <span class="s1">c2pread</span><span class="s2">, </span><span class="s1">c2pwrite = self.pipe_cloexec()</span>
+            <span class="s2">elif </span><span class="s1">stdout == _devnull:</span>
+                <span class="s1">c2pwrite = self._get_devnull()</span>
+            <span class="s2">elif </span><span class="s1">isinstance(stdout</span><span class="s2">, </span><span class="s1">int):</span>
+                <span class="s1">c2pwrite = stdout</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s3"># Assuming file-like object</span>
+                <span class="s1">c2pwrite = stdout.fileno()</span>
+
+            <span class="s2">if </span><span class="s1">stderr </span><span class="s2">is None</span><span class="s1">:</span>
+                <span class="s2">pass</span>
+            <span class="s2">elif </span><span class="s1">stderr == PIPE:</span>
+                <span class="s1">errread</span><span class="s2">, </span><span class="s1">errwrite = self.pipe_cloexec()</span>
+            <span class="s2">elif </span><span class="s1">stderr == STDOUT: </span><span class="s3"># pylint:disable=undefined-variable</span>
+                <span class="s2">if </span><span class="s1">c2pwrite != -</span><span class="s5">1</span><span class="s1">:</span>
+                    <span class="s1">errwrite = c2pwrite</span>
+                <span class="s2">else</span><span class="s1">: </span><span class="s3"># child's stdout is not set, use parent's stdout</span>
+                    <span class="s1">errwrite = sys.__stdout__.fileno()</span>
+            <span class="s2">elif </span><span class="s1">stderr == _devnull:</span>
+                <span class="s1">errwrite = self._get_devnull()</span>
+            <span class="s2">elif </span><span class="s1">isinstance(stderr</span><span class="s2">, </span><span class="s1">int):</span>
+                <span class="s1">errwrite = stderr</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s3"># Assuming file-like object</span>
+                <span class="s1">errwrite = stderr.fileno()</span>
+
+            <span class="s2">return </span><span class="s1">(p2cread</span><span class="s2">, </span><span class="s1">p2cwrite</span><span class="s2">,</span>
+                    <span class="s1">c2pread</span><span class="s2">, </span><span class="s1">c2pwrite</span><span class="s2">,</span>
+                    <span class="s1">errread</span><span class="s2">, </span><span class="s1">errwrite)</span>
+
+        <span class="s2">def </span><span class="s1">_set_cloexec_flag(self</span><span class="s2">, </span><span class="s1">fd</span><span class="s2">, </span><span class="s1">cloexec=</span><span class="s2">True</span><span class="s1">):</span>
+            <span class="s2">try</span><span class="s1">:</span>
+                <span class="s1">cloexec_flag = fcntl.FD_CLOEXEC</span>
+            <span class="s2">except </span><span class="s1">AttributeError:</span>
+                <span class="s1">cloexec_flag = </span><span class="s5">1</span>
+
+            <span class="s1">old = fcntl.fcntl(fd</span><span class="s2">, </span><span class="s1">fcntl.F_GETFD)</span>
+            <span class="s2">if </span><span class="s1">cloexec:</span>
+                <span class="s1">fcntl.fcntl(fd</span><span class="s2">, </span><span class="s1">fcntl.F_SETFD</span><span class="s2">, </span><span class="s1">old | cloexec_flag)</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s1">fcntl.fcntl(fd</span><span class="s2">, </span><span class="s1">fcntl.F_SETFD</span><span class="s2">, </span><span class="s1">old &amp; ~cloexec_flag)</span>
+
+        <span class="s2">def </span><span class="s1">_remove_nonblock_flag(self</span><span class="s2">, </span><span class="s1">fd):</span>
+            <span class="s1">flags = fcntl.fcntl(fd</span><span class="s2">, </span><span class="s1">fcntl.F_GETFL) &amp; (~os.O_NONBLOCK)</span>
+            <span class="s1">fcntl.fcntl(fd</span><span class="s2">, </span><span class="s1">fcntl.F_SETFL</span><span class="s2">, </span><span class="s1">flags)</span>
+
+        <span class="s2">def </span><span class="s1">pipe_cloexec(self):</span>
+            <span class="s0">&quot;&quot;&quot;Create a pipe with FDs set CLOEXEC.&quot;&quot;&quot;</span>
+            <span class="s3"># Pipes' FDs are set CLOEXEC by default because we don't want them</span>
+            <span class="s3"># to be inherited by other subprocesses: the CLOEXEC flag is removed</span>
+            <span class="s3"># from the child's FDs by _dup2(), between fork() and exec().</span>
+            <span class="s3"># This is not atomic: we would need the pipe2() syscall for that.</span>
+            <span class="s1">r</span><span class="s2">, </span><span class="s1">w = os.pipe()</span>
+            <span class="s1">self._set_cloexec_flag(r)</span>
+            <span class="s1">self._set_cloexec_flag(w)</span>
+            <span class="s2">return </span><span class="s1">r</span><span class="s2">, </span><span class="s1">w</span>
+
+        <span class="s1">_POSSIBLE_FD_DIRS = (</span>
+            <span class="s4">'/proc/self/fd'</span><span class="s2">, </span><span class="s3"># Linux</span>
+            <span class="s4">'/dev/fd'</span><span class="s2">, </span><span class="s3"># BSD, including macOS</span>
+        <span class="s1">)</span>
+
+        <span class="s1">@classmethod</span>
+        <span class="s2">def </span><span class="s1">_close_fds(cls</span><span class="s2">, </span><span class="s1">keep</span><span class="s2">, </span><span class="s1">errpipe_write):</span>
+            <span class="s3"># From the C code:</span>
+            <span class="s3"># errpipe_write is part of keep. It must be closed at</span>
+            <span class="s3"># exec(), but kept open in the child process until exec() is</span>
+            <span class="s3"># called.</span>
+            <span class="s2">for </span><span class="s1">path </span><span class="s2">in </span><span class="s1">cls._POSSIBLE_FD_DIRS:</span>
+                <span class="s2">if </span><span class="s1">os.path.isdir(path):</span>
+                    <span class="s2">return </span><span class="s1">cls._close_fds_from_path(path</span><span class="s2">, </span><span class="s1">keep</span><span class="s2">, </span><span class="s1">errpipe_write)</span>
+            <span class="s2">return </span><span class="s1">cls._close_fds_brute_force(keep</span><span class="s2">, </span><span class="s1">errpipe_write)</span>
+
+        <span class="s1">@classmethod</span>
+        <span class="s2">def </span><span class="s1">_close_fds_from_path(cls</span><span class="s2">, </span><span class="s1">path</span><span class="s2">, </span><span class="s1">keep</span><span class="s2">, </span><span class="s1">errpipe_write):</span>
+            <span class="s3"># path names a directory whose only entries have</span>
+            <span class="s3"># names that are ascii strings of integers in base10,</span>
+            <span class="s3"># corresponding to the fds the current process has open</span>
+            <span class="s2">try</span><span class="s1">:</span>
+                <span class="s1">fds = [int(fname) </span><span class="s2">for </span><span class="s1">fname </span><span class="s2">in </span><span class="s1">os.listdir(path)]</span>
+            <span class="s2">except </span><span class="s1">(ValueError</span><span class="s2">, </span><span class="s1">OSError):</span>
+                <span class="s1">cls._close_fds_brute_force(keep</span><span class="s2">, </span><span class="s1">errpipe_write)</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s2">for </span><span class="s1">i </span><span class="s2">in </span><span class="s1">keep:</span>
+                    <span class="s2">if </span><span class="s1">i == errpipe_write:</span>
+                        <span class="s2">continue</span>
+                    <span class="s1">_set_inheritable(i</span><span class="s2">, True</span><span class="s1">)</span>
+
+                <span class="s2">for </span><span class="s1">fd </span><span class="s2">in </span><span class="s1">fds:</span>
+                    <span class="s2">if </span><span class="s1">fd </span><span class="s2">in </span><span class="s1">keep </span><span class="s2">or </span><span class="s1">fd &lt; </span><span class="s5">3</span><span class="s1">:</span>
+                        <span class="s2">continue</span>
+                    <span class="s2">try</span><span class="s1">:</span>
+                        <span class="s1">os.close(fd)</span>
+                    <span class="s2">except</span><span class="s1">:</span>
+                        <span class="s2">pass</span>
+
+        <span class="s1">@classmethod</span>
+        <span class="s2">def </span><span class="s1">_close_fds_brute_force(cls</span><span class="s2">, </span><span class="s1">keep</span><span class="s2">, </span><span class="s1">errpipe_write):</span>
+            <span class="s3"># `keep` is a set of fds, so we</span>
+            <span class="s3"># use os.closerange from 3 to min(keep)</span>
+            <span class="s3"># and then from max(keep + 1) to MAXFD and</span>
+            <span class="s3"># loop through filling in the gaps.</span>
+
+            <span class="s3"># Under new python versions, we need to explicitly set</span>
+            <span class="s3"># passed fds to be inheritable or they will go away on exec</span>
+
+            <span class="s3"># XXX: Bug: We implicitly rely on errpipe_write being the largest open</span>
+            <span class="s3"># FD so that we don't change its cloexec flag.</span>
+
+            <span class="s2">assert </span><span class="s1">hasattr(os</span><span class="s2">, </span><span class="s4">'closerange'</span><span class="s1">) </span><span class="s3"># Added in 2.7</span>
+            <span class="s1">keep = sorted(keep)</span>
+            <span class="s1">min_keep = min(keep)</span>
+            <span class="s1">max_keep = max(keep)</span>
+            <span class="s1">os.closerange(</span><span class="s5">3</span><span class="s2">, </span><span class="s1">min_keep)</span>
+            <span class="s1">os.closerange(max_keep + </span><span class="s5">1</span><span class="s2">, </span><span class="s1">MAXFD)</span>
+
+            <span class="s2">for </span><span class="s1">i </span><span class="s2">in </span><span class="s1">xrange(min_keep</span><span class="s2">, </span><span class="s1">max_keep):</span>
+                <span class="s2">if </span><span class="s1">i </span><span class="s2">in </span><span class="s1">keep:</span>
+                    <span class="s1">_set_inheritable(i</span><span class="s2">, True</span><span class="s1">)</span>
+                    <span class="s2">continue</span>
+
+                <span class="s2">try</span><span class="s1">:</span>
+                    <span class="s1">os.close(i)</span>
+                <span class="s2">except</span><span class="s1">:</span>
+                    <span class="s2">pass</span>
+
+        <span class="s2">def </span><span class="s1">_execute_child(self</span><span class="s2">, </span><span class="s1">args</span><span class="s2">, </span><span class="s1">executable</span><span class="s2">, </span><span class="s1">preexec_fn</span><span class="s2">, </span><span class="s1">close_fds</span><span class="s2">,</span>
+                           <span class="s1">pass_fds</span><span class="s2">, </span><span class="s1">cwd</span><span class="s2">, </span><span class="s1">env</span><span class="s2">, </span><span class="s1">universal_newlines</span><span class="s2">,</span>
+                           <span class="s1">startupinfo</span><span class="s2">, </span><span class="s1">creationflags</span><span class="s2">, </span><span class="s1">shell</span><span class="s2">,</span>
+                           <span class="s1">p2cread</span><span class="s2">, </span><span class="s1">p2cwrite</span><span class="s2">,</span>
+                           <span class="s1">c2pread</span><span class="s2">, </span><span class="s1">c2pwrite</span><span class="s2">,</span>
+                           <span class="s1">errread</span><span class="s2">, </span><span class="s1">errwrite</span><span class="s2">,</span>
+                           <span class="s1">restore_signals</span><span class="s2">,</span>
+                           <span class="s1">gid</span><span class="s2">, </span><span class="s1">gids</span><span class="s2">, </span><span class="s1">uid</span><span class="s2">, </span><span class="s1">umask</span><span class="s2">,</span>
+                           <span class="s1">start_new_session</span><span class="s2">, </span><span class="s1">process_group):</span>
+            <span class="s0">&quot;&quot;&quot;Execute program (POSIX version)&quot;&quot;&quot;</span>
+
+            <span class="s2">if </span><span class="s1">PY3 </span><span class="s2">and </span><span class="s1">isinstance(args</span><span class="s2">, </span><span class="s1">(str</span><span class="s2">, </span><span class="s1">bytes)):</span>
+                <span class="s1">args = [args]</span>
+            <span class="s2">elif not </span><span class="s1">PY3 </span><span class="s2">and </span><span class="s1">isinstance(args</span><span class="s2">, </span><span class="s1">string_types):</span>
+                <span class="s1">args = [args]</span>
+            <span class="s2">elif </span><span class="s1">isinstance(args</span><span class="s2">, </span><span class="s1">PathLike):</span>
+                <span class="s2">if </span><span class="s1">shell:</span>
+                    <span class="s2">raise </span><span class="s1">TypeError(</span><span class="s4">'path-like args is not allowed when '</span>
+                                    <span class="s4">'shell is true'</span><span class="s1">)</span>
+                <span class="s1">args = [fsencode(args)] </span><span class="s3"># os.PathLike -&gt; [str]</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s1">args = list(args)</span>
+
+            <span class="s2">if </span><span class="s1">shell:</span>
+                <span class="s3"># On Android the default shell is at '/system/bin/sh'.</span>
+                <span class="s1">unix_shell = (</span>
+                    <span class="s4">'/system/bin/sh' </span><span class="s2">if </span><span class="s1">hasattr(sys</span><span class="s2">, </span><span class="s4">'getandroidapilevel'</span><span class="s1">) </span><span class="s2">else </span><span class="s4">'/bin/sh'</span>
+                <span class="s1">)</span>
+                <span class="s1">args = [unix_shell</span><span class="s2">, </span><span class="s4">&quot;-c&quot;</span><span class="s1">] + args</span>
+                <span class="s2">if </span><span class="s1">executable:</span>
+                    <span class="s1">args[</span><span class="s5">0</span><span class="s1">] = executable</span>
+
+            <span class="s2">if </span><span class="s1">executable </span><span class="s2">is None</span><span class="s1">:</span>
+                <span class="s1">executable = args[</span><span class="s5">0</span><span class="s1">]</span>
+
+            <span class="s1">self._loop.install_sigchld()</span>
+
+            <span class="s3"># For transferring possible exec failure from child to parent</span>
+            <span class="s3"># The first char specifies the exception type: 0 means</span>
+            <span class="s3"># OSError, 1 means some other error.</span>
+            <span class="s1">errpipe_read</span><span class="s2">, </span><span class="s1">errpipe_write = self.pipe_cloexec()</span>
+            <span class="s3"># errpipe_write must not be in the standard io 0, 1, or 2 fd range.</span>
+            <span class="s1">low_fds_to_close = []</span>
+            <span class="s2">while </span><span class="s1">errpipe_write &lt; </span><span class="s5">3</span><span class="s1">:</span>
+                <span class="s1">low_fds_to_close.append(errpipe_write)</span>
+                <span class="s1">errpipe_write = os.dup(errpipe_write)</span>
+            <span class="s2">for </span><span class="s1">low_fd </span><span class="s2">in </span><span class="s1">low_fds_to_close:</span>
+                <span class="s1">os.close(low_fd)</span>
+            <span class="s2">try</span><span class="s1">:</span>
+                <span class="s2">try</span><span class="s1">:</span>
+                    <span class="s1">gc_was_enabled = gc.isenabled()</span>
+                    <span class="s3"># Disable gc to avoid bug where gc -&gt; file_dealloc -&gt;</span>
+                    <span class="s3"># write to stderr -&gt; hang.  http://bugs.python.org/issue1336</span>
+                    <span class="s1">gc.disable()</span>
+                    <span class="s2">try</span><span class="s1">:</span>
+                        <span class="s1">self.pid = fork_and_watch(self._on_child</span><span class="s2">, </span><span class="s1">self._loop</span><span class="s2">, True, </span><span class="s1">fork)</span>
+                    <span class="s2">except</span><span class="s1">:</span>
+                        <span class="s2">if </span><span class="s1">gc_was_enabled:</span>
+                            <span class="s1">gc.enable()</span>
+                        <span class="s2">raise</span>
+                    <span class="s2">if </span><span class="s1">self.pid == </span><span class="s5">0</span><span class="s1">:</span>
+                        <span class="s3"># Child</span>
+
+                        <span class="s3"># XXX: Technically we're doing a lot of stuff here that</span>
+                        <span class="s3"># may not be safe to do before a exec(), depending on the OS.</span>
+                        <span class="s3"># CPython 3 goes to great lengths to precompute a lot</span>
+                        <span class="s3"># of this info before the fork and pass it all to C functions that</span>
+                        <span class="s3"># try hard not to call things like malloc(). (Of course,</span>
+                        <span class="s3"># CPython 2 pretty much did what we're doing.)</span>
+                        <span class="s2">try</span><span class="s1">:</span>
+                            <span class="s3"># Close parent's pipe ends</span>
+                            <span class="s2">if </span><span class="s1">p2cwrite != -</span><span class="s5">1</span><span class="s1">:</span>
+                                <span class="s1">os.close(p2cwrite)</span>
+                            <span class="s2">if </span><span class="s1">c2pread != -</span><span class="s5">1</span><span class="s1">:</span>
+                                <span class="s1">os.close(c2pread)</span>
+                            <span class="s2">if </span><span class="s1">errread != -</span><span class="s5">1</span><span class="s1">:</span>
+                                <span class="s1">os.close(errread)</span>
+                            <span class="s1">os.close(errpipe_read)</span>
+
+                            <span class="s3"># When duping fds, if there arises a situation</span>
+                            <span class="s3"># where one of the fds is either 0, 1 or 2, it</span>
+                            <span class="s3"># is possible that it is overwritten (#12607).</span>
+                            <span class="s2">if </span><span class="s1">c2pwrite == </span><span class="s5">0</span><span class="s1">:</span>
+                                <span class="s1">c2pwrite = os.dup(c2pwrite)</span>
+                                <span class="s1">_set_inheritable(c2pwrite</span><span class="s2">, False</span><span class="s1">)</span>
+                            <span class="s2">while </span><span class="s1">errwrite </span><span class="s2">in </span><span class="s1">(</span><span class="s5">0</span><span class="s2">, </span><span class="s5">1</span><span class="s1">):</span>
+                                <span class="s1">errwrite = os.dup(errwrite)</span>
+                                <span class="s1">_set_inheritable(errwrite</span><span class="s2">, False</span><span class="s1">)</span>
+
+                            <span class="s3"># Dup fds for child</span>
+                            <span class="s2">def </span><span class="s1">_dup2(existing</span><span class="s2">, </span><span class="s1">desired):</span>
+                                <span class="s3"># dup2() removes the CLOEXEC flag but</span>
+                                <span class="s3"># we must do it ourselves if dup2()</span>
+                                <span class="s3"># would be a no-op (issue #10806).</span>
+                                <span class="s2">if </span><span class="s1">existing == desired:</span>
+                                    <span class="s1">self._set_cloexec_flag(existing</span><span class="s2">, False</span><span class="s1">)</span>
+                                <span class="s2">elif </span><span class="s1">existing != -</span><span class="s5">1</span><span class="s1">:</span>
+                                    <span class="s1">os.dup2(existing</span><span class="s2">, </span><span class="s1">desired)</span>
+                                <span class="s2">try</span><span class="s1">:</span>
+                                    <span class="s1">self._remove_nonblock_flag(desired)</span>
+                                <span class="s2">except </span><span class="s1">OSError:</span>
+                                    <span class="s3"># Ignore EBADF, it may not actually be</span>
+                                    <span class="s3"># open yet.</span>
+                                    <span class="s3"># Tested beginning in 3.7.0b3 test_subprocess.py</span>
+                                    <span class="s2">pass</span>
+                            <span class="s1">_dup2(p2cread</span><span class="s2">, </span><span class="s5">0</span><span class="s1">)</span>
+                            <span class="s1">_dup2(c2pwrite</span><span class="s2">, </span><span class="s5">1</span><span class="s1">)</span>
+                            <span class="s1">_dup2(errwrite</span><span class="s2">, </span><span class="s5">2</span><span class="s1">)</span>
+
+                            <span class="s3"># Close pipe fds.  Make sure we don't close the</span>
+                            <span class="s3"># same fd more than once, or standard fds.</span>
+                            <span class="s2">if not </span><span class="s1">PY3:</span>
+                                <span class="s1">closed = set([</span><span class="s2">None</span><span class="s1">])</span>
+                                <span class="s2">for </span><span class="s1">fd </span><span class="s2">in </span><span class="s1">[p2cread</span><span class="s2">, </span><span class="s1">c2pwrite</span><span class="s2">, </span><span class="s1">errwrite]:</span>
+                                    <span class="s2">if </span><span class="s1">fd </span><span class="s2">not in </span><span class="s1">closed </span><span class="s2">and </span><span class="s1">fd &gt; </span><span class="s5">2</span><span class="s1">:</span>
+                                        <span class="s1">os.close(fd)</span>
+                                        <span class="s1">closed.add(fd)</span>
+
+                            <span class="s3"># Python 3 (with a working set_inheritable):</span>
+                            <span class="s3"># We no longer manually close p2cread,</span>
+	                        <span class="s3"># c2pwrite, and errwrite here as</span>
+	                        <span class="s3"># _close_open_fds takes care when it is</span>
+	                        <span class="s3"># not already non-inheritable.</span>
+
+                            <span class="s2">if </span><span class="s1">cwd </span><span class="s2">is not None</span><span class="s1">:</span>
+                                <span class="s2">try</span><span class="s1">:</span>
+                                    <span class="s1">os.chdir(cwd)</span>
+                                <span class="s2">except </span><span class="s1">OSError </span><span class="s2">as </span><span class="s1">e:</span>
+                                    <span class="s1">e._failed_chdir = </span><span class="s2">True</span>
+                                    <span class="s2">raise</span>
+
+                            <span class="s3"># Python 3.9</span>
+                            <span class="s2">if </span><span class="s1">umask &gt;= </span><span class="s5">0</span><span class="s1">:</span>
+                                <span class="s1">os.umask(umask)</span>
+                            <span class="s3"># XXX: CPython does _Py_RestoreSignals here.</span>
+                            <span class="s3"># Then setsid() based on ???</span>
+                            <span class="s2">if </span><span class="s1">gids:</span>
+                                <span class="s1">os.setgroups(gids)</span>
+                            <span class="s2">if </span><span class="s1">gid:</span>
+                                <span class="s1">os.setregid(gid</span><span class="s2">, </span><span class="s1">gid)</span>
+                            <span class="s2">if </span><span class="s1">uid:</span>
+                                <span class="s1">os.setreuid(uid</span><span class="s2">, </span><span class="s1">uid)</span>
+                            <span class="s2">if </span><span class="s1">process_group </span><span class="s2">is not None</span><span class="s1">:</span>
+                                <span class="s1">os.setpgid(</span><span class="s5">0</span><span class="s2">, </span><span class="s1">process_group)</span>
+                            <span class="s2">if </span><span class="s1">preexec_fn:</span>
+                                <span class="s1">preexec_fn()</span>
+
+                            <span class="s3"># Close all other fds, if asked for. This must be done</span>
+                            <span class="s3"># after preexec_fn runs.</span>
+                            <span class="s2">if </span><span class="s1">close_fds:</span>
+                                <span class="s1">fds_to_keep = set(pass_fds)</span>
+                                <span class="s1">fds_to_keep.add(errpipe_write)</span>
+                                <span class="s1">self._close_fds(fds_to_keep</span><span class="s2">, </span><span class="s1">errpipe_write)</span>
+
+                            <span class="s2">if </span><span class="s1">restore_signals:</span>
+                                <span class="s3"># restore the documented signals back to sig_dfl;</span>
+                                <span class="s3"># not all will be defined on every platform</span>
+                                <span class="s2">for </span><span class="s1">sig </span><span class="s2">in </span><span class="s4">'SIGPIPE'</span><span class="s2">, </span><span class="s4">'SIGXFZ'</span><span class="s2">, </span><span class="s4">'SIGXFSZ'</span><span class="s1">:</span>
+                                    <span class="s1">sig = getattr(signal</span><span class="s2">, </span><span class="s1">sig</span><span class="s2">, None</span><span class="s1">)</span>
+                                    <span class="s2">if </span><span class="s1">sig </span><span class="s2">is not None</span><span class="s1">:</span>
+                                        <span class="s1">signal.signal(sig</span><span class="s2">, </span><span class="s1">signal.SIG_DFL)</span>
+
+                            <span class="s2">if </span><span class="s1">start_new_session:</span>
+                                <span class="s1">os.setsid()</span>
+
+                            <span class="s2">if </span><span class="s1">env </span><span class="s2">is None</span><span class="s1">:</span>
+                                <span class="s1">os.execvp(executable</span><span class="s2">, </span><span class="s1">args)</span>
+                            <span class="s2">else</span><span class="s1">:</span>
+                                <span class="s2">if </span><span class="s1">PY3:</span>
+                                    <span class="s3"># Python 3.6 started testing for</span>
+                                    <span class="s3"># bytes values in the env; it also</span>
+                                    <span class="s3"># started encoding strs using</span>
+                                    <span class="s3"># fsencode and using a lower-level</span>
+                                    <span class="s3"># API that takes a list of keys</span>
+                                    <span class="s3"># and values. We don't have access</span>
+                                    <span class="s3"># to that API, so we go the reverse direction.</span>
+                                    <span class="s1">env = {os.fsdecode(k) </span><span class="s2">if </span><span class="s1">isinstance(k</span><span class="s2">, </span><span class="s1">bytes) </span><span class="s2">else </span><span class="s1">k:</span>
+                                           <span class="s1">os.fsdecode(v) </span><span class="s2">if </span><span class="s1">isinstance(v</span><span class="s2">, </span><span class="s1">bytes) </span><span class="s2">else </span><span class="s1">v</span>
+                                           <span class="s2">for </span><span class="s1">k</span><span class="s2">, </span><span class="s1">v </span><span class="s2">in </span><span class="s1">env.items()}</span>
+                                <span class="s1">os.execvpe(executable</span><span class="s2">, </span><span class="s1">args</span><span class="s2">, </span><span class="s1">env)</span>
+
+                        <span class="s2">except</span><span class="s1">:</span>
+                            <span class="s1">exc_type</span><span class="s2">, </span><span class="s1">exc_value</span><span class="s2">, </span><span class="s1">tb = sys.exc_info()</span>
+                            <span class="s3"># Save the traceback and attach it to the exception object</span>
+                            <span class="s1">exc_lines = traceback.format_exception(exc_type</span><span class="s2">,</span>
+                                                                   <span class="s1">exc_value</span><span class="s2">,</span>
+                                                                   <span class="s1">tb)</span>
+                            <span class="s1">exc_value.child_traceback = </span><span class="s4">''</span><span class="s1">.join(exc_lines)</span>
+                            <span class="s1">os.write(errpipe_write</span><span class="s2">, </span><span class="s1">pickle.dumps(exc_value))</span>
+
+                        <span class="s2">finally</span><span class="s1">:</span>
+                            <span class="s3"># Make sure that the process exits no matter what.</span>
+                            <span class="s3"># The return code does not matter much as it won't be</span>
+                            <span class="s3"># reported to the application</span>
+                            <span class="s1">os._exit(</span><span class="s5">1</span><span class="s1">)</span>
+
+                    <span class="s3"># Parent</span>
+                    <span class="s1">self._child_created = </span><span class="s2">True</span>
+                    <span class="s2">if </span><span class="s1">gc_was_enabled:</span>
+                        <span class="s1">gc.enable()</span>
+                <span class="s2">finally</span><span class="s1">:</span>
+                    <span class="s3"># be sure the FD is closed no matter what</span>
+                    <span class="s1">os.close(errpipe_write)</span>
+
+                <span class="s3"># self._devnull is not always defined.</span>
+                <span class="s1">devnull_fd = getattr(self</span><span class="s2">, </span><span class="s4">'_devnull'</span><span class="s2">, None</span><span class="s1">)</span>
+                <span class="s2">if </span><span class="s1">p2cread != -</span><span class="s5">1 </span><span class="s2">and </span><span class="s1">p2cwrite != -</span><span class="s5">1 </span><span class="s2">and </span><span class="s1">p2cread != devnull_fd:</span>
+                    <span class="s1">os.close(p2cread)</span>
+                <span class="s2">if </span><span class="s1">c2pwrite != -</span><span class="s5">1 </span><span class="s2">and </span><span class="s1">c2pread != -</span><span class="s5">1 </span><span class="s2">and </span><span class="s1">c2pwrite != devnull_fd:</span>
+                    <span class="s1">os.close(c2pwrite)</span>
+                <span class="s2">if </span><span class="s1">errwrite != -</span><span class="s5">1 </span><span class="s2">and </span><span class="s1">errread != -</span><span class="s5">1 </span><span class="s2">and </span><span class="s1">errwrite != devnull_fd:</span>
+                    <span class="s1">os.close(errwrite)</span>
+                <span class="s2">if </span><span class="s1">devnull_fd </span><span class="s2">is not None</span><span class="s1">:</span>
+                    <span class="s1">os.close(devnull_fd)</span>
+                <span class="s3"># Prevent a double close of these fds from __init__ on error.</span>
+                <span class="s1">self._closed_child_pipe_fds = </span><span class="s2">True</span>
+
+                <span class="s3"># Wait for exec to fail or succeed; possibly raising exception</span>
+                <span class="s1">errpipe_read = FileObject(errpipe_read</span><span class="s2">, </span><span class="s4">'rb'</span><span class="s1">)</span>
+                <span class="s1">data = errpipe_read.read()</span>
+            <span class="s2">finally</span><span class="s1">:</span>
+                <span class="s2">try</span><span class="s1">:</span>
+                    <span class="s2">if </span><span class="s1">hasattr(errpipe_read</span><span class="s2">, </span><span class="s4">'close'</span><span class="s1">):</span>
+                        <span class="s1">errpipe_read.close()</span>
+                    <span class="s2">else</span><span class="s1">:</span>
+                        <span class="s1">os.close(errpipe_read)</span>
+                <span class="s2">except </span><span class="s1">OSError:</span>
+                    <span class="s3"># Especially on PyPy, we sometimes see the above</span>
+                    <span class="s3"># `os.close(errpipe_read)` raise an OSError.</span>
+                    <span class="s3"># It's not entirely clear why, but it happens in</span>
+                    <span class="s3"># InterprocessSignalTests.test_main sometimes, which must mean</span>
+                    <span class="s3"># we have some sort of race condition.</span>
+                    <span class="s2">pass</span>
+                <span class="s2">finally</span><span class="s1">:</span>
+                    <span class="s1">errpipe_read = -</span><span class="s5">1</span>
+
+            <span class="s2">if </span><span class="s1">data != </span><span class="s6">b&quot;&quot;</span><span class="s1">:</span>
+                <span class="s1">self.wait()</span>
+                <span class="s1">child_exception = pickle.loads(data)</span>
+                <span class="s2">for </span><span class="s1">fd </span><span class="s2">in </span><span class="s1">(p2cwrite</span><span class="s2">, </span><span class="s1">c2pread</span><span class="s2">, </span><span class="s1">errread):</span>
+                    <span class="s2">if </span><span class="s1">fd </span><span class="s2">is not None and </span><span class="s1">fd != -</span><span class="s5">1</span><span class="s1">:</span>
+                        <span class="s1">os.close(fd)</span>
+                <span class="s2">if </span><span class="s1">isinstance(child_exception</span><span class="s2">, </span><span class="s1">OSError):</span>
+                    <span class="s1">child_exception.filename = executable</span>
+                    <span class="s2">if </span><span class="s1">hasattr(child_exception</span><span class="s2">, </span><span class="s4">'_failed_chdir'</span><span class="s1">):</span>
+                        <span class="s1">child_exception.filename = cwd</span>
+                <span class="s2">raise </span><span class="s1">child_exception</span>
+
+        <span class="s2">def </span><span class="s1">_handle_exitstatus(self</span><span class="s2">, </span><span class="s1">sts</span><span class="s2">, </span><span class="s1">_WIFSIGNALED=os.WIFSIGNALED</span><span class="s2">,</span>
+                               <span class="s1">_WTERMSIG=os.WTERMSIG</span><span class="s2">, </span><span class="s1">_WIFEXITED=os.WIFEXITED</span><span class="s2">,</span>
+                               <span class="s1">_WEXITSTATUS=os.WEXITSTATUS</span><span class="s2">, </span><span class="s1">_WIFSTOPPED=os.WIFSTOPPED</span><span class="s2">,</span>
+                               <span class="s1">_WSTOPSIG=os.WSTOPSIG):</span>
+            <span class="s3"># This method is called (indirectly) by __del__, so it cannot</span>
+            <span class="s3"># refer to anything outside of its local scope.</span>
+            <span class="s3"># (gevent: We don't have a __del__, that's in the CPython implementation.)</span>
+            <span class="s2">if </span><span class="s1">_WIFSIGNALED(sts):</span>
+                <span class="s1">self.returncode = -_WTERMSIG(sts)</span>
+            <span class="s2">elif </span><span class="s1">_WIFEXITED(sts):</span>
+                <span class="s1">self.returncode = _WEXITSTATUS(sts)</span>
+            <span class="s2">elif </span><span class="s1">_WIFSTOPPED(sts):</span>
+                <span class="s1">self.returncode = -_WSTOPSIG(sts)</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s3"># Should never happen</span>
+                <span class="s2">raise </span><span class="s1">RuntimeError(</span><span class="s4">&quot;Unknown child exit status!&quot;</span><span class="s1">)</span>
+
+        <span class="s2">def </span><span class="s1">_internal_poll(self):</span>
+            <span class="s0">&quot;&quot;&quot;Check if child process has terminated.  Returns returncode 
+            attribute. 
+            &quot;&quot;&quot;</span>
+            <span class="s2">if </span><span class="s1">self.returncode </span><span class="s2">is None</span><span class="s1">:</span>
+                <span class="s2">if </span><span class="s1">get_hub() </span><span class="s2">is not </span><span class="s1">getcurrent():</span>
+                    <span class="s1">sig_pending = getattr(self._loop</span><span class="s2">, </span><span class="s4">'sig_pending'</span><span class="s2">, True</span><span class="s1">)</span>
+                    <span class="s2">if </span><span class="s1">sig_pending:</span>
+                        <span class="s1">sleep(</span><span class="s5">0.00001</span><span class="s1">)</span>
+            <span class="s2">return </span><span class="s1">self.returncode</span>
+
+        <span class="s2">def </span><span class="s1">wait(self</span><span class="s2">, </span><span class="s1">timeout=</span><span class="s2">None, </span><span class="s1">_raise_exc=PY3):</span>
+            <span class="s0">&quot;&quot;&quot; 
+            Wait for child process to terminate.  Returns :attr:`returncode` 
+            attribute. 
+ 
+            :keyword timeout: The floating point number of seconds to 
+                wait. Under Python 2, this is a gevent extension, and 
+                we simply return if it expires. Under Python 3, if 
+                this time elapses without finishing the process, 
+                :exc:`TimeoutExpired` is raised. 
+            &quot;&quot;&quot;</span>
+            <span class="s2">return </span><span class="s1">self._gevent_result_wait(timeout</span><span class="s2">, </span><span class="s1">_raise_exc)</span>
+
+        <span class="s2">def </span><span class="s1">send_signal(self</span><span class="s2">, </span><span class="s1">sig):</span>
+            <span class="s0">&quot;&quot;&quot;Send a signal to the process 
+            &quot;&quot;&quot;</span>
+            <span class="s3"># Skip signalling a process that we know has already died.</span>
+            <span class="s2">if </span><span class="s1">self.returncode </span><span class="s2">is None</span><span class="s1">:</span>
+                <span class="s1">os.kill(self.pid</span><span class="s2">, </span><span class="s1">sig)</span>
+
+        <span class="s2">def </span><span class="s1">terminate(self):</span>
+            <span class="s0">&quot;&quot;&quot;Terminate the process with SIGTERM 
+            &quot;&quot;&quot;</span>
+            <span class="s1">self.send_signal(signal.SIGTERM)</span>
+
+        <span class="s2">def </span><span class="s1">kill(self):</span>
+            <span class="s0">&quot;&quot;&quot;Kill the process with SIGKILL 
+            &quot;&quot;&quot;</span>
+            <span class="s1">self.send_signal(signal.SIGKILL)</span>
+
+
+<span class="s2">def </span><span class="s1">_with_stdout_stderr(exc</span><span class="s2">, </span><span class="s1">stderr):</span>
+    <span class="s3"># Prior to Python 3.5, most exceptions didn't have stdout</span>
+    <span class="s3"># and stderr attributes and can't take the stderr attribute in their</span>
+    <span class="s3"># constructor</span>
+    <span class="s1">exc.stdout = exc.output</span>
+    <span class="s1">exc.stderr = stderr</span>
+    <span class="s2">return </span><span class="s1">exc</span>
+
+<span class="s2">class </span><span class="s1">CompletedProcess(object):</span>
+    <span class="s0">&quot;&quot;&quot; 
+    A process that has finished running. 
+ 
+    This is returned by run(). 
+ 
+    Attributes: 
+      - args: The list or str args passed to run(). 
+      - returncode: The exit code of the process, negative for signals. 
+      - stdout: The standard output (None if not captured). 
+      - stderr: The standard error (None if not captured). 
+ 
+    .. versionadded:: 1.2a1 
+       This first appeared in Python 3.5 and is available to all 
+       Python versions in gevent. 
+    &quot;&quot;&quot;</span>
+    <span class="s2">if </span><span class="s1">GenericAlias </span><span class="s2">is not None</span><span class="s1">:</span>
+        <span class="s3"># Sigh, 3.9 spreading typing stuff all over everything</span>
+        <span class="s1">__class_getitem__ = classmethod(GenericAlias)</span>
+
+    <span class="s2">def </span><span class="s1">__init__(self</span><span class="s2">, </span><span class="s1">args</span><span class="s2">, </span><span class="s1">returncode</span><span class="s2">, </span><span class="s1">stdout=</span><span class="s2">None, </span><span class="s1">stderr=</span><span class="s2">None</span><span class="s1">):</span>
+        <span class="s1">self.args = args</span>
+        <span class="s1">self.returncode = returncode</span>
+        <span class="s1">self.stdout = stdout</span>
+        <span class="s1">self.stderr = stderr</span>
+
+    <span class="s2">def </span><span class="s1">__repr__(self):</span>
+        <span class="s1">args = [</span><span class="s4">'args={!r}'</span><span class="s1">.format(self.args)</span><span class="s2">,</span>
+                <span class="s4">'returncode={!r}'</span><span class="s1">.format(self.returncode)]</span>
+        <span class="s2">if </span><span class="s1">self.stdout </span><span class="s2">is not None</span><span class="s1">:</span>
+            <span class="s1">args.append(</span><span class="s4">'stdout={!r}'</span><span class="s1">.format(self.stdout))</span>
+        <span class="s2">if </span><span class="s1">self.stderr </span><span class="s2">is not None</span><span class="s1">:</span>
+            <span class="s1">args.append(</span><span class="s4">'stderr={!r}'</span><span class="s1">.format(self.stderr))</span>
+        <span class="s2">return </span><span class="s4">&quot;{}({})&quot;</span><span class="s1">.format(type(self).__name__</span><span class="s2">, </span><span class="s4">', '</span><span class="s1">.join(args))</span>
+
+    <span class="s2">def </span><span class="s1">check_returncode(self):</span>
+        <span class="s0">&quot;&quot;&quot;Raise CalledProcessError if the exit code is non-zero.&quot;&quot;&quot;</span>
+        <span class="s2">if </span><span class="s1">self.returncode:</span>
+            <span class="s3"># pylint:disable=undefined-variable</span>
+            <span class="s2">raise </span><span class="s1">_with_stdout_stderr(CalledProcessError(self.returncode</span><span class="s2">, </span><span class="s1">self.args</span><span class="s2">, </span><span class="s1">self.stdout)</span><span class="s2">, </span><span class="s1">self.stderr)</span>
+
+
+<span class="s2">def </span><span class="s1">run(*popenargs</span><span class="s2">, </span><span class="s1">**kwargs):</span>
+    <span class="s0">&quot;&quot;&quot; 
+    run(args, *, stdin=None, input=None, stdout=None, stderr=None, shell=False, timeout=None, check=False) -&gt; CompletedProcess 
+ 
+    Run command with arguments and return a CompletedProcess instance. 
+ 
+    The returned instance will have attributes args, returncode, stdout and 
+    stderr. By default, stdout and stderr are not captured, and those attributes 
+    will be None. Pass stdout=PIPE and/or stderr=PIPE in order to capture them. 
+    If check is True and the exit code was non-zero, it raises a 
+    CalledProcessError. The CalledProcessError object will have the return code 
+    in the returncode attribute, and output &amp; stderr attributes if those streams 
+    were captured. 
+ 
+    If timeout is given, and the process takes too long, a TimeoutExpired 
+    exception will be raised. 
+ 
+    There is an optional argument &quot;input&quot;, allowing you to 
+    pass a string to the subprocess's stdin.  If you use this argument 
+    you may not also use the Popen constructor's &quot;stdin&quot; argument, as 
+    it will be used internally. 
+    The other arguments are the same as for the Popen constructor. 
+    If universal_newlines=True is passed, the &quot;input&quot; argument must be a 
+    string and stdout/stderr in the returned object will be strings rather than 
+    bytes. 
+ 
+    .. versionadded:: 1.2a1 
+       This function first appeared in Python 3.5. It is available on all Python 
+       versions gevent supports. 
+ 
+    .. versionchanged:: 1.3a2 
+       Add the ``capture_output`` argument from Python 3.7. It automatically sets 
+       ``stdout`` and ``stderr`` to ``PIPE``. It is an error to pass either 
+       of those arguments along with ``capture_output``. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">input = kwargs.pop(</span><span class="s4">'input'</span><span class="s2">, None</span><span class="s1">)</span>
+    <span class="s1">timeout = kwargs.pop(</span><span class="s4">'timeout'</span><span class="s2">, None</span><span class="s1">)</span>
+    <span class="s1">check = kwargs.pop(</span><span class="s4">'check'</span><span class="s2">, False</span><span class="s1">)</span>
+    <span class="s1">capture_output = kwargs.pop(</span><span class="s4">'capture_output'</span><span class="s2">, False</span><span class="s1">)</span>
+
+    <span class="s2">if </span><span class="s1">input </span><span class="s2">is not None</span><span class="s1">:</span>
+        <span class="s2">if </span><span class="s4">'stdin' </span><span class="s2">in </span><span class="s1">kwargs:</span>
+            <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s4">'stdin and input arguments may not both be used.'</span><span class="s1">)</span>
+        <span class="s1">kwargs[</span><span class="s4">'stdin'</span><span class="s1">] = PIPE</span>
+
+    <span class="s2">if </span><span class="s1">capture_output:</span>
+        <span class="s2">if </span><span class="s1">(</span><span class="s4">'stdout' </span><span class="s2">in </span><span class="s1">kwargs) </span><span class="s2">or </span><span class="s1">(</span><span class="s4">'stderr' </span><span class="s2">in </span><span class="s1">kwargs):</span>
+            <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s4">'stdout and stderr arguments may not be used '</span>
+                             <span class="s4">'with capture_output.'</span><span class="s1">)</span>
+        <span class="s1">kwargs[</span><span class="s4">'stdout'</span><span class="s1">] = PIPE</span>
+        <span class="s1">kwargs[</span><span class="s4">'stderr'</span><span class="s1">] = PIPE</span>
+
+    <span class="s2">with </span><span class="s1">Popen(*popenargs</span><span class="s2">, </span><span class="s1">**kwargs) </span><span class="s2">as </span><span class="s1">process:</span>
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s1">stdout</span><span class="s2">, </span><span class="s1">stderr = process.communicate(input</span><span class="s2">, </span><span class="s1">timeout=timeout)</span>
+        <span class="s2">except </span><span class="s1">TimeoutExpired:</span>
+            <span class="s1">process.kill()</span>
+            <span class="s1">stdout</span><span class="s2">, </span><span class="s1">stderr = process.communicate()</span>
+            <span class="s2">raise </span><span class="s1">_with_stdout_stderr(TimeoutExpired(process.args</span><span class="s2">, </span><span class="s1">timeout</span><span class="s2">, </span><span class="s1">output=stdout)</span><span class="s2">, </span><span class="s1">stderr)</span>
+        <span class="s2">except</span><span class="s1">:</span>
+            <span class="s1">process.kill()</span>
+            <span class="s1">process.wait()</span>
+            <span class="s2">raise</span>
+        <span class="s1">retcode = process.poll()</span>
+        <span class="s2">if </span><span class="s1">check </span><span class="s2">and </span><span class="s1">retcode:</span>
+            <span class="s3"># pylint:disable=undefined-variable</span>
+            <span class="s2">raise </span><span class="s1">_with_stdout_stderr(CalledProcessError(retcode</span><span class="s2">, </span><span class="s1">process.args</span><span class="s2">, </span><span class="s1">stdout)</span><span class="s2">, </span><span class="s1">stderr)</span>
+
+    <span class="s2">return </span><span class="s1">CompletedProcess(process.args</span><span class="s2">, </span><span class="s1">retcode</span><span class="s2">, </span><span class="s1">stdout</span><span class="s2">, </span><span class="s1">stderr)</span>
+
+<span class="s2">def </span><span class="s1">_gevent_did_monkey_patch(target_module</span><span class="s2">, </span><span class="s1">*_args</span><span class="s2">, </span><span class="s1">**_kwargs):</span>
+    <span class="s3"># Beginning on 3.8 on Mac, the 'spawn' method became the default</span>
+    <span class="s3"># start method. That doesn't fire fork watchers and we can't</span>
+    <span class="s3"># easily patch to make it do so: multiprocessing uses the private</span>
+    <span class="s3"># c accelerated _subprocess module to implement this. Instead we revert</span>
+    <span class="s3"># back to using fork.</span>
+    <span class="s2">from </span><span class="s1">gevent._compat </span><span class="s2">import </span><span class="s1">MAC</span>
+
+    <span class="s2">if </span><span class="s1">MAC:</span>
+        <span class="s2">import </span><span class="s1">multiprocessing</span>
+        <span class="s2">if </span><span class="s1">hasattr(multiprocessing</span><span class="s2">, </span><span class="s4">'set_start_method'</span><span class="s1">):</span>
+            <span class="s1">multiprocessing.set_start_method(</span><span class="s4">'fork'</span><span class="s2">, </span><span class="s1">force=</span><span class="s2">True</span><span class="s1">)</span>
+</pre>
+</body>
+</html>

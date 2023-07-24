@@ -1,0 +1,105 @@
+<html>
+<head>
+<title>test__core_fork.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #cc7832;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #808080;}
+.s3 { color: #6897bb;}
+.s4 { color: #6a8759;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+test__core_fork.py</font>
+</center></td></tr></table>
+<pre><span class="s0">from </span><span class="s1">__future__ </span><span class="s0">import </span><span class="s1">print_function</span>
+<span class="s0">from </span><span class="s1">gevent </span><span class="s0">import </span><span class="s1">monkey</span>
+<span class="s1">monkey.patch_all()</span>
+
+<span class="s0">import </span><span class="s1">os</span>
+<span class="s0">import </span><span class="s1">unittest</span>
+<span class="s0">import </span><span class="s1">multiprocessing</span>
+
+<span class="s0">import </span><span class="s1">gevent</span>
+
+<span class="s1">hub = gevent.get_hub()</span>
+<span class="s1">pid = os.getpid()</span>
+<span class="s1">newpid = </span><span class="s0">None</span>
+
+
+<span class="s0">def </span><span class="s1">on_fork():</span>
+    <span class="s0">global </span><span class="s1">newpid</span>
+    <span class="s1">newpid = os.getpid()</span>
+
+<span class="s1">fork_watcher = hub.loop.fork(ref=</span><span class="s0">False</span><span class="s1">)</span>
+<span class="s1">fork_watcher.start(on_fork)</span>
+
+
+<span class="s0">def </span><span class="s1">in_child(q):</span>
+    <span class="s2"># libev only calls fork callbacks at the beginning of</span>
+    <span class="s2"># the loop; we use callbacks extensively so it takes *two*</span>
+    <span class="s2"># calls to sleep (with a timer) to actually get wrapped</span>
+    <span class="s2"># around to the beginning of the loop.</span>
+    <span class="s1">gevent.sleep(</span><span class="s3">0.001</span><span class="s1">)</span>
+    <span class="s1">gevent.sleep(</span><span class="s3">0.001</span><span class="s1">)</span>
+    <span class="s1">q.put(newpid)</span>
+
+
+<span class="s0">class </span><span class="s1">Test(unittest.TestCase):</span>
+
+    <span class="s0">def </span><span class="s1">test(self):</span>
+        <span class="s1">self.assertEqual(hub.threadpool.size</span><span class="s0">, </span><span class="s3">0</span><span class="s1">)</span>
+        <span class="s2"># Use a thread to make us multi-threaded</span>
+        <span class="s1">hub.threadpool.apply(</span><span class="s0">lambda</span><span class="s1">: </span><span class="s0">None</span><span class="s1">)</span>
+        <span class="s1">self.assertEqual(hub.threadpool.size</span><span class="s0">, </span><span class="s3">1</span><span class="s1">)</span>
+
+        <span class="s2"># Not all platforms use fork by default, so we want to force it,</span>
+        <span class="s2"># where possible. The test is still useful even if we can't</span>
+        <span class="s2"># fork though.</span>
+        <span class="s0">try</span><span class="s1">:</span>
+            <span class="s1">fork_ctx = multiprocessing.get_context(</span><span class="s4">'fork'</span><span class="s1">)</span>
+        <span class="s0">except </span><span class="s1">(AttributeError</span><span class="s0">, </span><span class="s1">ValueError):</span>
+            <span class="s2"># ValueError if fork isn't supported.</span>
+            <span class="s2"># AttributeError on Python 2, which doesn't have get_context</span>
+            <span class="s1">fork_ctx = multiprocessing</span>
+
+        <span class="s2"># If the Queue is global, q.get() hangs on Windows; must pass as</span>
+        <span class="s2"># an argument.</span>
+        <span class="s1">q = fork_ctx.Queue()</span>
+        <span class="s1">p = fork_ctx.Process(target=in_child</span><span class="s0">, </span><span class="s1">args=(q</span><span class="s0">,</span><span class="s1">))</span>
+        <span class="s1">p.start()</span>
+        <span class="s1">p.join()</span>
+        <span class="s1">p_val = q.get()</span>
+
+        <span class="s1">self.assertIsNone(</span>
+            <span class="s1">newpid</span><span class="s0">,</span>
+            <span class="s4">&quot;The fork watcher ran in the parent for some reason.&quot;</span>
+        <span class="s1">)</span>
+        <span class="s1">self.assertIsNotNone(</span>
+            <span class="s1">p_val</span><span class="s0">,</span>
+            <span class="s4">&quot;The child process returned nothing, meaning the fork watcher didn't run in the child.&quot;</span>
+        <span class="s1">)</span>
+        <span class="s1">self.assertNotEqual(p_val</span><span class="s0">, </span><span class="s1">pid)</span>
+        <span class="s0">assert </span><span class="s1">p_val != pid</span>
+
+<span class="s0">if </span><span class="s1">__name__ == </span><span class="s4">'__main__'</span><span class="s1">:</span>
+    <span class="s2"># Must call for Windows to fork properly; the fork can't be in the top-level</span>
+    <span class="s1">multiprocessing.freeze_support()</span>
+
+    <span class="s2"># fork watchers weren't firing in multi-threading processes.</span>
+    <span class="s2"># This test is designed to prove that they are.</span>
+    <span class="s2"># However, it fails on Windows: The fork watcher never runs!</span>
+    <span class="s2"># This makes perfect sense: on Windows, our patches to os.fork()</span>
+    <span class="s2"># that call gevent.hub.reinit() don't get used; os.fork doesn't</span>
+    <span class="s2"># exist and multiprocessing.Process uses the windows-specific _subprocess.CreateProcess()</span>
+    <span class="s2"># to create a whole new process that has no relation to the current process;</span>
+    <span class="s2"># that process then calls multiprocessing.forking.main() to do its work.</span>
+    <span class="s2"># Since no state is shared, a fork watcher cannot exist in that process.</span>
+    <span class="s1">unittest.main()</span>
+</pre>
+</body>
+</html>

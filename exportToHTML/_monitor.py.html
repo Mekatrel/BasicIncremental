@@ -1,0 +1,333 @@
+<html>
+<head>
+<title>_monitor.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #cc7832;}
+.s3 { color: #6a8759;}
+.s4 { color: #629755; font-style: italic;}
+.s5 { color: #6897bb;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+_monitor.py</font>
+</center></td></tr></table>
+<pre><span class="s0"># Copyright (c) 2018 gevent. See LICENSE for details.</span>
+<span class="s2">from </span><span class="s1">__future__ </span><span class="s2">import </span><span class="s1">print_function</span><span class="s2">, </span><span class="s1">absolute_import</span><span class="s2">, </span><span class="s1">division</span>
+
+<span class="s2">import </span><span class="s1">os</span>
+<span class="s2">import </span><span class="s1">sys</span>
+
+<span class="s2">from </span><span class="s1">weakref </span><span class="s2">import </span><span class="s1">ref </span><span class="s2">as </span><span class="s1">wref</span>
+
+<span class="s2">from </span><span class="s1">greenlet </span><span class="s2">import </span><span class="s1">getcurrent</span>
+
+<span class="s2">from </span><span class="s1">gevent </span><span class="s2">import </span><span class="s1">config </span><span class="s2">as </span><span class="s1">GEVENT_CONFIG</span>
+<span class="s2">from </span><span class="s1">gevent.monkey </span><span class="s2">import </span><span class="s1">get_original</span>
+<span class="s2">from </span><span class="s1">gevent.events </span><span class="s2">import </span><span class="s1">notify</span>
+<span class="s2">from </span><span class="s1">gevent.events </span><span class="s2">import </span><span class="s1">EventLoopBlocked</span>
+<span class="s2">from </span><span class="s1">gevent.events </span><span class="s2">import </span><span class="s1">MemoryUsageThresholdExceeded</span>
+<span class="s2">from </span><span class="s1">gevent.events </span><span class="s2">import </span><span class="s1">MemoryUsageUnderThreshold</span>
+<span class="s2">from </span><span class="s1">gevent.events </span><span class="s2">import </span><span class="s1">IPeriodicMonitorThread</span>
+<span class="s2">from </span><span class="s1">gevent.events </span><span class="s2">import </span><span class="s1">implementer</span>
+
+<span class="s2">from </span><span class="s1">gevent._tracer </span><span class="s2">import </span><span class="s1">GreenletTracer</span>
+<span class="s2">from </span><span class="s1">gevent._compat </span><span class="s2">import </span><span class="s1">thread_mod_name</span>
+<span class="s2">from </span><span class="s1">gevent._compat </span><span class="s2">import </span><span class="s1">perf_counter</span>
+<span class="s2">from </span><span class="s1">gevent._compat </span><span class="s2">import </span><span class="s1">get_this_psutil_process</span>
+
+
+
+<span class="s1">__all__ = [</span>
+    <span class="s3">'PeriodicMonitoringThread'</span><span class="s2">,</span>
+<span class="s1">]</span>
+
+<span class="s1">get_thread_ident = get_original(thread_mod_name</span><span class="s2">, </span><span class="s3">'get_ident'</span><span class="s1">)</span>
+<span class="s1">start_new_thread = get_original(thread_mod_name</span><span class="s2">, </span><span class="s3">'start_new_thread'</span><span class="s1">)</span>
+<span class="s1">thread_sleep = get_original(</span><span class="s3">'time'</span><span class="s2">, </span><span class="s3">'sleep'</span><span class="s1">)</span>
+
+
+
+<span class="s2">class </span><span class="s1">MonitorWarning(RuntimeWarning):</span>
+    <span class="s4">&quot;&quot;&quot;The type of warnings we emit.&quot;&quot;&quot;</span>
+
+
+<span class="s2">class </span><span class="s1">_MonitorEntry(object):</span>
+
+    <span class="s1">__slots__ = (</span><span class="s3">'function'</span><span class="s2">, </span><span class="s3">'period'</span><span class="s2">, </span><span class="s3">'last_run_time'</span><span class="s1">)</span>
+
+    <span class="s2">def </span><span class="s1">__init__(self</span><span class="s2">, </span><span class="s1">function</span><span class="s2">, </span><span class="s1">period):</span>
+        <span class="s1">self.function = function</span>
+        <span class="s1">self.period = period</span>
+        <span class="s1">self.last_run_time = </span><span class="s5">0</span>
+
+    <span class="s2">def </span><span class="s1">__eq__(self</span><span class="s2">, </span><span class="s1">other):</span>
+        <span class="s2">return </span><span class="s1">self.function == other.function </span><span class="s2">and </span><span class="s1">self.period == other.period</span>
+
+    <span class="s2">def </span><span class="s1">__repr__(self):</span>
+        <span class="s2">return </span><span class="s1">repr((self.function</span><span class="s2">, </span><span class="s1">self.period</span><span class="s2">, </span><span class="s1">self.last_run_time))</span>
+
+
+<span class="s1">@implementer(IPeriodicMonitorThread)</span>
+<span class="s2">class </span><span class="s1">PeriodicMonitoringThread(object):</span>
+    <span class="s0"># This doesn't extend threading.Thread because that gets monkey-patched.</span>
+    <span class="s0"># We use the low-level 'start_new_thread' primitive instead.</span>
+
+    <span class="s0"># The amount of seconds we will sleep when we think we have nothing</span>
+    <span class="s0"># to do.</span>
+    <span class="s1">inactive_sleep_time = </span><span class="s5">2.0</span>
+
+    <span class="s0"># The absolute minimum we will sleep, regardless of</span>
+    <span class="s0"># what particular monitoring functions want to say.</span>
+    <span class="s1">min_sleep_time = </span><span class="s5">0.005</span>
+
+    <span class="s0"># The minimum period in seconds at which we will check memory usage.</span>
+    <span class="s0"># Getting memory usage is fairly expensive.</span>
+    <span class="s1">min_memory_monitor_period = </span><span class="s5">2</span>
+
+    <span class="s0"># A list of _MonitorEntry objects: [(function(hub), period, last_run_time))]</span>
+    <span class="s0"># The first entry is always our entry for self.monitor_blocking</span>
+    <span class="s1">_monitoring_functions = </span><span class="s2">None</span>
+
+    <span class="s0"># The calculated min sleep time for the monitoring functions list.</span>
+    <span class="s1">_calculated_sleep_time = </span><span class="s2">None</span>
+
+    <span class="s0"># A boolean value that also happens to capture the</span>
+    <span class="s0"># memory usage at the time we exceeded the threshold. Reset</span>
+    <span class="s0"># to 0 when we go back below.</span>
+    <span class="s1">_memory_exceeded = </span><span class="s5">0</span>
+
+    <span class="s0"># The instance of GreenletTracer we're using</span>
+    <span class="s1">_greenlet_tracer = </span><span class="s2">None</span>
+
+    <span class="s2">def </span><span class="s1">__init__(self</span><span class="s2">, </span><span class="s1">hub):</span>
+        <span class="s1">self._hub_wref = wref(hub</span><span class="s2">, </span><span class="s1">self._on_hub_gc)</span>
+        <span class="s1">self.should_run = </span><span class="s2">True</span>
+
+        <span class="s0"># Must be installed in the thread that the hub is running in;</span>
+        <span class="s0"># the trace function is threadlocal</span>
+        <span class="s2">assert </span><span class="s1">get_thread_ident() == hub.thread_ident</span>
+        <span class="s1">self._greenlet_tracer = GreenletTracer()</span>
+
+        <span class="s1">self._monitoring_functions = [_MonitorEntry(self.monitor_blocking</span><span class="s2">,</span>
+                                                    <span class="s1">GEVENT_CONFIG.max_blocking_time)]</span>
+        <span class="s1">self._calculated_sleep_time = GEVENT_CONFIG.max_blocking_time</span>
+        <span class="s0"># Create the actual monitoring thread. This is effectively a &quot;daemon&quot;</span>
+        <span class="s0"># thread.</span>
+        <span class="s1">self.monitor_thread_ident = start_new_thread(self</span><span class="s2">, </span><span class="s1">())</span>
+
+        <span class="s0"># We must track the PID to know if your thread has died after a fork</span>
+        <span class="s1">self.pid = os.getpid()</span>
+
+    <span class="s2">def </span><span class="s1">_on_fork(self):</span>
+        <span class="s0"># Pseudo-standard method that resolver_ares and threadpool</span>
+        <span class="s0"># also have, called by hub.reinit()</span>
+        <span class="s1">pid = os.getpid()</span>
+        <span class="s2">if </span><span class="s1">pid != self.pid:</span>
+            <span class="s1">self.pid = pid</span>
+            <span class="s1">self.monitor_thread_ident = start_new_thread(self</span><span class="s2">, </span><span class="s1">())</span>
+
+    <span class="s1">@property</span>
+    <span class="s2">def </span><span class="s1">hub(self):</span>
+        <span class="s2">return </span><span class="s1">self._hub_wref()</span>
+
+
+    <span class="s2">def </span><span class="s1">monitoring_functions(self):</span>
+        <span class="s0"># Return a list of _MonitorEntry objects</span>
+
+        <span class="s0"># Update max_blocking_time each time.</span>
+        <span class="s1">mbt = GEVENT_CONFIG.max_blocking_time </span><span class="s0"># XXX: Events so we know when this changes.</span>
+        <span class="s2">if </span><span class="s1">mbt != self._monitoring_functions[</span><span class="s5">0</span><span class="s1">].period:</span>
+            <span class="s1">self._monitoring_functions[</span><span class="s5">0</span><span class="s1">].period = mbt</span>
+            <span class="s1">self._calculated_sleep_time = min(x.period </span><span class="s2">for </span><span class="s1">x </span><span class="s2">in </span><span class="s1">self._monitoring_functions)</span>
+        <span class="s2">return </span><span class="s1">self._monitoring_functions</span>
+
+    <span class="s2">def </span><span class="s1">add_monitoring_function(self</span><span class="s2">, </span><span class="s1">function</span><span class="s2">, </span><span class="s1">period):</span>
+        <span class="s2">if not </span><span class="s1">callable(function):</span>
+            <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s3">&quot;function must be callable&quot;</span><span class="s1">)</span>
+
+        <span class="s2">if </span><span class="s1">period </span><span class="s2">is None</span><span class="s1">:</span>
+            <span class="s0"># Remove.</span>
+            <span class="s1">self._monitoring_functions = [</span>
+                <span class="s1">x </span><span class="s2">for </span><span class="s1">x </span><span class="s2">in </span><span class="s1">self._monitoring_functions</span>
+                <span class="s2">if </span><span class="s1">x.function != function</span>
+            <span class="s1">]</span>
+        <span class="s2">elif </span><span class="s1">period &lt;= </span><span class="s5">0</span><span class="s1">:</span>
+            <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s3">&quot;Period must be positive.&quot;</span><span class="s1">)</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s0"># Add or update period</span>
+            <span class="s1">entry = _MonitorEntry(function</span><span class="s2">, </span><span class="s1">period)</span>
+            <span class="s1">self._monitoring_functions = [</span>
+                <span class="s1">x </span><span class="s2">if </span><span class="s1">x.function != function </span><span class="s2">else </span><span class="s1">entry</span>
+                <span class="s2">for </span><span class="s1">x </span><span class="s2">in </span><span class="s1">self._monitoring_functions</span>
+            <span class="s1">]</span>
+            <span class="s2">if </span><span class="s1">entry </span><span class="s2">not in </span><span class="s1">self._monitoring_functions:</span>
+                <span class="s1">self._monitoring_functions.append(entry)</span>
+        <span class="s1">self._calculated_sleep_time = min(x.period </span><span class="s2">for </span><span class="s1">x </span><span class="s2">in </span><span class="s1">self._monitoring_functions)</span>
+
+    <span class="s2">def </span><span class="s1">calculate_sleep_time(self):</span>
+        <span class="s1">min_sleep = self._calculated_sleep_time</span>
+        <span class="s2">if </span><span class="s1">min_sleep &lt;= </span><span class="s5">0</span><span class="s1">:</span>
+            <span class="s0"># Everyone wants to be disabled. Sleep for a longer period of</span>
+            <span class="s0"># time than usual so we don't spin unnecessarily. We might be</span>
+            <span class="s0"># enabled again in the future.</span>
+            <span class="s2">return </span><span class="s1">self.inactive_sleep_time</span>
+        <span class="s2">return </span><span class="s1">max((min_sleep</span><span class="s2">, </span><span class="s1">self.min_sleep_time))</span>
+
+    <span class="s2">def </span><span class="s1">kill(self):</span>
+        <span class="s2">if not </span><span class="s1">self.should_run:</span>
+            <span class="s0"># Prevent overwriting trace functions.</span>
+            <span class="s2">return</span>
+        <span class="s0"># Stop this monitoring thread from running.</span>
+        <span class="s1">self.should_run = </span><span class="s2">False</span>
+        <span class="s0"># Uninstall our tracing hook</span>
+        <span class="s1">self._greenlet_tracer.kill()</span>
+
+    <span class="s2">def </span><span class="s1">_on_hub_gc(self</span><span class="s2">, </span><span class="s1">_):</span>
+        <span class="s1">self.kill()</span>
+
+    <span class="s2">def </span><span class="s1">__call__(self):</span>
+        <span class="s0"># The function that runs in the monitoring thread.</span>
+        <span class="s0"># We cannot use threading.current_thread because it would</span>
+        <span class="s0"># create an immortal DummyThread object.</span>
+        <span class="s1">getcurrent().gevent_monitoring_thread = wref(self)</span>
+
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s2">while </span><span class="s1">self.should_run:</span>
+                <span class="s1">functions = self.monitoring_functions()</span>
+                <span class="s2">assert </span><span class="s1">functions</span>
+                <span class="s1">sleep_time = self.calculate_sleep_time()</span>
+
+                <span class="s1">thread_sleep(sleep_time)</span>
+
+                <span class="s0"># Make sure the hub is still around, and still active,</span>
+                <span class="s0"># and keep it around while we are here.</span>
+                <span class="s1">hub = self.hub</span>
+                <span class="s2">if not </span><span class="s1">hub:</span>
+                    <span class="s1">self.kill()</span>
+
+                <span class="s2">if </span><span class="s1">self.should_run:</span>
+                    <span class="s1">this_run = perf_counter()</span>
+                    <span class="s2">for </span><span class="s1">entry </span><span class="s2">in </span><span class="s1">functions:</span>
+                        <span class="s1">f = entry.function</span>
+                        <span class="s1">period = entry.period</span>
+                        <span class="s1">last_run = entry.last_run_time</span>
+                        <span class="s2">if </span><span class="s1">period </span><span class="s2">and </span><span class="s1">last_run + period &lt;= this_run:</span>
+                            <span class="s1">entry.last_run_time = this_run</span>
+                            <span class="s1">f(hub)</span>
+                <span class="s2">del </span><span class="s1">hub </span><span class="s0"># break our reference to hub while we sleep</span>
+
+        <span class="s2">except </span><span class="s1">SystemExit:</span>
+            <span class="s2">pass</span>
+        <span class="s2">except</span><span class="s1">: </span><span class="s0"># pylint:disable=bare-except</span>
+            <span class="s0"># We're a daemon thread, so swallow any exceptions that get here</span>
+            <span class="s0"># during interpreter shutdown.</span>
+            <span class="s2">if not </span><span class="s1">sys </span><span class="s2">or not </span><span class="s1">sys.stderr: </span><span class="s0"># pragma: no cover</span>
+                <span class="s0"># Interpreter is shutting down</span>
+                <span class="s2">pass</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s1">hub = self.hub</span>
+                <span class="s2">if </span><span class="s1">hub </span><span class="s2">is not None</span><span class="s1">:</span>
+                    <span class="s0"># XXX: This tends to do bad things like end the process, because we</span>
+                    <span class="s0"># try to switch *threads*, which can't happen. Need something better.</span>
+                    <span class="s1">hub.handle_error(self</span><span class="s2">, </span><span class="s1">*sys.exc_info())</span>
+
+    <span class="s2">def </span><span class="s1">monitor_blocking(self</span><span class="s2">, </span><span class="s1">hub):</span>
+        <span class="s0"># Called periodically to see if the trace function has</span>
+        <span class="s0"># fired to switch greenlets. If not, we will print</span>
+        <span class="s0"># the greenlet tree.</span>
+
+        <span class="s0"># For tests, we return a true value when we think we found something</span>
+        <span class="s0"># blocking</span>
+
+        <span class="s1">did_block = self._greenlet_tracer.did_block_hub(hub)</span>
+        <span class="s2">if not </span><span class="s1">did_block:</span>
+            <span class="s2">return</span>
+
+        <span class="s1">active_greenlet = did_block[</span><span class="s5">1</span><span class="s1">] </span><span class="s0"># pylint:disable=unsubscriptable-object</span>
+        <span class="s1">report = self._greenlet_tracer.did_block_hub_report(</span>
+            <span class="s1">hub</span><span class="s2">, </span><span class="s1">active_greenlet</span><span class="s2">,</span>
+            <span class="s1">dict(greenlet_stacks=</span><span class="s2">False, </span><span class="s1">current_thread_ident=self.monitor_thread_ident))</span>
+
+        <span class="s1">stream = hub.exception_stream</span>
+        <span class="s2">for </span><span class="s1">line </span><span class="s2">in </span><span class="s1">report:</span>
+            <span class="s0"># Printing line by line may interleave with other things,</span>
+            <span class="s0"># but it should also prevent a &quot;reentrant call to print&quot;</span>
+            <span class="s0"># when the report is large.</span>
+            <span class="s1">print(line</span><span class="s2">, </span><span class="s1">file=stream)</span>
+
+        <span class="s1">notify(EventLoopBlocked(active_greenlet</span><span class="s2">, </span><span class="s1">GEVENT_CONFIG.max_blocking_time</span><span class="s2">, </span><span class="s1">report))</span>
+        <span class="s2">return </span><span class="s1">(active_greenlet</span><span class="s2">, </span><span class="s1">report)</span>
+
+    <span class="s2">def </span><span class="s1">ignore_current_greenlet_blocking(self):</span>
+        <span class="s1">self._greenlet_tracer.ignore_current_greenlet_blocking()</span>
+
+    <span class="s2">def </span><span class="s1">monitor_current_greenlet_blocking(self):</span>
+        <span class="s1">self._greenlet_tracer.monitor_current_greenlet_blocking()</span>
+
+    <span class="s2">def </span><span class="s1">_get_process(self): </span><span class="s0"># pylint:disable=method-hidden</span>
+        <span class="s1">proc = get_this_psutil_process()</span>
+        <span class="s1">self._get_process = </span><span class="s2">lambda</span><span class="s1">: proc</span>
+        <span class="s2">return </span><span class="s1">proc</span>
+
+    <span class="s2">def </span><span class="s1">can_monitor_memory_usage(self):</span>
+        <span class="s2">return </span><span class="s1">self._get_process() </span><span class="s2">is not None</span>
+
+    <span class="s2">def </span><span class="s1">install_monitor_memory_usage(self):</span>
+        <span class="s0"># Start monitoring memory usage, if possible.</span>
+        <span class="s0"># If not possible, emit a warning.</span>
+        <span class="s2">if not </span><span class="s1">self.can_monitor_memory_usage():</span>
+            <span class="s2">import </span><span class="s1">warnings</span>
+            <span class="s1">warnings.warn(</span><span class="s3">&quot;Unable to monitor memory usage. Install psutil.&quot;</span><span class="s2">,</span>
+                          <span class="s1">MonitorWarning)</span>
+            <span class="s2">return</span>
+
+        <span class="s1">self.add_monitoring_function(self.monitor_memory_usage</span><span class="s2">,</span>
+                                     <span class="s1">max(GEVENT_CONFIG.memory_monitor_period</span><span class="s2">,</span>
+                                         <span class="s1">self.min_memory_monitor_period))</span>
+
+    <span class="s2">def </span><span class="s1">monitor_memory_usage(self</span><span class="s2">, </span><span class="s1">_hub):</span>
+        <span class="s1">max_allowed = GEVENT_CONFIG.max_memory_usage</span>
+        <span class="s2">if not </span><span class="s1">max_allowed:</span>
+            <span class="s0"># They disabled it.</span>
+            <span class="s2">return </span><span class="s1">-</span><span class="s5">1 </span><span class="s0"># value for tests</span>
+
+        <span class="s1">rusage = self._get_process().memory_full_info()</span>
+        <span class="s0"># uss only documented available on Windows, Linux, and OS X.</span>
+        <span class="s0"># If not available, fall back to rss as an aproximation.</span>
+        <span class="s1">mem_usage = getattr(rusage</span><span class="s2">, </span><span class="s3">'uss'</span><span class="s2">, </span><span class="s5">0</span><span class="s1">) </span><span class="s2">or </span><span class="s1">rusage.rss</span>
+
+        <span class="s1">event = </span><span class="s2">None </span><span class="s0"># Return value for tests</span>
+
+        <span class="s2">if </span><span class="s1">mem_usage &gt; max_allowed:</span>
+            <span class="s2">if </span><span class="s1">mem_usage &gt; self._memory_exceeded:</span>
+                <span class="s0"># We're still growing</span>
+                <span class="s1">event = MemoryUsageThresholdExceeded(</span>
+                    <span class="s1">mem_usage</span><span class="s2">, </span><span class="s1">max_allowed</span><span class="s2">, </span><span class="s1">rusage)</span>
+                <span class="s1">notify(event)</span>
+            <span class="s1">self._memory_exceeded = mem_usage</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s0"># we're below. Were we above it last time?</span>
+            <span class="s2">if </span><span class="s1">self._memory_exceeded:</span>
+                <span class="s1">event = MemoryUsageUnderThreshold(</span>
+                    <span class="s1">mem_usage</span><span class="s2">, </span><span class="s1">max_allowed</span><span class="s2">, </span><span class="s1">rusage</span><span class="s2">, </span><span class="s1">self._memory_exceeded)</span>
+                <span class="s1">notify(event)</span>
+            <span class="s1">self._memory_exceeded = </span><span class="s5">0</span>
+
+        <span class="s2">return </span><span class="s1">event</span>
+
+    <span class="s2">def </span><span class="s1">__repr__(self):</span>
+        <span class="s2">return </span><span class="s3">'&lt;%s at %s in thread %s greenlet %r for %r&gt;' </span><span class="s1">% (</span>
+            <span class="s1">self.__class__.__name__</span><span class="s2">,</span>
+            <span class="s1">hex(id(self))</span><span class="s2">,</span>
+            <span class="s1">hex(self.monitor_thread_ident)</span><span class="s2">,</span>
+            <span class="s1">getcurrent()</span><span class="s2">,</span>
+            <span class="s1">self._hub_wref())</span>
+</pre>
+</body>
+</html>

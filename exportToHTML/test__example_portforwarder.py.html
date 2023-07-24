@@ -1,0 +1,89 @@
+<html>
+<head>
+<title>test__example_portforwarder.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #cc7832;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #6a8759;}
+.s3 { color: #808080;}
+.s4 { color: #6897bb;}
+.s5 { color: #a5c261;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+test__example_portforwarder.py</font>
+</center></td></tr></table>
+<pre><span class="s0">from </span><span class="s1">__future__ </span><span class="s0">import </span><span class="s1">print_function</span><span class="s0">, </span><span class="s1">absolute_import</span>
+<span class="s0">from </span><span class="s1">gevent </span><span class="s0">import </span><span class="s1">monkey; monkey.patch_all()</span>
+<span class="s0">import </span><span class="s1">signal</span>
+
+<span class="s0">import </span><span class="s1">socket</span>
+<span class="s0">from </span><span class="s1">time </span><span class="s0">import </span><span class="s1">sleep</span>
+
+<span class="s0">import </span><span class="s1">gevent</span>
+<span class="s0">from </span><span class="s1">gevent.server </span><span class="s0">import </span><span class="s1">StreamServer</span>
+
+<span class="s0">import </span><span class="s1">gevent.testing </span><span class="s0">as </span><span class="s1">greentest</span>
+<span class="s0">from </span><span class="s1">gevent.testing </span><span class="s0">import </span><span class="s1">util</span>
+
+<span class="s1">@greentest.skipOnLibuvOnCIOnPyPy(</span><span class="s2">&quot;Timing issues sometimes lead to connection refused&quot;</span><span class="s1">)</span>
+<span class="s0">class </span><span class="s1">Test(util.TestServer):</span>
+    <span class="s1">example = </span><span class="s2">'portforwarder.py'</span>
+    <span class="s3"># [listen on, forward to]</span>
+    <span class="s1">example_args = [</span><span class="s2">'127.0.0.1:10011'</span><span class="s0">, </span><span class="s2">'127.0.0.1:10012'</span><span class="s1">]</span>
+
+    <span class="s0">if </span><span class="s1">greentest.WIN:</span>
+        <span class="s0">from </span><span class="s1">subprocess </span><span class="s0">import </span><span class="s1">CREATE_NEW_PROCESS_GROUP</span>
+        <span class="s3"># Must be in a new process group to use CTRL_C_EVENT, otherwise</span>
+        <span class="s3"># we get killed too</span>
+        <span class="s1">start_kwargs = {</span><span class="s2">'creationflags'</span><span class="s1">: CREATE_NEW_PROCESS_GROUP}</span>
+
+    <span class="s0">def </span><span class="s1">after(self):</span>
+        <span class="s0">if </span><span class="s1">greentest.WIN:</span>
+            <span class="s1">self.assertIsNotNone(self.popen.poll())</span>
+        <span class="s0">else</span><span class="s1">:</span>
+            <span class="s1">self.assertEqual(self.popen.poll()</span><span class="s0">, </span><span class="s4">0</span><span class="s1">)</span>
+
+    <span class="s0">def </span><span class="s1">_run_all_tests(self):</span>
+        <span class="s1">log = []</span>
+
+        <span class="s0">def </span><span class="s1">handle(sock</span><span class="s0">, </span><span class="s1">_address):</span>
+            <span class="s0">while True</span><span class="s1">:</span>
+                <span class="s1">data = sock.recv(</span><span class="s4">1024</span><span class="s1">)</span>
+                <span class="s1">print(</span><span class="s2">'got %r' </span><span class="s1">% data)</span>
+                <span class="s0">if not </span><span class="s1">data:</span>
+                    <span class="s0">break</span>
+                <span class="s1">log.append(data)</span>
+
+        <span class="s1">server = StreamServer(self.example_args[</span><span class="s4">1</span><span class="s1">]</span><span class="s0">, </span><span class="s1">handle)</span>
+        <span class="s1">server.start()</span>
+        <span class="s0">try</span><span class="s1">:</span>
+            <span class="s1">conn = socket.create_connection((</span><span class="s2">'127.0.0.1'</span><span class="s0">, </span><span class="s4">10011</span><span class="s1">))</span>
+            <span class="s1">conn.sendall(</span><span class="s5">b'msg1'</span><span class="s1">)</span>
+            <span class="s1">sleep(</span><span class="s4">0.1</span><span class="s1">)</span>
+            <span class="s3"># On Windows, SIGTERM actually abruptly terminates the process;</span>
+            <span class="s3"># it can't be caught. However, CTRL_C_EVENT results in a KeyboardInterrupt</span>
+            <span class="s3"># being raised, so we can shut down properly.</span>
+            <span class="s1">self.popen.send_signal(getattr(signal</span><span class="s0">, </span><span class="s2">'CTRL_C_EVENT'</span><span class="s0">, </span><span class="s1">signal.SIGTERM))</span>
+            <span class="s1">sleep(</span><span class="s4">0.1</span><span class="s1">)</span>
+
+            <span class="s1">conn.sendall(</span><span class="s5">b'msg2'</span><span class="s1">)</span>
+            <span class="s1">conn.close()</span>
+
+            <span class="s0">with </span><span class="s1">gevent.Timeout(</span><span class="s4">2.1</span><span class="s1">):</span>
+                <span class="s1">self.popen.wait()</span>
+        <span class="s0">finally</span><span class="s1">:</span>
+            <span class="s1">server.close()</span>
+
+        <span class="s1">self.assertEqual([</span><span class="s5">b'msg1'</span><span class="s0">, </span><span class="s5">b'msg2'</span><span class="s1">]</span><span class="s0">, </span><span class="s1">log)</span>
+
+
+<span class="s0">if </span><span class="s1">__name__ == </span><span class="s2">'__main__'</span><span class="s1">:</span>
+    <span class="s1">greentest.main()</span>
+</pre>
+</body>
+</html>

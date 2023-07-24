@@ -1,0 +1,366 @@
+<html>
+<head>
+<title>_fileobjectposix.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #cc7832;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #808080;}
+.s3 { color: #6897bb;}
+.s4 { color: #6a8759;}
+.s5 { color: #a5c261;}
+.s6 { color: #629755; font-style: italic;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+_fileobjectposix.py</font>
+</center></td></tr></table>
+<pre><span class="s0">from </span><span class="s1">__future__ </span><span class="s0">import </span><span class="s1">absolute_import</span>
+<span class="s0">from </span><span class="s1">__future__ </span><span class="s0">import </span><span class="s1">print_function</span>
+<span class="s0">import </span><span class="s1">os</span>
+<span class="s0">import </span><span class="s1">sys</span>
+
+
+<span class="s0">from </span><span class="s1">io </span><span class="s0">import </span><span class="s1">BytesIO</span>
+<span class="s0">from </span><span class="s1">io </span><span class="s0">import </span><span class="s1">DEFAULT_BUFFER_SIZE</span>
+<span class="s0">from </span><span class="s1">io </span><span class="s0">import </span><span class="s1">FileIO</span>
+<span class="s0">from </span><span class="s1">io </span><span class="s0">import </span><span class="s1">RawIOBase</span>
+<span class="s0">from </span><span class="s1">io </span><span class="s0">import </span><span class="s1">UnsupportedOperation</span>
+
+<span class="s0">from </span><span class="s1">gevent._compat </span><span class="s0">import </span><span class="s1">reraise</span>
+<span class="s0">from </span><span class="s1">gevent._fileobjectcommon </span><span class="s0">import </span><span class="s1">cancel_wait_ex</span>
+<span class="s0">from </span><span class="s1">gevent._fileobjectcommon </span><span class="s0">import </span><span class="s1">FileObjectBase</span>
+<span class="s0">from </span><span class="s1">gevent._fileobjectcommon </span><span class="s0">import </span><span class="s1">OpenDescriptor</span>
+<span class="s0">from </span><span class="s1">gevent._fileobjectcommon </span><span class="s0">import </span><span class="s1">WriteIsWriteallMixin</span>
+<span class="s0">from </span><span class="s1">gevent._hub_primitives </span><span class="s0">import </span><span class="s1">wait_on_watcher</span>
+<span class="s0">from </span><span class="s1">gevent.hub </span><span class="s0">import </span><span class="s1">get_hub</span>
+<span class="s0">from </span><span class="s1">gevent.os </span><span class="s0">import </span><span class="s1">_read</span>
+<span class="s0">from </span><span class="s1">gevent.os </span><span class="s0">import </span><span class="s1">_write</span>
+<span class="s0">from </span><span class="s1">gevent.os </span><span class="s0">import </span><span class="s1">ignored_errors</span>
+<span class="s0">from </span><span class="s1">gevent.os </span><span class="s0">import </span><span class="s1">make_nonblocking</span>
+
+
+<span class="s0">class </span><span class="s1">GreenFileDescriptorIO(RawIOBase):</span>
+    <span class="s2"># Internal, undocumented, class. All that's documented is that this</span>
+    <span class="s2"># is a IOBase object. Constructor is private.</span>
+
+    <span class="s2"># Note that RawIOBase has a __del__ method that calls</span>
+    <span class="s2"># self.close(). (In C implementations like CPython, this is</span>
+    <span class="s2"># the type's tp_dealloc slot; prior to Python 3, the object doesn't</span>
+    <span class="s2"># appear to have a __del__ method, even though it functionally does)</span>
+
+    <span class="s1">_read_watcher = </span><span class="s0">None</span>
+    <span class="s1">_write_watcher = </span><span class="s0">None</span>
+    <span class="s1">_closed = </span><span class="s0">False</span>
+    <span class="s1">_seekable = </span><span class="s0">None</span>
+    <span class="s1">_keep_alive = </span><span class="s0">None </span><span class="s2"># An object that needs to live as long as we do.</span>
+
+    <span class="s0">def </span><span class="s1">__init__(self</span><span class="s0">, </span><span class="s1">fileno</span><span class="s0">, </span><span class="s1">open_descriptor</span><span class="s0">, </span><span class="s1">closefd=</span><span class="s0">True</span><span class="s1">):</span>
+        <span class="s1">RawIOBase.__init__(self)</span>
+
+        <span class="s1">self._closefd = closefd</span>
+        <span class="s1">self._fileno = fileno</span>
+        <span class="s1">self.name = fileno</span>
+        <span class="s1">self.mode = open_descriptor.fileio_mode</span>
+        <span class="s1">make_nonblocking(fileno)</span>
+        <span class="s1">readable = open_descriptor.can_read</span>
+        <span class="s1">writable = open_descriptor.can_write</span>
+
+        <span class="s1">self.hub = get_hub()</span>
+        <span class="s1">io_watcher = self.hub.loop.io</span>
+        <span class="s0">try</span><span class="s1">:</span>
+            <span class="s0">if </span><span class="s1">readable:</span>
+                <span class="s1">self._read_watcher = io_watcher(fileno</span><span class="s0">, </span><span class="s3">1</span><span class="s1">)</span>
+
+            <span class="s0">if </span><span class="s1">writable:</span>
+                <span class="s1">self._write_watcher = io_watcher(fileno</span><span class="s0">, </span><span class="s3">2</span><span class="s1">)</span>
+        <span class="s0">except</span><span class="s1">:</span>
+            <span class="s2"># If anything goes wrong, it's important to go ahead and</span>
+            <span class="s2"># close these watchers *now*, especially under libuv, so</span>
+            <span class="s2"># that they don't get eventually reclaimed by the garbage</span>
+            <span class="s2"># collector at some random time, thanks to the C level</span>
+            <span class="s2"># slot (even though we don't seem to have any actual references</span>
+            <span class="s2"># at the Python level). Previously, if we didn't close now,</span>
+            <span class="s2"># that random close in the future would cause issues if we had duplicated</span>
+            <span class="s2"># the fileno (if a wrapping with statement had closed an open fileobject,</span>
+            <span class="s2"># for example)</span>
+
+            <span class="s2"># test__fileobject can show a failure if this doesn't happen</span>
+            <span class="s2"># TRAVIS=true GEVENT_LOOP=libuv python -m gevent.tests.test__fileobject \</span>
+            <span class="s2">#    TestFileObjectPosix.test_seek TestFileObjectThread.test_bufsize_0</span>
+            <span class="s1">self.close()</span>
+            <span class="s0">raise</span>
+
+    <span class="s0">def </span><span class="s1">isatty(self):</span>
+        <span class="s2"># TODO: Couldn't we just subclass FileIO?</span>
+        <span class="s1">f = FileIO(self._fileno</span><span class="s0">, </span><span class="s4">'r'</span><span class="s0">, False</span><span class="s1">)</span>
+        <span class="s0">try</span><span class="s1">:</span>
+            <span class="s0">return </span><span class="s1">f.isatty()</span>
+        <span class="s0">finally</span><span class="s1">:</span>
+            <span class="s1">f.close()</span>
+
+    <span class="s0">def </span><span class="s1">readable(self):</span>
+        <span class="s0">return </span><span class="s1">self._read_watcher </span><span class="s0">is not None</span>
+
+    <span class="s0">def </span><span class="s1">writable(self):</span>
+        <span class="s0">return </span><span class="s1">self._write_watcher </span><span class="s0">is not None</span>
+
+    <span class="s0">def </span><span class="s1">seekable(self):</span>
+        <span class="s0">if </span><span class="s1">self._seekable </span><span class="s0">is None</span><span class="s1">:</span>
+            <span class="s0">try</span><span class="s1">:</span>
+                <span class="s1">os.lseek(self._fileno</span><span class="s0">, </span><span class="s3">0</span><span class="s0">, </span><span class="s1">os.SEEK_CUR)</span>
+            <span class="s0">except </span><span class="s1">OSError:</span>
+                <span class="s1">self._seekable = </span><span class="s0">False</span>
+            <span class="s0">else</span><span class="s1">:</span>
+                <span class="s1">self._seekable = </span><span class="s0">True</span>
+        <span class="s0">return </span><span class="s1">self._seekable</span>
+
+    <span class="s0">def </span><span class="s1">fileno(self):</span>
+        <span class="s0">return </span><span class="s1">self._fileno</span>
+
+    <span class="s1">@property</span>
+    <span class="s0">def </span><span class="s1">closed(self):</span>
+        <span class="s0">return </span><span class="s1">self._closed</span>
+
+    <span class="s0">def </span><span class="s1">__destroy_events(self):</span>
+        <span class="s1">read_event = self._read_watcher</span>
+        <span class="s1">write_event = self._write_watcher</span>
+        <span class="s1">hub = self.hub</span>
+        <span class="s1">self.hub = self._read_watcher = self._write_watcher = </span><span class="s0">None</span>
+
+        <span class="s1">hub.cancel_waits_close_and_then(</span>
+            <span class="s1">(read_event</span><span class="s0">, </span><span class="s1">write_event)</span><span class="s0">,</span>
+            <span class="s1">cancel_wait_ex</span><span class="s0">,</span>
+            <span class="s1">self.__finish_close</span><span class="s0">,</span>
+            <span class="s1">self._closefd</span><span class="s0">,</span>
+            <span class="s1">self._fileno</span><span class="s0">,</span>
+            <span class="s1">self._keep_alive</span>
+        <span class="s1">)</span>
+
+    <span class="s0">def </span><span class="s1">close(self):</span>
+        <span class="s0">if </span><span class="s1">self._closed:</span>
+            <span class="s0">return</span>
+        <span class="s1">self.flush()</span>
+        <span class="s2"># TODO: Can we use 'read_event is not None and write_event is</span>
+        <span class="s2"># not None' to mean _closed?</span>
+        <span class="s1">self._closed = </span><span class="s0">True</span>
+        <span class="s0">try</span><span class="s1">:</span>
+            <span class="s1">self.__destroy_events()</span>
+        <span class="s0">finally</span><span class="s1">:</span>
+            <span class="s1">self._fileno = self._keep_alive = </span><span class="s0">None</span>
+
+    <span class="s1">@staticmethod</span>
+    <span class="s0">def </span><span class="s1">__finish_close(closefd</span><span class="s0">, </span><span class="s1">fileno</span><span class="s0">, </span><span class="s1">keep_alive):</span>
+        <span class="s0">try</span><span class="s1">:</span>
+            <span class="s0">if </span><span class="s1">closefd:</span>
+                <span class="s1">os.close(fileno)</span>
+        <span class="s0">finally</span><span class="s1">:</span>
+            <span class="s0">if </span><span class="s1">hasattr(keep_alive</span><span class="s0">, </span><span class="s4">'close'</span><span class="s1">):</span>
+                <span class="s1">keep_alive.close()</span>
+
+    <span class="s2"># RawIOBase provides a 'read' method that will call readall() if</span>
+    <span class="s2"># the `size` was missing or -1 and otherwise call readinto(). We</span>
+    <span class="s2"># want to take advantage of this to avoid single byte reads when</span>
+    <span class="s2"># possible. This is highlighted by a bug in BufferedIOReader that</span>
+    <span class="s2"># calls read() in a loop when its readall() method is invoked;</span>
+    <span class="s2"># this was fixed in Python 3.3, but we still need our workaround for 2.7. See</span>
+    <span class="s2"># https://github.com/gevent/gevent/issues/675)</span>
+    <span class="s0">def </span><span class="s1">__read(self</span><span class="s0">, </span><span class="s1">n):</span>
+        <span class="s0">if </span><span class="s1">self._read_watcher </span><span class="s0">is None</span><span class="s1">:</span>
+            <span class="s0">raise </span><span class="s1">UnsupportedOperation(</span><span class="s4">'read'</span><span class="s1">)</span>
+        <span class="s0">while </span><span class="s3">1</span><span class="s1">:</span>
+            <span class="s0">try</span><span class="s1">:</span>
+                <span class="s0">return </span><span class="s1">_read(self._fileno</span><span class="s0">, </span><span class="s1">n)</span>
+            <span class="s0">except </span><span class="s1">(IOError</span><span class="s0">, </span><span class="s1">OSError) </span><span class="s0">as </span><span class="s1">ex:</span>
+                <span class="s0">if </span><span class="s1">ex.args[</span><span class="s3">0</span><span class="s1">] </span><span class="s0">not in </span><span class="s1">ignored_errors:</span>
+                    <span class="s0">raise</span>
+            <span class="s1">wait_on_watcher(self._read_watcher</span><span class="s0">, None, None, </span><span class="s1">self.hub)</span>
+
+    <span class="s0">def </span><span class="s1">readall(self):</span>
+        <span class="s1">ret = BytesIO()</span>
+        <span class="s0">while True</span><span class="s1">:</span>
+            <span class="s0">try</span><span class="s1">:</span>
+                <span class="s1">data = self.__read(DEFAULT_BUFFER_SIZE)</span>
+            <span class="s0">except </span><span class="s1">cancel_wait_ex:</span>
+                <span class="s2"># We were closed while reading. A buffered reader</span>
+                <span class="s2"># just returns what it has handy at that point,</span>
+                <span class="s2"># so we do to.</span>
+                <span class="s1">data = </span><span class="s0">None</span>
+            <span class="s0">if not </span><span class="s1">data:</span>
+                <span class="s0">break</span>
+            <span class="s1">ret.write(data)</span>
+        <span class="s0">return </span><span class="s1">ret.getvalue()</span>
+
+    <span class="s0">def </span><span class="s1">readinto(self</span><span class="s0">, </span><span class="s1">b):</span>
+        <span class="s1">data = self.__read(len(b))</span>
+        <span class="s1">n = len(data)</span>
+        <span class="s0">try</span><span class="s1">:</span>
+            <span class="s1">b[:n] = data</span>
+        <span class="s0">except </span><span class="s1">TypeError </span><span class="s0">as </span><span class="s1">err:</span>
+            <span class="s0">import </span><span class="s1">array</span>
+            <span class="s0">if not </span><span class="s1">isinstance(b</span><span class="s0">, </span><span class="s1">array.array):</span>
+                <span class="s0">raise </span><span class="s1">err</span>
+            <span class="s1">b[:n] = array.array(</span><span class="s5">b'b'</span><span class="s0">, </span><span class="s1">data)</span>
+        <span class="s0">return </span><span class="s1">n</span>
+
+    <span class="s0">def </span><span class="s1">write(self</span><span class="s0">, </span><span class="s1">b):</span>
+        <span class="s0">if </span><span class="s1">self._write_watcher </span><span class="s0">is None</span><span class="s1">:</span>
+            <span class="s0">raise </span><span class="s1">UnsupportedOperation(</span><span class="s4">'write'</span><span class="s1">)</span>
+        <span class="s0">while True</span><span class="s1">:</span>
+            <span class="s0">try</span><span class="s1">:</span>
+                <span class="s0">return </span><span class="s1">_write(self._fileno</span><span class="s0">, </span><span class="s1">b)</span>
+            <span class="s0">except </span><span class="s1">(IOError</span><span class="s0">, </span><span class="s1">OSError) </span><span class="s0">as </span><span class="s1">ex:</span>
+                <span class="s0">if </span><span class="s1">ex.args[</span><span class="s3">0</span><span class="s1">] </span><span class="s0">not in </span><span class="s1">ignored_errors:</span>
+                    <span class="s0">raise</span>
+            <span class="s1">wait_on_watcher(self._write_watcher</span><span class="s0">, None, None, </span><span class="s1">self.hub)</span>
+
+    <span class="s0">def </span><span class="s1">seek(self</span><span class="s0">, </span><span class="s1">offset</span><span class="s0">, </span><span class="s1">whence=</span><span class="s3">0</span><span class="s1">):</span>
+        <span class="s0">try</span><span class="s1">:</span>
+            <span class="s0">return </span><span class="s1">os.lseek(self._fileno</span><span class="s0">, </span><span class="s1">offset</span><span class="s0">, </span><span class="s1">whence)</span>
+        <span class="s0">except </span><span class="s1">IOError: </span><span class="s2"># pylint:disable=try-except-raise</span>
+            <span class="s0">raise</span>
+        <span class="s0">except </span><span class="s1">OSError </span><span class="s0">as </span><span class="s1">ex: </span><span class="s2"># pylint:disable=duplicate-except</span>
+            <span class="s2"># Python 2.x</span>
+            <span class="s2"># make sure on Python 2.x we raise an IOError</span>
+            <span class="s2"># as documented for RawIOBase.</span>
+            <span class="s2"># See https://github.com/gevent/gevent/issues/1323</span>
+            <span class="s1">reraise(IOError</span><span class="s0">, </span><span class="s1">IOError(*ex.args)</span><span class="s0">, </span><span class="s1">sys.exc_info()[</span><span class="s3">2</span><span class="s1">])</span>
+
+    <span class="s0">def </span><span class="s1">__repr__(self):</span>
+        <span class="s0">return </span><span class="s4">&quot;&lt;%s at 0x%x fileno=%s mode=%r&gt;&quot; </span><span class="s1">% (</span>
+            <span class="s1">type(self).__name__</span><span class="s0">, </span><span class="s1">id(self)</span><span class="s0">, </span><span class="s1">self._fileno</span><span class="s0">, </span><span class="s1">self.mode</span>
+        <span class="s1">)</span>
+
+
+<span class="s0">class </span><span class="s1">GreenFileDescriptorIOWriteall(WriteIsWriteallMixin</span><span class="s0">,</span>
+                                    <span class="s1">GreenFileDescriptorIO):</span>
+    <span class="s0">pass</span>
+
+
+<span class="s0">class </span><span class="s1">GreenOpenDescriptor(OpenDescriptor):</span>
+
+    <span class="s0">def </span><span class="s1">_do_open_raw(self):</span>
+        <span class="s0">if </span><span class="s1">self.is_fd():</span>
+            <span class="s1">fileio = GreenFileDescriptorIO(self._fobj</span><span class="s0">, </span><span class="s1">self</span><span class="s0">, </span><span class="s1">closefd=self.closefd)</span>
+        <span class="s0">else</span><span class="s1">:</span>
+            <span class="s2"># Either an existing file object or a path string (which</span>
+            <span class="s2"># we open to get a file object). In either case, the other object</span>
+            <span class="s2"># owns the descriptor and we must not close it.</span>
+            <span class="s1">closefd = </span><span class="s0">False</span>
+
+            <span class="s1">raw = OpenDescriptor._do_open_raw(self)</span>
+
+            <span class="s1">fileno = raw.fileno()</span>
+            <span class="s1">fileio = GreenFileDescriptorIO(fileno</span><span class="s0">, </span><span class="s1">self</span><span class="s0">, </span><span class="s1">closefd=closefd)</span>
+            <span class="s1">fileio._keep_alive = raw</span>
+            <span class="s2"># We can usually do better for a name, though.</span>
+            <span class="s0">try</span><span class="s1">:</span>
+                <span class="s1">fileio.name = raw.name</span>
+            <span class="s0">except </span><span class="s1">AttributeError:</span>
+                <span class="s0">del </span><span class="s1">fileio.name</span>
+        <span class="s0">return </span><span class="s1">fileio</span>
+
+    <span class="s0">def </span><span class="s1">_make_atomic_write(self</span><span class="s0">, </span><span class="s1">result</span><span class="s0">, </span><span class="s1">raw):</span>
+        <span class="s2"># Our return value from _do_open_raw is always a new</span>
+        <span class="s2"># object that we own, so we're always free to change</span>
+        <span class="s2"># the class.</span>
+        <span class="s0">assert </span><span class="s1">result </span><span class="s0">is not </span><span class="s1">raw </span><span class="s0">or </span><span class="s1">self._raw_object_is_new(raw)</span>
+        <span class="s0">if </span><span class="s1">result.__class__ </span><span class="s0">is </span><span class="s1">GreenFileDescriptorIO:</span>
+            <span class="s1">result.__class__ = GreenFileDescriptorIOWriteall</span>
+        <span class="s0">else</span><span class="s1">:</span>
+            <span class="s1">result = OpenDescriptor._make_atomic_write(self</span><span class="s0">, </span><span class="s1">result</span><span class="s0">, </span><span class="s1">raw)</span>
+        <span class="s0">return </span><span class="s1">result</span>
+
+
+<span class="s0">class </span><span class="s1">FileObjectPosix(FileObjectBase):</span>
+    <span class="s6">&quot;&quot;&quot; 
+    FileObjectPosix() 
+ 
+    A file-like object that operates on non-blocking files but 
+    provides a synchronous, cooperative interface. 
+ 
+    .. caution:: 
+         This object is only effective wrapping files that can be used meaningfully 
+         with :func:`select.select` such as sockets and pipes. 
+ 
+         In general, on most platforms, operations on regular files 
+         (e.g., ``open('a_file.txt')``) are considered non-blocking 
+         already, even though they can take some time to complete as 
+         data is copied to the kernel and flushed to disk: this time 
+         is relatively bounded compared to sockets or pipes, though. 
+         A :func:`~os.read` or :func:`~os.write` call on such a file 
+         will still effectively block for some small period of time. 
+         Therefore, wrapping this class around a regular file is 
+         unlikely to make IO gevent-friendly: reading or writing large 
+         amounts of data could still block the event loop. 
+ 
+         If you'll be working with regular files and doing IO in large 
+         chunks, you may consider using 
+         :class:`~gevent.fileobject.FileObjectThread` or 
+         :func:`~gevent.os.tp_read` and :func:`~gevent.os.tp_write` to bypass this 
+         concern. 
+ 
+    .. tip:: 
+         Although this object provides a :meth:`fileno` method and so 
+         can itself be passed to :func:`fcntl.fcntl`, setting the 
+         :data:`os.O_NONBLOCK` flag will have no effect (reads will 
+         still block the greenlet, although other greenlets can run). 
+         However, removing that flag *will cause this object to no 
+         longer be cooperative* (other greenlets will no longer run). 
+ 
+         You can use the internal ``fileio`` attribute of this object 
+         (a :class:`io.RawIOBase`) to perform non-blocking byte reads. 
+         Note, however, that once you begin directly using this 
+         attribute, the results from using methods of *this* object 
+         are undefined, especially in text mode. (See :issue:`222`.) 
+ 
+    .. versionchanged:: 1.1 
+       Now uses the :mod:`io` package internally. Under Python 2, previously 
+       used the undocumented class :class:`socket._fileobject`. This provides 
+       better file-like semantics (and portability to Python 3). 
+    .. versionchanged:: 1.2a1 
+       Document the ``fileio`` attribute for non-blocking reads. 
+    .. versionchanged:: 1.2a1 
+ 
+        A bufsize of 0 in write mode is no longer forced to be 1. 
+        Instead, the underlying buffer is flushed after every write 
+        operation to simulate a bufsize of 0. In gevent 1.0, a 
+        bufsize of 0 was flushed when a newline was written, while 
+        in gevent 1.1 it was flushed when more than one byte was 
+        written. Note that this may have performance impacts. 
+    .. versionchanged:: 1.3a1 
+        On Python 2, enabling universal newlines no longer forces unicode 
+        IO. 
+    .. versionchanged:: 1.5 
+       The default value for *mode* was changed from ``rb`` to ``r``. This is consistent 
+       with :func:`open`, :func:`io.open`, and :class:`~.FileObjectThread`, which is the 
+       default ``FileObject`` on some platforms. 
+    .. versionchanged:: 1.5 
+       Stop forcing buffering. Previously, given a ``buffering=0`` argument, 
+       *buffering* would be set to 1, and ``buffering=1`` would be forced to 
+       the default buffer size. This was a workaround for a long-standing concurrency 
+       issue. Now the *buffering* argument is interpreted as intended. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s1">default_bufsize = DEFAULT_BUFFER_SIZE</span>
+
+    <span class="s0">def </span><span class="s1">__init__(self</span><span class="s0">, </span><span class="s1">*args</span><span class="s0">, </span><span class="s1">**kwargs):</span>
+        <span class="s1">descriptor = GreenOpenDescriptor(*args</span><span class="s0">, </span><span class="s1">**kwargs)</span>
+        <span class="s1">FileObjectBase.__init__(self</span><span class="s0">, </span><span class="s1">descriptor)</span>
+        <span class="s2"># This attribute is documented as available for non-blocking reads.</span>
+        <span class="s1">self.fileio = descriptor.opened_raw()</span>
+
+    <span class="s0">def </span><span class="s1">_do_close(self</span><span class="s0">, </span><span class="s1">fobj</span><span class="s0">, </span><span class="s1">closefd):</span>
+        <span class="s0">try</span><span class="s1">:</span>
+            <span class="s1">fobj.close()</span>
+            <span class="s2"># self.fileio already knows whether or not to close the</span>
+            <span class="s2"># file descriptor</span>
+            <span class="s1">self.fileio.close()</span>
+        <span class="s0">finally</span><span class="s1">:</span>
+            <span class="s1">self.fileio = </span><span class="s0">None</span>
+</pre>
+</body>
+</html>

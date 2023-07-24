@@ -1,0 +1,444 @@
+<html>
+<head>
+<title>_markupbase.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #629755; font-style: italic;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #cc7832;}
+.s3 { color: #6a8759;}
+.s4 { color: #808080;}
+.s5 { color: #6897bb;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+_markupbase.py</font>
+</center></td></tr></table>
+<pre><span class="s0">&quot;&quot;&quot;Shared support for scanning document type declarations in HTML and XHTML. 
+ 
+Backported for python-future from Python 3.3. Reason: ParserBase is an 
+old-style class in the Python 2.7 source of markupbase.py, which I suspect 
+might be the cause of sporadic unit-test failures on travis-ci.org with 
+test_htmlparser.py.  The test failures look like this: 
+ 
+    ====================================================================== 
+ 
+ERROR: test_attr_entity_replacement (future.tests.test_htmlparser.AttributesStrictTestCase) 
+ 
+---------------------------------------------------------------------- 
+ 
+Traceback (most recent call last): 
+  File &quot;/home/travis/build/edschofield/python-future/future/tests/test_htmlparser.py&quot;, line 661, in test_attr_entity_replacement 
+    [(&quot;starttag&quot;, &quot;a&quot;, [(&quot;b&quot;, &quot;&amp;&gt;&lt;\&quot;'&quot;)])]) 
+  File &quot;/home/travis/build/edschofield/python-future/future/tests/test_htmlparser.py&quot;, line 93, in _run_check 
+    collector = self.get_collector() 
+  File &quot;/home/travis/build/edschofield/python-future/future/tests/test_htmlparser.py&quot;, line 617, in get_collector 
+    return EventCollector(strict=True) 
+  File &quot;/home/travis/build/edschofield/python-future/future/tests/test_htmlparser.py&quot;, line 27, in __init__ 
+    html.parser.HTMLParser.__init__(self, *args, **kw) 
+  File &quot;/home/travis/build/edschofield/python-future/future/backports/html/parser.py&quot;, line 135, in __init__ 
+    self.reset() 
+  File &quot;/home/travis/build/edschofield/python-future/future/backports/html/parser.py&quot;, line 143, in reset 
+    _markupbase.ParserBase.reset(self) 
+ 
+TypeError: unbound method reset() must be called with ParserBase instance as first argument (got EventCollector instance instead) 
+ 
+This module is used as a foundation for the html.parser module.  It has no 
+documented public API and should not be used directly. 
+ 
+&quot;&quot;&quot;</span>
+
+<span class="s2">import </span><span class="s1">re</span>
+
+<span class="s1">_declname_match = re.compile(</span><span class="s3">r'[a-zA-Z][-_.a-zA-Z0-9]*\s*'</span><span class="s1">).match</span>
+<span class="s1">_declstringlit_match = re.compile(</span><span class="s3">r'(\'[^\']*\'|&quot;[^&quot;]*&quot;)\s*'</span><span class="s1">).match</span>
+<span class="s1">_commentclose = re.compile(</span><span class="s3">r'--\s*&gt;'</span><span class="s1">)</span>
+<span class="s1">_markedsectionclose = re.compile(</span><span class="s3">r']\s*]\s*&gt;'</span><span class="s1">)</span>
+
+<span class="s4"># An analysis of the MS-Word extensions is available at</span>
+<span class="s4"># http://www.planetpublish.com/xmlarena/xap/Thursday/WordtoXML.pdf</span>
+
+<span class="s1">_msmarkedsectionclose = re.compile(</span><span class="s3">r']\s*&gt;'</span><span class="s1">)</span>
+
+<span class="s2">del </span><span class="s1">re</span>
+
+
+<span class="s2">class </span><span class="s1">ParserBase(object):</span>
+    <span class="s0">&quot;&quot;&quot;Parser base class which provides some common support methods used 
+    by the SGML/HTML and XHTML parsers.&quot;&quot;&quot;</span>
+
+    <span class="s2">def </span><span class="s1">__init__(self):</span>
+        <span class="s2">if </span><span class="s1">self.__class__ </span><span class="s2">is </span><span class="s1">ParserBase:</span>
+            <span class="s2">raise </span><span class="s1">RuntimeError(</span>
+                <span class="s3">&quot;_markupbase.ParserBase must be subclassed&quot;</span><span class="s1">)</span>
+
+    <span class="s2">def </span><span class="s1">error(self</span><span class="s2">, </span><span class="s1">message):</span>
+        <span class="s2">raise </span><span class="s1">NotImplementedError(</span>
+            <span class="s3">&quot;subclasses of ParserBase must override error()&quot;</span><span class="s1">)</span>
+
+    <span class="s2">def </span><span class="s1">reset(self):</span>
+        <span class="s1">self.lineno = </span><span class="s5">1</span>
+        <span class="s1">self.offset = </span><span class="s5">0</span>
+
+    <span class="s2">def </span><span class="s1">getpos(self):</span>
+        <span class="s0">&quot;&quot;&quot;Return current line number and offset.&quot;&quot;&quot;</span>
+        <span class="s2">return </span><span class="s1">self.lineno</span><span class="s2">, </span><span class="s1">self.offset</span>
+
+    <span class="s4"># Internal -- update line number and offset.  This should be</span>
+    <span class="s4"># called for each piece of data exactly once, in order -- in other</span>
+    <span class="s4"># words the concatenation of all the input strings to this</span>
+    <span class="s4"># function should be exactly the entire input.</span>
+    <span class="s2">def </span><span class="s1">updatepos(self</span><span class="s2">, </span><span class="s1">i</span><span class="s2">, </span><span class="s1">j):</span>
+        <span class="s2">if </span><span class="s1">i &gt;= j:</span>
+            <span class="s2">return </span><span class="s1">j</span>
+        <span class="s1">rawdata = self.rawdata</span>
+        <span class="s1">nlines = rawdata.count(</span><span class="s3">&quot;</span><span class="s2">\n</span><span class="s3">&quot;</span><span class="s2">, </span><span class="s1">i</span><span class="s2">, </span><span class="s1">j)</span>
+        <span class="s2">if </span><span class="s1">nlines:</span>
+            <span class="s1">self.lineno = self.lineno + nlines</span>
+            <span class="s1">pos = rawdata.rindex(</span><span class="s3">&quot;</span><span class="s2">\n</span><span class="s3">&quot;</span><span class="s2">, </span><span class="s1">i</span><span class="s2">, </span><span class="s1">j) </span><span class="s4"># Should not fail</span>
+            <span class="s1">self.offset = j-(pos+</span><span class="s5">1</span><span class="s1">)</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">self.offset = self.offset + j-i</span>
+        <span class="s2">return </span><span class="s1">j</span>
+
+    <span class="s1">_decl_otherchars = </span><span class="s3">''</span>
+
+    <span class="s4"># Internal -- parse declaration (for use by subclasses).</span>
+    <span class="s2">def </span><span class="s1">parse_declaration(self</span><span class="s2">, </span><span class="s1">i):</span>
+        <span class="s4"># This is some sort of declaration; in &quot;HTML as</span>
+        <span class="s4"># deployed,&quot; this should only be the document type</span>
+        <span class="s4"># declaration (&quot;&lt;!DOCTYPE html...&gt;&quot;).</span>
+        <span class="s4"># ISO 8879:1986, however, has more complex</span>
+        <span class="s4"># declaration syntax for elements in &lt;!...&gt;, including:</span>
+        <span class="s4"># --comment--</span>
+        <span class="s4"># [marked section]</span>
+        <span class="s4"># name in the following list: ENTITY, DOCTYPE, ELEMENT,</span>
+        <span class="s4"># ATTLIST, NOTATION, SHORTREF, USEMAP,</span>
+        <span class="s4"># LINKTYPE, LINK, IDLINK, USELINK, SYSTEM</span>
+        <span class="s1">rawdata = self.rawdata</span>
+        <span class="s1">j = i + </span><span class="s5">2</span>
+        <span class="s2">assert </span><span class="s1">rawdata[i:j] == </span><span class="s3">&quot;&lt;!&quot;</span><span class="s2">, </span><span class="s3">&quot;unexpected call to parse_declaration&quot;</span>
+        <span class="s2">if </span><span class="s1">rawdata[j:j+</span><span class="s5">1</span><span class="s1">] == </span><span class="s3">&quot;&gt;&quot;</span><span class="s1">:</span>
+            <span class="s4"># the empty comment &lt;!&gt;</span>
+            <span class="s2">return </span><span class="s1">j + </span><span class="s5">1</span>
+        <span class="s2">if </span><span class="s1">rawdata[j:j+</span><span class="s5">1</span><span class="s1">] </span><span class="s2">in </span><span class="s1">(</span><span class="s3">&quot;-&quot;</span><span class="s2">, </span><span class="s3">&quot;&quot;</span><span class="s1">):</span>
+            <span class="s4"># Start of comment followed by buffer boundary,</span>
+            <span class="s4"># or just a buffer boundary.</span>
+            <span class="s2">return </span><span class="s1">-</span><span class="s5">1</span>
+        <span class="s4"># A simple, practical version could look like: ((name|stringlit) S*) + '&gt;'</span>
+        <span class="s1">n = len(rawdata)</span>
+        <span class="s2">if </span><span class="s1">rawdata[j:j+</span><span class="s5">2</span><span class="s1">] == </span><span class="s3">'--'</span><span class="s1">: </span><span class="s4">#comment</span>
+            <span class="s4"># Locate --.*-- as the body of the comment</span>
+            <span class="s2">return </span><span class="s1">self.parse_comment(i)</span>
+        <span class="s2">elif </span><span class="s1">rawdata[j] == </span><span class="s3">'['</span><span class="s1">: </span><span class="s4">#marked section</span>
+            <span class="s4"># Locate [statusWord [...arbitrary SGML...]] as the body of the marked section</span>
+            <span class="s4"># Where statusWord is one of TEMP, CDATA, IGNORE, INCLUDE, RCDATA</span>
+            <span class="s4"># Note that this is extended by Microsoft Office &quot;Save as Web&quot; function</span>
+            <span class="s4"># to include [if...] and [endif].</span>
+            <span class="s2">return </span><span class="s1">self.parse_marked_section(i)</span>
+        <span class="s2">else</span><span class="s1">: </span><span class="s4">#all other declaration elements</span>
+            <span class="s1">decltype</span><span class="s2">, </span><span class="s1">j = self._scan_name(j</span><span class="s2">, </span><span class="s1">i)</span>
+        <span class="s2">if </span><span class="s1">j &lt; </span><span class="s5">0</span><span class="s1">:</span>
+            <span class="s2">return </span><span class="s1">j</span>
+        <span class="s2">if </span><span class="s1">decltype == </span><span class="s3">&quot;doctype&quot;</span><span class="s1">:</span>
+            <span class="s1">self._decl_otherchars = </span><span class="s3">''</span>
+        <span class="s2">while </span><span class="s1">j &lt; n:</span>
+            <span class="s1">c = rawdata[j]</span>
+            <span class="s2">if </span><span class="s1">c == </span><span class="s3">&quot;&gt;&quot;</span><span class="s1">:</span>
+                <span class="s4"># end of declaration syntax</span>
+                <span class="s1">data = rawdata[i+</span><span class="s5">2</span><span class="s1">:j]</span>
+                <span class="s2">if </span><span class="s1">decltype == </span><span class="s3">&quot;doctype&quot;</span><span class="s1">:</span>
+                    <span class="s1">self.handle_decl(data)</span>
+                <span class="s2">else</span><span class="s1">:</span>
+                    <span class="s4"># According to the HTML5 specs sections &quot;8.2.4.44 Bogus</span>
+                    <span class="s4"># comment state&quot; and &quot;8.2.4.45 Markup declaration open</span>
+                    <span class="s4"># state&quot;, a comment token should be emitted.</span>
+                    <span class="s4"># Calling unknown_decl provides more flexibility though.</span>
+                    <span class="s1">self.unknown_decl(data)</span>
+                <span class="s2">return </span><span class="s1">j + </span><span class="s5">1</span>
+            <span class="s2">if </span><span class="s1">c </span><span class="s2">in </span><span class="s3">&quot;</span><span class="s2">\&quot;</span><span class="s3">'&quot;</span><span class="s1">:</span>
+                <span class="s1">m = _declstringlit_match(rawdata</span><span class="s2">, </span><span class="s1">j)</span>
+                <span class="s2">if not </span><span class="s1">m:</span>
+                    <span class="s2">return </span><span class="s1">-</span><span class="s5">1 </span><span class="s4"># incomplete</span>
+                <span class="s1">j = m.end()</span>
+            <span class="s2">elif </span><span class="s1">c </span><span class="s2">in </span><span class="s3">&quot;abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ&quot;</span><span class="s1">:</span>
+                <span class="s1">name</span><span class="s2">, </span><span class="s1">j = self._scan_name(j</span><span class="s2">, </span><span class="s1">i)</span>
+            <span class="s2">elif </span><span class="s1">c </span><span class="s2">in </span><span class="s1">self._decl_otherchars:</span>
+                <span class="s1">j = j + </span><span class="s5">1</span>
+            <span class="s2">elif </span><span class="s1">c == </span><span class="s3">&quot;[&quot;</span><span class="s1">:</span>
+                <span class="s4"># this could be handled in a separate doctype parser</span>
+                <span class="s2">if </span><span class="s1">decltype == </span><span class="s3">&quot;doctype&quot;</span><span class="s1">:</span>
+                    <span class="s1">j = self._parse_doctype_subset(j + </span><span class="s5">1</span><span class="s2">, </span><span class="s1">i)</span>
+                <span class="s2">elif </span><span class="s1">decltype </span><span class="s2">in </span><span class="s1">set([</span><span class="s3">&quot;attlist&quot;</span><span class="s2">, </span><span class="s3">&quot;linktype&quot;</span><span class="s2">, </span><span class="s3">&quot;link&quot;</span><span class="s2">, </span><span class="s3">&quot;element&quot;</span><span class="s1">]):</span>
+                    <span class="s4"># must tolerate []'d groups in a content model in an element declaration</span>
+                    <span class="s4"># also in data attribute specifications of attlist declaration</span>
+                    <span class="s4"># also link type declaration subsets in linktype declarations</span>
+                    <span class="s4"># also link attribute specification lists in link declarations</span>
+                    <span class="s1">self.error(</span><span class="s3">&quot;unsupported '[' char in %s declaration&quot; </span><span class="s1">% decltype)</span>
+                <span class="s2">else</span><span class="s1">:</span>
+                    <span class="s1">self.error(</span><span class="s3">&quot;unexpected '[' char in declaration&quot;</span><span class="s1">)</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s1">self.error(</span>
+                    <span class="s3">&quot;unexpected %r char in declaration&quot; </span><span class="s1">% rawdata[j])</span>
+            <span class="s2">if </span><span class="s1">j &lt; </span><span class="s5">0</span><span class="s1">:</span>
+                <span class="s2">return </span><span class="s1">j</span>
+        <span class="s2">return </span><span class="s1">-</span><span class="s5">1 </span><span class="s4"># incomplete</span>
+
+    <span class="s4"># Internal -- parse a marked section</span>
+    <span class="s4"># Override this to handle MS-word extension syntax &lt;![if word]&gt;content&lt;![endif]&gt;</span>
+    <span class="s2">def </span><span class="s1">parse_marked_section(self</span><span class="s2">, </span><span class="s1">i</span><span class="s2">, </span><span class="s1">report=</span><span class="s5">1</span><span class="s1">):</span>
+        <span class="s1">rawdata= self.rawdata</span>
+        <span class="s2">assert </span><span class="s1">rawdata[i:i+</span><span class="s5">3</span><span class="s1">] == </span><span class="s3">'&lt;!['</span><span class="s2">, </span><span class="s3">&quot;unexpected call to parse_marked_section()&quot;</span>
+        <span class="s1">sectName</span><span class="s2">, </span><span class="s1">j = self._scan_name( i+</span><span class="s5">3</span><span class="s2">, </span><span class="s1">i )</span>
+        <span class="s2">if </span><span class="s1">j &lt; </span><span class="s5">0</span><span class="s1">:</span>
+            <span class="s2">return </span><span class="s1">j</span>
+        <span class="s2">if </span><span class="s1">sectName </span><span class="s2">in </span><span class="s1">set([</span><span class="s3">&quot;temp&quot;</span><span class="s2">, </span><span class="s3">&quot;cdata&quot;</span><span class="s2">, </span><span class="s3">&quot;ignore&quot;</span><span class="s2">, </span><span class="s3">&quot;include&quot;</span><span class="s2">, </span><span class="s3">&quot;rcdata&quot;</span><span class="s1">]):</span>
+            <span class="s4"># look for standard ]]&gt; ending</span>
+            <span class="s1">match= _markedsectionclose.search(rawdata</span><span class="s2">, </span><span class="s1">i+</span><span class="s5">3</span><span class="s1">)</span>
+        <span class="s2">elif </span><span class="s1">sectName </span><span class="s2">in </span><span class="s1">set([</span><span class="s3">&quot;if&quot;</span><span class="s2">, </span><span class="s3">&quot;else&quot;</span><span class="s2">, </span><span class="s3">&quot;endif&quot;</span><span class="s1">]):</span>
+            <span class="s4"># look for MS Office ]&gt; ending</span>
+            <span class="s1">match= _msmarkedsectionclose.search(rawdata</span><span class="s2">, </span><span class="s1">i+</span><span class="s5">3</span><span class="s1">)</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">self.error(</span><span class="s3">'unknown status keyword %r in marked section' </span><span class="s1">% rawdata[i+</span><span class="s5">3</span><span class="s1">:j])</span>
+        <span class="s2">if not </span><span class="s1">match:</span>
+            <span class="s2">return </span><span class="s1">-</span><span class="s5">1</span>
+        <span class="s2">if </span><span class="s1">report:</span>
+            <span class="s1">j = match.start(</span><span class="s5">0</span><span class="s1">)</span>
+            <span class="s1">self.unknown_decl(rawdata[i+</span><span class="s5">3</span><span class="s1">: j])</span>
+        <span class="s2">return </span><span class="s1">match.end(</span><span class="s5">0</span><span class="s1">)</span>
+
+    <span class="s4"># Internal -- parse comment, return length or -1 if not terminated</span>
+    <span class="s2">def </span><span class="s1">parse_comment(self</span><span class="s2">, </span><span class="s1">i</span><span class="s2">, </span><span class="s1">report=</span><span class="s5">1</span><span class="s1">):</span>
+        <span class="s1">rawdata = self.rawdata</span>
+        <span class="s2">if </span><span class="s1">rawdata[i:i+</span><span class="s5">4</span><span class="s1">] != </span><span class="s3">'&lt;!--'</span><span class="s1">:</span>
+            <span class="s1">self.error(</span><span class="s3">'unexpected call to parse_comment()'</span><span class="s1">)</span>
+        <span class="s1">match = _commentclose.search(rawdata</span><span class="s2">, </span><span class="s1">i+</span><span class="s5">4</span><span class="s1">)</span>
+        <span class="s2">if not </span><span class="s1">match:</span>
+            <span class="s2">return </span><span class="s1">-</span><span class="s5">1</span>
+        <span class="s2">if </span><span class="s1">report:</span>
+            <span class="s1">j = match.start(</span><span class="s5">0</span><span class="s1">)</span>
+            <span class="s1">self.handle_comment(rawdata[i+</span><span class="s5">4</span><span class="s1">: j])</span>
+        <span class="s2">return </span><span class="s1">match.end(</span><span class="s5">0</span><span class="s1">)</span>
+
+    <span class="s4"># Internal -- scan past the internal subset in a &lt;!DOCTYPE declaration,</span>
+    <span class="s4"># returning the index just past any whitespace following the trailing ']'.</span>
+    <span class="s2">def </span><span class="s1">_parse_doctype_subset(self</span><span class="s2">, </span><span class="s1">i</span><span class="s2">, </span><span class="s1">declstartpos):</span>
+        <span class="s1">rawdata = self.rawdata</span>
+        <span class="s1">n = len(rawdata)</span>
+        <span class="s1">j = i</span>
+        <span class="s2">while </span><span class="s1">j &lt; n:</span>
+            <span class="s1">c = rawdata[j]</span>
+            <span class="s2">if </span><span class="s1">c == </span><span class="s3">&quot;&lt;&quot;</span><span class="s1">:</span>
+                <span class="s1">s = rawdata[j:j+</span><span class="s5">2</span><span class="s1">]</span>
+                <span class="s2">if </span><span class="s1">s == </span><span class="s3">&quot;&lt;&quot;</span><span class="s1">:</span>
+                    <span class="s4"># end of buffer; incomplete</span>
+                    <span class="s2">return </span><span class="s1">-</span><span class="s5">1</span>
+                <span class="s2">if </span><span class="s1">s != </span><span class="s3">&quot;&lt;!&quot;</span><span class="s1">:</span>
+                    <span class="s1">self.updatepos(declstartpos</span><span class="s2">, </span><span class="s1">j + </span><span class="s5">1</span><span class="s1">)</span>
+                    <span class="s1">self.error(</span><span class="s3">&quot;unexpected char in internal subset (in %r)&quot; </span><span class="s1">% s)</span>
+                <span class="s2">if </span><span class="s1">(j + </span><span class="s5">2</span><span class="s1">) == n:</span>
+                    <span class="s4"># end of buffer; incomplete</span>
+                    <span class="s2">return </span><span class="s1">-</span><span class="s5">1</span>
+                <span class="s2">if </span><span class="s1">(j + </span><span class="s5">4</span><span class="s1">) &gt; n:</span>
+                    <span class="s4"># end of buffer; incomplete</span>
+                    <span class="s2">return </span><span class="s1">-</span><span class="s5">1</span>
+                <span class="s2">if </span><span class="s1">rawdata[j:j+</span><span class="s5">4</span><span class="s1">] == </span><span class="s3">&quot;&lt;!--&quot;</span><span class="s1">:</span>
+                    <span class="s1">j = self.parse_comment(j</span><span class="s2">, </span><span class="s1">report=</span><span class="s5">0</span><span class="s1">)</span>
+                    <span class="s2">if </span><span class="s1">j &lt; </span><span class="s5">0</span><span class="s1">:</span>
+                        <span class="s2">return </span><span class="s1">j</span>
+                    <span class="s2">continue</span>
+                <span class="s1">name</span><span class="s2">, </span><span class="s1">j = self._scan_name(j + </span><span class="s5">2</span><span class="s2">, </span><span class="s1">declstartpos)</span>
+                <span class="s2">if </span><span class="s1">j == -</span><span class="s5">1</span><span class="s1">:</span>
+                    <span class="s2">return </span><span class="s1">-</span><span class="s5">1</span>
+                <span class="s2">if </span><span class="s1">name </span><span class="s2">not in </span><span class="s1">set([</span><span class="s3">&quot;attlist&quot;</span><span class="s2">, </span><span class="s3">&quot;element&quot;</span><span class="s2">, </span><span class="s3">&quot;entity&quot;</span><span class="s2">, </span><span class="s3">&quot;notation&quot;</span><span class="s1">]):</span>
+                    <span class="s1">self.updatepos(declstartpos</span><span class="s2">, </span><span class="s1">j + </span><span class="s5">2</span><span class="s1">)</span>
+                    <span class="s1">self.error(</span>
+                        <span class="s3">&quot;unknown declaration %r in internal subset&quot; </span><span class="s1">% name)</span>
+                <span class="s4"># handle the individual names</span>
+                <span class="s1">meth = getattr(self</span><span class="s2">, </span><span class="s3">&quot;_parse_doctype_&quot; </span><span class="s1">+ name)</span>
+                <span class="s1">j = meth(j</span><span class="s2">, </span><span class="s1">declstartpos)</span>
+                <span class="s2">if </span><span class="s1">j &lt; </span><span class="s5">0</span><span class="s1">:</span>
+                    <span class="s2">return </span><span class="s1">j</span>
+            <span class="s2">elif </span><span class="s1">c == </span><span class="s3">&quot;%&quot;</span><span class="s1">:</span>
+                <span class="s4"># parameter entity reference</span>
+                <span class="s2">if </span><span class="s1">(j + </span><span class="s5">1</span><span class="s1">) == n:</span>
+                    <span class="s4"># end of buffer; incomplete</span>
+                    <span class="s2">return </span><span class="s1">-</span><span class="s5">1</span>
+                <span class="s1">s</span><span class="s2">, </span><span class="s1">j = self._scan_name(j + </span><span class="s5">1</span><span class="s2">, </span><span class="s1">declstartpos)</span>
+                <span class="s2">if </span><span class="s1">j &lt; </span><span class="s5">0</span><span class="s1">:</span>
+                    <span class="s2">return </span><span class="s1">j</span>
+                <span class="s2">if </span><span class="s1">rawdata[j] == </span><span class="s3">&quot;;&quot;</span><span class="s1">:</span>
+                    <span class="s1">j = j + </span><span class="s5">1</span>
+            <span class="s2">elif </span><span class="s1">c == </span><span class="s3">&quot;]&quot;</span><span class="s1">:</span>
+                <span class="s1">j = j + </span><span class="s5">1</span>
+                <span class="s2">while </span><span class="s1">j &lt; n </span><span class="s2">and </span><span class="s1">rawdata[j].isspace():</span>
+                    <span class="s1">j = j + </span><span class="s5">1</span>
+                <span class="s2">if </span><span class="s1">j &lt; n:</span>
+                    <span class="s2">if </span><span class="s1">rawdata[j] == </span><span class="s3">&quot;&gt;&quot;</span><span class="s1">:</span>
+                        <span class="s2">return </span><span class="s1">j</span>
+                    <span class="s1">self.updatepos(declstartpos</span><span class="s2">, </span><span class="s1">j)</span>
+                    <span class="s1">self.error(</span><span class="s3">&quot;unexpected char after internal subset&quot;</span><span class="s1">)</span>
+                <span class="s2">else</span><span class="s1">:</span>
+                    <span class="s2">return </span><span class="s1">-</span><span class="s5">1</span>
+            <span class="s2">elif </span><span class="s1">c.isspace():</span>
+                <span class="s1">j = j + </span><span class="s5">1</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s1">self.updatepos(declstartpos</span><span class="s2">, </span><span class="s1">j)</span>
+                <span class="s1">self.error(</span><span class="s3">&quot;unexpected char %r in internal subset&quot; </span><span class="s1">% c)</span>
+        <span class="s4"># end of buffer reached</span>
+        <span class="s2">return </span><span class="s1">-</span><span class="s5">1</span>
+
+    <span class="s4"># Internal -- scan past &lt;!ELEMENT declarations</span>
+    <span class="s2">def </span><span class="s1">_parse_doctype_element(self</span><span class="s2">, </span><span class="s1">i</span><span class="s2">, </span><span class="s1">declstartpos):</span>
+        <span class="s1">name</span><span class="s2">, </span><span class="s1">j = self._scan_name(i</span><span class="s2">, </span><span class="s1">declstartpos)</span>
+        <span class="s2">if </span><span class="s1">j == -</span><span class="s5">1</span><span class="s1">:</span>
+            <span class="s2">return </span><span class="s1">-</span><span class="s5">1</span>
+        <span class="s4"># style content model; just skip until '&gt;'</span>
+        <span class="s1">rawdata = self.rawdata</span>
+        <span class="s2">if </span><span class="s3">'&gt;' </span><span class="s2">in </span><span class="s1">rawdata[j:]:</span>
+            <span class="s2">return </span><span class="s1">rawdata.find(</span><span class="s3">&quot;&gt;&quot;</span><span class="s2">, </span><span class="s1">j) + </span><span class="s5">1</span>
+        <span class="s2">return </span><span class="s1">-</span><span class="s5">1</span>
+
+    <span class="s4"># Internal -- scan past &lt;!ATTLIST declarations</span>
+    <span class="s2">def </span><span class="s1">_parse_doctype_attlist(self</span><span class="s2">, </span><span class="s1">i</span><span class="s2">, </span><span class="s1">declstartpos):</span>
+        <span class="s1">rawdata = self.rawdata</span>
+        <span class="s1">name</span><span class="s2">, </span><span class="s1">j = self._scan_name(i</span><span class="s2">, </span><span class="s1">declstartpos)</span>
+        <span class="s1">c = rawdata[j:j+</span><span class="s5">1</span><span class="s1">]</span>
+        <span class="s2">if </span><span class="s1">c == </span><span class="s3">&quot;&quot;</span><span class="s1">:</span>
+            <span class="s2">return </span><span class="s1">-</span><span class="s5">1</span>
+        <span class="s2">if </span><span class="s1">c == </span><span class="s3">&quot;&gt;&quot;</span><span class="s1">:</span>
+            <span class="s2">return </span><span class="s1">j + </span><span class="s5">1</span>
+        <span class="s2">while </span><span class="s5">1</span><span class="s1">:</span>
+            <span class="s4"># scan a series of attribute descriptions; simplified:</span>
+            <span class="s4">#   name type [value] [#constraint]</span>
+            <span class="s1">name</span><span class="s2">, </span><span class="s1">j = self._scan_name(j</span><span class="s2">, </span><span class="s1">declstartpos)</span>
+            <span class="s2">if </span><span class="s1">j &lt; </span><span class="s5">0</span><span class="s1">:</span>
+                <span class="s2">return </span><span class="s1">j</span>
+            <span class="s1">c = rawdata[j:j+</span><span class="s5">1</span><span class="s1">]</span>
+            <span class="s2">if </span><span class="s1">c == </span><span class="s3">&quot;&quot;</span><span class="s1">:</span>
+                <span class="s2">return </span><span class="s1">-</span><span class="s5">1</span>
+            <span class="s2">if </span><span class="s1">c == </span><span class="s3">&quot;(&quot;</span><span class="s1">:</span>
+                <span class="s4"># an enumerated type; look for ')'</span>
+                <span class="s2">if </span><span class="s3">&quot;)&quot; </span><span class="s2">in </span><span class="s1">rawdata[j:]:</span>
+                    <span class="s1">j = rawdata.find(</span><span class="s3">&quot;)&quot;</span><span class="s2">, </span><span class="s1">j) + </span><span class="s5">1</span>
+                <span class="s2">else</span><span class="s1">:</span>
+                    <span class="s2">return </span><span class="s1">-</span><span class="s5">1</span>
+                <span class="s2">while </span><span class="s1">rawdata[j:j+</span><span class="s5">1</span><span class="s1">].isspace():</span>
+                    <span class="s1">j = j + </span><span class="s5">1</span>
+                <span class="s2">if not </span><span class="s1">rawdata[j:]:</span>
+                    <span class="s4"># end of buffer, incomplete</span>
+                    <span class="s2">return </span><span class="s1">-</span><span class="s5">1</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s1">name</span><span class="s2">, </span><span class="s1">j = self._scan_name(j</span><span class="s2">, </span><span class="s1">declstartpos)</span>
+            <span class="s1">c = rawdata[j:j+</span><span class="s5">1</span><span class="s1">]</span>
+            <span class="s2">if not </span><span class="s1">c:</span>
+                <span class="s2">return </span><span class="s1">-</span><span class="s5">1</span>
+            <span class="s2">if </span><span class="s1">c </span><span class="s2">in </span><span class="s3">&quot;'</span><span class="s2">\&quot;</span><span class="s3">&quot;</span><span class="s1">:</span>
+                <span class="s1">m = _declstringlit_match(rawdata</span><span class="s2">, </span><span class="s1">j)</span>
+                <span class="s2">if </span><span class="s1">m:</span>
+                    <span class="s1">j = m.end()</span>
+                <span class="s2">else</span><span class="s1">:</span>
+                    <span class="s2">return </span><span class="s1">-</span><span class="s5">1</span>
+                <span class="s1">c = rawdata[j:j+</span><span class="s5">1</span><span class="s1">]</span>
+                <span class="s2">if not </span><span class="s1">c:</span>
+                    <span class="s2">return </span><span class="s1">-</span><span class="s5">1</span>
+            <span class="s2">if </span><span class="s1">c == </span><span class="s3">&quot;#&quot;</span><span class="s1">:</span>
+                <span class="s2">if </span><span class="s1">rawdata[j:] == </span><span class="s3">&quot;#&quot;</span><span class="s1">:</span>
+                    <span class="s4"># end of buffer</span>
+                    <span class="s2">return </span><span class="s1">-</span><span class="s5">1</span>
+                <span class="s1">name</span><span class="s2">, </span><span class="s1">j = self._scan_name(j + </span><span class="s5">1</span><span class="s2">, </span><span class="s1">declstartpos)</span>
+                <span class="s2">if </span><span class="s1">j &lt; </span><span class="s5">0</span><span class="s1">:</span>
+                    <span class="s2">return </span><span class="s1">j</span>
+                <span class="s1">c = rawdata[j:j+</span><span class="s5">1</span><span class="s1">]</span>
+                <span class="s2">if not </span><span class="s1">c:</span>
+                    <span class="s2">return </span><span class="s1">-</span><span class="s5">1</span>
+            <span class="s2">if </span><span class="s1">c == </span><span class="s3">'&gt;'</span><span class="s1">:</span>
+                <span class="s4"># all done</span>
+                <span class="s2">return </span><span class="s1">j + </span><span class="s5">1</span>
+
+    <span class="s4"># Internal -- scan past &lt;!NOTATION declarations</span>
+    <span class="s2">def </span><span class="s1">_parse_doctype_notation(self</span><span class="s2">, </span><span class="s1">i</span><span class="s2">, </span><span class="s1">declstartpos):</span>
+        <span class="s1">name</span><span class="s2">, </span><span class="s1">j = self._scan_name(i</span><span class="s2">, </span><span class="s1">declstartpos)</span>
+        <span class="s2">if </span><span class="s1">j &lt; </span><span class="s5">0</span><span class="s1">:</span>
+            <span class="s2">return </span><span class="s1">j</span>
+        <span class="s1">rawdata = self.rawdata</span>
+        <span class="s2">while </span><span class="s5">1</span><span class="s1">:</span>
+            <span class="s1">c = rawdata[j:j+</span><span class="s5">1</span><span class="s1">]</span>
+            <span class="s2">if not </span><span class="s1">c:</span>
+                <span class="s4"># end of buffer; incomplete</span>
+                <span class="s2">return </span><span class="s1">-</span><span class="s5">1</span>
+            <span class="s2">if </span><span class="s1">c == </span><span class="s3">'&gt;'</span><span class="s1">:</span>
+                <span class="s2">return </span><span class="s1">j + </span><span class="s5">1</span>
+            <span class="s2">if </span><span class="s1">c </span><span class="s2">in </span><span class="s3">&quot;'</span><span class="s2">\&quot;</span><span class="s3">&quot;</span><span class="s1">:</span>
+                <span class="s1">m = _declstringlit_match(rawdata</span><span class="s2">, </span><span class="s1">j)</span>
+                <span class="s2">if not </span><span class="s1">m:</span>
+                    <span class="s2">return </span><span class="s1">-</span><span class="s5">1</span>
+                <span class="s1">j = m.end()</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s1">name</span><span class="s2">, </span><span class="s1">j = self._scan_name(j</span><span class="s2">, </span><span class="s1">declstartpos)</span>
+                <span class="s2">if </span><span class="s1">j &lt; </span><span class="s5">0</span><span class="s1">:</span>
+                    <span class="s2">return </span><span class="s1">j</span>
+
+    <span class="s4"># Internal -- scan past &lt;!ENTITY declarations</span>
+    <span class="s2">def </span><span class="s1">_parse_doctype_entity(self</span><span class="s2">, </span><span class="s1">i</span><span class="s2">, </span><span class="s1">declstartpos):</span>
+        <span class="s1">rawdata = self.rawdata</span>
+        <span class="s2">if </span><span class="s1">rawdata[i:i+</span><span class="s5">1</span><span class="s1">] == </span><span class="s3">&quot;%&quot;</span><span class="s1">:</span>
+            <span class="s1">j = i + </span><span class="s5">1</span>
+            <span class="s2">while </span><span class="s5">1</span><span class="s1">:</span>
+                <span class="s1">c = rawdata[j:j+</span><span class="s5">1</span><span class="s1">]</span>
+                <span class="s2">if not </span><span class="s1">c:</span>
+                    <span class="s2">return </span><span class="s1">-</span><span class="s5">1</span>
+                <span class="s2">if </span><span class="s1">c.isspace():</span>
+                    <span class="s1">j = j + </span><span class="s5">1</span>
+                <span class="s2">else</span><span class="s1">:</span>
+                    <span class="s2">break</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">j = i</span>
+        <span class="s1">name</span><span class="s2">, </span><span class="s1">j = self._scan_name(j</span><span class="s2">, </span><span class="s1">declstartpos)</span>
+        <span class="s2">if </span><span class="s1">j &lt; </span><span class="s5">0</span><span class="s1">:</span>
+            <span class="s2">return </span><span class="s1">j</span>
+        <span class="s2">while </span><span class="s5">1</span><span class="s1">:</span>
+            <span class="s1">c = self.rawdata[j:j+</span><span class="s5">1</span><span class="s1">]</span>
+            <span class="s2">if not </span><span class="s1">c:</span>
+                <span class="s2">return </span><span class="s1">-</span><span class="s5">1</span>
+            <span class="s2">if </span><span class="s1">c </span><span class="s2">in </span><span class="s3">&quot;'</span><span class="s2">\&quot;</span><span class="s3">&quot;</span><span class="s1">:</span>
+                <span class="s1">m = _declstringlit_match(rawdata</span><span class="s2">, </span><span class="s1">j)</span>
+                <span class="s2">if </span><span class="s1">m:</span>
+                    <span class="s1">j = m.end()</span>
+                <span class="s2">else</span><span class="s1">:</span>
+                    <span class="s2">return </span><span class="s1">-</span><span class="s5">1    </span><span class="s4"># incomplete</span>
+            <span class="s2">elif </span><span class="s1">c == </span><span class="s3">&quot;&gt;&quot;</span><span class="s1">:</span>
+                <span class="s2">return </span><span class="s1">j + </span><span class="s5">1</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s1">name</span><span class="s2">, </span><span class="s1">j = self._scan_name(j</span><span class="s2">, </span><span class="s1">declstartpos)</span>
+                <span class="s2">if </span><span class="s1">j &lt; </span><span class="s5">0</span><span class="s1">:</span>
+                    <span class="s2">return </span><span class="s1">j</span>
+
+    <span class="s4"># Internal -- scan a name token and the new position and the token, or</span>
+    <span class="s4"># return -1 if we've reached the end of the buffer.</span>
+    <span class="s2">def </span><span class="s1">_scan_name(self</span><span class="s2">, </span><span class="s1">i</span><span class="s2">, </span><span class="s1">declstartpos):</span>
+        <span class="s1">rawdata = self.rawdata</span>
+        <span class="s1">n = len(rawdata)</span>
+        <span class="s2">if </span><span class="s1">i == n:</span>
+            <span class="s2">return None, </span><span class="s1">-</span><span class="s5">1</span>
+        <span class="s1">m = _declname_match(rawdata</span><span class="s2">, </span><span class="s1">i)</span>
+        <span class="s2">if </span><span class="s1">m:</span>
+            <span class="s1">s = m.group()</span>
+            <span class="s1">name = s.strip()</span>
+            <span class="s2">if </span><span class="s1">(i + len(s)) == n:</span>
+                <span class="s2">return None, </span><span class="s1">-</span><span class="s5">1  </span><span class="s4"># end of buffer</span>
+            <span class="s2">return </span><span class="s1">name.lower()</span><span class="s2">, </span><span class="s1">m.end()</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">self.updatepos(declstartpos</span><span class="s2">, </span><span class="s1">i)</span>
+            <span class="s1">self.error(</span><span class="s3">&quot;expected name token at %r&quot;</span>
+                       <span class="s1">% rawdata[declstartpos:declstartpos+</span><span class="s5">20</span><span class="s1">])</span>
+
+    <span class="s4"># To be overridden -- handlers for unknown objects</span>
+    <span class="s2">def </span><span class="s1">unknown_decl(self</span><span class="s2">, </span><span class="s1">data):</span>
+        <span class="s2">pass</span>
+</pre>
+</body>
+</html>

@@ -1,0 +1,278 @@
+<html>
+<head>
+<title>gi.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #cc7832;}
+.s3 { color: #6a8759;}
+.s4 { color: #629755; font-style: italic;}
+.s5 { color: #6897bb;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+gi.py</font>
+</center></td></tr></table>
+<pre><span class="s0"># ----------------------------------------------------------------------------</span>
+<span class="s0"># Copyright (c) 2005-2021, PyInstaller Development Team.</span>
+<span class="s0">#</span>
+<span class="s0"># Distributed under the terms of the GNU General Public License (version 2</span>
+<span class="s0"># or later) with exception for distributing the bootloader.</span>
+<span class="s0">#</span>
+<span class="s0"># The full license is in the file COPYING.txt, distributed with this software.</span>
+<span class="s0">#</span>
+<span class="s0"># SPDX-License-Identifier: (GPL-2.0-or-later WITH Bootloader-exception)</span>
+<span class="s0"># ----------------------------------------------------------------------------</span>
+<span class="s2">import </span><span class="s1">os</span>
+<span class="s2">import </span><span class="s1">re</span>
+
+<span class="s2">from </span><span class="s1">PyInstaller </span><span class="s2">import </span><span class="s1">compat</span>
+<span class="s2">from </span><span class="s1">PyInstaller </span><span class="s2">import </span><span class="s1">log </span><span class="s2">as </span><span class="s1">logging</span>
+<span class="s2">from </span><span class="s1">PyInstaller.depend.bindepend </span><span class="s2">import </span><span class="s1">findSystemLibrary</span>
+<span class="s2">from </span><span class="s1">PyInstaller.utils.hooks </span><span class="s2">import </span><span class="s1">collect_submodules</span><span class="s2">, </span><span class="s1">collect_system_data_files</span><span class="s2">, </span><span class="s1">eval_statement</span><span class="s2">, </span><span class="s1">exec_statement</span>
+
+<span class="s1">logger = logging.getLogger(__name__)</span>
+
+
+<span class="s2">def </span><span class="s1">get_gi_libdir(module</span><span class="s2">, </span><span class="s1">version):</span>
+    <span class="s1">statement = </span><span class="s3">&quot;&quot;&quot; 
+        import gi 
+        gi.require_version(&quot;GIRepository&quot;, &quot;2.0&quot;) 
+        from gi.repository import GIRepository 
+        repo = GIRepository.Repository.get_default() 
+        module, version = (%r, %r) 
+        repo.require(module, version, GIRepository.RepositoryLoadFlags.IREPOSITORY_LOAD_FLAG_LAZY) 
+        print(repo.get_shared_library(module)) 
+    &quot;&quot;&quot;</span>
+    <span class="s1">statement %= (module</span><span class="s2">, </span><span class="s1">version)</span>
+    <span class="s1">libs = exec_statement(statement).split(</span><span class="s3">','</span><span class="s1">)</span>
+    <span class="s2">for </span><span class="s1">lib </span><span class="s2">in </span><span class="s1">libs:</span>
+        <span class="s1">path = findSystemLibrary(lib.strip())</span>
+        <span class="s2">return </span><span class="s1">os.path.normpath(os.path.dirname(path))</span>
+
+    <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s3">&quot;Could not find libdir for %s-%s&quot; </span><span class="s1">% (module</span><span class="s2">, </span><span class="s1">version))</span>
+
+
+<span class="s2">def </span><span class="s1">get_gi_typelibs(module</span><span class="s2">, </span><span class="s1">version):</span>
+    <span class="s4">&quot;&quot;&quot; 
+    Return a tuple of (binaries, datas, hiddenimports) to be used by PyGObject related hooks. Searches for and adds 
+    dependencies recursively. 
+ 
+    :param module: GI module name, as passed to 'gi.require_version()' 
+    :param version: GI module version, as passed to 'gi.require_version()' 
+    &quot;&quot;&quot;</span>
+    <span class="s1">datas = []</span>
+    <span class="s1">binaries = []</span>
+    <span class="s1">hiddenimports = []</span>
+
+    <span class="s1">statement = </span><span class="s3">&quot;&quot;&quot; 
+        import gi 
+        gi.require_version(&quot;GIRepository&quot;, &quot;2.0&quot;) 
+        from gi.repository import GIRepository 
+        repo = GIRepository.Repository.get_default() 
+        module, version = (%r, %r) 
+        repo.require(module, version, GIRepository.RepositoryLoadFlags.IREPOSITORY_LOAD_FLAG_LAZY) 
+        get_deps = getattr(repo, 'get_immediate_dependencies', None) 
+        if not get_deps: 
+            get_deps = repo.get_dependencies 
+        print({'sharedlib': repo.get_shared_library(module), 
+               'typelib': repo.get_typelib_path(module), 
+               'deps': get_deps(module) or []}) 
+    &quot;&quot;&quot;</span>
+    <span class="s1">statement %= (module</span><span class="s2">, </span><span class="s1">version)</span>
+    <span class="s1">typelibs_data = eval_statement(statement)</span>
+    <span class="s2">if not </span><span class="s1">typelibs_data:</span>
+        <span class="s1">logger.error(</span><span class="s3">&quot;gi repository 'GIRepository 2.0' not found. Please make sure corresponding package is installed.&quot;</span><span class="s1">)</span>
+        <span class="s0"># :todo: should we raise a SystemError here?</span>
+    <span class="s2">else</span><span class="s1">:</span>
+        <span class="s1">logger.debug(</span><span class="s3">&quot;Adding files for %s %s&quot;</span><span class="s2">, </span><span class="s1">module</span><span class="s2">, </span><span class="s1">version)</span>
+
+        <span class="s2">if </span><span class="s1">typelibs_data[</span><span class="s3">'sharedlib'</span><span class="s1">]:</span>
+            <span class="s2">for </span><span class="s1">lib </span><span class="s2">in </span><span class="s1">typelibs_data[</span><span class="s3">'sharedlib'</span><span class="s1">].split(</span><span class="s3">','</span><span class="s1">):</span>
+                <span class="s1">path = findSystemLibrary(lib.strip())</span>
+                <span class="s2">if </span><span class="s1">path:</span>
+                    <span class="s1">logger.debug(</span><span class="s3">'Found shared library %s at %s'</span><span class="s2">, </span><span class="s1">lib</span><span class="s2">, </span><span class="s1">path)</span>
+                    <span class="s1">binaries.append((path</span><span class="s2">, </span><span class="s3">'.'</span><span class="s1">))</span>
+
+        <span class="s1">d = gir_library_path_fix(typelibs_data[</span><span class="s3">'typelib'</span><span class="s1">])</span>
+        <span class="s2">if </span><span class="s1">d:</span>
+            <span class="s1">logger.debug(</span><span class="s3">'Found gir typelib at %s'</span><span class="s2">, </span><span class="s1">d)</span>
+            <span class="s1">datas.append(d)</span>
+
+        <span class="s1">hiddenimports += collect_submodules(</span><span class="s3">'gi.overrides'</span><span class="s2">, lambda </span><span class="s1">name: name.endswith(</span><span class="s3">'.' </span><span class="s1">+ module))</span>
+
+        <span class="s0"># Load dependencies recursively</span>
+        <span class="s2">for </span><span class="s1">dep </span><span class="s2">in </span><span class="s1">typelibs_data[</span><span class="s3">'deps'</span><span class="s1">]:</span>
+            <span class="s1">m</span><span class="s2">, </span><span class="s1">_ = dep.rsplit(</span><span class="s3">'-'</span><span class="s2">, </span><span class="s5">1</span><span class="s1">)</span>
+            <span class="s1">hiddenimports += [</span><span class="s3">'gi.repository.%s' </span><span class="s1">% m]</span>
+
+    <span class="s2">return </span><span class="s1">binaries</span><span class="s2">, </span><span class="s1">datas</span><span class="s2">, </span><span class="s1">hiddenimports</span>
+
+
+<span class="s2">def </span><span class="s1">gir_library_path_fix(path):</span>
+    <span class="s2">import </span><span class="s1">subprocess</span>
+
+    <span class="s0"># 'PyInstaller.config' cannot be imported as other top-level modules.</span>
+    <span class="s2">from </span><span class="s1">PyInstaller.config </span><span class="s2">import </span><span class="s1">CONF</span>
+
+    <span class="s1">path = os.path.abspath(path)</span>
+
+    <span class="s0"># On Mac OS we need to recompile the GIR files to reference the loader path,</span>
+    <span class="s0"># but this is not necessary on other platforms.</span>
+    <span class="s2">if </span><span class="s1">compat.is_darwin:</span>
+
+        <span class="s0"># If using a virtualenv, the base prefix and the path of the typelib</span>
+        <span class="s0"># have really nothing to do with each other, so try to detect that.</span>
+        <span class="s1">common_path = os.path.commonprefix([compat.base_prefix</span><span class="s2">, </span><span class="s1">path])</span>
+        <span class="s2">if </span><span class="s1">common_path == </span><span class="s3">'/'</span><span class="s1">:</span>
+            <span class="s1">logger.debug(</span><span class="s3">&quot;virtualenv detected? fixing the gir path...&quot;</span><span class="s1">)</span>
+            <span class="s1">common_path = os.path.abspath(os.path.join(path</span><span class="s2">, </span><span class="s3">'..'</span><span class="s2">, </span><span class="s3">'..'</span><span class="s2">, </span><span class="s3">'..'</span><span class="s1">))</span>
+
+        <span class="s1">gir_path = os.path.join(common_path</span><span class="s2">, </span><span class="s3">'share'</span><span class="s2">, </span><span class="s3">'gir-1.0'</span><span class="s1">)</span>
+
+        <span class="s1">typelib_name = os.path.basename(path)</span>
+        <span class="s1">gir_name = os.path.splitext(typelib_name)[</span><span class="s5">0</span><span class="s1">] + </span><span class="s3">'.gir'</span>
+
+        <span class="s1">gir_file = os.path.join(gir_path</span><span class="s2">, </span><span class="s1">gir_name)</span>
+
+        <span class="s2">if not </span><span class="s1">os.path.exists(gir_path):</span>
+            <span class="s1">logger.error(</span>
+                <span class="s3">&quot;Unable to find gir directory: %s.</span><span class="s2">\n</span><span class="s3">Try installing your platform's gobject-introspection package.&quot;</span><span class="s2">,</span>
+                <span class="s1">gir_path</span>
+            <span class="s1">)</span>
+            <span class="s2">return None</span>
+        <span class="s2">if not </span><span class="s1">os.path.exists(gir_file):</span>
+            <span class="s1">logger.error(</span>
+                <span class="s3">&quot;Unable to find gir file: %s.</span><span class="s2">\n</span><span class="s3">Try installing your platform's gobject-introspection package.&quot;</span><span class="s2">, </span><span class="s1">gir_file</span>
+            <span class="s1">)</span>
+            <span class="s2">return None</span>
+
+        <span class="s2">with </span><span class="s1">open(gir_file</span><span class="s2">, </span><span class="s3">'r'</span><span class="s2">, </span><span class="s1">encoding=</span><span class="s3">'utf-8'</span><span class="s1">) </span><span class="s2">as </span><span class="s1">f:</span>
+            <span class="s1">lines = f.readlines()</span>
+        <span class="s0"># GIR files are `XML encoded &lt;https://developer.gnome.org/gi/stable/gi-gir-reference.html&gt;`_,</span>
+        <span class="s0"># which means they are by definition encoded using UTF-8.</span>
+        <span class="s2">with </span><span class="s1">open(os.path.join(CONF[</span><span class="s3">'workpath'</span><span class="s1">]</span><span class="s2">, </span><span class="s1">gir_name)</span><span class="s2">, </span><span class="s3">'w'</span><span class="s2">, </span><span class="s1">encoding=</span><span class="s3">'utf-8'</span><span class="s1">) </span><span class="s2">as </span><span class="s1">f:</span>
+            <span class="s2">for </span><span class="s1">line </span><span class="s2">in </span><span class="s1">lines:</span>
+                <span class="s2">if </span><span class="s3">'shared-library' </span><span class="s2">in </span><span class="s1">line:</span>
+                    <span class="s1">split = re.split(</span><span class="s3">'(=)'</span><span class="s2">, </span><span class="s1">line)</span>
+                    <span class="s1">files = re.split(</span><span class="s3">'([&quot;|,])'</span><span class="s2">, </span><span class="s1">split[</span><span class="s5">2</span><span class="s1">])</span>
+                    <span class="s2">for </span><span class="s1">count</span><span class="s2">, </span><span class="s1">item </span><span class="s2">in </span><span class="s1">enumerate(files):</span>
+                        <span class="s2">if </span><span class="s3">'lib' </span><span class="s2">in </span><span class="s1">item:</span>
+                            <span class="s1">files[count] = </span><span class="s3">'@loader_path/' </span><span class="s1">+ os.path.basename(item)</span>
+                    <span class="s1">line = </span><span class="s3">''</span><span class="s1">.join(split[</span><span class="s5">0</span><span class="s1">:</span><span class="s5">2</span><span class="s1">]) + </span><span class="s3">''</span><span class="s1">.join(files)</span>
+                <span class="s1">f.write(line)</span>
+
+        <span class="s0"># g-ir-compiler expects a file so we cannot just pipe the fixed file to it.</span>
+        <span class="s1">command = subprocess.Popen((</span>
+            <span class="s3">'g-ir-compiler'</span><span class="s2">, </span><span class="s1">os.path.join(CONF[</span><span class="s3">'workpath'</span><span class="s1">]</span><span class="s2">, </span><span class="s1">gir_name)</span><span class="s2">,</span>
+            <span class="s3">'-o'</span><span class="s2">, </span><span class="s1">os.path.join(CONF[</span><span class="s3">'workpath'</span><span class="s1">]</span><span class="s2">, </span><span class="s1">typelib_name)</span>
+        <span class="s1">))  </span><span class="s0"># yapf: disable</span>
+        <span class="s1">command.wait()</span>
+
+        <span class="s2">return </span><span class="s1">os.path.join(CONF[</span><span class="s3">'workpath'</span><span class="s1">]</span><span class="s2">, </span><span class="s1">typelib_name)</span><span class="s2">, </span><span class="s3">'gi_typelibs'</span>
+    <span class="s2">else</span><span class="s1">:</span>
+        <span class="s2">return </span><span class="s1">path</span><span class="s2">, </span><span class="s3">'gi_typelibs'</span>
+
+
+<span class="s2">def </span><span class="s1">get_glib_system_data_dirs():</span>
+    <span class="s1">statement = </span><span class="s3">&quot;&quot;&quot; 
+        import gi 
+        gi.require_version('GLib', '2.0') 
+        from gi.repository import GLib 
+        print(GLib.get_system_data_dirs()) 
+    &quot;&quot;&quot;</span>
+    <span class="s1">data_dirs = eval_statement(statement)</span>
+    <span class="s2">if not </span><span class="s1">data_dirs:</span>
+        <span class="s1">logger.error(</span><span class="s3">&quot;gi repository 'GLib 2.0' not found. Please make sure corresponding package is installed.&quot;</span><span class="s1">)</span>
+        <span class="s0"># :todo: should we raise a SystemError here?</span>
+    <span class="s2">return </span><span class="s1">data_dirs</span>
+
+
+<span class="s2">def </span><span class="s1">get_glib_sysconf_dirs():</span>
+    <span class="s4">&quot;&quot;&quot; 
+    Try to return the sysconf directories (e.g., /etc). 
+    &quot;&quot;&quot;</span>
+    <span class="s2">if </span><span class="s1">compat.is_win:</span>
+        <span class="s0"># On Windows, if you look at gtkwin32.c, sysconfdir is actually relative to the location of the GTK DLL. Since</span>
+        <span class="s0"># that is what we are actually interested in (not the user path), we have to do that the hard way...</span>
+        <span class="s2">return </span><span class="s1">[os.path.join(get_gi_libdir(</span><span class="s3">'GLib'</span><span class="s2">, </span><span class="s3">'2.0'</span><span class="s1">)</span><span class="s2">, </span><span class="s3">'etc'</span><span class="s1">)]</span>
+
+    <span class="s1">statement = </span><span class="s3">&quot;&quot;&quot; 
+        import gi 
+        gi.require_version('GLib', '2.0') 
+        from gi.repository import GLib 
+        print(GLib.get_system_config_dirs()) 
+    &quot;&quot;&quot;</span>
+    <span class="s1">data_dirs = eval_statement(statement)</span>
+    <span class="s2">if not </span><span class="s1">data_dirs:</span>
+        <span class="s1">logger.error(</span><span class="s3">&quot;gi repository 'GLib 2.0' not found. Please make sure corresponding package is installed.&quot;</span><span class="s1">)</span>
+        <span class="s0"># :todo: should we raise a SystemError here?</span>
+    <span class="s2">return </span><span class="s1">data_dirs</span>
+
+
+<span class="s2">def </span><span class="s1">collect_glib_share_files(*path):</span>
+    <span class="s4">&quot;&quot;&quot; 
+    Path is relative to the system data directory (e.g., /usr/share). 
+    &quot;&quot;&quot;</span>
+    <span class="s1">glib_data_dirs = get_glib_system_data_dirs()</span>
+    <span class="s2">if </span><span class="s1">glib_data_dirs </span><span class="s2">is None</span><span class="s1">:</span>
+        <span class="s2">return </span><span class="s1">[]</span>
+
+    <span class="s1">destdir = os.path.join(</span><span class="s3">'share'</span><span class="s2">, </span><span class="s1">*path)</span>
+
+    <span class="s0"># TODO: will this return too much?</span>
+    <span class="s1">collected = []</span>
+    <span class="s2">for </span><span class="s1">data_dir </span><span class="s2">in </span><span class="s1">glib_data_dirs:</span>
+        <span class="s1">p = os.path.join(data_dir</span><span class="s2">, </span><span class="s1">*path)</span>
+        <span class="s1">collected += collect_system_data_files(p</span><span class="s2">, </span><span class="s1">destdir=destdir</span><span class="s2">, </span><span class="s1">include_py_files=</span><span class="s2">False</span><span class="s1">)</span>
+
+    <span class="s2">return </span><span class="s1">collected</span>
+
+
+<span class="s2">def </span><span class="s1">collect_glib_etc_files(*path):</span>
+    <span class="s4">&quot;&quot;&quot; 
+    Path is relative to the system config directory (e.g., /etc). 
+    &quot;&quot;&quot;</span>
+    <span class="s1">glib_config_dirs = get_glib_sysconf_dirs()</span>
+    <span class="s2">if </span><span class="s1">glib_config_dirs </span><span class="s2">is None</span><span class="s1">:</span>
+        <span class="s2">return </span><span class="s1">[]</span>
+
+    <span class="s1">destdir = os.path.join(</span><span class="s3">'etc'</span><span class="s2">, </span><span class="s1">*path)</span>
+
+    <span class="s0"># TODO: will this return too much?</span>
+    <span class="s1">collected = []</span>
+    <span class="s2">for </span><span class="s1">config_dir </span><span class="s2">in </span><span class="s1">glib_config_dirs:</span>
+        <span class="s1">p = os.path.join(config_dir</span><span class="s2">, </span><span class="s1">*path)</span>
+        <span class="s1">collected += collect_system_data_files(p</span><span class="s2">, </span><span class="s1">destdir=destdir</span><span class="s2">, </span><span class="s1">include_py_files=</span><span class="s2">False</span><span class="s1">)</span>
+
+    <span class="s2">return </span><span class="s1">collected</span>
+
+
+<span class="s1">_glib_translations = </span><span class="s2">None</span>
+
+
+<span class="s2">def </span><span class="s1">collect_glib_translations(prog</span><span class="s2">, </span><span class="s1">lang_list=</span><span class="s2">None</span><span class="s1">):</span>
+    <span class="s4">&quot;&quot;&quot; 
+    Return a list of translations in the system locale directory whose names equal prog.mo. 
+    &quot;&quot;&quot;</span>
+    <span class="s2">global </span><span class="s1">_glib_translations</span>
+    <span class="s2">if </span><span class="s1">_glib_translations </span><span class="s2">is None</span><span class="s1">:</span>
+        <span class="s2">if </span><span class="s1">lang_list </span><span class="s2">is not None</span><span class="s1">:</span>
+            <span class="s1">trans = []</span>
+            <span class="s2">for </span><span class="s1">lang </span><span class="s2">in </span><span class="s1">lang_list:</span>
+                <span class="s1">trans += collect_glib_share_files(os.path.join(</span><span class="s3">&quot;locale&quot;</span><span class="s2">, </span><span class="s1">lang))</span>
+            <span class="s1">_glib_translations = trans</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">_glib_translations = collect_glib_share_files(</span><span class="s3">'locale'</span><span class="s1">)</span>
+
+    <span class="s1">names = [os.sep + prog + </span><span class="s3">'.mo'</span><span class="s2">, </span><span class="s1">os.sep + prog + </span><span class="s3">'.po'</span><span class="s1">]</span>
+    <span class="s1">namelen = len(names[</span><span class="s5">0</span><span class="s1">])</span>
+
+    <span class="s2">return </span><span class="s1">[(src</span><span class="s2">, </span><span class="s1">dst) </span><span class="s2">for </span><span class="s1">src</span><span class="s2">, </span><span class="s1">dst </span><span class="s2">in </span><span class="s1">_glib_translations </span><span class="s2">if </span><span class="s1">src[-namelen:] </span><span class="s2">in </span><span class="s1">names]</span>
+</pre>
+</body>
+</html>

@@ -1,0 +1,492 @@
+<html>
+<head>
+<title>events.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #629755; font-style: italic;}
+.s3 { color: #cc7832;}
+.s4 { color: #6a8759;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+events.py</font>
+</center></td></tr></table>
+<pre><span class="s0"># -*- coding: utf-8 -*-</span>
+<span class="s0"># Copyright 2018 gevent. See LICENSE for details.</span>
+<span class="s2">&quot;&quot;&quot; 
+Publish/subscribe event infrastructure. 
+ 
+When certain &quot;interesting&quot; things happen during the lifetime of the 
+process, gevent will &quot;publish&quot; an event (an object). That event is 
+delivered to interested &quot;subscribers&quot; (functions that take one 
+parameter, the event object). 
+ 
+Higher level frameworks may take this foundation and build richer 
+models on it. 
+ 
+:mod:`zope.event` will be used to provide the functionality of 
+`notify` and `subscribers`. See :mod:`zope.event.classhandler` for a 
+simple class-based approach to subscribing to a filtered list of 
+events, and see `zope.component 
+&lt;https://zopecomponent.readthedocs.io/en/latest/event.html&gt;`_ for a 
+much higher-level, flexible system. If you are using one of these 
+systems, you generally will not want to directly modify `subscribers`. 
+ 
+.. versionadded:: 1.3b1 
+&quot;&quot;&quot;</span>
+<span class="s3">from </span><span class="s1">__future__ </span><span class="s3">import </span><span class="s1">absolute_import</span>
+<span class="s3">from </span><span class="s1">__future__ </span><span class="s3">import </span><span class="s1">division</span>
+<span class="s3">from </span><span class="s1">__future__ </span><span class="s3">import </span><span class="s1">print_function</span>
+
+
+<span class="s1">__all__ = [</span>
+    <span class="s4">'subscribers'</span><span class="s3">,</span>
+
+    <span class="s0"># monitor thread</span>
+    <span class="s4">'IEventLoopBlocked'</span><span class="s3">,</span>
+    <span class="s4">'EventLoopBlocked'</span><span class="s3">,</span>
+    <span class="s4">'IMemoryUsageThresholdExceeded'</span><span class="s3">,</span>
+    <span class="s4">'MemoryUsageThresholdExceeded'</span><span class="s3">,</span>
+    <span class="s4">'IMemoryUsageUnderThreshold'</span><span class="s3">,</span>
+    <span class="s4">'MemoryUsageUnderThreshold'</span><span class="s3">,</span>
+
+    <span class="s0"># Hub</span>
+    <span class="s4">'IPeriodicMonitorThread'</span><span class="s3">,</span>
+    <span class="s4">'IPeriodicMonitorThreadStartedEvent'</span><span class="s3">,</span>
+    <span class="s4">'PeriodicMonitorThreadStartedEvent'</span><span class="s3">,</span>
+
+    <span class="s0"># monkey</span>
+    <span class="s4">'IGeventPatchEvent'</span><span class="s3">,</span>
+    <span class="s4">'GeventPatchEvent'</span><span class="s3">,</span>
+    <span class="s4">'IGeventWillPatchEvent'</span><span class="s3">,</span>
+    <span class="s4">'DoNotPatch'</span><span class="s3">,</span>
+    <span class="s4">'GeventWillPatchEvent'</span><span class="s3">,</span>
+    <span class="s4">'IGeventDidPatchEvent'</span><span class="s3">,</span>
+    <span class="s4">'IGeventWillPatchModuleEvent'</span><span class="s3">,</span>
+    <span class="s4">'GeventWillPatchModuleEvent'</span><span class="s3">,</span>
+    <span class="s4">'IGeventDidPatchModuleEvent'</span><span class="s3">,</span>
+    <span class="s4">'GeventDidPatchModuleEvent'</span><span class="s3">,</span>
+    <span class="s4">'IGeventWillPatchAllEvent'</span><span class="s3">,</span>
+    <span class="s4">'GeventWillPatchAllEvent'</span><span class="s3">,</span>
+    <span class="s4">'IGeventDidPatchBuiltinModulesEvent'</span><span class="s3">,</span>
+    <span class="s4">'GeventDidPatchBuiltinModulesEvent'</span><span class="s3">,</span>
+    <span class="s4">'IGeventDidPatchAllEvent'</span><span class="s3">,</span>
+    <span class="s4">'GeventDidPatchAllEvent'</span><span class="s3">,</span>
+<span class="s1">]</span>
+
+<span class="s0"># pylint:disable=no-self-argument,inherit-non-class</span>
+<span class="s3">import </span><span class="s1">platform</span>
+
+<span class="s3">from </span><span class="s1">zope.interface </span><span class="s3">import </span><span class="s1">Interface</span>
+<span class="s3">from </span><span class="s1">zope.interface </span><span class="s3">import </span><span class="s1">Attribute</span>
+<span class="s3">from </span><span class="s1">zope.interface </span><span class="s3">import </span><span class="s1">implementer</span>
+
+<span class="s3">from </span><span class="s1">zope.event </span><span class="s3">import </span><span class="s1">subscribers</span>
+<span class="s3">from </span><span class="s1">zope.event </span><span class="s3">import </span><span class="s1">notify</span>
+
+<span class="s3">from </span><span class="s1">pkg_resources </span><span class="s3">import </span><span class="s1">iter_entry_points</span>
+
+<span class="s0">#: Applications may register for notification of events by appending a</span>
+<span class="s0">#: callable to the ``subscribers`` list.</span>
+<span class="s0">#:</span>
+<span class="s0">#: Each subscriber takes a single argument, which is the event object</span>
+<span class="s0">#: being published.</span>
+<span class="s0">#:</span>
+<span class="s0">#: Exceptions raised by subscribers will be propagated *without* running</span>
+<span class="s0">#: any remaining subscribers.</span>
+<span class="s0">#:</span>
+<span class="s0">#: This is an alias for `zope.event.subscribers`; prefer to use</span>
+<span class="s0">#: that attribute directly.</span>
+<span class="s1">subscribers = subscribers</span>
+
+<span class="s3">try</span><span class="s1">:</span>
+    <span class="s0"># Cache the platform info. pkg_resources uses</span>
+    <span class="s0"># platform.machine() for environment markers, and</span>
+    <span class="s0"># platform.machine() wants to call os.popen('uname'), which is</span>
+    <span class="s0"># broken on Py2 when the gevent child signal handler is</span>
+    <span class="s0"># installed. (see test__monkey_sigchild_2.py)</span>
+    <span class="s1">platform.uname()</span>
+<span class="s3">except</span><span class="s1">: </span><span class="s0"># pylint:disable=bare-except</span>
+    <span class="s3">pass</span>
+<span class="s3">finally</span><span class="s1">:</span>
+    <span class="s3">del </span><span class="s1">platform</span>
+
+<span class="s3">def </span><span class="s1">notify_and_call_entry_points(event):</span>
+    <span class="s1">notify(event)</span>
+    <span class="s3">for </span><span class="s1">plugin </span><span class="s3">in </span><span class="s1">iter_entry_points(event.ENTRY_POINT_NAME):</span>
+        <span class="s1">subscriber = plugin.load()</span>
+        <span class="s1">subscriber(event)</span>
+
+
+<span class="s3">class </span><span class="s1">IPeriodicMonitorThread(Interface):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    The contract for the periodic monitoring thread that is started 
+    by the hub. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s3">def </span><span class="s1">add_monitoring_function(function</span><span class="s3">, </span><span class="s1">period):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Schedule the *function* to be called approximately every *period* fractional seconds. 
+ 
+        The *function* receives one argument, the hub being monitored. It is called 
+        in the monitoring thread, *not* the hub thread. It **must not** attempt to 
+        use the gevent asynchronous API. 
+ 
+        If the *function* is already a monitoring function, then its *period* 
+        will be updated for future runs. 
+ 
+        If the *period* is ``None``, then the function will be removed. 
+ 
+        A *period* less than or equal to zero is not allowed. 
+        &quot;&quot;&quot;</span>
+
+<span class="s3">class </span><span class="s1">IPeriodicMonitorThreadStartedEvent(Interface):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    The event emitted when a hub starts a periodic monitoring thread. 
+ 
+    You can use this event to add additional monitoring functions. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s1">monitor = Attribute(</span><span class="s4">&quot;The instance of `IPeriodicMonitorThread` that was started.&quot;</span><span class="s1">)</span>
+
+<span class="s3">class </span><span class="s1">PeriodicMonitorThreadStartedEvent(object):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    The implementation of :class:`IPeriodicMonitorThreadStartedEvent`. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s0">#: The name of the setuptools entry point that is called when this</span>
+    <span class="s0">#: event is emitted.</span>
+    <span class="s1">ENTRY_POINT_NAME = </span><span class="s4">'gevent.plugins.hub.periodic_monitor_thread_started'</span>
+
+    <span class="s3">def </span><span class="s1">__init__(self</span><span class="s3">, </span><span class="s1">monitor):</span>
+        <span class="s1">self.monitor = monitor</span>
+
+<span class="s3">class </span><span class="s1">IEventLoopBlocked(Interface):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    The event emitted when the event loop is blocked. 
+ 
+    This event is emitted in the monitor thread. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s1">greenlet = Attribute(</span><span class="s4">&quot;The greenlet that appeared to be blocking the loop.&quot;</span><span class="s1">)</span>
+    <span class="s1">blocking_time = Attribute(</span><span class="s4">&quot;The approximate time in seconds the loop has been blocked.&quot;</span><span class="s1">)</span>
+    <span class="s1">info = Attribute(</span><span class="s4">&quot;A sequence of string lines providing extra info.&quot;</span><span class="s1">)</span>
+
+<span class="s1">@implementer(IEventLoopBlocked)</span>
+<span class="s3">class </span><span class="s1">EventLoopBlocked(object):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    The event emitted when the event loop is blocked. 
+ 
+    Implements `IEventLoopBlocked`. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s3">def </span><span class="s1">__init__(self</span><span class="s3">, </span><span class="s1">greenlet</span><span class="s3">, </span><span class="s1">blocking_time</span><span class="s3">, </span><span class="s1">info):</span>
+        <span class="s1">self.greenlet = greenlet</span>
+        <span class="s1">self.blocking_time = blocking_time</span>
+        <span class="s1">self.info = info</span>
+
+<span class="s3">class </span><span class="s1">IMemoryUsageThresholdExceeded(Interface):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    The event emitted when the memory usage threshold is exceeded. 
+ 
+    This event is emitted only while memory continues to grow 
+    above the threshold. Only if the condition or stabilized is corrected (memory 
+    usage drops) will the event be emitted in the future. 
+ 
+    This event is emitted in the monitor thread. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s1">mem_usage = Attribute(</span><span class="s4">&quot;The current process memory usage, in bytes.&quot;</span><span class="s1">)</span>
+    <span class="s1">max_allowed = Attribute(</span><span class="s4">&quot;The maximum allowed memory usage, in bytes.&quot;</span><span class="s1">)</span>
+    <span class="s1">memory_info = Attribute(</span><span class="s4">&quot;The tuple of memory usage stats return by psutil.&quot;</span><span class="s1">)</span>
+
+<span class="s3">class </span><span class="s1">_AbstractMemoryEvent(object):</span>
+
+    <span class="s3">def </span><span class="s1">__init__(self</span><span class="s3">, </span><span class="s1">mem_usage</span><span class="s3">, </span><span class="s1">max_allowed</span><span class="s3">, </span><span class="s1">memory_info):</span>
+        <span class="s1">self.mem_usage = mem_usage</span>
+        <span class="s1">self.max_allowed = max_allowed</span>
+        <span class="s1">self.memory_info = memory_info</span>
+
+    <span class="s3">def </span><span class="s1">__repr__(self):</span>
+        <span class="s3">return </span><span class="s4">&quot;&lt;%s used=%d max=%d details=%r&gt;&quot; </span><span class="s1">% (</span>
+            <span class="s1">self.__class__.__name__</span><span class="s3">,</span>
+            <span class="s1">self.mem_usage</span><span class="s3">,</span>
+            <span class="s1">self.max_allowed</span><span class="s3">,</span>
+            <span class="s1">self.memory_info</span><span class="s3">,</span>
+        <span class="s1">)</span>
+
+<span class="s1">@implementer(IMemoryUsageThresholdExceeded)</span>
+<span class="s3">class </span><span class="s1">MemoryUsageThresholdExceeded(_AbstractMemoryEvent):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Implementation of `IMemoryUsageThresholdExceeded`. 
+    &quot;&quot;&quot;</span>
+
+
+<span class="s3">class </span><span class="s1">IMemoryUsageUnderThreshold(Interface):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    The event emitted when the memory usage drops below the 
+    threshold after having previously been above it. 
+ 
+    This event is emitted only the first time memory usage is detected 
+    to be below the threshold after having previously been above it. 
+    If memory usage climbs again, a `IMemoryUsageThresholdExceeded` 
+    event will be broadcast, and then this event could be broadcast again. 
+ 
+    This event is emitted in the monitor thread. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s1">mem_usage = Attribute(</span><span class="s4">&quot;The current process memory usage, in bytes.&quot;</span><span class="s1">)</span>
+    <span class="s1">max_allowed = Attribute(</span><span class="s4">&quot;The maximum allowed memory usage, in bytes.&quot;</span><span class="s1">)</span>
+    <span class="s1">max_memory_usage = Attribute(</span><span class="s4">&quot;The memory usage that caused the previous &quot;</span>
+                                 <span class="s4">&quot;IMemoryUsageThresholdExceeded event.&quot;</span><span class="s1">)</span>
+    <span class="s1">memory_info = Attribute(</span><span class="s4">&quot;The tuple of memory usage stats return by psutil.&quot;</span><span class="s1">)</span>
+
+
+<span class="s1">@implementer(IMemoryUsageUnderThreshold)</span>
+<span class="s3">class </span><span class="s1">MemoryUsageUnderThreshold(_AbstractMemoryEvent):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Implementation of `IMemoryUsageUnderThreshold`. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s3">def </span><span class="s1">__init__(self</span><span class="s3">, </span><span class="s1">mem_usage</span><span class="s3">, </span><span class="s1">max_allowed</span><span class="s3">, </span><span class="s1">memory_info</span><span class="s3">, </span><span class="s1">max_usage):</span>
+        <span class="s1">super(MemoryUsageUnderThreshold</span><span class="s3">, </span><span class="s1">self).__init__(mem_usage</span><span class="s3">, </span><span class="s1">max_allowed</span><span class="s3">, </span><span class="s1">memory_info)</span>
+        <span class="s1">self.max_memory_usage = max_usage</span>
+
+
+<span class="s3">class </span><span class="s1">IGeventPatchEvent(Interface):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    The root for all monkey-patch events gevent emits. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s1">source = Attribute(</span><span class="s4">&quot;The source object containing the patches.&quot;</span><span class="s1">)</span>
+    <span class="s1">target = Attribute(</span><span class="s4">&quot;The destination object to be patched.&quot;</span><span class="s1">)</span>
+
+<span class="s1">@implementer(IGeventPatchEvent)</span>
+<span class="s3">class </span><span class="s1">GeventPatchEvent(object):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Implementation of `IGeventPatchEvent`. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s3">def </span><span class="s1">__init__(self</span><span class="s3">, </span><span class="s1">source</span><span class="s3">, </span><span class="s1">target):</span>
+        <span class="s1">self.source = source</span>
+        <span class="s1">self.target = target</span>
+
+    <span class="s3">def </span><span class="s1">__repr__(self):</span>
+        <span class="s3">return </span><span class="s4">'&lt;%s source=%r target=%r at %x&gt;' </span><span class="s1">% (self.__class__.__name__</span><span class="s3">,</span>
+                                                   <span class="s1">self.source</span><span class="s3">,</span>
+                                                   <span class="s1">self.target</span><span class="s3">,</span>
+                                                   <span class="s1">id(self))</span>
+
+<span class="s3">class </span><span class="s1">IGeventWillPatchEvent(IGeventPatchEvent):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    An event emitted *before* gevent monkey-patches something. 
+ 
+    If a subscriber raises `DoNotPatch`, then patching this particular 
+    item will not take place. 
+    &quot;&quot;&quot;</span>
+
+
+<span class="s3">class </span><span class="s1">DoNotPatch(BaseException):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Subscribers to will-patch events can raise instances 
+    of this class to tell gevent not to patch that particular item. 
+    &quot;&quot;&quot;</span>
+
+
+<span class="s1">@implementer(IGeventWillPatchEvent)</span>
+<span class="s3">class </span><span class="s1">GeventWillPatchEvent(GeventPatchEvent):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Implementation of `IGeventWillPatchEvent`. 
+    &quot;&quot;&quot;</span>
+
+<span class="s3">class </span><span class="s1">IGeventDidPatchEvent(IGeventPatchEvent):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    An event emitted *after* gevent has patched something. 
+    &quot;&quot;&quot;</span>
+
+<span class="s1">@implementer(IGeventDidPatchEvent)</span>
+<span class="s3">class </span><span class="s1">GeventDidPatchEvent(GeventPatchEvent):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Implementation of `IGeventDidPatchEvent`. 
+    &quot;&quot;&quot;</span>
+
+<span class="s3">class </span><span class="s1">IGeventWillPatchModuleEvent(IGeventWillPatchEvent):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    An event emitted *before* gevent begins patching a specific module. 
+ 
+    Both *source* and *target* attributes are module objects. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s1">module_name = Attribute(</span><span class="s4">&quot;The name of the module being patched. &quot;</span>
+                            <span class="s4">&quot;This is the same as ``target.__name__``.&quot;</span><span class="s1">)</span>
+
+    <span class="s1">target_item_names = Attribute(</span><span class="s4">&quot;The list of item names to patch. &quot;</span>
+                                  <span class="s4">&quot;This can be modified in place with caution.&quot;</span><span class="s1">)</span>
+
+<span class="s1">@implementer(IGeventWillPatchModuleEvent)</span>
+<span class="s3">class </span><span class="s1">GeventWillPatchModuleEvent(GeventWillPatchEvent):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Implementation of `IGeventWillPatchModuleEvent`. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s0">#: The name of the setuptools entry point that is called when this</span>
+    <span class="s0">#: event is emitted.</span>
+    <span class="s1">ENTRY_POINT_NAME = </span><span class="s4">'gevent.plugins.monkey.will_patch_module'</span>
+
+    <span class="s3">def </span><span class="s1">__init__(self</span><span class="s3">, </span><span class="s1">module_name</span><span class="s3">, </span><span class="s1">source</span><span class="s3">, </span><span class="s1">target</span><span class="s3">, </span><span class="s1">items):</span>
+        <span class="s1">super(GeventWillPatchModuleEvent</span><span class="s3">, </span><span class="s1">self).__init__(source</span><span class="s3">, </span><span class="s1">target)</span>
+        <span class="s1">self.module_name = module_name</span>
+        <span class="s1">self.target_item_names = items</span>
+
+
+<span class="s3">class </span><span class="s1">IGeventDidPatchModuleEvent(IGeventDidPatchEvent):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    An event emitted *after* gevent has completed patching a specific 
+    module. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s1">module_name = Attribute(</span><span class="s4">&quot;The name of the module being patched. &quot;</span>
+                            <span class="s4">&quot;This is the same as ``target.__name__``.&quot;</span><span class="s1">)</span>
+
+
+<span class="s1">@implementer(IGeventDidPatchModuleEvent)</span>
+<span class="s3">class </span><span class="s1">GeventDidPatchModuleEvent(GeventDidPatchEvent):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Implementation of `IGeventDidPatchModuleEvent`. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s0">#: The name of the setuptools entry point that is called when this</span>
+    <span class="s0">#: event is emitted.</span>
+    <span class="s1">ENTRY_POINT_NAME = </span><span class="s4">'gevent.plugins.monkey.did_patch_module'</span>
+
+    <span class="s3">def </span><span class="s1">__init__(self</span><span class="s3">, </span><span class="s1">module_name</span><span class="s3">, </span><span class="s1">source</span><span class="s3">, </span><span class="s1">target):</span>
+        <span class="s1">super(GeventDidPatchModuleEvent</span><span class="s3">, </span><span class="s1">self).__init__(source</span><span class="s3">, </span><span class="s1">target)</span>
+        <span class="s1">self.module_name = module_name</span>
+
+<span class="s0"># TODO: Maybe it would be useful for the the module patch events</span>
+<span class="s0"># to have an attribute telling if they're being done during patch_all?</span>
+
+<span class="s3">class </span><span class="s1">IGeventWillPatchAllEvent(IGeventWillPatchEvent):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    An event emitted *before* gevent begins patching the system. 
+ 
+    Following this event will be a series of 
+    `IGeventWillPatchModuleEvent` and `IGeventDidPatchModuleEvent` for 
+    each patched module. 
+ 
+    Once the gevent builtin modules have been processed, 
+    `IGeventDidPatchBuiltinModulesEvent` will be emitted. Processing 
+    this event is an ideal time for third-party modules to be imported 
+    and patched (which may trigger its own will/did patch module 
+    events). 
+ 
+    Finally, a `IGeventDidPatchAllEvent` will be sent. 
+ 
+    If a subscriber to this event raises `DoNotPatch`, no patching 
+    will be done. 
+ 
+    The *source* and *target* attributes have undefined values. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s1">patch_all_arguments = Attribute(</span>
+        <span class="s4">&quot;A dictionary of all the arguments to `gevent.monkey.patch_all`. &quot;</span>
+        <span class="s4">&quot;This dictionary should not be modified. &quot;</span>
+    <span class="s1">)</span>
+
+    <span class="s1">patch_all_kwargs = Attribute(</span>
+        <span class="s4">&quot;A dictionary of the extra arguments to `gevent.monkey.patch_all`. &quot;</span>
+        <span class="s4">&quot;This dictionary should not be modified. &quot;</span>
+    <span class="s1">)</span>
+
+    <span class="s3">def </span><span class="s1">will_patch_module(module_name):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Return whether the module named *module_name* will be patched. 
+        &quot;&quot;&quot;</span>
+
+<span class="s3">class </span><span class="s1">_PatchAllMixin(object):</span>
+    <span class="s3">def </span><span class="s1">__init__(self</span><span class="s3">, </span><span class="s1">patch_all_arguments</span><span class="s3">, </span><span class="s1">patch_all_kwargs):</span>
+        <span class="s1">super(_PatchAllMixin</span><span class="s3">, </span><span class="s1">self).__init__(</span><span class="s3">None, None</span><span class="s1">)</span>
+        <span class="s1">self._patch_all_arguments = patch_all_arguments</span>
+        <span class="s1">self._patch_all_kwargs = patch_all_kwargs</span>
+
+    <span class="s1">@property</span>
+    <span class="s3">def </span><span class="s1">patch_all_arguments(self):</span>
+        <span class="s3">return </span><span class="s1">self._patch_all_arguments.copy()</span>
+
+    <span class="s1">@property</span>
+    <span class="s3">def </span><span class="s1">patch_all_kwargs(self):</span>
+        <span class="s3">return </span><span class="s1">self._patch_all_kwargs.copy()</span>
+
+    <span class="s3">def </span><span class="s1">__repr__(self):</span>
+        <span class="s3">return </span><span class="s4">'&lt;%s %r at %x&gt;' </span><span class="s1">% (self.__class__.__name__</span><span class="s3">,</span>
+                                  <span class="s1">self._patch_all_arguments</span><span class="s3">,</span>
+                                  <span class="s1">id(self))</span>
+
+<span class="s1">@implementer(IGeventWillPatchAllEvent)</span>
+<span class="s3">class </span><span class="s1">GeventWillPatchAllEvent(_PatchAllMixin</span><span class="s3">, </span><span class="s1">GeventWillPatchEvent):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Implementation of `IGeventWillPatchAllEvent`. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s0">#: The name of the setuptools entry point that is called when this</span>
+    <span class="s0">#: event is emitted.</span>
+    <span class="s1">ENTRY_POINT_NAME = </span><span class="s4">'gevent.plugins.monkey.will_patch_all'</span>
+
+    <span class="s3">def </span><span class="s1">will_patch_module(self</span><span class="s3">, </span><span class="s1">module_name):</span>
+        <span class="s3">return </span><span class="s1">self.patch_all_arguments.get(module_name)</span>
+
+<span class="s3">class </span><span class="s1">IGeventDidPatchBuiltinModulesEvent(IGeventDidPatchEvent):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Event emitted *after* the builtin modules have been patched. 
+ 
+    If you're going to monkey-patch a third-party library, this is 
+    usually the event to listen for. 
+ 
+    The values of the *source* and *target* attributes are undefined. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s1">patch_all_arguments = Attribute(</span>
+        <span class="s4">&quot;A dictionary of all the arguments to `gevent.monkey.patch_all`. &quot;</span>
+        <span class="s4">&quot;This dictionary should not be modified. &quot;</span>
+    <span class="s1">)</span>
+
+    <span class="s1">patch_all_kwargs = Attribute(</span>
+        <span class="s4">&quot;A dictionary of the extra arguments to `gevent.monkey.patch_all`. &quot;</span>
+        <span class="s4">&quot;This dictionary should not be modified. &quot;</span>
+    <span class="s1">)</span>
+
+<span class="s1">@implementer(IGeventDidPatchBuiltinModulesEvent)</span>
+<span class="s3">class </span><span class="s1">GeventDidPatchBuiltinModulesEvent(_PatchAllMixin</span><span class="s3">, </span><span class="s1">GeventDidPatchEvent):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Implementation of `IGeventDidPatchBuiltinModulesEvent`. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s0">#: The name of the setuptools entry point that is called when this</span>
+    <span class="s0">#: event is emitted.</span>
+    <span class="s1">ENTRY_POINT_NAME = </span><span class="s4">'gevent.plugins.monkey.did_patch_builtins'</span>
+
+<span class="s3">class </span><span class="s1">IGeventDidPatchAllEvent(IGeventDidPatchEvent):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Event emitted after gevent has patched all modules, both builtin 
+    and those provided by plugins/subscribers. 
+ 
+    The values of the *source* and *target* attributes are undefined. 
+    &quot;&quot;&quot;</span>
+
+<span class="s1">@implementer(IGeventDidPatchAllEvent)</span>
+<span class="s3">class </span><span class="s1">GeventDidPatchAllEvent(_PatchAllMixin</span><span class="s3">, </span><span class="s1">GeventDidPatchEvent):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Implementation of `IGeventDidPatchAllEvent`. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s0">#: The name of the setuptools entry point that is called when this</span>
+    <span class="s0">#: event is emitted.</span>
+    <span class="s1">ENTRY_POINT_NAME = </span><span class="s4">'gevent.plugins.monkey.did_patch_all'</span>
+</pre>
+</body>
+</html>

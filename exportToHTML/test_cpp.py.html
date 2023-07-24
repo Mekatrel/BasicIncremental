@@ -1,0 +1,101 @@
+<html>
+<head>
+<title>test_cpp.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #cc7832;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #808080;}
+.s3 { color: #6897bb;}
+.s4 { color: #6a8759;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+test_cpp.py</font>
+</center></td></tr></table>
+<pre><span class="s0">from </span><span class="s1">__future__ </span><span class="s0">import </span><span class="s1">print_function</span>
+<span class="s0">from </span><span class="s1">__future__ </span><span class="s0">import </span><span class="s1">absolute_import</span>
+
+<span class="s0">import </span><span class="s1">signal</span>
+<span class="s0">from </span><span class="s1">multiprocessing </span><span class="s0">import </span><span class="s1">Process</span>
+
+<span class="s0">import </span><span class="s1">greenlet</span>
+<span class="s0">from </span><span class="s1">. </span><span class="s0">import </span><span class="s1">_test_extension_cpp</span>
+<span class="s0">from </span><span class="s1">. </span><span class="s0">import </span><span class="s1">TestCase</span>
+
+<span class="s0">def </span><span class="s1">run_unhandled_exception_in_greenlet_aborts():</span>
+    <span class="s2"># This is used in multiprocessing.Process and must be picklable</span>
+    <span class="s2"># so it needs to be global.</span>
+
+
+    <span class="s0">def </span><span class="s1">_():</span>
+        <span class="s1">_test_extension_cpp.test_exception_switch_and_do_in_g2(</span>
+            <span class="s1">_test_extension_cpp.test_exception_throw</span>
+        <span class="s1">)</span>
+    <span class="s1">g1 = greenlet.greenlet(_)</span>
+    <span class="s1">g1.switch()</span>
+
+<span class="s0">class </span><span class="s1">CPPTests(TestCase):</span>
+    <span class="s0">def </span><span class="s1">test_exception_switch(self):</span>
+        <span class="s1">greenlets = []</span>
+        <span class="s0">for </span><span class="s1">i </span><span class="s0">in </span><span class="s1">range(</span><span class="s3">4</span><span class="s1">):</span>
+            <span class="s1">g = greenlet.greenlet(_test_extension_cpp.test_exception_switch)</span>
+            <span class="s1">g.switch(i)</span>
+            <span class="s1">greenlets.append(g)</span>
+        <span class="s0">for </span><span class="s1">i</span><span class="s0">, </span><span class="s1">g </span><span class="s0">in </span><span class="s1">enumerate(greenlets):</span>
+            <span class="s1">self.assertEqual(g.switch()</span><span class="s0">, </span><span class="s1">i)</span>
+
+    <span class="s0">def </span><span class="s1">_do_test_unhandled_exception(self</span><span class="s0">, </span><span class="s1">target):</span>
+        <span class="s2"># TODO: On some versions of Python with some settings, this</span>
+        <span class="s2"># spews a lot of garbage to stderr. It would be nice to capture and ignore that.</span>
+        <span class="s0">import </span><span class="s1">sys</span>
+        <span class="s1">WIN = sys.platform.startswith(</span><span class="s4">&quot;win&quot;</span><span class="s1">)</span>
+
+        <span class="s1">p = Process(target=target)</span>
+        <span class="s1">p.start()</span>
+        <span class="s1">p.join(</span><span class="s3">10</span><span class="s1">)</span>
+        <span class="s2"># The child should be aborted in an unusual way. On POSIX</span>
+        <span class="s2"># platforms, this is done with abort() and signal.SIGABRT,</span>
+        <span class="s2"># which is reflected in a negative return value; however, on</span>
+        <span class="s2"># Windows, even though we observe the child print &quot;Fatal</span>
+        <span class="s2"># Python error: Aborted&quot; and in older versions of the C</span>
+        <span class="s2"># runtime &quot;This application has requested the Runtime to</span>
+        <span class="s2"># terminate it in an unusual way,&quot; it always has an exit code</span>
+        <span class="s2"># of 3. This is interesting because 3 is the error code for</span>
+        <span class="s2"># ERROR_PATH_NOT_FOUND; BUT: the C runtime abort() function</span>
+        <span class="s2"># also uses this code.</span>
+        <span class="s2">#</span>
+        <span class="s2"># See</span>
+        <span class="s2"># https://devblogs.microsoft.com/oldnewthing/20110519-00/?p=10623</span>
+        <span class="s2"># and</span>
+        <span class="s2"># https://docs.microsoft.com/en-us/previous-versions/k089yyh0(v=vs.140)?redirectedfrom=MSDN</span>
+        <span class="s1">expected_exit = (</span>
+            <span class="s1">-signal.SIGABRT</span><span class="s0">,</span>
+            <span class="s2"># But beginning on Python 3.11, the faulthandler</span>
+            <span class="s2"># that prints the C backtraces sometimes segfaults after</span>
+            <span class="s2"># reporting the exception but before printing the stack.</span>
+            <span class="s2"># This has only been seen on linux/gcc.</span>
+            <span class="s1">-signal.SIGSEGV</span>
+        <span class="s1">) </span><span class="s0">if not </span><span class="s1">WIN </span><span class="s0">else </span><span class="s1">(</span>
+            <span class="s3">3</span><span class="s0">,</span>
+        <span class="s1">)</span>
+        <span class="s1">self.assertIn(p.exitcode</span><span class="s0">, </span><span class="s1">expected_exit)</span>
+
+    <span class="s0">def </span><span class="s1">test_unhandled_exception_aborts(self):</span>
+        <span class="s2"># verify that plain unhandled throw aborts</span>
+        <span class="s1">self._do_test_unhandled_exception(_test_extension_cpp.test_exception_throw)</span>
+
+
+    <span class="s0">def </span><span class="s1">test_unhandled_exception_in_greenlet_aborts(self):</span>
+        <span class="s2"># verify that unhandled throw called in greenlet aborts too</span>
+        <span class="s1">self._do_test_unhandled_exception(run_unhandled_exception_in_greenlet_aborts)</span>
+
+
+<span class="s0">if </span><span class="s1">__name__ == </span><span class="s4">'__main__'</span><span class="s1">:</span>
+    <span class="s1">__import__(</span><span class="s4">'unittest'</span><span class="s1">).main()</span>
+</pre>
+</body>
+</html>

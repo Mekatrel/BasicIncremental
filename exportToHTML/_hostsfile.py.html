@@ -1,0 +1,167 @@
+<html>
+<head>
+<title>_hostsfile.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #629755; font-style: italic;}
+.s3 { color: #cc7832;}
+.s4 { color: #6a8759;}
+.s5 { color: #6897bb;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+_hostsfile.py</font>
+</center></td></tr></table>
+<pre><span class="s0"># -*- coding: utf-8 -*-</span>
+<span class="s0"># Copyright (c) 2019  gevent contributors. See LICENSE for details.</span>
+<span class="s0">#</span>
+<span class="s0"># Portions of this code taken from dnspython</span>
+<span class="s0">#   https://github.com/rthalley/dnspython</span>
+<span class="s0">#</span>
+<span class="s0"># Copyright (C) Dnspython Contributors, see LICENSE for text of ISC license</span>
+
+<span class="s0"># Copyright (C) 2003-2017 Nominum, Inc.</span>
+<span class="s0">#</span>
+<span class="s0"># Permission to use, copy, modify, and distribute this software and its</span>
+<span class="s0"># documentation for any purpose with or without fee is hereby granted,</span>
+<span class="s0"># provided that the above copyright notice and this permission notice</span>
+<span class="s0"># appear in all copies.</span>
+<span class="s0">#</span>
+<span class="s0"># THE SOFTWARE IS PROVIDED &quot;AS IS&quot; AND NOMINUM DISCLAIMS ALL WARRANTIES</span>
+<span class="s0"># WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF</span>
+<span class="s0"># MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL NOMINUM BE LIABLE FOR</span>
+<span class="s0"># ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES</span>
+<span class="s0"># WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN</span>
+<span class="s0"># ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT</span>
+<span class="s0"># OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.</span>
+<span class="s2">&quot;&quot;&quot; 
+Private support for parsing /etc/hosts. 
+ 
+&quot;&quot;&quot;</span>
+<span class="s3">from </span><span class="s1">__future__ </span><span class="s3">import </span><span class="s1">absolute_import</span><span class="s3">, </span><span class="s1">division</span><span class="s3">, </span><span class="s1">print_function</span>
+
+<span class="s3">import </span><span class="s1">sys</span>
+<span class="s3">import </span><span class="s1">os</span>
+<span class="s3">import </span><span class="s1">re</span>
+
+<span class="s3">from </span><span class="s1">gevent.resolver._addresses </span><span class="s3">import </span><span class="s1">is_ipv4_addr</span>
+<span class="s3">from </span><span class="s1">gevent.resolver._addresses </span><span class="s3">import </span><span class="s1">is_ipv6_addr</span>
+
+<span class="s3">from </span><span class="s1">gevent._compat </span><span class="s3">import </span><span class="s1">iteritems</span>
+
+
+<span class="s3">class </span><span class="s1">HostsFile(object):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    A class to read the contents of a hosts file (/etc/hosts). 
+    &quot;&quot;&quot;</span>
+
+    <span class="s1">LINES_RE = re.compile(</span><span class="s4">r&quot;&quot;&quot; 
+        \s*  # Leading space 
+        ([^\r\n#]+?)  # The actual match, non-greedy so as not to include trailing space 
+        \s*  # Trailing space 
+        (?:[#][^\r\n]+)?  # Comments 
+        (?:$|[\r\n]+)  # EOF or newline 
+    &quot;&quot;&quot;</span><span class="s3">, </span><span class="s1">re.VERBOSE)</span>
+
+    <span class="s3">def </span><span class="s1">__init__(self</span><span class="s3">, </span><span class="s1">fname=</span><span class="s3">None</span><span class="s1">):</span>
+        <span class="s1">self.v4 = {} </span><span class="s0"># name -&gt; ipv4</span>
+        <span class="s1">self.v6 = {} </span><span class="s0"># name -&gt; ipv6</span>
+        <span class="s1">self.aliases = {} </span><span class="s0"># name -&gt; canonical_name</span>
+        <span class="s1">self.reverse = {} </span><span class="s0"># ip addr -&gt; some name</span>
+        <span class="s3">if </span><span class="s1">fname </span><span class="s3">is None</span><span class="s1">:</span>
+            <span class="s3">if </span><span class="s1">os.name == </span><span class="s4">'posix'</span><span class="s1">:</span>
+                <span class="s1">fname = </span><span class="s4">'/etc/hosts'</span>
+            <span class="s3">elif </span><span class="s1">os.name == </span><span class="s4">'nt'</span><span class="s1">: </span><span class="s0"># pragma: no cover</span>
+                <span class="s1">fname = os.path.expandvars(</span>
+                    <span class="s4">r'%SystemRoot%\system32\drivers\etc\hosts'</span><span class="s1">)</span>
+        <span class="s1">self.fname = fname</span>
+        <span class="s3">assert </span><span class="s1">self.fname</span>
+        <span class="s1">self._last_load = </span><span class="s5">0</span>
+
+
+    <span class="s3">def </span><span class="s1">_readlines(self):</span>
+        <span class="s0"># Read the contents of the hosts file.</span>
+        <span class="s0">#</span>
+        <span class="s0"># Return list of lines, comment lines and empty lines are</span>
+        <span class="s0"># excluded. Note that this performs disk I/O so can be</span>
+        <span class="s0"># blocking.</span>
+        <span class="s3">with </span><span class="s1">open(self.fname</span><span class="s3">, </span><span class="s4">'rb'</span><span class="s1">) </span><span class="s3">as </span><span class="s1">fp:</span>
+            <span class="s1">fdata = fp.read()</span>
+
+
+        <span class="s0"># XXX: Using default decoding. Is that correct?</span>
+        <span class="s1">udata = fdata.decode(errors=</span><span class="s4">'ignore'</span><span class="s1">) </span><span class="s3">if not </span><span class="s1">isinstance(fdata</span><span class="s3">, </span><span class="s1">str) </span><span class="s3">else </span><span class="s1">fdata</span>
+
+        <span class="s3">return </span><span class="s1">self.LINES_RE.findall(udata)</span>
+
+    <span class="s3">def </span><span class="s1">load(self): </span><span class="s0"># pylint:disable=too-many-locals</span>
+        <span class="s0"># Load hosts file</span>
+
+        <span class="s0"># This will (re)load the data from the hosts</span>
+        <span class="s0"># file if it has changed.</span>
+
+        <span class="s3">try</span><span class="s1">:</span>
+            <span class="s1">load_time = os.stat(self.fname).st_mtime</span>
+            <span class="s1">needs_load = load_time &gt; self._last_load</span>
+        <span class="s3">except </span><span class="s1">(IOError</span><span class="s3">, </span><span class="s1">OSError):</span>
+            <span class="s3">from </span><span class="s1">gevent </span><span class="s3">import </span><span class="s1">get_hub</span>
+            <span class="s1">get_hub().handle_error(self</span><span class="s3">, </span><span class="s1">*sys.exc_info())</span>
+            <span class="s1">needs_load = </span><span class="s3">False</span>
+
+        <span class="s3">if not </span><span class="s1">needs_load:</span>
+            <span class="s3">return</span>
+
+        <span class="s1">v4 = {}</span>
+        <span class="s1">v6 = {}</span>
+        <span class="s1">aliases = {}</span>
+        <span class="s1">reverse = {}</span>
+
+        <span class="s3">for </span><span class="s1">line </span><span class="s3">in </span><span class="s1">self._readlines():</span>
+            <span class="s1">parts = line.split()</span>
+            <span class="s3">if </span><span class="s1">len(parts) &lt; </span><span class="s5">2</span><span class="s1">:</span>
+                <span class="s3">continue</span>
+            <span class="s1">ip = parts.pop(</span><span class="s5">0</span><span class="s1">)</span>
+            <span class="s3">if </span><span class="s1">is_ipv4_addr(ip):</span>
+                <span class="s1">ipmap = v4</span>
+            <span class="s3">elif </span><span class="s1">is_ipv6_addr(ip):</span>
+                <span class="s3">if </span><span class="s1">ip.startswith(</span><span class="s4">'fe80'</span><span class="s1">):</span>
+                    <span class="s0"># Do not use link-local addresses, OSX stores these here</span>
+                    <span class="s3">continue</span>
+                <span class="s1">ipmap = v6</span>
+            <span class="s3">else</span><span class="s1">:</span>
+                <span class="s3">continue</span>
+            <span class="s1">cname = parts.pop(</span><span class="s5">0</span><span class="s1">).lower()</span>
+            <span class="s1">ipmap[cname] = ip</span>
+            <span class="s3">for </span><span class="s1">alias </span><span class="s3">in </span><span class="s1">parts:</span>
+                <span class="s1">alias = alias.lower()</span>
+                <span class="s1">ipmap[alias] = ip</span>
+                <span class="s1">aliases[alias] = cname</span>
+
+            <span class="s0"># XXX: This is wrong for ipv6</span>
+            <span class="s3">if </span><span class="s1">ipmap </span><span class="s3">is </span><span class="s1">v4:</span>
+                <span class="s1">ptr = </span><span class="s4">'.'</span><span class="s1">.join(reversed(ip.split(</span><span class="s4">'.'</span><span class="s1">))) + </span><span class="s4">'.in-addr.arpa'</span>
+            <span class="s3">else</span><span class="s1">:</span>
+                <span class="s1">ptr = ip + </span><span class="s4">'.ip6.arpa.'</span>
+            <span class="s3">if </span><span class="s1">ptr </span><span class="s3">not in </span><span class="s1">reverse:</span>
+                <span class="s1">reverse[ptr] = cname</span>
+
+        <span class="s1">self._last_load = load_time</span>
+        <span class="s1">self.v4 = v4</span>
+        <span class="s1">self.v6 = v6</span>
+        <span class="s1">self.aliases = aliases</span>
+        <span class="s1">self.reverse = reverse</span>
+
+    <span class="s3">def </span><span class="s1">iter_all_host_addr_pairs(self):</span>
+        <span class="s1">self.load()</span>
+        <span class="s3">for </span><span class="s1">name</span><span class="s3">, </span><span class="s1">addr </span><span class="s3">in </span><span class="s1">iteritems(self.v4):</span>
+            <span class="s3">yield </span><span class="s1">name</span><span class="s3">, </span><span class="s1">addr</span>
+        <span class="s3">for </span><span class="s1">name</span><span class="s3">, </span><span class="s1">addr </span><span class="s3">in </span><span class="s1">iteritems(self.v6):</span>
+            <span class="s3">yield </span><span class="s1">name</span><span class="s3">, </span><span class="s1">addr</span>
+</pre>
+</body>
+</html>

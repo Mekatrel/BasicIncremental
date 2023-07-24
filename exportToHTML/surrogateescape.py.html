@@ -1,0 +1,220 @@
+<html>
+<head>
+<title>surrogateescape.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #629755; font-style: italic;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #808080;}
+.s3 { color: #cc7832;}
+.s4 { color: #6a8759;}
+.s5 { color: #6897bb;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+surrogateescape.py</font>
+</center></td></tr></table>
+<pre><span class="s0">&quot;&quot;&quot; 
+This is Victor Stinner's pure-Python implementation of PEP 383: the &quot;surrogateescape&quot; error 
+handler of Python 3. 
+ 
+Source: misc/python/surrogateescape.py in https://bitbucket.org/haypo/misc 
+&quot;&quot;&quot;</span>
+
+<span class="s2"># This code is released under the Python license and the BSD 2-clause license</span>
+
+<span class="s3">import </span><span class="s1">codecs</span>
+<span class="s3">import </span><span class="s1">sys</span>
+
+<span class="s3">from </span><span class="s1">future </span><span class="s3">import </span><span class="s1">utils</span>
+
+
+<span class="s1">FS_ERRORS = </span><span class="s4">'surrogateescape'</span>
+
+<span class="s2">#     # -- Python 2/3 compatibility -------------------------------------</span>
+<span class="s2">#     FS_ERRORS = 'my_surrogateescape'</span>
+
+<span class="s3">def </span><span class="s1">u(text):</span>
+    <span class="s3">if </span><span class="s1">utils.PY3:</span>
+        <span class="s3">return </span><span class="s1">text</span>
+    <span class="s3">else</span><span class="s1">:</span>
+        <span class="s3">return </span><span class="s1">text.decode(</span><span class="s4">'unicode_escape'</span><span class="s1">)</span>
+
+<span class="s3">def </span><span class="s1">b(data):</span>
+    <span class="s3">if </span><span class="s1">utils.PY3:</span>
+        <span class="s3">return </span><span class="s1">data.encode(</span><span class="s4">'latin1'</span><span class="s1">)</span>
+    <span class="s3">else</span><span class="s1">:</span>
+        <span class="s3">return </span><span class="s1">data</span>
+
+<span class="s3">if </span><span class="s1">utils.PY3:</span>
+    <span class="s1">_unichr = chr</span>
+    <span class="s1">bytes_chr = </span><span class="s3">lambda </span><span class="s1">code: bytes((code</span><span class="s3">,</span><span class="s1">))</span>
+<span class="s3">else</span><span class="s1">:</span>
+    <span class="s1">_unichr = unichr</span>
+    <span class="s1">bytes_chr = chr</span>
+
+<span class="s3">def </span><span class="s1">surrogateescape_handler(exc):</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Pure Python implementation of the PEP 383: the &quot;surrogateescape&quot; error 
+    handler of Python 3. Undecodable bytes will be replaced by a Unicode 
+    character U+DCxx on decoding, and these are translated into the 
+    original bytes on encoding. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">mystring = exc.object[exc.start:exc.end]</span>
+
+    <span class="s3">try</span><span class="s1">:</span>
+        <span class="s3">if </span><span class="s1">isinstance(exc</span><span class="s3">, </span><span class="s1">UnicodeDecodeError):</span>
+            <span class="s2"># mystring is a byte-string in this case</span>
+            <span class="s1">decoded = replace_surrogate_decode(mystring)</span>
+        <span class="s3">elif </span><span class="s1">isinstance(exc</span><span class="s3">, </span><span class="s1">UnicodeEncodeError):</span>
+            <span class="s2"># In the case of u'\udcc3'.encode('ascii',</span>
+            <span class="s2"># 'this_surrogateescape_handler'), both Python 2.x and 3.x raise an</span>
+            <span class="s2"># exception anyway after this function is called, even though I think</span>
+            <span class="s2"># it's doing what it should. It seems that the strict encoder is called</span>
+            <span class="s2"># to encode the unicode string that this function returns ...</span>
+            <span class="s1">decoded = replace_surrogate_encode(mystring)</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s3">raise </span><span class="s1">exc</span>
+    <span class="s3">except </span><span class="s1">NotASurrogateError:</span>
+        <span class="s3">raise </span><span class="s1">exc</span>
+    <span class="s3">return </span><span class="s1">(decoded</span><span class="s3">, </span><span class="s1">exc.end)</span>
+
+
+<span class="s3">class </span><span class="s1">NotASurrogateError(Exception):</span>
+    <span class="s3">pass</span>
+
+
+<span class="s3">def </span><span class="s1">replace_surrogate_encode(mystring):</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Returns a (unicode) string, not the more logical bytes, because the codecs 
+    register_error functionality expects this. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">decoded = []</span>
+    <span class="s3">for </span><span class="s1">ch </span><span class="s3">in </span><span class="s1">mystring:</span>
+        <span class="s2"># if utils.PY3:</span>
+        <span class="s2">#     code = ch</span>
+        <span class="s2"># else:</span>
+        <span class="s1">code = ord(ch)</span>
+
+        <span class="s2"># The following magic comes from Py3.3's Python/codecs.c file:</span>
+        <span class="s3">if not </span><span class="s5">0xD800 </span><span class="s1">&lt;= code &lt;= </span><span class="s5">0xDCFF</span><span class="s1">:</span>
+            <span class="s2"># Not a surrogate. Fail with the original exception.</span>
+            <span class="s3">raise </span><span class="s1">NotASurrogateError</span>
+        <span class="s2"># mybytes = [0xe0 | (code &gt;&gt; 12),</span>
+        <span class="s2">#            0x80 | ((code &gt;&gt; 6) &amp; 0x3f),</span>
+        <span class="s2">#            0x80 | (code &amp; 0x3f)]</span>
+        <span class="s2"># Is this a good idea?</span>
+        <span class="s3">if </span><span class="s5">0xDC00 </span><span class="s1">&lt;= code &lt;= </span><span class="s5">0xDC7F</span><span class="s1">:</span>
+            <span class="s1">decoded.append(_unichr(code - </span><span class="s5">0xDC00</span><span class="s1">))</span>
+        <span class="s3">elif </span><span class="s1">code &lt;= </span><span class="s5">0xDCFF</span><span class="s1">:</span>
+            <span class="s1">decoded.append(_unichr(code - </span><span class="s5">0xDC00</span><span class="s1">))</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s3">raise </span><span class="s1">NotASurrogateError</span>
+    <span class="s3">return </span><span class="s1">str().join(decoded)</span>
+
+
+<span class="s3">def </span><span class="s1">replace_surrogate_decode(mybytes):</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Returns a (unicode) string 
+    &quot;&quot;&quot;</span>
+    <span class="s1">decoded = []</span>
+    <span class="s3">for </span><span class="s1">ch </span><span class="s3">in </span><span class="s1">mybytes:</span>
+        <span class="s2"># We may be parsing newbytes (in which case ch is an int) or a native</span>
+        <span class="s2"># str on Py2</span>
+        <span class="s3">if </span><span class="s1">isinstance(ch</span><span class="s3">, </span><span class="s1">int):</span>
+            <span class="s1">code = ch</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s1">code = ord(ch)</span>
+        <span class="s3">if </span><span class="s5">0x80 </span><span class="s1">&lt;= code &lt;= </span><span class="s5">0xFF</span><span class="s1">:</span>
+            <span class="s1">decoded.append(_unichr(</span><span class="s5">0xDC00 </span><span class="s1">+ code))</span>
+        <span class="s3">elif </span><span class="s1">code &lt;= </span><span class="s5">0x7F</span><span class="s1">:</span>
+            <span class="s1">decoded.append(_unichr(code))</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s2"># # It may be a bad byte</span>
+            <span class="s2"># # Try swallowing it.</span>
+            <span class="s2"># continue</span>
+            <span class="s2"># print(&quot;RAISE!&quot;)</span>
+            <span class="s3">raise </span><span class="s1">NotASurrogateError</span>
+    <span class="s3">return </span><span class="s1">str().join(decoded)</span>
+
+
+<span class="s3">def </span><span class="s1">encodefilename(fn):</span>
+    <span class="s3">if </span><span class="s1">FS_ENCODING == </span><span class="s4">'ascii'</span><span class="s1">:</span>
+        <span class="s2"># ASCII encoder of Python 2 expects that the error handler returns a</span>
+        <span class="s2"># Unicode string encodable to ASCII, whereas our surrogateescape error</span>
+        <span class="s2"># handler has to return bytes in 0x80-0xFF range.</span>
+        <span class="s1">encoded = []</span>
+        <span class="s3">for </span><span class="s1">index</span><span class="s3">, </span><span class="s1">ch </span><span class="s3">in </span><span class="s1">enumerate(fn):</span>
+            <span class="s1">code = ord(ch)</span>
+            <span class="s3">if </span><span class="s1">code &lt; </span><span class="s5">128</span><span class="s1">:</span>
+                <span class="s1">ch = bytes_chr(code)</span>
+            <span class="s3">elif </span><span class="s5">0xDC80 </span><span class="s1">&lt;= code &lt;= </span><span class="s5">0xDCFF</span><span class="s1">:</span>
+                <span class="s1">ch = bytes_chr(code - </span><span class="s5">0xDC00</span><span class="s1">)</span>
+            <span class="s3">else</span><span class="s1">:</span>
+                <span class="s3">raise </span><span class="s1">UnicodeEncodeError(FS_ENCODING</span><span class="s3">,</span>
+                    <span class="s1">fn</span><span class="s3">, </span><span class="s1">index</span><span class="s3">, </span><span class="s1">index+</span><span class="s5">1</span><span class="s3">,</span>
+                    <span class="s4">'ordinal not in range(128)'</span><span class="s1">)</span>
+            <span class="s1">encoded.append(ch)</span>
+        <span class="s3">return </span><span class="s1">bytes().join(encoded)</span>
+    <span class="s3">elif </span><span class="s1">FS_ENCODING == </span><span class="s4">'utf-8'</span><span class="s1">:</span>
+        <span class="s2"># UTF-8 encoder of Python 2 encodes surrogates, so U+DC80-U+DCFF</span>
+        <span class="s2"># doesn't go through our error handler</span>
+        <span class="s1">encoded = []</span>
+        <span class="s3">for </span><span class="s1">index</span><span class="s3">, </span><span class="s1">ch </span><span class="s3">in </span><span class="s1">enumerate(fn):</span>
+            <span class="s1">code = ord(ch)</span>
+            <span class="s3">if </span><span class="s5">0xD800 </span><span class="s1">&lt;= code &lt;= </span><span class="s5">0xDFFF</span><span class="s1">:</span>
+                <span class="s3">if </span><span class="s5">0xDC80 </span><span class="s1">&lt;= code &lt;= </span><span class="s5">0xDCFF</span><span class="s1">:</span>
+                    <span class="s1">ch = bytes_chr(code - </span><span class="s5">0xDC00</span><span class="s1">)</span>
+                    <span class="s1">encoded.append(ch)</span>
+                <span class="s3">else</span><span class="s1">:</span>
+                    <span class="s3">raise </span><span class="s1">UnicodeEncodeError(</span>
+                        <span class="s1">FS_ENCODING</span><span class="s3">,</span>
+                        <span class="s1">fn</span><span class="s3">, </span><span class="s1">index</span><span class="s3">, </span><span class="s1">index+</span><span class="s5">1</span><span class="s3">, </span><span class="s4">'surrogates not allowed'</span><span class="s1">)</span>
+            <span class="s3">else</span><span class="s1">:</span>
+                <span class="s1">ch_utf8 = ch.encode(</span><span class="s4">'utf-8'</span><span class="s1">)</span>
+                <span class="s1">encoded.append(ch_utf8)</span>
+        <span class="s3">return </span><span class="s1">bytes().join(encoded)</span>
+    <span class="s3">else</span><span class="s1">:</span>
+        <span class="s3">return </span><span class="s1">fn.encode(FS_ENCODING</span><span class="s3">, </span><span class="s1">FS_ERRORS)</span>
+
+<span class="s3">def </span><span class="s1">decodefilename(fn):</span>
+    <span class="s3">return </span><span class="s1">fn.decode(FS_ENCODING</span><span class="s3">, </span><span class="s1">FS_ERRORS)</span>
+
+<span class="s1">FS_ENCODING = </span><span class="s4">'ascii'</span><span class="s1">; fn = b(</span><span class="s4">'[abc</span><span class="s3">\xff</span><span class="s4">]'</span><span class="s1">); encoded = u(</span><span class="s4">'[abc</span><span class="s3">\udcff</span><span class="s4">]'</span><span class="s1">)</span>
+<span class="s2"># FS_ENCODING = 'cp932'; fn = b('[abc\x81\x00]'); encoded = u('[abc\udc81\x00]')</span>
+<span class="s2"># FS_ENCODING = 'UTF-8'; fn = b('[abc\xff]'); encoded = u('[abc\udcff]')</span>
+
+
+<span class="s2"># normalize the filesystem encoding name.</span>
+<span class="s2"># For example, we expect &quot;utf-8&quot;, not &quot;UTF8&quot;.</span>
+<span class="s1">FS_ENCODING = codecs.lookup(FS_ENCODING).name</span>
+
+
+<span class="s3">def </span><span class="s1">register_surrogateescape():</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Registers the surrogateescape error handler on Python 2 (only) 
+    &quot;&quot;&quot;</span>
+    <span class="s3">if </span><span class="s1">utils.PY3:</span>
+        <span class="s3">return</span>
+    <span class="s3">try</span><span class="s1">:</span>
+        <span class="s1">codecs.lookup_error(FS_ERRORS)</span>
+    <span class="s3">except </span><span class="s1">LookupError:</span>
+        <span class="s1">codecs.register_error(FS_ERRORS</span><span class="s3">, </span><span class="s1">surrogateescape_handler)</span>
+
+
+<span class="s3">if </span><span class="s1">__name__ == </span><span class="s4">'__main__'</span><span class="s1">:</span>
+    <span class="s3">pass</span>
+    <span class="s2"># # Tests:</span>
+    <span class="s2"># register_surrogateescape()</span>
+
+    <span class="s2"># b = decodefilename(fn)</span>
+    <span class="s2"># assert b == encoded, &quot;%r != %r&quot; % (b, encoded)</span>
+    <span class="s2"># c = encodefilename(b)</span>
+    <span class="s2"># assert c == fn, '%r != %r' % (c, fn)</span>
+    <span class="s2"># # print(&quot;ok&quot;)</span>
+</pre>
+</body>
+</html>

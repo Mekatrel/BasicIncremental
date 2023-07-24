@@ -1,0 +1,556 @@
+<html>
+<head>
+<title>test__fileobject.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #cc7832;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #808080;}
+.s3 { color: #629755; font-style: italic;}
+.s4 { color: #6a8759;}
+.s5 { color: #a5c261;}
+.s6 { color: #6897bb;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+test__fileobject.py</font>
+</center></td></tr></table>
+<pre><span class="s0">from </span><span class="s1">__future__ </span><span class="s0">import </span><span class="s1">print_function</span>
+<span class="s0">from </span><span class="s1">__future__ </span><span class="s0">import </span><span class="s1">absolute_import</span>
+
+<span class="s0">import </span><span class="s1">functools</span>
+<span class="s0">import </span><span class="s1">gc</span>
+<span class="s0">import </span><span class="s1">io</span>
+<span class="s0">import </span><span class="s1">os</span>
+<span class="s0">import </span><span class="s1">sys</span>
+<span class="s0">import </span><span class="s1">tempfile</span>
+<span class="s0">import </span><span class="s1">unittest</span>
+
+<span class="s0">import </span><span class="s1">gevent</span>
+<span class="s0">from </span><span class="s1">gevent </span><span class="s0">import </span><span class="s1">fileobject</span>
+<span class="s0">from </span><span class="s1">gevent._fileobjectcommon </span><span class="s0">import </span><span class="s1">OpenDescriptor</span>
+<span class="s0">try</span><span class="s1">:</span>
+    <span class="s0">from </span><span class="s1">gevent._fileobjectposix </span><span class="s0">import </span><span class="s1">GreenOpenDescriptor</span>
+<span class="s0">except </span><span class="s1">ImportError:</span>
+    <span class="s1">GreenOpenDescriptor = </span><span class="s0">None</span>
+
+<span class="s0">from </span><span class="s1">gevent._compat </span><span class="s0">import </span><span class="s1">PY2</span>
+<span class="s0">from </span><span class="s1">gevent._compat </span><span class="s0">import </span><span class="s1">PY3</span>
+<span class="s0">from </span><span class="s1">gevent._compat </span><span class="s0">import </span><span class="s1">text_type</span>
+
+<span class="s0">import </span><span class="s1">gevent.testing </span><span class="s0">as </span><span class="s1">greentest</span>
+<span class="s0">from </span><span class="s1">gevent.testing </span><span class="s0">import </span><span class="s1">sysinfo</span>
+
+<span class="s0">try</span><span class="s1">:</span>
+    <span class="s1">ResourceWarning </span><span class="s2"># pylint:disable=used-before-assignment</span>
+<span class="s0">except </span><span class="s1">NameError:</span>
+    <span class="s0">class </span><span class="s1">ResourceWarning(Warning):</span>
+        <span class="s3">&quot;Python 2 fallback&quot;</span>
+
+<span class="s2"># pylint:disable=unspecified-encoding</span>
+
+<span class="s0">def </span><span class="s1">Writer(fobj</span><span class="s0">, </span><span class="s1">line):</span>
+    <span class="s0">for </span><span class="s1">character </span><span class="s0">in </span><span class="s1">line:</span>
+        <span class="s1">fobj.write(character)</span>
+        <span class="s1">fobj.flush()</span>
+    <span class="s1">fobj.close()</span>
+
+
+<span class="s0">def </span><span class="s1">close_fd_quietly(fd):</span>
+    <span class="s0">try</span><span class="s1">:</span>
+        <span class="s1">os.close(fd)</span>
+    <span class="s0">except </span><span class="s1">(IOError</span><span class="s0">, </span><span class="s1">OSError):</span>
+        <span class="s0">pass</span>
+
+<span class="s0">def </span><span class="s1">skipUnlessWorksWithRegularFiles(func):</span>
+    <span class="s1">@functools.wraps(func)</span>
+    <span class="s0">def </span><span class="s1">f(self):</span>
+        <span class="s0">if not </span><span class="s1">self.WORKS_WITH_REGULAR_FILES:</span>
+            <span class="s1">self.skipTest(</span><span class="s4">&quot;Doesn't work with regular files&quot;</span><span class="s1">)</span>
+        <span class="s1">func(self)</span>
+    <span class="s0">return </span><span class="s1">f</span>
+
+
+<span class="s0">class </span><span class="s1">CleanupMixin(object):</span>
+    <span class="s0">def </span><span class="s1">_mkstemp(self</span><span class="s0">, </span><span class="s1">suffix):</span>
+        <span class="s1">fileno</span><span class="s0">, </span><span class="s1">path = tempfile.mkstemp(suffix)</span>
+        <span class="s1">self.addCleanup(os.remove</span><span class="s0">, </span><span class="s1">path)</span>
+        <span class="s1">self.addCleanup(close_fd_quietly</span><span class="s0">, </span><span class="s1">fileno)</span>
+        <span class="s0">return </span><span class="s1">fileno</span><span class="s0">, </span><span class="s1">path</span>
+
+    <span class="s0">def </span><span class="s1">_pipe(self):</span>
+        <span class="s1">r</span><span class="s0">, </span><span class="s1">w = os.pipe()</span>
+        <span class="s1">self.addCleanup(close_fd_quietly</span><span class="s0">, </span><span class="s1">r)</span>
+        <span class="s1">self.addCleanup(close_fd_quietly</span><span class="s0">, </span><span class="s1">w)</span>
+        <span class="s0">return </span><span class="s1">r</span><span class="s0">, </span><span class="s1">w</span>
+
+
+<span class="s0">class </span><span class="s1">TestFileObjectBlock(CleanupMixin</span><span class="s0">,</span>
+                          <span class="s1">greentest.TestCase):</span>
+    <span class="s2"># serves as a base for the concurrent tests too</span>
+
+    <span class="s1">WORKS_WITH_REGULAR_FILES = </span><span class="s0">True</span>
+
+    <span class="s0">def </span><span class="s1">_getTargetClass(self):</span>
+        <span class="s0">return </span><span class="s1">fileobject.FileObjectBlock</span>
+
+    <span class="s0">def </span><span class="s1">_makeOne(self</span><span class="s0">, </span><span class="s1">*args</span><span class="s0">, </span><span class="s1">**kwargs):</span>
+        <span class="s0">return </span><span class="s1">self._getTargetClass()(*args</span><span class="s0">, </span><span class="s1">**kwargs)</span>
+
+    <span class="s0">def </span><span class="s1">_test_del(self</span><span class="s0">, </span><span class="s1">**kwargs):</span>
+        <span class="s1">r</span><span class="s0">, </span><span class="s1">w = self._pipe()</span>
+        <span class="s1">self._do_test_del((r</span><span class="s0">, </span><span class="s1">w)</span><span class="s0">, </span><span class="s1">**kwargs)</span>
+
+    <span class="s0">def </span><span class="s1">_do_test_del(self</span><span class="s0">, </span><span class="s1">pipe</span><span class="s0">, </span><span class="s1">**kwargs):</span>
+        <span class="s1">r</span><span class="s0">, </span><span class="s1">w = pipe</span>
+        <span class="s1">s = self._makeOne(w</span><span class="s0">, </span><span class="s4">'wb'</span><span class="s0">, </span><span class="s1">**kwargs)</span>
+        <span class="s1">s.write(</span><span class="s5">b'x'</span><span class="s1">)</span>
+        <span class="s0">try</span><span class="s1">:</span>
+            <span class="s1">s.flush()</span>
+        <span class="s0">except </span><span class="s1">IOError:</span>
+            <span class="s2"># Sometimes seen on Windows/AppVeyor</span>
+            <span class="s1">print(</span><span class="s4">&quot;Failed flushing fileobject&quot;</span><span class="s0">, </span><span class="s1">repr(s)</span><span class="s0">, </span><span class="s1">file=sys.stderr)</span>
+            <span class="s0">import </span><span class="s1">traceback</span>
+            <span class="s1">traceback.print_exc()</span>
+
+        <span class="s0">import </span><span class="s1">warnings</span>
+        <span class="s0">with </span><span class="s1">warnings.catch_warnings():</span>
+            <span class="s1">warnings.simplefilter(</span><span class="s4">'ignore'</span><span class="s0">, </span><span class="s1">ResourceWarning)</span>
+            <span class="s2"># Deliberately getting ResourceWarning with FileObject(Thread) under Py3</span>
+            <span class="s0">del </span><span class="s1">s</span>
+            <span class="s1">gc.collect() </span><span class="s2"># PyPy</span>
+
+        <span class="s0">if </span><span class="s1">kwargs.get(</span><span class="s4">&quot;close&quot;</span><span class="s0">, True</span><span class="s1">):</span>
+            <span class="s0">with </span><span class="s1">self.assertRaises((OSError</span><span class="s0">, </span><span class="s1">IOError)):</span>
+                <span class="s2"># expected, because FileObject already closed it</span>
+                <span class="s1">os.close(w)</span>
+        <span class="s0">else</span><span class="s1">:</span>
+            <span class="s1">os.close(w)</span>
+
+        <span class="s0">with </span><span class="s1">self._makeOne(r</span><span class="s0">, </span><span class="s4">'rb'</span><span class="s1">) </span><span class="s0">as </span><span class="s1">fobj:</span>
+            <span class="s1">self.assertEqual(fobj.read()</span><span class="s0">, </span><span class="s5">b'x'</span><span class="s1">)</span>
+
+    <span class="s0">def </span><span class="s1">test_del(self):</span>
+        <span class="s2"># Close should be true by default</span>
+        <span class="s1">self._test_del()</span>
+
+    <span class="s0">def </span><span class="s1">test_del_close(self):</span>
+        <span class="s1">self._test_del(close=</span><span class="s0">True</span><span class="s1">)</span>
+
+
+    <span class="s1">@skipUnlessWorksWithRegularFiles</span>
+    <span class="s0">def </span><span class="s1">test_seek(self):</span>
+        <span class="s1">fileno</span><span class="s0">, </span><span class="s1">path = self._mkstemp(</span><span class="s4">'.gevent.test__fileobject.test_seek'</span><span class="s1">)</span>
+
+        <span class="s1">s = </span><span class="s5">b'a' </span><span class="s1">* </span><span class="s6">1024</span>
+        <span class="s1">os.write(fileno</span><span class="s0">, </span><span class="s5">b'B' </span><span class="s1">* </span><span class="s6">15</span><span class="s1">)</span>
+        <span class="s1">os.write(fileno</span><span class="s0">, </span><span class="s1">s)</span>
+        <span class="s1">os.close(fileno)</span>
+
+        <span class="s0">with </span><span class="s1">open(path</span><span class="s0">, </span><span class="s4">'rb'</span><span class="s1">) </span><span class="s0">as </span><span class="s1">f:</span>
+            <span class="s1">f.seek(</span><span class="s6">15</span><span class="s1">)</span>
+            <span class="s1">native_data = f.read(</span><span class="s6">1024</span><span class="s1">)</span>
+
+        <span class="s0">with </span><span class="s1">open(path</span><span class="s0">, </span><span class="s4">'rb'</span><span class="s1">) </span><span class="s0">as </span><span class="s1">f_raw:</span>
+            <span class="s1">f = self._makeOne(f_raw</span><span class="s0">, </span><span class="s4">'rb'</span><span class="s0">, </span><span class="s1">close=</span><span class="s0">False</span><span class="s1">)</span>
+
+            <span class="s0">if </span><span class="s1">PY3 </span><span class="s0">or </span><span class="s1">hasattr(f</span><span class="s0">, </span><span class="s4">'seekable'</span><span class="s1">):</span>
+                <span class="s2"># On Python 3, all objects should have seekable.</span>
+                <span class="s2"># On Python 2, only our custom objects do.</span>
+                <span class="s1">self.assertTrue(f.seekable())</span>
+            <span class="s1">f.seek(</span><span class="s6">15</span><span class="s1">)</span>
+            <span class="s1">self.assertEqual(</span><span class="s6">15</span><span class="s0">, </span><span class="s1">f.tell())</span>
+
+            <span class="s2"># Note that a duplicate close() of the underlying</span>
+            <span class="s2"># file descriptor can look like an OSError from this line</span>
+            <span class="s2"># as we exit the with block</span>
+            <span class="s1">fileobj_data = f.read(</span><span class="s6">1024</span><span class="s1">)</span>
+
+        <span class="s1">self.assertEqual(native_data</span><span class="s0">, </span><span class="s1">s)</span>
+        <span class="s1">self.assertEqual(native_data</span><span class="s0">, </span><span class="s1">fileobj_data)</span>
+
+    <span class="s0">def </span><span class="s1">__check_native_matches(self</span><span class="s0">, </span><span class="s1">byte_data</span><span class="s0">, </span><span class="s1">open_mode</span><span class="s0">,</span>
+                               <span class="s1">meth=</span><span class="s4">'read'</span><span class="s0">, </span><span class="s1">open_path=</span><span class="s0">True,</span>
+                               <span class="s1">**open_kwargs):</span>
+        <span class="s1">fileno</span><span class="s0">, </span><span class="s1">path = self._mkstemp(</span><span class="s4">'.gevent_test_' </span><span class="s1">+ open_mode)</span>
+
+        <span class="s1">os.write(fileno</span><span class="s0">, </span><span class="s1">byte_data)</span>
+        <span class="s1">os.close(fileno)</span>
+
+        <span class="s0">with </span><span class="s1">io.open(path</span><span class="s0">, </span><span class="s1">open_mode</span><span class="s0">, </span><span class="s1">**open_kwargs) </span><span class="s0">as </span><span class="s1">f:</span>
+            <span class="s1">native_data = getattr(f</span><span class="s0">, </span><span class="s1">meth)()</span>
+
+        <span class="s0">if </span><span class="s1">open_path:</span>
+            <span class="s0">with </span><span class="s1">self._makeOne(path</span><span class="s0">, </span><span class="s1">open_mode</span><span class="s0">, </span><span class="s1">**open_kwargs) </span><span class="s0">as </span><span class="s1">f:</span>
+                <span class="s1">gevent_data = getattr(f</span><span class="s0">, </span><span class="s1">meth)()</span>
+        <span class="s0">else</span><span class="s1">:</span>
+            <span class="s2"># Note that we don't use ``io.open()`` for the raw file,</span>
+            <span class="s2"># on Python 2. We want 'r' to mean what the usual call to open() means.</span>
+            <span class="s1">opener = io.open </span><span class="s0">if </span><span class="s1">PY3 </span><span class="s0">else </span><span class="s1">open</span>
+            <span class="s0">with </span><span class="s1">opener(path</span><span class="s0">, </span><span class="s1">open_mode</span><span class="s0">, </span><span class="s1">**open_kwargs) </span><span class="s0">as </span><span class="s1">raw:</span>
+                <span class="s0">with </span><span class="s1">self._makeOne(raw) </span><span class="s0">as </span><span class="s1">f:</span>
+                    <span class="s1">gevent_data = getattr(f</span><span class="s0">, </span><span class="s1">meth)()</span>
+
+        <span class="s1">self.assertEqual(native_data</span><span class="s0">, </span><span class="s1">gevent_data)</span>
+        <span class="s0">return </span><span class="s1">gevent_data</span>
+
+    <span class="s1">@skipUnlessWorksWithRegularFiles</span>
+    <span class="s0">def </span><span class="s1">test_str_default_to_native(self):</span>
+        <span class="s2"># With no 'b' or 't' given, read and write native str.</span>
+        <span class="s1">gevent_data = self.__check_native_matches(</span><span class="s5">b'abcdefg'</span><span class="s0">, </span><span class="s4">'r'</span><span class="s1">)</span>
+        <span class="s1">self.assertIsInstance(gevent_data</span><span class="s0">, </span><span class="s1">str)</span>
+
+    <span class="s1">@skipUnlessWorksWithRegularFiles</span>
+    <span class="s0">def </span><span class="s1">test_text_encoding(self):</span>
+        <span class="s1">gevent_data = self.__check_native_matches(</span>
+            <span class="s4">u'</span><span class="s0">\N{SNOWMAN}</span><span class="s4">'</span><span class="s1">.encode(</span><span class="s4">'utf-8'</span><span class="s1">)</span><span class="s0">,</span>
+            <span class="s4">'r+'</span><span class="s0">,</span>
+            <span class="s1">buffering=</span><span class="s6">5</span><span class="s0">, </span><span class="s1">encoding=</span><span class="s4">'utf-8'</span>
+        <span class="s1">)</span>
+        <span class="s1">self.assertIsInstance(gevent_data</span><span class="s0">, </span><span class="s1">text_type)</span>
+
+    <span class="s1">@skipUnlessWorksWithRegularFiles</span>
+    <span class="s0">def </span><span class="s1">test_does_not_leak_on_exception(self):</span>
+        <span class="s2"># If an exception occurs during opening,</span>
+        <span class="s2"># everything still gets cleaned up.</span>
+        <span class="s0">pass</span>
+
+    <span class="s1">@skipUnlessWorksWithRegularFiles</span>
+    <span class="s0">def </span><span class="s1">test_rbU_produces_bytes_readline(self):</span>
+        <span class="s0">if </span><span class="s1">sys.version_info &gt; (</span><span class="s6">3</span><span class="s0">, </span><span class="s6">11</span><span class="s1">):</span>
+            <span class="s1">self.skipTest(</span><span class="s4">&quot;U file mode was removed in 3.11&quot;</span><span class="s1">)</span>
+        <span class="s2"># Including U in rb still produces bytes.</span>
+        <span class="s2"># Note that the universal newline behaviour is</span>
+        <span class="s2"># essentially ignored in explicit bytes mode.</span>
+        <span class="s1">gevent_data = self.__check_native_matches(</span>
+            <span class="s5">b'line1</span><span class="s0">\n</span><span class="s5">line2</span><span class="s0">\r\n</span><span class="s5">line3</span><span class="s0">\r</span><span class="s5">lastline</span><span class="s0">\n\n</span><span class="s5">'</span><span class="s0">,</span>
+            <span class="s4">'rbU'</span><span class="s0">,</span>
+            <span class="s1">meth=</span><span class="s4">'readlines'</span><span class="s0">,</span>
+        <span class="s1">)</span>
+        <span class="s1">self.assertIsInstance(gevent_data[</span><span class="s6">0</span><span class="s1">]</span><span class="s0">, </span><span class="s1">bytes)</span>
+        <span class="s1">self.assertEqual(len(gevent_data)</span><span class="s0">, </span><span class="s6">4</span><span class="s1">)</span>
+
+    <span class="s1">@skipUnlessWorksWithRegularFiles</span>
+    <span class="s0">def </span><span class="s1">test_rU_produces_native(self):</span>
+        <span class="s0">if </span><span class="s1">sys.version_info &gt; (</span><span class="s6">3</span><span class="s0">, </span><span class="s6">11</span><span class="s1">):</span>
+            <span class="s1">self.skipTest(</span><span class="s4">&quot;U file mode was removed in 3.11&quot;</span><span class="s1">)</span>
+        <span class="s1">gevent_data = self.__check_native_matches(</span>
+            <span class="s5">b'line1</span><span class="s0">\n</span><span class="s5">line2</span><span class="s0">\r\n</span><span class="s5">line3</span><span class="s0">\r</span><span class="s5">lastline</span><span class="s0">\n\n</span><span class="s5">'</span><span class="s0">,</span>
+            <span class="s4">'rU'</span><span class="s0">,</span>
+            <span class="s1">meth=</span><span class="s4">'readlines'</span><span class="s0">,</span>
+        <span class="s1">)</span>
+        <span class="s1">self.assertIsInstance(gevent_data[</span><span class="s6">0</span><span class="s1">]</span><span class="s0">, </span><span class="s1">str)</span>
+
+    <span class="s1">@skipUnlessWorksWithRegularFiles</span>
+    <span class="s0">def </span><span class="s1">test_r_readline_produces_native(self):</span>
+        <span class="s1">gevent_data = self.__check_native_matches(</span>
+            <span class="s5">b'line1</span><span class="s0">\n</span><span class="s5">'</span><span class="s0">,</span>
+            <span class="s4">'r'</span><span class="s0">,</span>
+            <span class="s1">meth=</span><span class="s4">'readline'</span><span class="s0">,</span>
+        <span class="s1">)</span>
+        <span class="s1">self.assertIsInstance(gevent_data</span><span class="s0">, </span><span class="s1">str)</span>
+
+    <span class="s1">@skipUnlessWorksWithRegularFiles</span>
+    <span class="s0">def </span><span class="s1">test_r_readline_on_fobject_produces_native(self):</span>
+        <span class="s1">gevent_data = self.__check_native_matches(</span>
+            <span class="s5">b'line1</span><span class="s0">\n</span><span class="s5">'</span><span class="s0">,</span>
+            <span class="s4">'r'</span><span class="s0">,</span>
+            <span class="s1">meth=</span><span class="s4">'readline'</span><span class="s0">,</span>
+            <span class="s1">open_path=</span><span class="s0">False,</span>
+        <span class="s1">)</span>
+        <span class="s1">self.assertIsInstance(gevent_data</span><span class="s0">, </span><span class="s1">str)</span>
+
+    <span class="s0">def </span><span class="s1">test_close_pipe(self):</span>
+        <span class="s2"># Issue #190, 203</span>
+        <span class="s1">r</span><span class="s0">, </span><span class="s1">w = os.pipe()</span>
+        <span class="s1">x = self._makeOne(r)</span>
+        <span class="s1">y = self._makeOne(w</span><span class="s0">, </span><span class="s4">'w'</span><span class="s1">)</span>
+        <span class="s1">x.close()</span>
+        <span class="s1">y.close()</span>
+
+    <span class="s1">@skipUnlessWorksWithRegularFiles</span>
+    <span class="s1">@greentest.ignores_leakcheck</span>
+    <span class="s0">def </span><span class="s1">test_name_after_close(self):</span>
+        <span class="s1">fileno</span><span class="s0">, </span><span class="s1">path = self._mkstemp(</span><span class="s4">'.gevent_test_named_path_after_close'</span><span class="s1">)</span>
+
+        <span class="s2"># Passing the fileno; the name is the same as the fileno, and</span>
+        <span class="s2"># doesn't change when closed.</span>
+        <span class="s1">f = self._makeOne(fileno)</span>
+        <span class="s1">nf = os.fdopen(fileno)</span>
+        <span class="s2"># On Python 2, os.fdopen() produces a name of &lt;fdopen&gt;;</span>
+        <span class="s2"># we follow the Python 3 semantics everywhere.</span>
+        <span class="s1">nf_name = </span><span class="s4">'&lt;fdopen&gt;' </span><span class="s0">if </span><span class="s1">greentest.PY2 </span><span class="s0">else </span><span class="s1">fileno</span>
+        <span class="s1">self.assertEqual(f.name</span><span class="s0">, </span><span class="s1">fileno)</span>
+        <span class="s1">self.assertEqual(nf.name</span><span class="s0">, </span><span class="s1">nf_name)</span>
+
+        <span class="s2"># A file-like object that has no name; we'll close the</span>
+        <span class="s2"># `f` after this because we reuse the fileno, which</span>
+        <span class="s2"># gets passed to fcntl and so must still be valid</span>
+        <span class="s0">class </span><span class="s1">Nameless(object):</span>
+            <span class="s0">def </span><span class="s1">fileno(self):</span>
+                <span class="s0">return </span><span class="s1">fileno</span>
+            <span class="s1">close = flush = isatty = closed = writable = </span><span class="s0">lambda </span><span class="s1">self: </span><span class="s0">False</span>
+            <span class="s1">seekable = readable = </span><span class="s0">lambda </span><span class="s1">self: </span><span class="s0">True</span>
+
+        <span class="s1">nameless = self._makeOne(Nameless()</span><span class="s0">, </span><span class="s4">'rb'</span><span class="s1">)</span>
+        <span class="s0">with </span><span class="s1">self.assertRaises(AttributeError):</span>
+            <span class="s1">getattr(nameless</span><span class="s0">, </span><span class="s4">'name'</span><span class="s1">)</span>
+        <span class="s1">nameless.close()</span>
+        <span class="s0">with </span><span class="s1">self.assertRaises(AttributeError):</span>
+            <span class="s1">getattr(nameless</span><span class="s0">, </span><span class="s4">'name'</span><span class="s1">)</span>
+
+        <span class="s1">f.close()</span>
+        <span class="s0">try</span><span class="s1">:</span>
+            <span class="s1">nf.close()</span>
+        <span class="s0">except </span><span class="s1">(OSError</span><span class="s0">, </span><span class="s1">IOError):</span>
+            <span class="s2"># OSError: Py3, IOError: Py2</span>
+            <span class="s0">pass</span>
+        <span class="s1">self.assertEqual(f.name</span><span class="s0">, </span><span class="s1">fileno)</span>
+        <span class="s1">self.assertEqual(nf.name</span><span class="s0">, </span><span class="s1">nf_name)</span>
+
+        <span class="s0">def </span><span class="s1">check(arg):</span>
+            <span class="s1">f = self._makeOne(arg)</span>
+            <span class="s1">self.assertEqual(f.name</span><span class="s0">, </span><span class="s1">path)</span>
+            <span class="s1">f.close()</span>
+            <span class="s2"># Doesn't change after closed.</span>
+            <span class="s1">self.assertEqual(f.name</span><span class="s0">, </span><span class="s1">path)</span>
+
+        <span class="s2"># Passing the string</span>
+        <span class="s1">check(path)</span>
+
+        <span class="s2"># Passing an opened native object</span>
+        <span class="s0">with </span><span class="s1">open(path) </span><span class="s0">as </span><span class="s1">nf:</span>
+            <span class="s1">check(nf)</span>
+
+        <span class="s2"># An io object</span>
+        <span class="s0">with </span><span class="s1">io.open(path) </span><span class="s0">as </span><span class="s1">nf:</span>
+            <span class="s1">check(nf)</span>
+
+
+
+
+
+<span class="s0">class </span><span class="s1">ConcurrentFileObjectMixin(object):</span>
+    <span class="s2"># Additional tests for fileobjects that cooperate</span>
+    <span class="s2"># and we have full control of the implementation</span>
+
+    <span class="s0">def </span><span class="s1">test_read1_binary_present(self):</span>
+        <span class="s2"># Issue #840</span>
+        <span class="s1">r</span><span class="s0">, </span><span class="s1">w = self._pipe()</span>
+        <span class="s1">reader = self._makeOne(r</span><span class="s0">, </span><span class="s4">'rb'</span><span class="s1">)</span>
+        <span class="s1">self._close_on_teardown(reader)</span>
+        <span class="s1">writer = self._makeOne(w</span><span class="s0">, </span><span class="s4">'w'</span><span class="s1">)</span>
+        <span class="s1">self._close_on_teardown(writer)</span>
+        <span class="s1">self.assertTrue(hasattr(reader</span><span class="s0">, </span><span class="s4">'read1'</span><span class="s1">)</span><span class="s0">, </span><span class="s1">dir(reader))</span>
+
+    <span class="s0">def </span><span class="s1">test_read1_text_not_present(self):</span>
+        <span class="s2"># Only defined for binary.</span>
+        <span class="s1">r</span><span class="s0">, </span><span class="s1">w = self._pipe()</span>
+        <span class="s1">reader = self._makeOne(r</span><span class="s0">, </span><span class="s4">'rt'</span><span class="s1">)</span>
+        <span class="s1">self._close_on_teardown(reader)</span>
+        <span class="s1">self.addCleanup(os.close</span><span class="s0">, </span><span class="s1">w)</span>
+        <span class="s1">self.assertFalse(hasattr(reader</span><span class="s0">, </span><span class="s4">'read1'</span><span class="s1">)</span><span class="s0">, </span><span class="s1">dir(reader))</span>
+
+    <span class="s0">def </span><span class="s1">test_read1_default(self):</span>
+        <span class="s2"># If just 'r' is given, whether it has one or not</span>
+        <span class="s2"># depends on if we're Python 2 or 3.</span>
+        <span class="s1">r</span><span class="s0">, </span><span class="s1">w = self._pipe()</span>
+        <span class="s1">self.addCleanup(os.close</span><span class="s0">, </span><span class="s1">w)</span>
+        <span class="s1">reader = self._makeOne(r)</span>
+        <span class="s1">self._close_on_teardown(reader)</span>
+        <span class="s1">self.assertEqual(PY2</span><span class="s0">, </span><span class="s1">hasattr(reader</span><span class="s0">, </span><span class="s4">'read1'</span><span class="s1">))</span>
+
+    <span class="s0">def </span><span class="s1">test_bufsize_0(self):</span>
+        <span class="s2"># Issue #840</span>
+        <span class="s1">r</span><span class="s0">, </span><span class="s1">w = self._pipe()</span>
+        <span class="s1">x = self._makeOne(r</span><span class="s0">, </span><span class="s4">'rb'</span><span class="s0">, </span><span class="s1">bufsize=</span><span class="s6">0</span><span class="s1">)</span>
+        <span class="s1">y = self._makeOne(w</span><span class="s0">, </span><span class="s4">'wb'</span><span class="s0">, </span><span class="s1">bufsize=</span><span class="s6">0</span><span class="s1">)</span>
+        <span class="s1">self._close_on_teardown(x)</span>
+        <span class="s1">self._close_on_teardown(y)</span>
+        <span class="s1">y.write(</span><span class="s5">b'a'</span><span class="s1">)</span>
+        <span class="s1">b = x.read(</span><span class="s6">1</span><span class="s1">)</span>
+        <span class="s1">self.assertEqual(b</span><span class="s0">, </span><span class="s5">b'a'</span><span class="s1">)</span>
+
+        <span class="s1">y.writelines([</span><span class="s5">b'2'</span><span class="s1">])</span>
+        <span class="s1">b = x.read(</span><span class="s6">1</span><span class="s1">)</span>
+        <span class="s1">self.assertEqual(b</span><span class="s0">, </span><span class="s5">b'2'</span><span class="s1">)</span>
+
+    <span class="s0">def </span><span class="s1">test_newlines(self):</span>
+        <span class="s0">import </span><span class="s1">warnings</span>
+        <span class="s1">r</span><span class="s0">, </span><span class="s1">w = self._pipe()</span>
+        <span class="s1">lines = [</span><span class="s5">b'line1</span><span class="s0">\n</span><span class="s5">'</span><span class="s0">, </span><span class="s5">b'line2</span><span class="s0">\r</span><span class="s5">'</span><span class="s0">, </span><span class="s5">b'line3</span><span class="s0">\r\n</span><span class="s5">'</span><span class="s0">, </span><span class="s5">b'line4</span><span class="s0">\r\n</span><span class="s5">line5'</span><span class="s0">, </span><span class="s5">b'</span><span class="s0">\n</span><span class="s5">line6'</span><span class="s1">]</span>
+        <span class="s1">g = gevent.spawn(Writer</span><span class="s0">, </span><span class="s1">self._makeOne(w</span><span class="s0">, </span><span class="s4">'wb'</span><span class="s1">)</span><span class="s0">, </span><span class="s1">lines)</span>
+
+        <span class="s0">try</span><span class="s1">:</span>
+            <span class="s0">with </span><span class="s1">warnings.catch_warnings():</span>
+                <span class="s0">if </span><span class="s1">sys.version_info &gt; (</span><span class="s6">3</span><span class="s0">, </span><span class="s6">11</span><span class="s1">):</span>
+                    <span class="s2"># U is removed in Python 3.11</span>
+                    <span class="s1">mode = </span><span class="s4">'r'</span>
+                    <span class="s1">self.skipTest(</span><span class="s4">&quot;U file mode was removed in 3.11&quot;</span><span class="s1">)</span>
+                <span class="s0">else</span><span class="s1">:</span>
+                    <span class="s2"># U is deprecated in Python 3, shows up on FileObjectThread</span>
+                    <span class="s1">warnings.simplefilter(</span><span class="s4">'ignore'</span><span class="s0">, </span><span class="s1">DeprecationWarning)</span>
+                    <span class="s1">mode = </span><span class="s4">'rU'</span>
+                <span class="s1">fobj = self._makeOne(r</span><span class="s0">, </span><span class="s1">mode)</span>
+            <span class="s1">result = fobj.read()</span>
+            <span class="s1">fobj.close()</span>
+            <span class="s1">self.assertEqual(</span><span class="s4">'line1</span><span class="s0">\n</span><span class="s4">line2</span><span class="s0">\n</span><span class="s4">line3</span><span class="s0">\n</span><span class="s4">line4</span><span class="s0">\n</span><span class="s4">line5</span><span class="s0">\n</span><span class="s4">line6'</span><span class="s0">, </span><span class="s1">result)</span>
+        <span class="s0">finally</span><span class="s1">:</span>
+            <span class="s1">g.kill()</span>
+
+
+<span class="s0">class </span><span class="s1">TestFileObjectThread(ConcurrentFileObjectMixin</span><span class="s0">, </span><span class="s2"># pylint:disable=too-many-ancestors</span>
+                           <span class="s1">TestFileObjectBlock):</span>
+
+    <span class="s0">def </span><span class="s1">_getTargetClass(self):</span>
+        <span class="s0">return </span><span class="s1">fileobject.FileObjectThread</span>
+
+    <span class="s0">def </span><span class="s1">test_del_noclose(self):</span>
+        <span class="s2"># In the past, we used os.fdopen() when given a file descriptor,</span>
+        <span class="s2"># and that has a destructor that can't be bypassed, so</span>
+        <span class="s2"># close=false wasn't allowed. Now that we do everything with the</span>
+        <span class="s2"># io module, it is allowed.</span>
+        <span class="s1">self._test_del(close=</span><span class="s0">False</span><span class="s1">)</span>
+
+    <span class="s2"># We don't test this with FileObjectThread. Sometimes the</span>
+    <span class="s2"># visibility of the 'close' operation, which happens in a</span>
+    <span class="s2"># background thread, doesn't make it to the foreground</span>
+    <span class="s2"># thread in a timely fashion, leading to 'os.close(4) must</span>
+    <span class="s2"># not succeed' in test_del_close. We have the same thing</span>
+    <span class="s2"># with flushing and closing in test_newlines. Both of</span>
+    <span class="s2"># these are most commonly (only?) observed on Py27/64-bit.</span>
+    <span class="s2"># They also appear on 64-bit 3.6 with libuv</span>
+
+    <span class="s0">def </span><span class="s1">test_del(self):</span>
+        <span class="s0">raise </span><span class="s1">unittest.SkipTest(</span><span class="s4">&quot;Race conditions&quot;</span><span class="s1">)</span>
+
+    <span class="s0">def </span><span class="s1">test_del_close(self):</span>
+        <span class="s0">raise </span><span class="s1">unittest.SkipTest(</span><span class="s4">&quot;Race conditions&quot;</span><span class="s1">)</span>
+
+
+<span class="s1">@unittest.skipUnless(</span>
+    <span class="s1">hasattr(fileobject</span><span class="s0">, </span><span class="s4">'FileObjectPosix'</span><span class="s1">)</span><span class="s0">,</span>
+    <span class="s4">&quot;Needs FileObjectPosix&quot;</span>
+<span class="s1">)</span>
+<span class="s0">class </span><span class="s1">TestFileObjectPosix(ConcurrentFileObjectMixin</span><span class="s0">, </span><span class="s2"># pylint:disable=too-many-ancestors</span>
+                          <span class="s1">TestFileObjectBlock):</span>
+
+    <span class="s0">if </span><span class="s1">sysinfo.LIBUV </span><span class="s0">and </span><span class="s1">sysinfo.LINUX:</span>
+        <span class="s2"># On Linux, initializing the watcher for a regular</span>
+        <span class="s2"># file results in libuv raising EPERM. But that works</span>
+        <span class="s2"># fine on other platforms.</span>
+        <span class="s1">WORKS_WITH_REGULAR_FILES = </span><span class="s0">False</span>
+
+    <span class="s0">def </span><span class="s1">_getTargetClass(self):</span>
+        <span class="s0">return </span><span class="s1">fileobject.FileObjectPosix</span>
+
+    <span class="s0">def </span><span class="s1">test_seek_raises_ioerror(self):</span>
+        <span class="s2"># https://github.com/gevent/gevent/issues/1323</span>
+
+        <span class="s2"># Get a non-seekable file descriptor</span>
+        <span class="s1">r</span><span class="s0">, </span><span class="s1">_w = self._pipe()</span>
+
+        <span class="s0">with </span><span class="s1">self.assertRaises(OSError) </span><span class="s0">as </span><span class="s1">ctx:</span>
+            <span class="s1">os.lseek(r</span><span class="s0">, </span><span class="s6">0</span><span class="s0">, </span><span class="s1">os.SEEK_SET)</span>
+        <span class="s1">os_ex = ctx.exception</span>
+
+        <span class="s0">with </span><span class="s1">self.assertRaises(IOError) </span><span class="s0">as </span><span class="s1">ctx:</span>
+            <span class="s1">f = self._makeOne(r</span><span class="s0">, </span><span class="s4">'r'</span><span class="s0">, </span><span class="s1">close=</span><span class="s0">False</span><span class="s1">)</span>
+            <span class="s2"># Seek directly using the underlying GreenFileDescriptorIO;</span>
+            <span class="s2"># the buffer may do different things, depending</span>
+            <span class="s2"># on the version of Python (especially 3.7+)</span>
+            <span class="s1">f.fileio.seek(</span><span class="s6">0</span><span class="s1">)</span>
+        <span class="s1">io_ex = ctx.exception</span>
+
+        <span class="s1">self.assertEqual(io_ex.errno</span><span class="s0">, </span><span class="s1">os_ex.errno)</span>
+        <span class="s1">self.assertEqual(io_ex.strerror</span><span class="s0">, </span><span class="s1">os_ex.strerror)</span>
+        <span class="s1">self.assertEqual(io_ex.args</span><span class="s0">, </span><span class="s1">os_ex.args)</span>
+        <span class="s1">self.assertEqual(str(io_ex)</span><span class="s0">, </span><span class="s1">str(os_ex))</span>
+
+<span class="s0">class </span><span class="s1">TestTextMode(CleanupMixin</span><span class="s0">, </span><span class="s1">unittest.TestCase):</span>
+
+    <span class="s0">def </span><span class="s1">test_default_mode_writes_linesep(self):</span>
+        <span class="s2"># See https://github.com/gevent/gevent/issues/1282</span>
+        <span class="s2"># libuv 1.x interferes with the default line mode on</span>
+        <span class="s2"># Windows.</span>
+        <span class="s2"># First, make sure we initialize gevent</span>
+        <span class="s1">gevent.get_hub()</span>
+
+        <span class="s1">fileno</span><span class="s0">, </span><span class="s1">path = self._mkstemp(</span><span class="s4">'.gevent.test__fileobject.test_default'</span><span class="s1">)</span>
+        <span class="s1">os.close(fileno)</span>
+
+        <span class="s0">with </span><span class="s1">open(path</span><span class="s0">, </span><span class="s4">&quot;w&quot;</span><span class="s1">) </span><span class="s0">as </span><span class="s1">f:</span>
+            <span class="s1">f.write(</span><span class="s4">&quot;</span><span class="s0">\n</span><span class="s4">&quot;</span><span class="s1">)</span>
+
+        <span class="s0">with </span><span class="s1">open(path</span><span class="s0">, </span><span class="s4">&quot;rb&quot;</span><span class="s1">) </span><span class="s0">as </span><span class="s1">f:</span>
+            <span class="s1">data = f.read()</span>
+
+        <span class="s1">self.assertEqual(data</span><span class="s0">, </span><span class="s1">os.linesep.encode(</span><span class="s4">'ascii'</span><span class="s1">))</span>
+
+<span class="s0">class </span><span class="s1">TestOpenDescriptor(CleanupMixin</span><span class="s0">, </span><span class="s1">greentest.TestCase):</span>
+
+    <span class="s0">def </span><span class="s1">_getTargetClass(self):</span>
+        <span class="s0">return </span><span class="s1">OpenDescriptor</span>
+
+    <span class="s0">def </span><span class="s1">_makeOne(self</span><span class="s0">, </span><span class="s1">*args</span><span class="s0">, </span><span class="s1">**kwargs):</span>
+        <span class="s0">return </span><span class="s1">self._getTargetClass()(*args</span><span class="s0">, </span><span class="s1">**kwargs)</span>
+
+    <span class="s0">def </span><span class="s1">_check(self</span><span class="s0">, </span><span class="s1">regex</span><span class="s0">, </span><span class="s1">kind</span><span class="s0">, </span><span class="s1">*args</span><span class="s0">, </span><span class="s1">**kwargs):</span>
+        <span class="s0">with </span><span class="s1">self.assertRaisesRegex(kind</span><span class="s0">, </span><span class="s1">regex):</span>
+            <span class="s1">self._makeOne(*args</span><span class="s0">, </span><span class="s1">**kwargs)</span>
+
+    <span class="s1">case = </span><span class="s0">lambda </span><span class="s1">re</span><span class="s0">, </span><span class="s1">**kwargs: (re</span><span class="s0">, </span><span class="s1">TypeError</span><span class="s0">, </span><span class="s1">kwargs)</span>
+    <span class="s1">vase = </span><span class="s0">lambda </span><span class="s1">re</span><span class="s0">, </span><span class="s1">**kwargs: (re</span><span class="s0">, </span><span class="s1">ValueError</span><span class="s0">, </span><span class="s1">kwargs)</span>
+    <span class="s1">CASES = (</span>
+        <span class="s1">case(</span><span class="s4">'mode'</span><span class="s0">, </span><span class="s1">mode=</span><span class="s6">42</span><span class="s1">)</span><span class="s0">,</span>
+        <span class="s1">case(</span><span class="s4">'buffering'</span><span class="s0">, </span><span class="s1">buffering=</span><span class="s4">'nope'</span><span class="s1">)</span><span class="s0">,</span>
+        <span class="s1">case(</span><span class="s4">'encoding'</span><span class="s0">, </span><span class="s1">encoding=</span><span class="s6">42</span><span class="s1">)</span><span class="s0">,</span>
+        <span class="s1">case(</span><span class="s4">'errors'</span><span class="s0">, </span><span class="s1">errors=</span><span class="s6">42</span><span class="s1">)</span><span class="s0">,</span>
+        <span class="s1">vase(</span><span class="s4">'mode'</span><span class="s0">, </span><span class="s1">mode=</span><span class="s4">'aoeug'</span><span class="s1">)</span><span class="s0">,</span>
+        <span class="s1">vase(</span><span class="s4">'mode U cannot be combined'</span><span class="s0">, </span><span class="s1">mode=</span><span class="s4">'wU'</span><span class="s1">)</span><span class="s0">,</span>
+        <span class="s1">vase(</span><span class="s4">'text and binary'</span><span class="s0">, </span><span class="s1">mode=</span><span class="s4">'rtb'</span><span class="s1">)</span><span class="s0">,</span>
+        <span class="s1">vase(</span><span class="s4">'append mode at once'</span><span class="s0">, </span><span class="s1">mode=</span><span class="s4">'rw'</span><span class="s1">)</span><span class="s0">,</span>
+        <span class="s1">vase(</span><span class="s4">'exactly one'</span><span class="s0">, </span><span class="s1">mode=</span><span class="s4">'+'</span><span class="s1">)</span><span class="s0">,</span>
+        <span class="s1">vase(</span><span class="s4">'take an encoding'</span><span class="s0">, </span><span class="s1">mode=</span><span class="s4">'rb'</span><span class="s0">, </span><span class="s1">encoding=</span><span class="s4">'ascii'</span><span class="s1">)</span><span class="s0">,</span>
+        <span class="s1">vase(</span><span class="s4">'take an errors'</span><span class="s0">, </span><span class="s1">mode=</span><span class="s4">'rb'</span><span class="s0">, </span><span class="s1">errors=</span><span class="s4">'strict'</span><span class="s1">)</span><span class="s0">,</span>
+        <span class="s1">vase(</span><span class="s4">'take a newline'</span><span class="s0">, </span><span class="s1">mode=</span><span class="s4">'rb'</span><span class="s0">, </span><span class="s1">newline=</span><span class="s4">'</span><span class="s0">\n</span><span class="s4">'</span><span class="s1">)</span><span class="s0">,</span>
+    <span class="s1">)</span>
+
+    <span class="s0">def </span><span class="s1">test_atomicwrite_fd(self):</span>
+        <span class="s0">from </span><span class="s1">gevent._fileobjectcommon </span><span class="s0">import </span><span class="s1">WriteallMixin</span>
+        <span class="s2"># It basically only does something when buffering is otherwise disabled</span>
+        <span class="s1">fileno</span><span class="s0">, </span><span class="s1">_w = self._pipe()</span>
+        <span class="s1">desc = self._makeOne(fileno</span><span class="s0">, </span><span class="s4">'wb'</span><span class="s0">,</span>
+                             <span class="s1">buffering=</span><span class="s6">0</span><span class="s0">,</span>
+                             <span class="s1">closefd=</span><span class="s0">False,</span>
+                             <span class="s1">atomic_write=</span><span class="s0">True</span><span class="s1">)</span>
+        <span class="s1">self.assertTrue(desc.atomic_write)</span>
+
+        <span class="s1">fobj = desc.opened()</span>
+        <span class="s1">self.assertIsInstance(fobj</span><span class="s0">, </span><span class="s1">WriteallMixin)</span>
+        <span class="s1">os.close(fileno)</span>
+
+<span class="s0">def </span><span class="s1">pop():</span>
+    <span class="s0">for </span><span class="s1">regex</span><span class="s0">, </span><span class="s1">kind</span><span class="s0">, </span><span class="s1">kwargs </span><span class="s0">in </span><span class="s1">TestOpenDescriptor.CASES:</span>
+        <span class="s1">setattr(</span>
+            <span class="s1">TestOpenDescriptor</span><span class="s0">, </span><span class="s4">'test_' </span><span class="s1">+ regex.replace(</span><span class="s4">' '</span><span class="s0">, </span><span class="s4">'_'</span><span class="s1">)</span><span class="s0">,</span>
+            <span class="s0">lambda </span><span class="s1">self</span><span class="s0">, </span><span class="s1">_re=regex</span><span class="s0">, </span><span class="s1">_kind=kind</span><span class="s0">, </span><span class="s1">_kw=kwargs: self._check(_re</span><span class="s0">, </span><span class="s1">_kind</span><span class="s0">, </span><span class="s6">1</span><span class="s0">, </span><span class="s1">**_kw)</span>
+        <span class="s1">)</span>
+<span class="s1">pop()</span>
+
+<span class="s1">@unittest.skipIf(GreenOpenDescriptor </span><span class="s0">is None, </span><span class="s4">&quot;No support for non-blocking IO&quot;</span><span class="s1">)</span>
+<span class="s0">class </span><span class="s1">TestGreenOpenDescripton(TestOpenDescriptor):</span>
+    <span class="s0">def </span><span class="s1">_getTargetClass(self):</span>
+        <span class="s0">return </span><span class="s1">GreenOpenDescriptor</span>
+
+
+
+
+<span class="s0">if </span><span class="s1">__name__ == </span><span class="s4">'__main__'</span><span class="s1">:</span>
+    <span class="s1">greentest.main()</span>
+</pre>
+</body>
+</html>

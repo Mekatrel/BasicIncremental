@@ -1,0 +1,720 @@
+<html>
+<head>
+<title>queue.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #629755; font-style: italic;}
+.s3 { color: #cc7832;}
+.s4 { color: #6897bb;}
+.s5 { color: #6a8759;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+queue.py</font>
+</center></td></tr></table>
+<pre><span class="s0"># Copyright (c) 2009-2012 Denis Bilenko. See LICENSE for details.</span>
+<span class="s0"># copyright (c) 2018 gevent</span>
+<span class="s0"># cython: auto_pickle=False,embedsignature=True,always_allow_keywords=False</span>
+<span class="s2">&quot;&quot;&quot; 
+Synchronized queues. 
+ 
+The :mod:`gevent.queue` module implements multi-producer, multi-consumer queues 
+that work across greenlets, with the API similar to the classes found in the 
+standard :mod:`Queue` and :class:`multiprocessing &lt;multiprocessing.Queue&gt;` modules. 
+ 
+The classes in this module implement the iterator protocol. Iterating 
+over a queue means repeatedly calling :meth:`get &lt;Queue.get&gt;` until 
+:meth:`get &lt;Queue.get&gt;` returns ``StopIteration`` (specifically that 
+class, not an instance or subclass). 
+ 
+    &gt;&gt;&gt; import gevent.queue 
+    &gt;&gt;&gt; queue = gevent.queue.Queue() 
+    &gt;&gt;&gt; queue.put(1) 
+    &gt;&gt;&gt; queue.put(2) 
+    &gt;&gt;&gt; queue.put(StopIteration) 
+    &gt;&gt;&gt; for item in queue: 
+    ...    print(item) 
+    1 
+    2 
+ 
+.. versionchanged:: 1.0 
+       ``Queue(0)`` now means queue of infinite size, not a channel. A :exc:`DeprecationWarning` 
+       will be issued with this argument. 
+&quot;&quot;&quot;</span>
+
+<span class="s3">from </span><span class="s1">__future__ </span><span class="s3">import </span><span class="s1">absolute_import</span>
+<span class="s3">import </span><span class="s1">sys</span>
+<span class="s3">from </span><span class="s1">heapq </span><span class="s3">import </span><span class="s1">heappush </span><span class="s3">as </span><span class="s1">_heappush</span>
+<span class="s3">from </span><span class="s1">heapq </span><span class="s3">import </span><span class="s1">heappop </span><span class="s3">as </span><span class="s1">_heappop</span>
+<span class="s3">from </span><span class="s1">heapq </span><span class="s3">import </span><span class="s1">heapify </span><span class="s3">as </span><span class="s1">_heapify</span>
+<span class="s3">import </span><span class="s1">collections</span>
+
+<span class="s3">if </span><span class="s1">sys.version_info[</span><span class="s4">0</span><span class="s1">] == </span><span class="s4">2</span><span class="s1">:</span>
+    <span class="s3">import </span><span class="s1">Queue </span><span class="s3">as </span><span class="s1">__queue__ </span><span class="s0"># python 3: pylint:disable=import-error</span>
+<span class="s3">else</span><span class="s1">:</span>
+    <span class="s3">import </span><span class="s1">queue </span><span class="s3">as </span><span class="s1">__queue__ </span><span class="s0"># python 2: pylint:disable=import-error</span>
+<span class="s0"># We re-export these exceptions to client modules.</span>
+<span class="s0"># But we also want fast access to them from Cython with a cdef,</span>
+<span class="s0"># and we do that with the _ definition.</span>
+<span class="s1">_Full = Full = __queue__.Full</span>
+<span class="s1">_Empty = Empty = __queue__.Empty</span>
+
+<span class="s3">from </span><span class="s1">gevent.timeout </span><span class="s3">import </span><span class="s1">Timeout</span>
+<span class="s3">from </span><span class="s1">gevent._hub_local </span><span class="s3">import </span><span class="s1">get_hub_noargs </span><span class="s3">as </span><span class="s1">get_hub</span>
+<span class="s3">from </span><span class="s1">gevent.exceptions </span><span class="s3">import </span><span class="s1">InvalidSwitchError</span>
+
+<span class="s1">__all__ = []</span>
+<span class="s1">__implements__ = [</span><span class="s5">'Queue'</span><span class="s3">, </span><span class="s5">'PriorityQueue'</span><span class="s3">, </span><span class="s5">'LifoQueue'</span><span class="s1">]</span>
+<span class="s1">__extensions__ = [</span><span class="s5">'JoinableQueue'</span><span class="s3">, </span><span class="s5">'Channel'</span><span class="s1">]</span>
+<span class="s1">__imports__ = [</span><span class="s5">'Empty'</span><span class="s3">, </span><span class="s5">'Full'</span><span class="s1">]</span>
+<span class="s3">if </span><span class="s1">hasattr(__queue__</span><span class="s3">, </span><span class="s5">'SimpleQueue'</span><span class="s1">):</span>
+    <span class="s1">__all__.append(</span><span class="s5">'SimpleQueue'</span><span class="s1">) </span><span class="s0"># New in 3.7</span>
+    <span class="s0"># SimpleQueue is implemented in C and directly allocates locks</span>
+    <span class="s0"># unaffected by monkey patching. We need the Python version.</span>
+    <span class="s1">SimpleQueue = __queue__._PySimpleQueue </span><span class="s0"># pylint:disable=no-member</span>
+<span class="s1">__all__ += (__implements__ + __extensions__ + __imports__)</span>
+
+
+<span class="s0"># pylint 2.0.dev2 things collections.dequeue.popleft() doesn't return</span>
+<span class="s0"># pylint:disable=assignment-from-no-return</span>
+
+<span class="s3">def </span><span class="s1">_safe_remove(deq</span><span class="s3">, </span><span class="s1">item):</span>
+    <span class="s0"># For when the item may have been removed by</span>
+    <span class="s0"># Queue._unlock</span>
+    <span class="s3">try</span><span class="s1">:</span>
+        <span class="s1">deq.remove(item)</span>
+    <span class="s3">except </span><span class="s1">ValueError:</span>
+        <span class="s3">pass</span>
+
+<span class="s3">import </span><span class="s1">gevent._waiter</span>
+<span class="s1">locals()[</span><span class="s5">'Waiter'</span><span class="s1">] = gevent._waiter.Waiter</span>
+<span class="s1">locals()[</span><span class="s5">'getcurrent'</span><span class="s1">] = __import__(</span><span class="s5">'greenlet'</span><span class="s1">).getcurrent</span>
+<span class="s1">locals()[</span><span class="s5">'greenlet_init'</span><span class="s1">] = </span><span class="s3">lambda</span><span class="s1">: </span><span class="s3">None</span>
+
+<span class="s3">class </span><span class="s1">ItemWaiter(Waiter): </span><span class="s0"># pylint:disable=undefined-variable</span>
+    <span class="s0"># pylint:disable=assigning-non-slot</span>
+    <span class="s1">__slots__ = (</span>
+        <span class="s5">'item'</span><span class="s3">,</span>
+        <span class="s5">'queue'</span><span class="s3">,</span>
+    <span class="s1">)</span>
+
+    <span class="s3">def </span><span class="s1">__init__(self</span><span class="s3">, </span><span class="s1">item</span><span class="s3">, </span><span class="s1">queue):</span>
+        <span class="s1">Waiter.__init__(self) </span><span class="s0"># pylint:disable=undefined-variable</span>
+        <span class="s1">self.item = item</span>
+        <span class="s1">self.queue = queue</span>
+
+    <span class="s3">def </span><span class="s1">put_and_switch(self):</span>
+        <span class="s1">self.queue._put(self.item)</span>
+        <span class="s1">self.queue = </span><span class="s3">None</span>
+        <span class="s1">self.item = </span><span class="s3">None</span>
+        <span class="s3">return </span><span class="s1">self.switch(self)</span>
+
+<span class="s3">class </span><span class="s1">Queue(object):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Create a queue object with a given maximum size. 
+ 
+    If *maxsize* is less than or equal to zero or ``None``, the queue 
+    size is infinite. 
+ 
+    Queues have a ``len`` equal to the number of items in them (the :meth:`qsize`), 
+    but in a boolean context they are always True. 
+ 
+    .. versionchanged:: 1.1b3 
+       Queues now support :func:`len`; it behaves the same as :meth:`qsize`. 
+    .. versionchanged:: 1.1b3 
+       Multiple greenlets that block on a call to :meth:`put` for a full queue 
+       will now be awakened to put their items into the queue in the order in which 
+       they arrived. Likewise, multiple greenlets that block on a call to :meth:`get` for 
+       an empty queue will now receive items in the order in which they blocked. An 
+       implementation quirk under CPython *usually* ensured this was roughly the case 
+       previously anyway, but that wasn't the case for PyPy. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s1">__slots__ = (</span>
+        <span class="s5">'_maxsize'</span><span class="s3">,</span>
+        <span class="s5">'getters'</span><span class="s3">,</span>
+        <span class="s5">'putters'</span><span class="s3">,</span>
+        <span class="s5">'hub'</span><span class="s3">,</span>
+        <span class="s5">'_event_unlock'</span><span class="s3">,</span>
+        <span class="s5">'queue'</span><span class="s3">,</span>
+        <span class="s5">'__weakref__'</span><span class="s3">,</span>
+    <span class="s1">)</span>
+
+    <span class="s3">def </span><span class="s1">__init__(self</span><span class="s3">, </span><span class="s1">maxsize=</span><span class="s3">None, </span><span class="s1">items=()</span><span class="s3">, </span><span class="s1">_warn_depth=</span><span class="s4">2</span><span class="s1">):</span>
+        <span class="s3">if </span><span class="s1">maxsize </span><span class="s3">is not None and </span><span class="s1">maxsize &lt;= </span><span class="s4">0</span><span class="s1">:</span>
+            <span class="s3">if </span><span class="s1">maxsize == </span><span class="s4">0</span><span class="s1">:</span>
+                <span class="s3">import </span><span class="s1">warnings</span>
+                <span class="s1">warnings.warn(</span>
+                    <span class="s5">'Queue(0) now equivalent to Queue(None); if you want a channel, use Channel'</span><span class="s3">,</span>
+                    <span class="s1">DeprecationWarning</span><span class="s3">,</span>
+                    <span class="s1">stacklevel=_warn_depth)</span>
+            <span class="s1">maxsize = </span><span class="s3">None</span>
+
+        <span class="s1">self._maxsize = maxsize </span><span class="s3">if </span><span class="s1">maxsize </span><span class="s3">is not None else </span><span class="s1">-</span><span class="s4">1</span>
+        <span class="s0"># Explicitly maintain order for getters and putters that block</span>
+        <span class="s0"># so that callers can consistently rely on getting things out</span>
+        <span class="s0"># in the apparent order they went in. This was once required by</span>
+        <span class="s0"># imap_unordered. Previously these were set() objects, and the</span>
+        <span class="s0"># items put in the set have default hash() and eq() methods;</span>
+        <span class="s0"># under CPython, since new objects tend to have increasing</span>
+        <span class="s0"># hash values, this tended to roughly maintain order anyway,</span>
+        <span class="s0"># but that's not true under PyPy. An alternative to a deque</span>
+        <span class="s0"># (to avoid the linear scan of remove()) might be an</span>
+        <span class="s0"># OrderedDict, but it's 2.7 only; we don't expect to have so</span>
+        <span class="s0"># many waiters that removing an arbitrary element is a</span>
+        <span class="s0"># bottleneck, though.</span>
+        <span class="s1">self.getters = collections.deque()</span>
+        <span class="s1">self.putters = collections.deque()</span>
+        <span class="s1">self.hub = get_hub()</span>
+        <span class="s1">self._event_unlock = </span><span class="s3">None</span>
+        <span class="s1">self.queue = self._create_queue(items)</span>
+
+    <span class="s1">@property</span>
+    <span class="s3">def </span><span class="s1">maxsize(self):</span>
+        <span class="s3">return </span><span class="s1">self._maxsize </span><span class="s3">if </span><span class="s1">self._maxsize &gt; </span><span class="s4">0 </span><span class="s3">else None</span>
+
+    <span class="s1">@maxsize.setter</span>
+    <span class="s3">def </span><span class="s1">maxsize(self</span><span class="s3">, </span><span class="s1">nv):</span>
+        <span class="s0"># QQQ make maxsize into a property with setter that schedules unlock if necessary</span>
+        <span class="s3">if </span><span class="s1">nv </span><span class="s3">is None or </span><span class="s1">nv &lt;= </span><span class="s4">0</span><span class="s1">:</span>
+            <span class="s1">self._maxsize = -</span><span class="s4">1</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s1">self._maxsize = nv</span>
+
+    <span class="s3">def </span><span class="s1">copy(self):</span>
+        <span class="s3">return </span><span class="s1">type(self)(self.maxsize</span><span class="s3">, </span><span class="s1">self.queue)</span>
+
+    <span class="s3">def </span><span class="s1">_create_queue(self</span><span class="s3">, </span><span class="s1">items=()):</span>
+        <span class="s3">return </span><span class="s1">collections.deque(items)</span>
+
+    <span class="s3">def </span><span class="s1">_get(self):</span>
+        <span class="s3">return </span><span class="s1">self.queue.popleft()</span>
+
+    <span class="s3">def </span><span class="s1">_peek(self):</span>
+        <span class="s3">return </span><span class="s1">self.queue[</span><span class="s4">0</span><span class="s1">]</span>
+
+    <span class="s3">def </span><span class="s1">_put(self</span><span class="s3">, </span><span class="s1">item):</span>
+        <span class="s1">self.queue.append(item)</span>
+
+    <span class="s3">def </span><span class="s1">__repr__(self):</span>
+        <span class="s3">return </span><span class="s5">'&lt;%s at %s%s&gt;' </span><span class="s1">% (type(self).__name__</span><span class="s3">, </span><span class="s1">hex(id(self))</span><span class="s3">, </span><span class="s1">self._format())</span>
+
+    <span class="s3">def </span><span class="s1">__str__(self):</span>
+        <span class="s3">return </span><span class="s5">'&lt;%s%s&gt;' </span><span class="s1">% (type(self).__name__</span><span class="s3">, </span><span class="s1">self._format())</span>
+
+    <span class="s3">def </span><span class="s1">_format(self):</span>
+        <span class="s1">result = []</span>
+        <span class="s3">if </span><span class="s1">self.maxsize </span><span class="s3">is not None</span><span class="s1">:</span>
+            <span class="s1">result.append(</span><span class="s5">'maxsize=%r' </span><span class="s1">% (self.maxsize</span><span class="s3">, </span><span class="s1">))</span>
+        <span class="s3">if </span><span class="s1">getattr(self</span><span class="s3">, </span><span class="s5">'queue'</span><span class="s3">, None</span><span class="s1">):</span>
+            <span class="s1">result.append(</span><span class="s5">'queue=%r' </span><span class="s1">% (self.queue</span><span class="s3">, </span><span class="s1">))</span>
+        <span class="s3">if </span><span class="s1">self.getters:</span>
+            <span class="s1">result.append(</span><span class="s5">'getters[%s]' </span><span class="s1">% len(self.getters))</span>
+        <span class="s3">if </span><span class="s1">self.putters:</span>
+            <span class="s1">result.append(</span><span class="s5">'putters[%s]' </span><span class="s1">% len(self.putters))</span>
+        <span class="s3">if </span><span class="s1">result:</span>
+            <span class="s3">return </span><span class="s5">' ' </span><span class="s1">+ </span><span class="s5">' '</span><span class="s1">.join(result)</span>
+        <span class="s3">return </span><span class="s5">''</span>
+
+    <span class="s3">def </span><span class="s1">qsize(self):</span>
+        <span class="s2">&quot;&quot;&quot;Return the size of the queue.&quot;&quot;&quot;</span>
+        <span class="s3">return </span><span class="s1">len(self.queue)</span>
+
+    <span class="s3">def </span><span class="s1">__len__(self):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Return the size of the queue. This is the same as :meth:`qsize`. 
+ 
+        .. versionadded: 1.1b3 
+ 
+            Previously, getting len() of a queue would raise a TypeError. 
+        &quot;&quot;&quot;</span>
+
+        <span class="s3">return </span><span class="s1">self.qsize()</span>
+
+    <span class="s3">def </span><span class="s1">__bool__(self):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        A queue object is always True. 
+ 
+        .. versionadded: 1.1b3 
+ 
+           Now that queues support len(), they need to implement ``__bool__`` 
+           to return True for backwards compatibility. 
+        &quot;&quot;&quot;</span>
+        <span class="s3">return True</span>
+
+    <span class="s3">def </span><span class="s1">__nonzero__(self):</span>
+        <span class="s0"># Py2.</span>
+        <span class="s0"># For Cython; __bool__ becomes a special method that we can't</span>
+        <span class="s0"># get by name.</span>
+        <span class="s3">return True</span>
+
+    <span class="s3">def </span><span class="s1">empty(self):</span>
+        <span class="s2">&quot;&quot;&quot;Return ``True`` if the queue is empty, ``False`` otherwise.&quot;&quot;&quot;</span>
+        <span class="s3">return not </span><span class="s1">self.qsize()</span>
+
+    <span class="s3">def </span><span class="s1">full(self):</span>
+        <span class="s2">&quot;&quot;&quot;Return ``True`` if the queue is full, ``False`` otherwise. 
+ 
+        ``Queue(None)`` is never full. 
+        &quot;&quot;&quot;</span>
+        <span class="s3">return </span><span class="s1">self._maxsize &gt; </span><span class="s4">0 </span><span class="s3">and </span><span class="s1">self.qsize() &gt;= self._maxsize</span>
+
+    <span class="s3">def </span><span class="s1">put(self</span><span class="s3">, </span><span class="s1">item</span><span class="s3">, </span><span class="s1">block=</span><span class="s3">True, </span><span class="s1">timeout=</span><span class="s3">None</span><span class="s1">):</span>
+        <span class="s2">&quot;&quot;&quot;Put an item into the queue. 
+ 
+        If optional arg *block* is true and *timeout* is ``None`` (the default), 
+        block if necessary until a free slot is available. If *timeout* is 
+        a positive number, it blocks at most *timeout* seconds and raises 
+        the :class:`Full` exception if no free slot was available within that time. 
+        Otherwise (*block* is false), put an item on the queue if a free slot 
+        is immediately available, else raise the :class:`Full` exception (*timeout* 
+        is ignored in that case). 
+        &quot;&quot;&quot;</span>
+        <span class="s3">if </span><span class="s1">self._maxsize == -</span><span class="s4">1 </span><span class="s3">or </span><span class="s1">self.qsize() &lt; self._maxsize:</span>
+            <span class="s0"># there's a free slot, put an item right away</span>
+            <span class="s1">self._put(item)</span>
+            <span class="s3">if </span><span class="s1">self.getters:</span>
+                <span class="s1">self._schedule_unlock()</span>
+        <span class="s3">elif </span><span class="s1">self.hub </span><span class="s3">is </span><span class="s1">getcurrent(): </span><span class="s0"># pylint:disable=undefined-variable</span>
+            <span class="s0"># We're in the mainloop, so we cannot wait; we can switch to other greenlets though.</span>
+            <span class="s0"># Check if possible to get a free slot in the queue.</span>
+            <span class="s3">while </span><span class="s1">self.getters </span><span class="s3">and </span><span class="s1">self.qsize() </span><span class="s3">and </span><span class="s1">self.qsize() &gt;= self._maxsize:</span>
+                <span class="s1">getter = self.getters.popleft()</span>
+                <span class="s1">getter.switch(getter)</span>
+            <span class="s3">if </span><span class="s1">self.qsize() &lt; self._maxsize:</span>
+                <span class="s1">self._put(item)</span>
+                <span class="s3">return</span>
+            <span class="s3">raise </span><span class="s1">Full</span>
+        <span class="s3">elif </span><span class="s1">block:</span>
+            <span class="s1">waiter = ItemWaiter(item</span><span class="s3">, </span><span class="s1">self)</span>
+            <span class="s1">self.putters.append(waiter)</span>
+            <span class="s1">timeout = Timeout._start_new_or_dummy(timeout</span><span class="s3">, </span><span class="s1">Full)</span>
+            <span class="s3">try</span><span class="s1">:</span>
+                <span class="s3">if </span><span class="s1">self.getters:</span>
+                    <span class="s1">self._schedule_unlock()</span>
+                <span class="s1">result = waiter.get()</span>
+                <span class="s3">if </span><span class="s1">result </span><span class="s3">is not </span><span class="s1">waiter:</span>
+                    <span class="s3">raise </span><span class="s1">InvalidSwitchError(</span><span class="s5">&quot;Invalid switch into Queue.put: %r&quot; </span><span class="s1">% (result</span><span class="s3">, </span><span class="s1">))</span>
+            <span class="s3">finally</span><span class="s1">:</span>
+                <span class="s1">timeout.cancel()</span>
+                <span class="s1">_safe_remove(self.putters</span><span class="s3">, </span><span class="s1">waiter)</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s3">raise </span><span class="s1">Full</span>
+
+    <span class="s3">def </span><span class="s1">put_nowait(self</span><span class="s3">, </span><span class="s1">item):</span>
+        <span class="s2">&quot;&quot;&quot;Put an item into the queue without blocking. 
+ 
+        Only enqueue the item if a free slot is immediately available. 
+        Otherwise raise the :class:`Full` exception. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">self.put(item</span><span class="s3">, False</span><span class="s1">)</span>
+
+
+    <span class="s3">def </span><span class="s1">__get_or_peek(self</span><span class="s3">, </span><span class="s1">method</span><span class="s3">, </span><span class="s1">block</span><span class="s3">, </span><span class="s1">timeout):</span>
+        <span class="s0"># Internal helper method. The `method` should be either</span>
+        <span class="s0"># self._get when called from self.get() or self._peek when</span>
+        <span class="s0"># called from self.peek(). Call this after the initial check</span>
+        <span class="s0"># to see if there are items in the queue.</span>
+
+        <span class="s3">if </span><span class="s1">self.hub </span><span class="s3">is </span><span class="s1">getcurrent(): </span><span class="s0"># pylint:disable=undefined-variable</span>
+            <span class="s0"># special case to make get_nowait() or peek_nowait() runnable in the mainloop greenlet</span>
+            <span class="s0"># there are no items in the queue; try to fix the situation by unlocking putters</span>
+            <span class="s3">while </span><span class="s1">self.putters:</span>
+                <span class="s0"># Note: get() used popleft(), peek used pop(); popleft</span>
+                <span class="s0"># is almost certainly correct.</span>
+                <span class="s1">self.putters.popleft().put_and_switch()</span>
+                <span class="s3">if </span><span class="s1">self.qsize():</span>
+                    <span class="s3">return </span><span class="s1">method()</span>
+            <span class="s3">raise </span><span class="s1">Empty</span>
+
+        <span class="s3">if not </span><span class="s1">block:</span>
+            <span class="s0"># We can't block, we're not the hub, and we have nothing</span>
+            <span class="s0"># to return. No choice...</span>
+            <span class="s3">raise </span><span class="s1">Empty</span>
+
+        <span class="s1">waiter = Waiter() </span><span class="s0"># pylint:disable=undefined-variable</span>
+        <span class="s1">timeout = Timeout._start_new_or_dummy(timeout</span><span class="s3">, </span><span class="s1">Empty)</span>
+        <span class="s3">try</span><span class="s1">:</span>
+            <span class="s1">self.getters.append(waiter)</span>
+            <span class="s3">if </span><span class="s1">self.putters:</span>
+                <span class="s1">self._schedule_unlock()</span>
+            <span class="s1">result = waiter.get()</span>
+            <span class="s3">if </span><span class="s1">result </span><span class="s3">is not </span><span class="s1">waiter:</span>
+                <span class="s3">raise </span><span class="s1">InvalidSwitchError(</span><span class="s5">'Invalid switch into Queue.get: %r' </span><span class="s1">% (result</span><span class="s3">, </span><span class="s1">))</span>
+            <span class="s3">return </span><span class="s1">method()</span>
+        <span class="s3">finally</span><span class="s1">:</span>
+            <span class="s1">timeout.cancel()</span>
+            <span class="s1">_safe_remove(self.getters</span><span class="s3">, </span><span class="s1">waiter)</span>
+
+    <span class="s3">def </span><span class="s1">get(self</span><span class="s3">, </span><span class="s1">block=</span><span class="s3">True, </span><span class="s1">timeout=</span><span class="s3">None</span><span class="s1">):</span>
+        <span class="s2">&quot;&quot;&quot;Remove and return an item from the queue. 
+ 
+        If optional args *block* is true and *timeout* is ``None`` (the default), 
+        block if necessary until an item is available. If *timeout* is a positive number, 
+        it blocks at most *timeout* seconds and raises the :class:`Empty` exception 
+        if no item was available within that time. Otherwise (*block* is false), return 
+        an item if one is immediately available, else raise the :class:`Empty` exception 
+        (*timeout* is ignored in that case). 
+        &quot;&quot;&quot;</span>
+        <span class="s3">if </span><span class="s1">self.qsize():</span>
+            <span class="s3">if </span><span class="s1">self.putters:</span>
+                <span class="s1">self._schedule_unlock()</span>
+            <span class="s3">return </span><span class="s1">self._get()</span>
+
+        <span class="s3">return </span><span class="s1">self.__get_or_peek(self._get</span><span class="s3">, </span><span class="s1">block</span><span class="s3">, </span><span class="s1">timeout)</span>
+
+    <span class="s3">def </span><span class="s1">get_nowait(self):</span>
+        <span class="s2">&quot;&quot;&quot;Remove and return an item from the queue without blocking. 
+ 
+        Only get an item if one is immediately available. Otherwise 
+        raise the :class:`Empty` exception. 
+        &quot;&quot;&quot;</span>
+        <span class="s3">return </span><span class="s1">self.get(</span><span class="s3">False</span><span class="s1">)</span>
+
+    <span class="s3">def </span><span class="s1">peek(self</span><span class="s3">, </span><span class="s1">block=</span><span class="s3">True, </span><span class="s1">timeout=</span><span class="s3">None</span><span class="s1">):</span>
+        <span class="s2">&quot;&quot;&quot;Return an item from the queue without removing it. 
+ 
+        If optional args *block* is true and *timeout* is ``None`` (the default), 
+        block if necessary until an item is available. If *timeout* is a positive number, 
+        it blocks at most *timeout* seconds and raises the :class:`Empty` exception 
+        if no item was available within that time. Otherwise (*block* is false), return 
+        an item if one is immediately available, else raise the :class:`Empty` exception 
+        (*timeout* is ignored in that case). 
+        &quot;&quot;&quot;</span>
+        <span class="s3">if </span><span class="s1">self.qsize():</span>
+            <span class="s0"># This doesn't schedule an unlock like get() does because we're not</span>
+            <span class="s0"># actually making any space.</span>
+            <span class="s3">return </span><span class="s1">self._peek()</span>
+
+        <span class="s3">return </span><span class="s1">self.__get_or_peek(self._peek</span><span class="s3">, </span><span class="s1">block</span><span class="s3">, </span><span class="s1">timeout)</span>
+
+    <span class="s3">def </span><span class="s1">peek_nowait(self):</span>
+        <span class="s2">&quot;&quot;&quot;Return an item from the queue without blocking. 
+ 
+        Only return an item if one is immediately available. Otherwise 
+        raise the :class:`Empty` exception. 
+        &quot;&quot;&quot;</span>
+        <span class="s3">return </span><span class="s1">self.peek(</span><span class="s3">False</span><span class="s1">)</span>
+
+    <span class="s3">def </span><span class="s1">_unlock(self):</span>
+        <span class="s3">while True</span><span class="s1">:</span>
+            <span class="s1">repeat = </span><span class="s3">False</span>
+            <span class="s3">if </span><span class="s1">self.putters </span><span class="s3">and </span><span class="s1">(self._maxsize == -</span><span class="s4">1 </span><span class="s3">or </span><span class="s1">self.qsize() &lt; self._maxsize):</span>
+                <span class="s1">repeat = </span><span class="s3">True</span>
+                <span class="s3">try</span><span class="s1">:</span>
+                    <span class="s1">putter = self.putters.popleft()</span>
+                    <span class="s1">self._put(putter.item)</span>
+                <span class="s3">except</span><span class="s1">: </span><span class="s0"># pylint:disable=bare-except</span>
+                    <span class="s1">putter.throw(*sys.exc_info())</span>
+                <span class="s3">else</span><span class="s1">:</span>
+                    <span class="s1">putter.switch(putter)</span>
+            <span class="s3">if </span><span class="s1">self.getters </span><span class="s3">and </span><span class="s1">self.qsize():</span>
+                <span class="s1">repeat = </span><span class="s3">True</span>
+                <span class="s1">getter = self.getters.popleft()</span>
+                <span class="s1">getter.switch(getter)</span>
+            <span class="s3">if not </span><span class="s1">repeat:</span>
+                <span class="s3">return</span>
+
+    <span class="s3">def </span><span class="s1">_schedule_unlock(self):</span>
+        <span class="s3">if not </span><span class="s1">self._event_unlock:</span>
+            <span class="s1">self._event_unlock = self.hub.loop.run_callback(self._unlock)</span>
+
+    <span class="s3">def </span><span class="s1">__iter__(self):</span>
+        <span class="s3">return </span><span class="s1">self</span>
+
+    <span class="s3">def </span><span class="s1">__next__(self):</span>
+        <span class="s1">result = self.get()</span>
+        <span class="s3">if </span><span class="s1">result </span><span class="s3">is </span><span class="s1">StopIteration:</span>
+            <span class="s3">raise </span><span class="s1">result</span>
+        <span class="s3">return </span><span class="s1">result</span>
+
+    <span class="s1">next = __next__ </span><span class="s0"># Py2</span>
+
+
+<span class="s3">class </span><span class="s1">UnboundQueue(Queue):</span>
+    <span class="s0"># A specialization of Queue that knows it can never</span>
+    <span class="s0"># be bound. Changing its maxsize has no effect.</span>
+
+    <span class="s1">__slots__ = ()</span>
+
+    <span class="s3">def </span><span class="s1">__init__(self</span><span class="s3">, </span><span class="s1">maxsize=</span><span class="s3">None, </span><span class="s1">items=()):</span>
+        <span class="s3">if </span><span class="s1">maxsize </span><span class="s3">is not None</span><span class="s1">:</span>
+            <span class="s3">raise </span><span class="s1">ValueError(</span><span class="s5">&quot;UnboundQueue has no maxsize&quot;</span><span class="s1">)</span>
+        <span class="s1">Queue.__init__(self</span><span class="s3">, </span><span class="s1">maxsize</span><span class="s3">, </span><span class="s1">items)</span>
+        <span class="s1">self.putters = </span><span class="s3">None </span><span class="s0"># Will never be used.</span>
+
+    <span class="s3">def </span><span class="s1">put(self</span><span class="s3">, </span><span class="s1">item</span><span class="s3">, </span><span class="s1">block=</span><span class="s3">True, </span><span class="s1">timeout=</span><span class="s3">None</span><span class="s1">):</span>
+        <span class="s1">self._put(item)</span>
+        <span class="s3">if </span><span class="s1">self.getters:</span>
+            <span class="s1">self._schedule_unlock()</span>
+
+
+<span class="s3">class </span><span class="s1">PriorityQueue(Queue):</span>
+    <span class="s2">'''A subclass of :class:`Queue` that retrieves entries in priority order (lowest first). 
+ 
+    Entries are typically tuples of the form: ``(priority number, data)``. 
+ 
+    .. versionchanged:: 1.2a1 
+       Any *items* given to the constructor will now be passed through 
+       :func:`heapq.heapify` to ensure the invariants of this class hold. 
+       Previously it was just assumed that they were already a heap. 
+    '''</span>
+
+    <span class="s1">__slots__ = ()</span>
+
+    <span class="s3">def </span><span class="s1">_create_queue(self</span><span class="s3">, </span><span class="s1">items=()):</span>
+        <span class="s1">q = list(items)</span>
+        <span class="s1">_heapify(q)</span>
+        <span class="s3">return </span><span class="s1">q</span>
+
+    <span class="s3">def </span><span class="s1">_put(self</span><span class="s3">, </span><span class="s1">item):</span>
+        <span class="s1">_heappush(self.queue</span><span class="s3">, </span><span class="s1">item)</span>
+
+    <span class="s3">def </span><span class="s1">_get(self):</span>
+        <span class="s3">return </span><span class="s1">_heappop(self.queue)</span>
+
+
+<span class="s3">class </span><span class="s1">LifoQueue(Queue):</span>
+    <span class="s2">'''A subclass of :class:`Queue` that retrieves most recently added entries first.'''</span>
+
+    <span class="s1">__slots__ = ()</span>
+
+    <span class="s3">def </span><span class="s1">_create_queue(self</span><span class="s3">, </span><span class="s1">items=()):</span>
+        <span class="s3">return </span><span class="s1">list(items)</span>
+
+    <span class="s3">def </span><span class="s1">_put(self</span><span class="s3">, </span><span class="s1">item):</span>
+        <span class="s1">self.queue.append(item)</span>
+
+    <span class="s3">def </span><span class="s1">_get(self):</span>
+        <span class="s3">return </span><span class="s1">self.queue.pop()</span>
+
+    <span class="s3">def </span><span class="s1">_peek(self):</span>
+        <span class="s3">return </span><span class="s1">self.queue[-</span><span class="s4">1</span><span class="s1">]</span>
+
+
+<span class="s3">class </span><span class="s1">JoinableQueue(Queue):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    A subclass of :class:`Queue` that additionally has 
+    :meth:`task_done` and :meth:`join` methods. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s1">__slots__ = (</span>
+        <span class="s5">'_cond'</span><span class="s3">,</span>
+        <span class="s5">'unfinished_tasks'</span><span class="s3">,</span>
+    <span class="s1">)</span>
+
+    <span class="s3">def </span><span class="s1">__init__(self</span><span class="s3">, </span><span class="s1">maxsize=</span><span class="s3">None, </span><span class="s1">items=()</span><span class="s3">, </span><span class="s1">unfinished_tasks=</span><span class="s3">None</span><span class="s1">):</span>
+        <span class="s2">&quot;&quot;&quot; 
+ 
+        .. versionchanged:: 1.1a1 
+           If *unfinished_tasks* is not given, then all the given *items* 
+           (if any) will be considered unfinished. 
+ 
+        &quot;&quot;&quot;</span>
+        <span class="s1">Queue.__init__(self</span><span class="s3">, </span><span class="s1">maxsize</span><span class="s3">, </span><span class="s1">items</span><span class="s3">, </span><span class="s1">_warn_depth=</span><span class="s4">3</span><span class="s1">)</span>
+
+        <span class="s3">from </span><span class="s1">gevent.event </span><span class="s3">import </span><span class="s1">Event</span>
+        <span class="s1">self._cond = Event()</span>
+        <span class="s1">self._cond.set()</span>
+
+        <span class="s3">if </span><span class="s1">unfinished_tasks:</span>
+            <span class="s1">self.unfinished_tasks = unfinished_tasks</span>
+        <span class="s3">elif </span><span class="s1">items:</span>
+            <span class="s1">self.unfinished_tasks = len(items)</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s1">self.unfinished_tasks = </span><span class="s4">0</span>
+
+        <span class="s3">if </span><span class="s1">self.unfinished_tasks:</span>
+            <span class="s1">self._cond.clear()</span>
+
+    <span class="s3">def </span><span class="s1">copy(self):</span>
+        <span class="s3">return </span><span class="s1">type(self)(self.maxsize</span><span class="s3">, </span><span class="s1">self.queue</span><span class="s3">, </span><span class="s1">self.unfinished_tasks)</span>
+
+    <span class="s3">def </span><span class="s1">_format(self):</span>
+        <span class="s1">result = Queue._format(self)</span>
+        <span class="s3">if </span><span class="s1">self.unfinished_tasks:</span>
+            <span class="s1">result += </span><span class="s5">' tasks=%s _cond=%s' </span><span class="s1">% (self.unfinished_tasks</span><span class="s3">, </span><span class="s1">self._cond)</span>
+        <span class="s3">return </span><span class="s1">result</span>
+
+    <span class="s3">def </span><span class="s1">_put(self</span><span class="s3">, </span><span class="s1">item):</span>
+        <span class="s1">Queue._put(self</span><span class="s3">, </span><span class="s1">item)</span>
+        <span class="s1">self.unfinished_tasks += </span><span class="s4">1</span>
+        <span class="s1">self._cond.clear()</span>
+
+    <span class="s3">def </span><span class="s1">task_done(self):</span>
+        <span class="s2">'''Indicate that a formerly enqueued task is complete. Used by queue consumer threads. 
+        For each :meth:`get &lt;Queue.get&gt;` used to fetch a task, a subsequent call to :meth:`task_done` tells the queue 
+        that the processing on the task is complete. 
+ 
+        If a :meth:`join` is currently blocking, it will resume when all items have been processed 
+        (meaning that a :meth:`task_done` call was received for every item that had been 
+        :meth:`put &lt;Queue.put&gt;` into the queue). 
+ 
+        Raises a :exc:`ValueError` if called more times than there were items placed in the queue. 
+        '''</span>
+        <span class="s3">if </span><span class="s1">self.unfinished_tasks &lt;= </span><span class="s4">0</span><span class="s1">:</span>
+            <span class="s3">raise </span><span class="s1">ValueError(</span><span class="s5">'task_done() called too many times'</span><span class="s1">)</span>
+        <span class="s1">self.unfinished_tasks -= </span><span class="s4">1</span>
+        <span class="s3">if </span><span class="s1">self.unfinished_tasks == </span><span class="s4">0</span><span class="s1">:</span>
+            <span class="s1">self._cond.set()</span>
+
+    <span class="s3">def </span><span class="s1">join(self</span><span class="s3">, </span><span class="s1">timeout=</span><span class="s3">None</span><span class="s1">):</span>
+        <span class="s2">''' 
+        Block until all items in the queue have been gotten and processed. 
+ 
+        The count of unfinished tasks goes up whenever an item is added to the queue. 
+        The count goes down whenever a consumer thread calls :meth:`task_done` to indicate 
+        that the item was retrieved and all work on it is complete. When the count of 
+        unfinished tasks drops to zero, :meth:`join` unblocks. 
+ 
+        :param float timeout: If not ``None``, then wait no more than this time in seconds 
+            for all tasks to finish. 
+        :return: ``True`` if all tasks have finished; if ``timeout`` was given and expired before 
+            all tasks finished, ``False``. 
+ 
+        .. versionchanged:: 1.1a1 
+           Add the *timeout* parameter. 
+        '''</span>
+        <span class="s3">return </span><span class="s1">self._cond.wait(timeout=timeout)</span>
+
+
+<span class="s3">class </span><span class="s1">Channel(object):</span>
+
+    <span class="s1">__slots__ = (</span>
+        <span class="s5">'getters'</span><span class="s3">,</span>
+        <span class="s5">'putters'</span><span class="s3">,</span>
+        <span class="s5">'hub'</span><span class="s3">,</span>
+        <span class="s5">'_event_unlock'</span><span class="s3">,</span>
+        <span class="s5">'__weakref__'</span><span class="s3">,</span>
+    <span class="s1">)</span>
+
+    <span class="s3">def </span><span class="s1">__init__(self</span><span class="s3">, </span><span class="s1">maxsize=</span><span class="s4">1</span><span class="s1">):</span>
+        <span class="s0"># We take maxsize to simplify certain kinds of code</span>
+        <span class="s3">if </span><span class="s1">maxsize != </span><span class="s4">1</span><span class="s1">:</span>
+            <span class="s3">raise </span><span class="s1">ValueError(</span><span class="s5">&quot;Channels have a maxsize of 1&quot;</span><span class="s1">)</span>
+        <span class="s1">self.getters = collections.deque()</span>
+        <span class="s1">self.putters = collections.deque()</span>
+        <span class="s1">self.hub = get_hub()</span>
+        <span class="s1">self._event_unlock = </span><span class="s3">None</span>
+
+    <span class="s3">def </span><span class="s1">__repr__(self):</span>
+        <span class="s3">return </span><span class="s5">'&lt;%s at %s %s&gt;' </span><span class="s1">% (type(self).__name__</span><span class="s3">, </span><span class="s1">hex(id(self))</span><span class="s3">, </span><span class="s1">self._format())</span>
+
+    <span class="s3">def </span><span class="s1">__str__(self):</span>
+        <span class="s3">return </span><span class="s5">'&lt;%s %s&gt;' </span><span class="s1">% (type(self).__name__</span><span class="s3">, </span><span class="s1">self._format())</span>
+
+    <span class="s3">def </span><span class="s1">_format(self):</span>
+        <span class="s1">result = </span><span class="s5">''</span>
+        <span class="s3">if </span><span class="s1">self.getters:</span>
+            <span class="s1">result += </span><span class="s5">' getters[%s]' </span><span class="s1">% len(self.getters)</span>
+        <span class="s3">if </span><span class="s1">self.putters:</span>
+            <span class="s1">result += </span><span class="s5">' putters[%s]' </span><span class="s1">% len(self.putters)</span>
+        <span class="s3">return </span><span class="s1">result</span>
+
+    <span class="s1">@property</span>
+    <span class="s3">def </span><span class="s1">balance(self):</span>
+        <span class="s3">return </span><span class="s1">len(self.putters) - len(self.getters)</span>
+
+    <span class="s3">def </span><span class="s1">qsize(self):</span>
+        <span class="s3">return </span><span class="s4">0</span>
+
+    <span class="s3">def </span><span class="s1">empty(self):</span>
+        <span class="s3">return True</span>
+
+    <span class="s3">def </span><span class="s1">full(self):</span>
+        <span class="s3">return True</span>
+
+    <span class="s3">def </span><span class="s1">put(self</span><span class="s3">, </span><span class="s1">item</span><span class="s3">, </span><span class="s1">block=</span><span class="s3">True, </span><span class="s1">timeout=</span><span class="s3">None</span><span class="s1">):</span>
+        <span class="s3">if </span><span class="s1">self.hub </span><span class="s3">is </span><span class="s1">getcurrent(): </span><span class="s0"># pylint:disable=undefined-variable</span>
+            <span class="s3">if </span><span class="s1">self.getters:</span>
+                <span class="s1">getter = self.getters.popleft()</span>
+                <span class="s1">getter.switch(item)</span>
+                <span class="s3">return</span>
+            <span class="s3">raise </span><span class="s1">Full</span>
+
+        <span class="s3">if not </span><span class="s1">block:</span>
+            <span class="s1">timeout = </span><span class="s4">0</span>
+
+        <span class="s1">waiter = Waiter() </span><span class="s0"># pylint:disable=undefined-variable</span>
+        <span class="s1">item = (item</span><span class="s3">, </span><span class="s1">waiter)</span>
+        <span class="s1">self.putters.append(item)</span>
+        <span class="s1">timeout = Timeout._start_new_or_dummy(timeout</span><span class="s3">, </span><span class="s1">Full)</span>
+        <span class="s3">try</span><span class="s1">:</span>
+            <span class="s3">if </span><span class="s1">self.getters:</span>
+                <span class="s1">self._schedule_unlock()</span>
+            <span class="s1">result = waiter.get()</span>
+            <span class="s3">if </span><span class="s1">result </span><span class="s3">is not </span><span class="s1">waiter:</span>
+                <span class="s3">raise </span><span class="s1">InvalidSwitchError(</span><span class="s5">&quot;Invalid switch into Channel.put: %r&quot; </span><span class="s1">% (result</span><span class="s3">, </span><span class="s1">))</span>
+        <span class="s3">except</span><span class="s1">:</span>
+            <span class="s1">_safe_remove(self.putters</span><span class="s3">, </span><span class="s1">item)</span>
+            <span class="s3">raise</span>
+        <span class="s3">finally</span><span class="s1">:</span>
+            <span class="s1">timeout.cancel()</span>
+
+    <span class="s3">def </span><span class="s1">put_nowait(self</span><span class="s3">, </span><span class="s1">item):</span>
+        <span class="s1">self.put(item</span><span class="s3">, False</span><span class="s1">)</span>
+
+    <span class="s3">def </span><span class="s1">get(self</span><span class="s3">, </span><span class="s1">block=</span><span class="s3">True, </span><span class="s1">timeout=</span><span class="s3">None</span><span class="s1">):</span>
+        <span class="s3">if </span><span class="s1">self.hub </span><span class="s3">is </span><span class="s1">getcurrent(): </span><span class="s0"># pylint:disable=undefined-variable</span>
+            <span class="s3">if </span><span class="s1">self.putters:</span>
+                <span class="s1">item</span><span class="s3">, </span><span class="s1">putter = self.putters.popleft()</span>
+                <span class="s1">self.hub.loop.run_callback(putter.switch</span><span class="s3">, </span><span class="s1">putter)</span>
+                <span class="s3">return </span><span class="s1">item</span>
+
+        <span class="s3">if not </span><span class="s1">block:</span>
+            <span class="s1">timeout = </span><span class="s4">0</span>
+
+        <span class="s1">waiter = Waiter() </span><span class="s0"># pylint:disable=undefined-variable</span>
+        <span class="s1">timeout = Timeout._start_new_or_dummy(timeout</span><span class="s3">, </span><span class="s1">Empty)</span>
+        <span class="s3">try</span><span class="s1">:</span>
+            <span class="s1">self.getters.append(waiter)</span>
+            <span class="s3">if </span><span class="s1">self.putters:</span>
+                <span class="s1">self._schedule_unlock()</span>
+            <span class="s3">return </span><span class="s1">waiter.get()</span>
+        <span class="s3">except</span><span class="s1">:</span>
+            <span class="s1">self.getters.remove(waiter)</span>
+            <span class="s3">raise</span>
+        <span class="s3">finally</span><span class="s1">:</span>
+            <span class="s1">timeout.close()</span>
+
+    <span class="s3">def </span><span class="s1">get_nowait(self):</span>
+        <span class="s3">return </span><span class="s1">self.get(</span><span class="s3">False</span><span class="s1">)</span>
+
+    <span class="s3">def </span><span class="s1">_unlock(self):</span>
+        <span class="s3">while </span><span class="s1">self.putters </span><span class="s3">and </span><span class="s1">self.getters:</span>
+            <span class="s1">getter = self.getters.popleft()</span>
+            <span class="s1">item</span><span class="s3">, </span><span class="s1">putter = self.putters.popleft()</span>
+            <span class="s1">getter.switch(item)</span>
+            <span class="s1">putter.switch(putter)</span>
+
+    <span class="s3">def </span><span class="s1">_schedule_unlock(self):</span>
+        <span class="s3">if not </span><span class="s1">self._event_unlock:</span>
+            <span class="s1">self._event_unlock = self.hub.loop.run_callback(self._unlock)</span>
+
+    <span class="s3">def </span><span class="s1">__iter__(self):</span>
+        <span class="s3">return </span><span class="s1">self</span>
+
+    <span class="s3">def </span><span class="s1">__next__(self):</span>
+        <span class="s1">result = self.get()</span>
+        <span class="s3">if </span><span class="s1">result </span><span class="s3">is </span><span class="s1">StopIteration:</span>
+            <span class="s3">raise </span><span class="s1">result</span>
+        <span class="s3">return </span><span class="s1">result</span>
+
+    <span class="s1">next = __next__ </span><span class="s0"># Py2</span>
+
+<span class="s3">def </span><span class="s1">_init():</span>
+    <span class="s1">greenlet_init() </span><span class="s0"># pylint:disable=undefined-variable</span>
+
+<span class="s1">_init()</span>
+
+
+<span class="s3">from </span><span class="s1">gevent._util </span><span class="s3">import </span><span class="s1">import_c_accel</span>
+<span class="s1">import_c_accel(globals()</span><span class="s3">, </span><span class="s5">'gevent._queue'</span><span class="s1">)</span>
+</pre>
+</body>
+</html>

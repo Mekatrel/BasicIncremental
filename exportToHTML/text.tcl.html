@@ -1,0 +1,1221 @@
+<html>
+<head>
+<title>text.tcl</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #a9b7c6;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+text.tcl</font>
+</center></td></tr></table>
+<pre><span class="s0"># text.tcl --</span>
+<span class="s0">#</span>
+<span class="s0"># This file defines the default bindings for Tk text widgets and provides</span>
+<span class="s0"># procedures that help in implementing the bindings.</span>
+<span class="s0">#</span>
+<span class="s0"># Copyright (c) 1992-1994 The Regents of the University of California.</span>
+<span class="s0"># Copyright (c) 1994-1997 Sun Microsystems, Inc.</span>
+<span class="s0"># Copyright (c) 1998 by Scriptics Corporation.</span>
+<span class="s0">#</span>
+<span class="s0"># See the file &quot;license.terms&quot; for information on usage and redistribution</span>
+<span class="s0"># of this file, and for a DISCLAIMER OF ALL WARRANTIES.</span>
+<span class="s0">#</span>
+
+<span class="s0">#-------------------------------------------------------------------------</span>
+<span class="s0"># Elements of ::tk::Priv that are used in this file:</span>
+<span class="s0">#</span>
+<span class="s0"># afterId -		If non-null, it means that auto-scanning is underway</span>
+<span class="s0">#			and it gives the &quot;after&quot; id for the next auto-scan</span>
+<span class="s0">#			command to be executed.</span>
+<span class="s0"># char -		Character position on the line;  kept in order</span>
+<span class="s0">#			to allow moving up or down past short lines while</span>
+<span class="s0">#			still remembering the desired position.</span>
+<span class="s0"># mouseMoved -		Non-zero means the mouse has moved a significant</span>
+<span class="s0">#			amount since the button went down (so, for example,</span>
+<span class="s0">#			start dragging out a selection).</span>
+<span class="s0"># prevPos -		Used when moving up or down lines via the keyboard.</span>
+<span class="s0">#			Keeps track of the previous insert position, so</span>
+<span class="s0">#			we can distinguish a series of ups and downs, all</span>
+<span class="s0">#			in a row, from a new up or down.</span>
+<span class="s0"># selectMode -		The style of selection currently underway:</span>
+<span class="s0">#			char, word, or line.</span>
+<span class="s0"># x, y -		Last known mouse coordinates for scanning</span>
+<span class="s0">#			and auto-scanning.</span>
+<span class="s0">#</span>
+<span class="s0">#-------------------------------------------------------------------------</span>
+
+<span class="s0">#-------------------------------------------------------------------------</span>
+<span class="s0"># The code below creates the default class bindings for text widgets.</span>
+<span class="s0">#-------------------------------------------------------------------------</span>
+
+<span class="s0"># Standard Motif bindings:</span>
+
+<span class="s0">bind Text &lt;1&gt; {</span>
+    <span class="s0">tk::TextButton1 %W %x %y</span>
+    <span class="s0">%W tag remove sel 0.0 end</span>
+<span class="s0">}</span>
+<span class="s0">bind Text &lt;B1-Motion&gt; {</span>
+    <span class="s0">set tk::Priv(x) %x</span>
+    <span class="s0">set tk::Priv(y) %y</span>
+    <span class="s0">tk::TextSelectTo %W %x %y</span>
+<span class="s0">}</span>
+<span class="s0">bind Text &lt;Double-1&gt; {</span>
+    <span class="s0">set tk::Priv(selectMode) word</span>
+    <span class="s0">tk::TextSelectTo %W %x %y</span>
+    <span class="s0">catch {%W mark set insert sel.first}</span>
+<span class="s0">}</span>
+<span class="s0">bind Text &lt;Triple-1&gt; {</span>
+    <span class="s0">set tk::Priv(selectMode) line</span>
+    <span class="s0">tk::TextSelectTo %W %x %y</span>
+    <span class="s0">catch {%W mark set insert sel.first}</span>
+<span class="s0">}</span>
+<span class="s0">bind Text &lt;Shift-1&gt; {</span>
+    <span class="s0">tk::TextResetAnchor %W @%x,%y</span>
+    <span class="s0">set tk::Priv(selectMode) char</span>
+    <span class="s0">tk::TextSelectTo %W %x %y</span>
+<span class="s0">}</span>
+<span class="s0">bind Text &lt;Double-Shift-1&gt;	{</span>
+    <span class="s0">set tk::Priv(selectMode) word</span>
+    <span class="s0">tk::TextSelectTo %W %x %y 1</span>
+<span class="s0">}</span>
+<span class="s0">bind Text &lt;Triple-Shift-1&gt;	{</span>
+    <span class="s0">set tk::Priv(selectMode) line</span>
+    <span class="s0">tk::TextSelectTo %W %x %y</span>
+<span class="s0">}</span>
+<span class="s0">bind Text &lt;B1-Leave&gt; {</span>
+    <span class="s0">set tk::Priv(x) %x</span>
+    <span class="s0">set tk::Priv(y) %y</span>
+    <span class="s0">tk::TextAutoScan %W</span>
+<span class="s0">}</span>
+<span class="s0">bind Text &lt;B1-Enter&gt; {</span>
+    <span class="s0">tk::CancelRepeat</span>
+<span class="s0">}</span>
+<span class="s0">bind Text &lt;ButtonRelease-1&gt; {</span>
+    <span class="s0">tk::CancelRepeat</span>
+<span class="s0">}</span>
+<span class="s0">bind Text &lt;Control-1&gt; {</span>
+    <span class="s0">%W mark set insert @%x,%y</span>
+    <span class="s0"># An operation that moves the insert mark without making it</span>
+    <span class="s0"># one end of the selection must insert an autoseparator</span>
+    <span class="s0">if {[%W cget -autoseparators]} {</span>
+	<span class="s0">%W edit separator</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+<span class="s0"># stop an accidental double click triggering &lt;Double-Button-1&gt;</span>
+<span class="s0">bind Text &lt;Double-Control-1&gt; { # nothing }</span>
+<span class="s0"># stop an accidental movement triggering &lt;B1-Motion&gt;</span>
+<span class="s0">bind Text &lt;Control-B1-Motion&gt; { # nothing }</span>
+<span class="s0">bind Text &lt;&lt;PrevChar&gt;&gt; {</span>
+    <span class="s0">tk::TextSetCursor %W insert-1displayindices</span>
+<span class="s0">}</span>
+<span class="s0">bind Text &lt;&lt;NextChar&gt;&gt; {</span>
+    <span class="s0">tk::TextSetCursor %W insert+1displayindices</span>
+<span class="s0">}</span>
+<span class="s0">bind Text &lt;&lt;PrevLine&gt;&gt; {</span>
+    <span class="s0">tk::TextSetCursor %W [tk::TextUpDownLine %W -1]</span>
+<span class="s0">}</span>
+<span class="s0">bind Text &lt;&lt;NextLine&gt;&gt; {</span>
+    <span class="s0">tk::TextSetCursor %W [tk::TextUpDownLine %W 1]</span>
+<span class="s0">}</span>
+<span class="s0">bind Text &lt;&lt;SelectPrevChar&gt;&gt; {</span>
+    <span class="s0">tk::TextKeySelect %W [%W index {insert - 1displayindices}]</span>
+<span class="s0">}</span>
+<span class="s0">bind Text &lt;&lt;SelectNextChar&gt;&gt; {</span>
+    <span class="s0">tk::TextKeySelect %W [%W index {insert + 1displayindices}]</span>
+<span class="s0">}</span>
+<span class="s0">bind Text &lt;&lt;SelectPrevLine&gt;&gt; {</span>
+    <span class="s0">tk::TextKeySelect %W [tk::TextUpDownLine %W -1]</span>
+<span class="s0">}</span>
+<span class="s0">bind Text &lt;&lt;SelectNextLine&gt;&gt; {</span>
+    <span class="s0">tk::TextKeySelect %W [tk::TextUpDownLine %W 1]</span>
+<span class="s0">}</span>
+<span class="s0">bind Text &lt;&lt;PrevWord&gt;&gt; {</span>
+    <span class="s0">tk::TextSetCursor %W [tk::TextPrevPos %W insert tcl_startOfPreviousWord]</span>
+<span class="s0">}</span>
+<span class="s0">bind Text &lt;&lt;NextWord&gt;&gt; {</span>
+    <span class="s0">tk::TextSetCursor %W [tk::TextNextWord %W insert]</span>
+<span class="s0">}</span>
+<span class="s0">bind Text &lt;&lt;PrevPara&gt;&gt; {</span>
+    <span class="s0">tk::TextSetCursor %W [tk::TextPrevPara %W insert]</span>
+<span class="s0">}</span>
+<span class="s0">bind Text &lt;&lt;NextPara&gt;&gt; {</span>
+    <span class="s0">tk::TextSetCursor %W [tk::TextNextPara %W insert]</span>
+<span class="s0">}</span>
+<span class="s0">bind Text &lt;&lt;SelectPrevWord&gt;&gt; {</span>
+    <span class="s0">tk::TextKeySelect %W [tk::TextPrevPos %W insert tcl_startOfPreviousWord]</span>
+<span class="s0">}</span>
+<span class="s0">bind Text &lt;&lt;SelectNextWord&gt;&gt; {</span>
+    <span class="s0">tk::TextKeySelect %W [tk::TextNextWord %W insert]</span>
+<span class="s0">}</span>
+<span class="s0">bind Text &lt;&lt;SelectPrevPara&gt;&gt; {</span>
+    <span class="s0">tk::TextKeySelect %W [tk::TextPrevPara %W insert]</span>
+<span class="s0">}</span>
+<span class="s0">bind Text &lt;&lt;SelectNextPara&gt;&gt; {</span>
+    <span class="s0">tk::TextKeySelect %W [tk::TextNextPara %W insert]</span>
+<span class="s0">}</span>
+<span class="s0">bind Text &lt;Prior&gt; {</span>
+    <span class="s0">tk::TextSetCursor %W [tk::TextScrollPages %W -1]</span>
+<span class="s0">}</span>
+<span class="s0">bind Text &lt;Shift-Prior&gt; {</span>
+    <span class="s0">tk::TextKeySelect %W [tk::TextScrollPages %W -1]</span>
+<span class="s0">}</span>
+<span class="s0">bind Text &lt;Next&gt; {</span>
+    <span class="s0">tk::TextSetCursor %W [tk::TextScrollPages %W 1]</span>
+<span class="s0">}</span>
+<span class="s0">bind Text &lt;Shift-Next&gt; {</span>
+    <span class="s0">tk::TextKeySelect %W [tk::TextScrollPages %W 1]</span>
+<span class="s0">}</span>
+<span class="s0">bind Text &lt;Control-Prior&gt; {</span>
+    <span class="s0">%W xview scroll -1 page</span>
+<span class="s0">}</span>
+<span class="s0">bind Text &lt;Control-Next&gt; {</span>
+    <span class="s0">%W xview scroll 1 page</span>
+<span class="s0">}</span>
+
+<span class="s0">bind Text &lt;&lt;LineStart&gt;&gt; {</span>
+    <span class="s0">tk::TextSetCursor %W {insert display linestart}</span>
+<span class="s0">}</span>
+<span class="s0">bind Text &lt;&lt;SelectLineStart&gt;&gt; {</span>
+    <span class="s0">tk::TextKeySelect %W {insert display linestart}</span>
+<span class="s0">}</span>
+<span class="s0">bind Text &lt;&lt;LineEnd&gt;&gt; {</span>
+    <span class="s0">tk::TextSetCursor %W {insert display lineend}</span>
+<span class="s0">}</span>
+<span class="s0">bind Text &lt;&lt;SelectLineEnd&gt;&gt; {</span>
+    <span class="s0">tk::TextKeySelect %W {insert display lineend}</span>
+<span class="s0">}</span>
+<span class="s0">bind Text &lt;Control-Home&gt; {</span>
+    <span class="s0">tk::TextSetCursor %W 1.0</span>
+<span class="s0">}</span>
+<span class="s0">bind Text &lt;Control-Shift-Home&gt; {</span>
+    <span class="s0">tk::TextKeySelect %W 1.0</span>
+<span class="s0">}</span>
+<span class="s0">bind Text &lt;Control-End&gt; {</span>
+    <span class="s0">tk::TextSetCursor %W {end - 1 indices}</span>
+<span class="s0">}</span>
+<span class="s0">bind Text &lt;Control-Shift-End&gt; {</span>
+    <span class="s0">tk::TextKeySelect %W {end - 1 indices}</span>
+<span class="s0">}</span>
+
+<span class="s0">bind Text &lt;Tab&gt; {</span>
+    <span class="s0">if {[%W cget -state] eq &quot;normal&quot;} {</span>
+	<span class="s0">tk::TextInsert %W \t</span>
+	<span class="s0">focus %W</span>
+	<span class="s0">break</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+<span class="s0">bind Text &lt;Shift-Tab&gt; {</span>
+    <span class="s0"># Needed only to keep &lt;Tab&gt; binding from triggering;  doesn't</span>
+    <span class="s0"># have to actually do anything.</span>
+    <span class="s0">break</span>
+<span class="s0">}</span>
+<span class="s0">bind Text &lt;Control-Tab&gt; {</span>
+    <span class="s0">focus [tk_focusNext %W]</span>
+<span class="s0">}</span>
+<span class="s0">bind Text &lt;Control-Shift-Tab&gt; {</span>
+    <span class="s0">focus [tk_focusPrev %W]</span>
+<span class="s0">}</span>
+<span class="s0">bind Text &lt;Control-i&gt; {</span>
+    <span class="s0">tk::TextInsert %W \t</span>
+<span class="s0">}</span>
+<span class="s0">bind Text &lt;Return&gt; {</span>
+    <span class="s0">tk::TextInsert %W \n</span>
+    <span class="s0">if {[%W cget -autoseparators]} {</span>
+	<span class="s0">%W edit separator</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+<span class="s0">bind Text &lt;Delete&gt; {</span>
+    <span class="s0">if {[tk::TextCursorInSelection %W]} {</span>
+	<span class="s0">%W delete sel.first sel.last</span>
+    <span class="s0">} else {</span>
+	<span class="s0">if {[%W compare end != insert+1c]} {</span>
+	    <span class="s0">%W delete insert</span>
+	<span class="s0">}</span>
+	<span class="s0">%W see insert</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+<span class="s0">bind Text &lt;BackSpace&gt; {</span>
+    <span class="s0">if {[tk::TextCursorInSelection %W]} {</span>
+	<span class="s0">%W delete sel.first sel.last</span>
+    <span class="s0">} else {</span>
+	<span class="s0">if {[%W compare insert != 1.0]} {</span>
+	    <span class="s0">%W delete insert-1c</span>
+	<span class="s0">}</span>
+	<span class="s0">%W see insert</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+
+<span class="s0">bind Text &lt;Control-space&gt; {</span>
+    <span class="s0">%W mark set [tk::TextAnchor %W] insert</span>
+<span class="s0">}</span>
+<span class="s0">bind Text &lt;Select&gt; {</span>
+    <span class="s0">%W mark set [tk::TextAnchor %W] insert</span>
+<span class="s0">}</span>
+<span class="s0">bind Text &lt;Control-Shift-space&gt; {</span>
+    <span class="s0">set tk::Priv(selectMode) char</span>
+    <span class="s0">tk::TextKeyExtend %W insert</span>
+<span class="s0">}</span>
+<span class="s0">bind Text &lt;Shift-Select&gt; {</span>
+    <span class="s0">set tk::Priv(selectMode) char</span>
+    <span class="s0">tk::TextKeyExtend %W insert</span>
+<span class="s0">}</span>
+<span class="s0">bind Text &lt;&lt;SelectAll&gt;&gt; {</span>
+    <span class="s0">%W tag add sel 1.0 end</span>
+<span class="s0">}</span>
+<span class="s0">bind Text &lt;&lt;SelectNone&gt;&gt; {</span>
+    <span class="s0">%W tag remove sel 1.0 end</span>
+    <span class="s0"># An operation that clears the selection must insert an autoseparator,</span>
+    <span class="s0"># because the selection operation may have moved the insert mark</span>
+    <span class="s0">if {[%W cget -autoseparators]} {</span>
+	<span class="s0">%W edit separator</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+<span class="s0">bind Text &lt;&lt;Cut&gt;&gt; {</span>
+    <span class="s0">tk_textCut %W</span>
+<span class="s0">}</span>
+<span class="s0">bind Text &lt;&lt;Copy&gt;&gt; {</span>
+    <span class="s0">tk_textCopy %W</span>
+<span class="s0">}</span>
+<span class="s0">bind Text &lt;&lt;Paste&gt;&gt; {</span>
+    <span class="s0">tk_textPaste %W</span>
+<span class="s0">}</span>
+<span class="s0">bind Text &lt;&lt;Clear&gt;&gt; {</span>
+    <span class="s0"># Make &lt;&lt;Clear&gt;&gt; an atomic operation on the Undo stack,</span>
+    <span class="s0"># i.e. separate it from other delete operations on either side</span>
+    <span class="s0">if {[%W cget -autoseparators]} {</span>
+	<span class="s0">%W edit separator</span>
+    <span class="s0">}</span>
+    <span class="s0">catch {%W delete sel.first sel.last}</span>
+    <span class="s0">if {[%W cget -autoseparators]} {</span>
+	<span class="s0">%W edit separator</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+<span class="s0">bind Text &lt;&lt;PasteSelection&gt;&gt; {</span>
+    <span class="s0">if {$tk_strictMotif || ![info exists tk::Priv(mouseMoved)]</span>
+	    <span class="s0">|| !$tk::Priv(mouseMoved)} {</span>
+	<span class="s0">tk::TextPasteSelection %W %x %y</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+<span class="s0">bind Text &lt;Insert&gt; {</span>
+    <span class="s0">catch {tk::TextInsert %W [::tk::GetSelection %W PRIMARY]}</span>
+<span class="s0">}</span>
+<span class="s0">bind Text &lt;KeyPress&gt; {</span>
+    <span class="s0">tk::TextInsert %W %A</span>
+<span class="s0">}</span>
+
+<span class="s0"># Ignore all Alt, Meta, and Control keypresses unless explicitly bound.</span>
+<span class="s0"># Otherwise, if a widget binding for one of these is defined, the</span>
+<span class="s0"># &lt;KeyPress&gt; class binding will also fire and insert the character,</span>
+<span class="s0"># which is wrong.  Ditto for &lt;Escape&gt;.</span>
+
+<span class="s0">bind Text &lt;Alt-KeyPress&gt; {# nothing }</span>
+<span class="s0">bind Text &lt;Meta-KeyPress&gt; {# nothing}</span>
+<span class="s0">bind Text &lt;Control-KeyPress&gt; {# nothing}</span>
+<span class="s0">bind Text &lt;Escape&gt; {# nothing}</span>
+<span class="s0">bind Text &lt;KP_Enter&gt; {# nothing}</span>
+<span class="s0">if {[tk windowingsystem] eq &quot;aqua&quot;} {</span>
+    <span class="s0">bind Text &lt;Command-KeyPress&gt; {# nothing}</span>
+<span class="s0">}</span>
+
+<span class="s0"># Additional emacs-like bindings:</span>
+
+<span class="s0">bind Text &lt;Control-d&gt; {</span>
+    <span class="s0">if {!$tk_strictMotif &amp;&amp; [%W compare end != insert+1c]} {</span>
+	<span class="s0">%W delete insert</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+<span class="s0">bind Text &lt;Control-k&gt; {</span>
+    <span class="s0">if {!$tk_strictMotif &amp;&amp; [%W compare end != insert+1c]} {</span>
+	<span class="s0">if {[%W compare insert == {insert lineend}]} {</span>
+	    <span class="s0">%W delete insert</span>
+	<span class="s0">} else {</span>
+	    <span class="s0">%W delete insert {insert lineend}</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+<span class="s0">bind Text &lt;Control-o&gt; {</span>
+    <span class="s0">if {!$tk_strictMotif} {</span>
+	<span class="s0">%W insert insert \n</span>
+	<span class="s0">%W mark set insert insert-1c</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+<span class="s0">bind Text &lt;Control-t&gt; {</span>
+    <span class="s0">if {!$tk_strictMotif} {</span>
+	<span class="s0">tk::TextTranspose %W</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+
+<span class="s0">bind Text &lt;&lt;Undo&gt;&gt; {</span>
+    <span class="s0"># An Undo operation may remove the separator at the top of the Undo stack.</span>
+    <span class="s0"># Then the item at the top of the stack gets merged with the subsequent changes.</span>
+    <span class="s0"># Place separators before and after Undo to prevent this.</span>
+    <span class="s0">if {[%W cget -autoseparators]} {</span>
+	<span class="s0">%W edit separator</span>
+    <span class="s0">}</span>
+    <span class="s0">catch { %W edit undo }</span>
+    <span class="s0">if {[%W cget -autoseparators]} {</span>
+	<span class="s0">%W edit separator</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+
+<span class="s0">bind Text &lt;&lt;Redo&gt;&gt; {</span>
+    <span class="s0">catch { %W edit redo }</span>
+<span class="s0">}</span>
+
+<span class="s0">bind Text &lt;Meta-b&gt; {</span>
+    <span class="s0">if {!$tk_strictMotif} {</span>
+	<span class="s0">tk::TextSetCursor %W [tk::TextPrevPos %W insert tcl_startOfPreviousWord]</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+<span class="s0">bind Text &lt;Meta-d&gt; {</span>
+    <span class="s0">if {!$tk_strictMotif &amp;&amp; [%W compare end != insert+1c]} {</span>
+	<span class="s0">%W delete insert [tk::TextNextWord %W insert]</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+<span class="s0">bind Text &lt;Meta-f&gt; {</span>
+    <span class="s0">if {!$tk_strictMotif} {</span>
+	<span class="s0">tk::TextSetCursor %W [tk::TextNextWord %W insert]</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+<span class="s0">bind Text &lt;Meta-less&gt; {</span>
+    <span class="s0">if {!$tk_strictMotif} {</span>
+	<span class="s0">tk::TextSetCursor %W 1.0</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+<span class="s0">bind Text &lt;Meta-greater&gt; {</span>
+    <span class="s0">if {!$tk_strictMotif} {</span>
+	<span class="s0">tk::TextSetCursor %W end-1c</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+<span class="s0">bind Text &lt;Meta-BackSpace&gt; {</span>
+    <span class="s0">if {!$tk_strictMotif} {</span>
+	<span class="s0">%W delete [tk::TextPrevPos %W insert tcl_startOfPreviousWord] insert</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+<span class="s0">bind Text &lt;Meta-Delete&gt; {</span>
+    <span class="s0">if {!$tk_strictMotif} {</span>
+	<span class="s0">%W delete [tk::TextPrevPos %W insert tcl_startOfPreviousWord] insert</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+
+<span class="s0"># Macintosh only bindings:</span>
+
+<span class="s0">if {[tk windowingsystem] eq &quot;aqua&quot;} {</span>
+<span class="s0">bind Text &lt;Control-v&gt; {</span>
+    <span class="s0">tk::TextScrollPages %W 1</span>
+<span class="s0">}</span>
+
+<span class="s0"># End of Mac only bindings</span>
+<span class="s0">}</span>
+
+<span class="s0"># A few additional bindings of my own.</span>
+
+<span class="s0">bind Text &lt;Control-h&gt; {</span>
+    <span class="s0">if {!$tk_strictMotif &amp;&amp; [%W compare insert != 1.0]} {</span>
+	<span class="s0">%W delete insert-1c</span>
+	<span class="s0">%W see insert</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+<span class="s0">bind Text &lt;2&gt; {</span>
+    <span class="s0">if {!$tk_strictMotif} {</span>
+	<span class="s0">tk::TextScanMark %W %x %y</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+<span class="s0">bind Text &lt;B2-Motion&gt; {</span>
+    <span class="s0">if {!$tk_strictMotif} {</span>
+	<span class="s0">tk::TextScanDrag %W %x %y</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+<span class="s0">set ::tk::Priv(prevPos) {}</span>
+
+<span class="s0"># The MouseWheel will typically only fire on Windows and MacOS X.</span>
+<span class="s0"># However, someone could use the &quot;event generate&quot; command to produce one</span>
+<span class="s0"># on other platforms.  We must be careful not to round -ve values of %D</span>
+<span class="s0"># down to zero.</span>
+
+<span class="s0">if {[tk windowingsystem] eq &quot;aqua&quot;} {</span>
+    <span class="s0">bind Text &lt;MouseWheel&gt; {</span>
+        <span class="s0">%W yview scroll [expr {-15 * (%D)}] pixels</span>
+    <span class="s0">}</span>
+    <span class="s0">bind Text &lt;Option-MouseWheel&gt; {</span>
+        <span class="s0">%W yview scroll [expr {-150 * (%D)}] pixels</span>
+    <span class="s0">}</span>
+    <span class="s0">bind Text &lt;Shift-MouseWheel&gt; {</span>
+        <span class="s0">%W xview scroll [expr {-15 * (%D)}] pixels</span>
+    <span class="s0">}</span>
+    <span class="s0">bind Text &lt;Shift-Option-MouseWheel&gt; {</span>
+        <span class="s0">%W xview scroll [expr {-150 * (%D)}] pixels</span>
+    <span class="s0">}</span>
+<span class="s0">} else {</span>
+    <span class="s0"># We must make sure that positive and negative movements are rounded</span>
+    <span class="s0"># equally to integers, avoiding the problem that</span>
+    <span class="s0">#     (int)1/3 = 0,</span>
+    <span class="s0"># but</span>
+    <span class="s0">#     (int)-1/3 = -1</span>
+    <span class="s0"># The following code ensure equal +/- behaviour.</span>
+    <span class="s0">bind Text &lt;MouseWheel&gt; {</span>
+	<span class="s0">if {%D &gt;= 0} {</span>
+	    <span class="s0">%W yview scroll [expr {-%D/3}] pixels</span>
+	<span class="s0">} else {</span>
+	    <span class="s0">%W yview scroll [expr {(2-%D)/3}] pixels</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+    <span class="s0">bind Text &lt;Shift-MouseWheel&gt; {</span>
+	<span class="s0">if {%D &gt;= 0} {</span>
+	    <span class="s0">%W xview scroll [expr {-%D/3}] pixels</span>
+	<span class="s0">} else {</span>
+	    <span class="s0">%W xview scroll [expr {(2-%D)/3}] pixels</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+
+<span class="s0">if {&quot;x11&quot; eq [tk windowingsystem]} {</span>
+    <span class="s0"># Support for mousewheels on Linux/Unix commonly comes through mapping</span>
+    <span class="s0"># the wheel to the extended buttons.  If you have a mousewheel, find</span>
+    <span class="s0"># Linux configuration info at:</span>
+    <span class="s0">#	http://www.inria.fr/koala/colas/mouse-wheel-scroll/</span>
+    <span class="s0">bind Text &lt;4&gt; {</span>
+	<span class="s0">if {!$tk_strictMotif} {</span>
+	    <span class="s0">%W yview scroll -50 pixels</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+    <span class="s0">bind Text &lt;5&gt; {</span>
+	<span class="s0">if {!$tk_strictMotif} {</span>
+	    <span class="s0">%W yview scroll 50 pixels</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+    <span class="s0">bind Text &lt;Shift-4&gt; {</span>
+	<span class="s0">if {!$tk_strictMotif} {</span>
+	    <span class="s0">%W xview scroll -50 pixels</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+    <span class="s0">bind Text &lt;Shift-5&gt; {</span>
+	<span class="s0">if {!$tk_strictMotif} {</span>
+	    <span class="s0">%W xview scroll 50 pixels</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+
+<span class="s0"># ::tk::TextClosestGap --</span>
+<span class="s0"># Given x and y coordinates, this procedure finds the closest boundary</span>
+<span class="s0"># between characters to the given coordinates and returns the index</span>
+<span class="s0"># of the character just after the boundary.</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0"># w -		The text window.</span>
+<span class="s0"># x -		X-coordinate within the window.</span>
+<span class="s0"># y -		Y-coordinate within the window.</span>
+
+<span class="s0">proc ::tk::TextClosestGap {w x y} {</span>
+    <span class="s0">set pos [$w index @$x,$y]</span>
+    <span class="s0">set bbox [$w bbox $pos]</span>
+    <span class="s0">if {$bbox eq &quot;&quot;} {</span>
+	<span class="s0">return $pos</span>
+    <span class="s0">}</span>
+    <span class="s0">if {($x - [lindex $bbox 0]) &lt; ([lindex $bbox 2]/2)} {</span>
+	<span class="s0">return $pos</span>
+    <span class="s0">}</span>
+    <span class="s0">$w index &quot;$pos + 1 char&quot;</span>
+<span class="s0">}</span>
+
+<span class="s0"># ::tk::TextButton1 --</span>
+<span class="s0"># This procedure is invoked to handle button-1 presses in text</span>
+<span class="s0"># widgets.  It moves the insertion cursor, sets the selection anchor,</span>
+<span class="s0"># and claims the input focus.</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0"># w -		The text window in which the button was pressed.</span>
+<span class="s0"># x -		The x-coordinate of the button press.</span>
+<span class="s0"># y -		The x-coordinate of the button press.</span>
+
+<span class="s0">proc ::tk::TextButton1 {w x y} {</span>
+    <span class="s0">variable ::tk::Priv</span>
+
+    <span class="s0">set Priv(selectMode) char</span>
+    <span class="s0">set Priv(mouseMoved) 0</span>
+    <span class="s0">set Priv(pressX) $x</span>
+    <span class="s0">set anchorname [tk::TextAnchor $w]</span>
+    <span class="s0">$w mark set insert [TextClosestGap $w $x $y]</span>
+    <span class="s0">$w mark set $anchorname insert</span>
+    <span class="s0"># Set the anchor mark's gravity depending on the click position</span>
+    <span class="s0"># relative to the gap</span>
+    <span class="s0">set bbox [$w bbox [$w index $anchorname]]</span>
+    <span class="s0">if {$x &gt; [lindex $bbox 0]} {</span>
+	<span class="s0">$w mark gravity $anchorname right</span>
+    <span class="s0">} else {</span>
+	<span class="s0">$w mark gravity $anchorname left</span>
+    <span class="s0">}</span>
+    <span class="s0"># Allow focus in any case on Windows, because that will let the</span>
+    <span class="s0"># selection be displayed even for state disabled text widgets.</span>
+    <span class="s0">if {[tk windowingsystem] eq &quot;win32&quot; \</span>
+	    <span class="s0">|| [$w cget -state] eq &quot;normal&quot;} {</span>
+	<span class="s0">focus $w</span>
+    <span class="s0">}</span>
+    <span class="s0">if {[$w cget -autoseparators]} {</span>
+	<span class="s0">$w edit separator</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+
+<span class="s0"># ::tk::TextSelectTo --</span>
+<span class="s0"># This procedure is invoked to extend the selection, typically when</span>
+<span class="s0"># dragging it with the mouse.  Depending on the selection mode (character,</span>
+<span class="s0"># word, line) it selects in different-sized units.  This procedure</span>
+<span class="s0"># ignores mouse motions initially until the mouse has moved from</span>
+<span class="s0"># one character to another or until there have been multiple clicks.</span>
+<span class="s0">#</span>
+<span class="s0"># Note that the 'anchor' is implemented programmatically using</span>
+<span class="s0"># a text widget mark, and uses a name that will be unique for each</span>
+<span class="s0"># text widget (even when there are multiple peers).  Currently the</span>
+<span class="s0"># anchor is considered private to Tk, hence the name 'tk::anchor$w'.</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0"># w -		The text window in which the button was pressed.</span>
+<span class="s0"># x -		Mouse x position.</span>
+<span class="s0"># y - 		Mouse y position.</span>
+
+<span class="s0">set ::tk::Priv(textanchoruid) 0</span>
+
+<span class="s0">proc ::tk::TextAnchor {w} {</span>
+    <span class="s0">variable Priv</span>
+    <span class="s0">if {![info exists Priv(textanchor,$w)]} {</span>
+        <span class="s0">set Priv(textanchor,$w) tk::anchor[incr Priv(textanchoruid)]</span>
+    <span class="s0">}</span>
+    <span class="s0">return $Priv(textanchor,$w)</span>
+<span class="s0">}</span>
+
+<span class="s0">proc ::tk::TextSelectTo {w x y {extend 0}} {</span>
+    <span class="s0">variable ::tk::Priv</span>
+
+    <span class="s0">set anchorname [tk::TextAnchor $w]</span>
+    <span class="s0">set cur [TextClosestGap $w $x $y]</span>
+    <span class="s0">if {[catch {$w index $anchorname}]} {</span>
+	<span class="s0">$w mark set $anchorname $cur</span>
+    <span class="s0">}</span>
+    <span class="s0">set anchor [$w index $anchorname]</span>
+    <span class="s0">if {[$w compare $cur != $anchor] || (abs($Priv(pressX) - $x) &gt;= 3)} {</span>
+	<span class="s0">set Priv(mouseMoved) 1</span>
+    <span class="s0">}</span>
+    <span class="s0">switch -- $Priv(selectMode) {</span>
+	<span class="s0">char {</span>
+	    <span class="s0">if {[$w compare $cur &lt; $anchorname]} {</span>
+		<span class="s0">set first $cur</span>
+		<span class="s0">set last $anchorname</span>
+	    <span class="s0">} else {</span>
+		<span class="s0">set first $anchorname</span>
+		<span class="s0">set last $cur</span>
+	    <span class="s0">}</span>
+	<span class="s0">}</span>
+	<span class="s0">word {</span>
+	    <span class="s0"># Set initial range based only on the anchor (1 char min width)</span>
+	    <span class="s0">if {[$w mark gravity $anchorname] eq &quot;right&quot;} {</span>
+		<span class="s0">set first $anchorname</span>
+		<span class="s0">set last &quot;$anchorname + 1c&quot;</span>
+	    <span class="s0">} else {</span>
+		<span class="s0">set first &quot;$anchorname - 1c&quot;</span>
+		<span class="s0">set last $anchorname</span>
+	    <span class="s0">}</span>
+	    <span class="s0"># Extend range (if necessary) based on the current point</span>
+	    <span class="s0">if {[$w compare $cur &lt; $first]} {</span>
+		<span class="s0">set first $cur</span>
+	    <span class="s0">} elseif {[$w compare $cur &gt; $last]} {</span>
+		<span class="s0">set last $cur</span>
+	    <span class="s0">}</span>
+
+	    <span class="s0"># Now find word boundaries</span>
+	    <span class="s0">set first [TextPrevPos $w &quot;$first + 1c&quot; tcl_wordBreakBefore]</span>
+	    <span class="s0">set last [TextNextPos $w &quot;$last - 1c&quot; tcl_wordBreakAfter]</span>
+	<span class="s0">}</span>
+	<span class="s0">line {</span>
+	    <span class="s0"># Set initial range based only on the anchor</span>
+	    <span class="s0">set first &quot;$anchorname linestart&quot;</span>
+	    <span class="s0">set last &quot;$anchorname lineend&quot;</span>
+
+	    <span class="s0"># Extend range (if necessary) based on the current point</span>
+	    <span class="s0">if {[$w compare $cur &lt; $first]} {</span>
+		<span class="s0">set first &quot;$cur linestart&quot;</span>
+	    <span class="s0">} elseif {[$w compare $cur &gt; $last]} {</span>
+		<span class="s0">set last &quot;$cur lineend&quot;</span>
+	    <span class="s0">}</span>
+	    <span class="s0">set first [$w index $first]</span>
+	    <span class="s0">set last [$w index &quot;$last + 1c&quot;]</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+    <span class="s0">if {$Priv(mouseMoved) || ($Priv(selectMode) ne &quot;char&quot;)} {</span>
+	<span class="s0">$w tag remove sel 0.0 end</span>
+	<span class="s0">$w mark set insert $cur</span>
+	<span class="s0">$w tag add sel $first $last</span>
+	<span class="s0">$w tag remove sel $last end</span>
+	<span class="s0">update idletasks</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+
+<span class="s0"># ::tk::TextKeyExtend --</span>
+<span class="s0"># This procedure handles extending the selection from the keyboard,</span>
+<span class="s0"># where the point to extend to is really the boundary between two</span>
+<span class="s0"># characters rather than a particular character.</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0"># w -		The text window.</span>
+<span class="s0"># index -	The point to which the selection is to be extended.</span>
+
+<span class="s0">proc ::tk::TextKeyExtend {w index} {</span>
+
+    <span class="s0">set anchorname [tk::TextAnchor $w]</span>
+    <span class="s0">set cur [$w index $index]</span>
+    <span class="s0">if {[catch {$w index $anchorname}]} {</span>
+	<span class="s0">$w mark set $anchorname $cur</span>
+    <span class="s0">}</span>
+    <span class="s0">set anchor [$w index $anchorname]</span>
+    <span class="s0">if {[$w compare $cur &lt; $anchorname]} {</span>
+	<span class="s0">set first $cur</span>
+	<span class="s0">set last $anchorname</span>
+    <span class="s0">} else {</span>
+	<span class="s0">set first $anchorname</span>
+	<span class="s0">set last $cur</span>
+    <span class="s0">}</span>
+    <span class="s0">$w tag remove sel 0.0 $first</span>
+    <span class="s0">$w tag add sel $first $last</span>
+    <span class="s0">$w tag remove sel $last end</span>
+<span class="s0">}</span>
+
+<span class="s0"># ::tk::TextPasteSelection --</span>
+<span class="s0"># This procedure sets the insertion cursor to the mouse position,</span>
+<span class="s0"># inserts the selection, and sets the focus to the window.</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0"># w -		The text window.</span>
+<span class="s0"># x, y - 	Position of the mouse.</span>
+
+<span class="s0">proc ::tk::TextPasteSelection {w x y} {</span>
+    <span class="s0">$w mark set insert [TextClosestGap $w $x $y]</span>
+    <span class="s0">if {![catch {::tk::GetSelection $w PRIMARY} sel]} {</span>
+	<span class="s0">set oldSeparator [$w cget -autoseparators]</span>
+	<span class="s0">if {$oldSeparator} {</span>
+	    <span class="s0">$w configure -autoseparators 0</span>
+	    <span class="s0">$w edit separator</span>
+	<span class="s0">}</span>
+	<span class="s0">$w insert insert $sel</span>
+	<span class="s0">if {$oldSeparator} {</span>
+	    <span class="s0">$w edit separator</span>
+	    <span class="s0">$w configure -autoseparators 1</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+    <span class="s0">if {[$w cget -state] eq &quot;normal&quot;} {</span>
+	<span class="s0">focus $w</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+
+<span class="s0"># ::tk::TextAutoScan --</span>
+<span class="s0"># This procedure is invoked when the mouse leaves a text window</span>
+<span class="s0"># with button 1 down.  It scrolls the window up, down, left, or right,</span>
+<span class="s0"># depending on where the mouse is (this information was saved in</span>
+<span class="s0"># ::tk::Priv(x) and ::tk::Priv(y)), and reschedules itself as an &quot;after&quot;</span>
+<span class="s0"># command so that the window continues to scroll until the mouse</span>
+<span class="s0"># moves back into the window or the mouse button is released.</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0"># w -		The text window.</span>
+
+<span class="s0">proc ::tk::TextAutoScan {w} {</span>
+    <span class="s0">variable ::tk::Priv</span>
+    <span class="s0">if {![winfo exists $w]} {</span>
+	<span class="s0">return</span>
+    <span class="s0">}</span>
+    <span class="s0">if {$Priv(y) &gt;= [winfo height $w]} {</span>
+	<span class="s0">$w yview scroll [expr {1 + $Priv(y) - [winfo height $w]}] pixels</span>
+    <span class="s0">} elseif {$Priv(y) &lt; 0} {</span>
+	<span class="s0">$w yview scroll [expr {-1 + $Priv(y)}] pixels</span>
+    <span class="s0">} elseif {$Priv(x) &gt;= [winfo width $w]} {</span>
+	<span class="s0">$w xview scroll 2 units</span>
+    <span class="s0">} elseif {$Priv(x) &lt; 0} {</span>
+	<span class="s0">$w xview scroll -2 units</span>
+    <span class="s0">} else {</span>
+	<span class="s0">return</span>
+    <span class="s0">}</span>
+    <span class="s0">TextSelectTo $w $Priv(x) $Priv(y)</span>
+    <span class="s0">set Priv(afterId) [after 50 [list tk::TextAutoScan $w]]</span>
+<span class="s0">}</span>
+
+<span class="s0"># ::tk::TextSetCursor</span>
+<span class="s0"># Move the insertion cursor to a given position in a text.  Also</span>
+<span class="s0"># clears the selection, if there is one in the text, and makes sure</span>
+<span class="s0"># that the insertion cursor is visible.  Also, don't let the insertion</span>
+<span class="s0"># cursor appear on the dummy last line of the text.</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0"># w -		The text window.</span>
+<span class="s0"># pos -		The desired new position for the cursor in the window.</span>
+
+<span class="s0">proc ::tk::TextSetCursor {w pos} {</span>
+    <span class="s0">if {[$w compare $pos == end]} {</span>
+	<span class="s0">set pos {end - 1 chars}</span>
+    <span class="s0">}</span>
+    <span class="s0">$w mark set insert $pos</span>
+    <span class="s0">$w tag remove sel 1.0 end</span>
+    <span class="s0">$w see insert</span>
+    <span class="s0">if {[$w cget -autoseparators]} {</span>
+	<span class="s0">$w edit separator</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+
+<span class="s0"># ::tk::TextKeySelect</span>
+<span class="s0"># This procedure is invoked when stroking out selections using the</span>
+<span class="s0"># keyboard.  It moves the cursor to a new position, then extends</span>
+<span class="s0"># the selection to that position.</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0"># w -		The text window.</span>
+<span class="s0"># new -		A new position for the insertion cursor (the cursor hasn't</span>
+<span class="s0">#		actually been moved to this position yet).</span>
+
+<span class="s0">proc ::tk::TextKeySelect {w new} {</span>
+    <span class="s0">set anchorname [tk::TextAnchor $w]</span>
+    <span class="s0">if {[$w tag nextrange sel 1.0 end] eq &quot;&quot;} {</span>
+	<span class="s0">if {[$w compare $new &lt; insert]} {</span>
+	    <span class="s0">$w tag add sel $new insert</span>
+	<span class="s0">} else {</span>
+	    <span class="s0">$w tag add sel insert $new</span>
+	<span class="s0">}</span>
+	<span class="s0">$w mark set $anchorname insert</span>
+    <span class="s0">} else {</span>
+	<span class="s0">if {[$w compare $new &lt; $anchorname]} {</span>
+	    <span class="s0">set first $new</span>
+	    <span class="s0">set last $anchorname</span>
+	<span class="s0">} else {</span>
+	    <span class="s0">set first $anchorname</span>
+	    <span class="s0">set last $new</span>
+	<span class="s0">}</span>
+	<span class="s0">$w tag remove sel 1.0 $first</span>
+	<span class="s0">$w tag add sel $first $last</span>
+	<span class="s0">$w tag remove sel $last end</span>
+    <span class="s0">}</span>
+    <span class="s0">$w mark set insert $new</span>
+    <span class="s0">$w see insert</span>
+    <span class="s0">update idletasks</span>
+<span class="s0">}</span>
+
+<span class="s0"># ::tk::TextResetAnchor --</span>
+<span class="s0"># Set the selection anchor to whichever end is farthest from the</span>
+<span class="s0"># index argument.  One special trick: if the selection has two or</span>
+<span class="s0"># fewer characters, just leave the anchor where it is.  In this</span>
+<span class="s0"># case it doesn't matter which point gets chosen for the anchor,</span>
+<span class="s0"># and for the things like Shift-Left and Shift-Right this produces</span>
+<span class="s0"># better behavior when the cursor moves back and forth across the</span>
+<span class="s0"># anchor.</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0"># w -		The text widget.</span>
+<span class="s0"># index -	Position at which mouse button was pressed, which determines</span>
+<span class="s0">#		which end of selection should be used as anchor point.</span>
+
+<span class="s0">proc ::tk::TextResetAnchor {w index} {</span>
+    <span class="s0">if {[$w tag ranges sel] eq &quot;&quot;} {</span>
+	<span class="s0"># Don't move the anchor if there is no selection now; this</span>
+	<span class="s0"># makes the widget behave &quot;correctly&quot; when the user clicks</span>
+	<span class="s0"># once, then shift-clicks somewhere -- ie, the area between</span>
+	<span class="s0"># the two clicks will be selected. [Bug: 5929].</span>
+	<span class="s0">return</span>
+    <span class="s0">}</span>
+    <span class="s0">set anchorname [tk::TextAnchor $w]</span>
+    <span class="s0">set a [$w index $index]</span>
+    <span class="s0">set b [$w index sel.first]</span>
+    <span class="s0">set c [$w index sel.last]</span>
+    <span class="s0">if {[$w compare $a &lt; $b]} {</span>
+	<span class="s0">$w mark set $anchorname sel.last</span>
+	<span class="s0">return</span>
+    <span class="s0">}</span>
+    <span class="s0">if {[$w compare $a &gt; $c]} {</span>
+	<span class="s0">$w mark set $anchorname sel.first</span>
+	<span class="s0">return</span>
+    <span class="s0">}</span>
+    <span class="s0">scan $a &quot;%d.%d&quot; lineA chA</span>
+    <span class="s0">scan $b &quot;%d.%d&quot; lineB chB</span>
+    <span class="s0">scan $c &quot;%d.%d&quot; lineC chC</span>
+    <span class="s0">if {$lineB &lt; $lineC+2} {</span>
+	<span class="s0">set total [string length [$w get $b $c]]</span>
+	<span class="s0">if {$total &lt;= 2} {</span>
+	    <span class="s0">return</span>
+	<span class="s0">}</span>
+	<span class="s0">if {[string length [$w get $b $a]] &lt; ($total/2)} {</span>
+	    <span class="s0">$w mark set $anchorname sel.last</span>
+	<span class="s0">} else {</span>
+	    <span class="s0">$w mark set $anchorname sel.first</span>
+	<span class="s0">}</span>
+	<span class="s0">return</span>
+    <span class="s0">}</span>
+    <span class="s0">if {($lineA-$lineB) &lt; ($lineC-$lineA)} {</span>
+	<span class="s0">$w mark set $anchorname sel.last</span>
+    <span class="s0">} else {</span>
+	<span class="s0">$w mark set $anchorname sel.first</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+
+<span class="s0"># ::tk::TextCursorInSelection --</span>
+<span class="s0"># Check whether the selection exists and contains the insertion cursor. Note</span>
+<span class="s0"># that it assumes that the selection is contiguous.</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0"># w -		The text widget whose selection is to be checked</span>
+
+<span class="s0">proc ::tk::TextCursorInSelection {w} {</span>
+    <span class="s0">expr {</span>
+	<span class="s0">[llength [$w tag ranges sel]]</span>
+	<span class="s0">&amp;&amp; [$w compare sel.first &lt;= insert]</span>
+	<span class="s0">&amp;&amp; [$w compare sel.last &gt;= insert]</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+
+<span class="s0"># ::tk::TextInsert --</span>
+<span class="s0"># Insert a string into a text at the point of the insertion cursor.</span>
+<span class="s0"># If there is a selection in the text, and it covers the point of the</span>
+<span class="s0"># insertion cursor, then delete the selection before inserting.</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0"># w -		The text window in which to insert the string</span>
+<span class="s0"># s -		The string to insert (usually just a single character)</span>
+
+<span class="s0">proc ::tk::TextInsert {w s} {</span>
+    <span class="s0">if {$s eq &quot;&quot; || [$w cget -state] eq &quot;disabled&quot;} {</span>
+	<span class="s0">return</span>
+    <span class="s0">}</span>
+    <span class="s0">set compound 0</span>
+    <span class="s0">if {[TextCursorInSelection $w]} {</span>
+	<span class="s0">set oldSeparator [$w cget -autoseparators]</span>
+	<span class="s0">if {$oldSeparator} {</span>
+	    <span class="s0">$w configure -autoseparators 0</span>
+	    <span class="s0">$w edit separator</span>
+	    <span class="s0">set compound 1</span>
+	<span class="s0">}</span>
+	<span class="s0">$w delete sel.first sel.last</span>
+    <span class="s0">}</span>
+    <span class="s0">$w insert insert $s</span>
+    <span class="s0">$w see insert</span>
+    <span class="s0">if {$compound &amp;&amp; $oldSeparator} {</span>
+	<span class="s0">$w edit separator</span>
+	<span class="s0">$w configure -autoseparators 1</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+
+<span class="s0"># ::tk::TextUpDownLine --</span>
+<span class="s0"># Returns the index of the character one display line above or below the</span>
+<span class="s0"># insertion cursor.  There are two tricky things here.  First, we want to</span>
+<span class="s0"># maintain the original x position across repeated operations, even though</span>
+<span class="s0"># some lines that will get passed through don't have enough characters to</span>
+<span class="s0"># cover the original column.  Second, don't try to scroll past the</span>
+<span class="s0"># beginning or end of the text.</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0"># w -		The text window in which the cursor is to move.</span>
+<span class="s0"># n -		The number of display lines to move: -1 for up one line,</span>
+<span class="s0">#		+1 for down one line.</span>
+
+<span class="s0">proc ::tk::TextUpDownLine {w n} {</span>
+    <span class="s0">variable ::tk::Priv</span>
+
+    <span class="s0">set i [$w index insert]</span>
+    <span class="s0">if {$Priv(prevPos) ne $i} {</span>
+	<span class="s0">set Priv(textPosOrig) $i</span>
+    <span class="s0">}</span>
+    <span class="s0">set lines [$w count -displaylines $Priv(textPosOrig) $i]</span>
+    <span class="s0">set new [$w index \</span>
+	    <span class="s0">&quot;$Priv(textPosOrig) + [expr {$lines + $n}] displaylines&quot;]</span>
+    <span class="s0">if {[$w compare $new == end] \</span>
+	    <span class="s0">|| [$w compare $new == &quot;insert display linestart&quot;]} {</span>
+	<span class="s0">set new $i</span>
+    <span class="s0">}</span>
+    <span class="s0">set Priv(prevPos) $new</span>
+    <span class="s0">return $new</span>
+<span class="s0">}</span>
+
+<span class="s0"># ::tk::TextPrevPara --</span>
+<span class="s0"># Returns the index of the beginning of the paragraph just before a given</span>
+<span class="s0"># position in the text (the beginning of a paragraph is the first non-blank</span>
+<span class="s0"># character after a blank line).</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0"># w -		The text window in which the cursor is to move.</span>
+<span class="s0"># pos -		Position at which to start search.</span>
+
+<span class="s0">proc ::tk::TextPrevPara {w pos} {</span>
+    <span class="s0">set pos [$w index &quot;$pos linestart&quot;]</span>
+    <span class="s0">while {1} {</span>
+	<span class="s0">if {([$w get &quot;$pos - 1 line&quot;] eq &quot;\n&quot; &amp;&amp; ([$w get $pos] ne &quot;\n&quot;)) \</span>
+		<span class="s0">|| $pos eq &quot;1.0&quot;} {</span>
+	    <span class="s0">if {[regexp -indices -- {^[ \t]+(.)} \</span>
+		    <span class="s0">[$w get $pos &quot;$pos lineend&quot;] -&gt; index]} {</span>
+		<span class="s0">set pos [$w index &quot;$pos + [lindex $index 0] chars&quot;]</span>
+	    <span class="s0">}</span>
+	    <span class="s0">if {[$w compare $pos != insert] || [lindex [split $pos .] 0]==1} {</span>
+		<span class="s0">return $pos</span>
+	    <span class="s0">}</span>
+	<span class="s0">}</span>
+	<span class="s0">set pos [$w index &quot;$pos - 1 line&quot;]</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+
+<span class="s0"># ::tk::TextNextPara --</span>
+<span class="s0"># Returns the index of the beginning of the paragraph just after a given</span>
+<span class="s0"># position in the text (the beginning of a paragraph is the first non-blank</span>
+<span class="s0"># character after a blank line).</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0"># w -		The text window in which the cursor is to move.</span>
+<span class="s0"># start -	Position at which to start search.</span>
+
+<span class="s0">proc ::tk::TextNextPara {w start} {</span>
+    <span class="s0">set pos [$w index &quot;$start linestart + 1 line&quot;]</span>
+    <span class="s0">while {[$w get $pos] ne &quot;\n&quot;} {</span>
+	<span class="s0">if {[$w compare $pos == end]} {</span>
+	    <span class="s0">return [$w index &quot;end - 1c&quot;]</span>
+	<span class="s0">}</span>
+	<span class="s0">set pos [$w index &quot;$pos + 1 line&quot;]</span>
+    <span class="s0">}</span>
+    <span class="s0">while {[$w get $pos] eq &quot;\n&quot;} {</span>
+	<span class="s0">set pos [$w index &quot;$pos + 1 line&quot;]</span>
+	<span class="s0">if {[$w compare $pos == end]} {</span>
+	    <span class="s0">return [$w index &quot;end - 1c&quot;]</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+    <span class="s0">if {[regexp -indices -- {^[ \t]+(.)} \</span>
+	    <span class="s0">[$w get $pos &quot;$pos lineend&quot;] -&gt; index]} {</span>
+	<span class="s0">return [$w index &quot;$pos + [lindex $index 0] chars&quot;]</span>
+    <span class="s0">}</span>
+    <span class="s0">return $pos</span>
+<span class="s0">}</span>
+
+<span class="s0"># ::tk::TextScrollPages --</span>
+<span class="s0"># This is a utility procedure used in bindings for moving up and down</span>
+<span class="s0"># pages and possibly extending the selection along the way.  It scrolls</span>
+<span class="s0"># the view in the widget by the number of pages, and it returns the</span>
+<span class="s0"># index of the character that is at the same position in the new view</span>
+<span class="s0"># as the insertion cursor used to be in the old view.</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0"># w -		The text window in which the cursor is to move.</span>
+<span class="s0"># count -	Number of pages forward to scroll;  may be negative</span>
+<span class="s0">#		to scroll backwards.</span>
+
+<span class="s0">proc ::tk::TextScrollPages {w count} {</span>
+    <span class="s0">set bbox [$w bbox insert]</span>
+    <span class="s0">$w yview scroll $count pages</span>
+    <span class="s0">if {$bbox eq &quot;&quot;} {</span>
+	<span class="s0">return [$w index @[expr {[winfo height $w]/2}],0]</span>
+    <span class="s0">}</span>
+    <span class="s0">return [$w index @[lindex $bbox 0],[lindex $bbox 1]]</span>
+<span class="s0">}</span>
+
+<span class="s0"># ::tk::TextTranspose --</span>
+<span class="s0"># This procedure implements the &quot;transpose&quot; function for text widgets.</span>
+<span class="s0"># It tranposes the characters on either side of the insertion cursor,</span>
+<span class="s0"># unless the cursor is at the end of the line.  In this case it</span>
+<span class="s0"># transposes the two characters to the left of the cursor.  In either</span>
+<span class="s0"># case, the cursor ends up to the right of the transposed characters.</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0"># w -		Text window in which to transpose.</span>
+
+<span class="s0">proc ::tk::TextTranspose w {</span>
+    <span class="s0">set pos insert</span>
+    <span class="s0">if {[$w compare $pos != &quot;$pos lineend&quot;]} {</span>
+	<span class="s0">set pos [$w index &quot;$pos + 1 char&quot;]</span>
+    <span class="s0">}</span>
+    <span class="s0">set new [$w get &quot;$pos - 1 char&quot;][$w get  &quot;$pos - 2 char&quot;]</span>
+    <span class="s0">if {[$w compare &quot;$pos - 1 char&quot; == 1.0]} {</span>
+	<span class="s0">return</span>
+    <span class="s0">}</span>
+    <span class="s0"># ensure this is seen as an atomic op to undo</span>
+    <span class="s0">set autosep [$w cget -autoseparators]</span>
+    <span class="s0">if {$autosep} {</span>
+	<span class="s0">$w configure -autoseparators 0</span>
+	<span class="s0">$w edit separator</span>
+    <span class="s0">}</span>
+    <span class="s0">$w delete &quot;$pos - 2 char&quot; $pos</span>
+    <span class="s0">$w insert insert $new</span>
+    <span class="s0">$w see insert</span>
+    <span class="s0">if {$autosep} {</span>
+	<span class="s0">$w edit separator</span>
+	<span class="s0">$w configure -autoseparators $autosep</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+
+<span class="s0"># ::tk_textCopy --</span>
+<span class="s0"># This procedure copies the selection from a text widget into the</span>
+<span class="s0"># clipboard.</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0"># w -		Name of a text widget.</span>
+
+<span class="s0">proc ::tk_textCopy w {</span>
+    <span class="s0">if {![catch {set data [$w get sel.first sel.last]}]} {</span>
+	<span class="s0">clipboard clear -displayof $w</span>
+	<span class="s0">clipboard append -displayof $w $data</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+
+<span class="s0"># ::tk_textCut --</span>
+<span class="s0"># This procedure copies the selection from a text widget into the</span>
+<span class="s0"># clipboard, then deletes the selection (if it exists in the given</span>
+<span class="s0"># widget).</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0"># w -		Name of a text widget.</span>
+
+<span class="s0">proc ::tk_textCut w {</span>
+    <span class="s0">if {![catch {set data [$w get sel.first sel.last]}]} {</span>
+        <span class="s0"># make &lt;&lt;Cut&gt;&gt; an atomic operation on the Undo stack,</span>
+        <span class="s0"># i.e. separate it from other delete operations on either side</span>
+	<span class="s0">set oldSeparator [$w cget -autoseparators]</span>
+	<span class="s0">if {$oldSeparator} {</span>
+	    <span class="s0">$w edit separator</span>
+	<span class="s0">}</span>
+	<span class="s0">clipboard clear -displayof $w</span>
+	<span class="s0">clipboard append -displayof $w $data</span>
+	<span class="s0">$w delete sel.first sel.last</span>
+	<span class="s0">if {$oldSeparator} {</span>
+	    <span class="s0">$w edit separator</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+
+<span class="s0"># ::tk_textPaste --</span>
+<span class="s0"># This procedure pastes the contents of the clipboard to the insertion</span>
+<span class="s0"># point in a text widget.</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0"># w -		Name of a text widget.</span>
+
+<span class="s0">proc ::tk_textPaste w {</span>
+    <span class="s0">if {![catch {::tk::GetSelection $w CLIPBOARD} sel]} {</span>
+	<span class="s0">set oldSeparator [$w cget -autoseparators]</span>
+	<span class="s0">if {$oldSeparator} {</span>
+	    <span class="s0">$w configure -autoseparators 0</span>
+	    <span class="s0">$w edit separator</span>
+	<span class="s0">}</span>
+	<span class="s0">if {[tk windowingsystem] ne &quot;x11&quot;} {</span>
+	    <span class="s0">catch { $w delete sel.first sel.last }</span>
+	<span class="s0">}</span>
+	<span class="s0">$w insert insert $sel</span>
+	<span class="s0">if {$oldSeparator} {</span>
+	    <span class="s0">$w edit separator</span>
+	    <span class="s0">$w configure -autoseparators 1</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+
+<span class="s0"># ::tk::TextNextWord --</span>
+<span class="s0"># Returns the index of the next word position after a given position in the</span>
+<span class="s0"># text.  The next word is platform dependent and may be either the next</span>
+<span class="s0"># end-of-word position or the next start-of-word position after the next</span>
+<span class="s0"># end-of-word position.</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0"># w -		The text window in which the cursor is to move.</span>
+<span class="s0"># start -	Position at which to start search.</span>
+
+<span class="s0">if {[tk windowingsystem] eq &quot;win32&quot;}  {</span>
+    <span class="s0">proc ::tk::TextNextWord {w start} {</span>
+	<span class="s0">TextNextPos $w [TextNextPos $w $start tcl_endOfWord] \</span>
+		<span class="s0">tcl_startOfNextWord</span>
+    <span class="s0">}</span>
+<span class="s0">} else {</span>
+    <span class="s0">proc ::tk::TextNextWord {w start} {</span>
+	<span class="s0">TextNextPos $w $start tcl_endOfWord</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+
+<span class="s0"># ::tk::TextNextPos --</span>
+<span class="s0"># Returns the index of the next position after the given starting</span>
+<span class="s0"># position in the text as computed by a specified function.</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0"># w -		The text window in which the cursor is to move.</span>
+<span class="s0"># start -	Position at which to start search.</span>
+<span class="s0"># op -		Function to use to find next position.</span>
+
+<span class="s0">proc ::tk::TextNextPos {w start op} {</span>
+    <span class="s0">set text &quot;&quot;</span>
+    <span class="s0">set cur $start</span>
+    <span class="s0">while {[$w compare $cur &lt; end]} {</span>
+	<span class="s0">set text $text[$w get -displaychars $cur &quot;$cur lineend + 1c&quot;]</span>
+	<span class="s0">set pos [$op $text 0]</span>
+	<span class="s0">if {$pos &gt;= 0} {</span>
+	    <span class="s0">return [$w index &quot;$start + $pos display chars&quot;]</span>
+	<span class="s0">}</span>
+	<span class="s0">set cur [$w index &quot;$cur lineend +1c&quot;]</span>
+    <span class="s0">}</span>
+    <span class="s0">return end</span>
+<span class="s0">}</span>
+
+<span class="s0"># ::tk::TextPrevPos --</span>
+<span class="s0"># Returns the index of the previous position before the given starting</span>
+<span class="s0"># position in the text as computed by a specified function.</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0"># w -		The text window in which the cursor is to move.</span>
+<span class="s0"># start -	Position at which to start search.</span>
+<span class="s0"># op -		Function to use to find next position.</span>
+
+<span class="s0">proc ::tk::TextPrevPos {w start op} {</span>
+    <span class="s0">set text &quot;&quot;</span>
+    <span class="s0">set cur $start</span>
+    <span class="s0">while {[$w compare $cur &gt; 0.0]} {</span>
+	<span class="s0">set text [$w get -displaychars &quot;$cur linestart - 1c&quot; $cur]$text</span>
+	<span class="s0">set pos [$op $text end]</span>
+	<span class="s0">if {$pos &gt;= 0} {</span>
+	    <span class="s0">return [$w index &quot;$cur linestart - 1c + $pos display chars&quot;]</span>
+	<span class="s0">}</span>
+	<span class="s0">set cur [$w index &quot;$cur linestart - 1c&quot;]</span>
+    <span class="s0">}</span>
+    <span class="s0">return 0.0</span>
+<span class="s0">}</span>
+
+<span class="s0"># ::tk::TextScanMark --</span>
+<span class="s0">#</span>
+<span class="s0"># Marks the start of a possible scan drag operation</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0"># w -	The text window from which the text to get</span>
+<span class="s0"># x -	x location on screen</span>
+<span class="s0"># y -	y location on screen</span>
+
+<span class="s0">proc ::tk::TextScanMark {w x y} {</span>
+    <span class="s0">variable ::tk::Priv</span>
+    <span class="s0">$w scan mark $x $y</span>
+    <span class="s0">set Priv(x) $x</span>
+    <span class="s0">set Priv(y) $y</span>
+    <span class="s0">set Priv(mouseMoved) 0</span>
+<span class="s0">}</span>
+
+<span class="s0"># ::tk::TextScanDrag --</span>
+<span class="s0">#</span>
+<span class="s0"># Marks the start of a possible scan drag operation</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0"># w -	The text window from which the text to get</span>
+<span class="s0"># x -	x location on screen</span>
+<span class="s0"># y -	y location on screen</span>
+
+<span class="s0">proc ::tk::TextScanDrag {w x y} {</span>
+    <span class="s0">variable ::tk::Priv</span>
+    <span class="s0"># Make sure these exist, as some weird situations can trigger the</span>
+    <span class="s0"># motion binding without the initial press.  [Bug #220269]</span>
+    <span class="s0">if {![info exists Priv(x)]} {</span>
+	<span class="s0">set Priv(x) $x</span>
+    <span class="s0">}</span>
+    <span class="s0">if {![info exists Priv(y)]} {</span>
+	<span class="s0">set Priv(y) $y</span>
+    <span class="s0">}</span>
+    <span class="s0">if {($x != $Priv(x)) || ($y != $Priv(y))} {</span>
+	<span class="s0">set Priv(mouseMoved) 1</span>
+    <span class="s0">}</span>
+    <span class="s0">if {[info exists Priv(mouseMoved)] &amp;&amp; $Priv(mouseMoved)} {</span>
+	<span class="s0">$w scan dragto $x $y</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+</pre>
+</body>
+</html>

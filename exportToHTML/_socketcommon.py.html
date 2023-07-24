@@ -1,0 +1,778 @@
+<html>
+<head>
+<title>_socketcommon.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #cc7832;}
+.s3 { color: #6a8759;}
+.s4 { color: #6897bb;}
+.s5 { color: #629755; font-style: italic;}
+.s6 { color: #a5c261;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+_socketcommon.py</font>
+</center></td></tr></table>
+<pre><span class="s0"># Copyright (c) 2009-2014 Denis Bilenko and gevent contributors. See LICENSE for details.</span>
+<span class="s2">from </span><span class="s1">__future__ </span><span class="s2">import </span><span class="s1">absolute_import</span>
+
+<span class="s0"># standard functions and classes that this module re-implements in a gevent-aware way:</span>
+<span class="s1">_implements = [</span>
+    <span class="s3">'create_connection'</span><span class="s2">,</span>
+    <span class="s3">'socket'</span><span class="s2">,</span>
+    <span class="s3">'SocketType'</span><span class="s2">,</span>
+    <span class="s3">'fromfd'</span><span class="s2">,</span>
+    <span class="s3">'socketpair'</span><span class="s2">,</span>
+<span class="s1">]</span>
+
+<span class="s1">__dns__ = [</span>
+    <span class="s3">'getaddrinfo'</span><span class="s2">,</span>
+    <span class="s3">'gethostbyname'</span><span class="s2">,</span>
+    <span class="s3">'gethostbyname_ex'</span><span class="s2">,</span>
+    <span class="s3">'gethostbyaddr'</span><span class="s2">,</span>
+    <span class="s3">'getnameinfo'</span><span class="s2">,</span>
+    <span class="s3">'getfqdn'</span><span class="s2">,</span>
+<span class="s1">]</span>
+
+<span class="s1">_implements += __dns__</span>
+
+<span class="s0"># non-standard functions that this module provides:</span>
+<span class="s1">__extensions__ = [</span>
+    <span class="s3">'cancel_wait'</span><span class="s2">,</span>
+    <span class="s3">'wait_read'</span><span class="s2">,</span>
+    <span class="s3">'wait_write'</span><span class="s2">,</span>
+    <span class="s3">'wait_readwrite'</span><span class="s2">,</span>
+<span class="s1">]</span>
+
+<span class="s0"># standard functions and classes that this module re-imports</span>
+<span class="s1">__imports__ = [</span>
+    <span class="s3">'error'</span><span class="s2">,</span>
+    <span class="s3">'gaierror'</span><span class="s2">,</span>
+    <span class="s3">'herror'</span><span class="s2">,</span>
+    <span class="s3">'htonl'</span><span class="s2">,</span>
+    <span class="s3">'htons'</span><span class="s2">,</span>
+    <span class="s3">'ntohl'</span><span class="s2">,</span>
+    <span class="s3">'ntohs'</span><span class="s2">,</span>
+    <span class="s3">'inet_aton'</span><span class="s2">,</span>
+    <span class="s3">'inet_ntoa'</span><span class="s2">,</span>
+    <span class="s3">'inet_pton'</span><span class="s2">,</span>
+    <span class="s3">'inet_ntop'</span><span class="s2">,</span>
+    <span class="s3">'timeout'</span><span class="s2">,</span>
+    <span class="s3">'gethostname'</span><span class="s2">,</span>
+    <span class="s3">'getprotobyname'</span><span class="s2">,</span>
+    <span class="s3">'getservbyname'</span><span class="s2">,</span>
+    <span class="s3">'getservbyport'</span><span class="s2">,</span>
+    <span class="s3">'getdefaulttimeout'</span><span class="s2">,</span>
+    <span class="s3">'setdefaulttimeout'</span><span class="s2">,</span>
+    <span class="s0"># Windows:</span>
+    <span class="s3">'errorTab'</span><span class="s2">,</span>
+<span class="s1">]</span>
+
+<span class="s1">__py3_imports__ = [</span>
+    <span class="s0"># Python 3</span>
+    <span class="s3">'AddressFamily'</span><span class="s2">,</span>
+    <span class="s3">'SocketKind'</span><span class="s2">,</span>
+    <span class="s3">'CMSG_LEN'</span><span class="s2">,</span>
+    <span class="s3">'CMSG_SPACE'</span><span class="s2">,</span>
+    <span class="s3">'dup'</span><span class="s2">,</span>
+    <span class="s3">'if_indextoname'</span><span class="s2">,</span>
+    <span class="s3">'if_nameindex'</span><span class="s2">,</span>
+    <span class="s3">'if_nametoindex'</span><span class="s2">,</span>
+    <span class="s3">'sethostname'</span><span class="s2">,</span>
+<span class="s1">]</span>
+
+<span class="s1">__imports__.extend(__py3_imports__)</span>
+
+<span class="s2">import </span><span class="s1">time</span>
+
+<span class="s2">from </span><span class="s1">gevent._hub_local </span><span class="s2">import </span><span class="s1">get_hub_noargs </span><span class="s2">as </span><span class="s1">get_hub</span>
+<span class="s2">from </span><span class="s1">gevent._compat </span><span class="s2">import </span><span class="s1">string_types</span><span class="s2">, </span><span class="s1">integer_types</span><span class="s2">, </span><span class="s1">PY3</span>
+<span class="s2">from </span><span class="s1">gevent._compat </span><span class="s2">import </span><span class="s1">PY38</span>
+<span class="s2">from </span><span class="s1">gevent._compat </span><span class="s2">import </span><span class="s1">PY39</span>
+<span class="s2">from </span><span class="s1">gevent._compat </span><span class="s2">import </span><span class="s1">WIN </span><span class="s2">as </span><span class="s1">is_windows</span>
+<span class="s2">from </span><span class="s1">gevent._compat </span><span class="s2">import </span><span class="s1">OSX </span><span class="s2">as </span><span class="s1">is_macos</span>
+<span class="s2">from </span><span class="s1">gevent._compat </span><span class="s2">import </span><span class="s1">exc_clear</span>
+<span class="s2">from </span><span class="s1">gevent._util </span><span class="s2">import </span><span class="s1">copy_globals</span>
+<span class="s2">from </span><span class="s1">gevent._greenlet_primitives </span><span class="s2">import </span><span class="s1">get_memory </span><span class="s2">as </span><span class="s1">_get_memory</span>
+<span class="s2">from </span><span class="s1">gevent._hub_primitives </span><span class="s2">import </span><span class="s1">wait_on_socket </span><span class="s2">as </span><span class="s1">_wait_on_socket</span>
+
+<span class="s2">from </span><span class="s1">gevent.timeout </span><span class="s2">import </span><span class="s1">Timeout</span>
+
+<span class="s2">if </span><span class="s1">PY38:</span>
+    <span class="s1">__imports__.extend([</span>
+        <span class="s3">'create_server'</span><span class="s2">,</span>
+        <span class="s3">'has_dualstack_ipv6'</span><span class="s2">,</span>
+    <span class="s1">])</span>
+
+<span class="s2">if </span><span class="s1">PY39:</span>
+    <span class="s1">__imports__.extend([</span>
+        <span class="s3">'recv_fds'</span><span class="s2">,</span>
+        <span class="s3">'send_fds'</span><span class="s2">,</span>
+    <span class="s1">])</span>
+
+<span class="s0"># pylint:disable=no-name-in-module,unused-import</span>
+<span class="s2">if </span><span class="s1">is_windows:</span>
+    <span class="s0"># no such thing as WSAEPERM or error code 10001 according to winsock.h or MSDN</span>
+    <span class="s2">from </span><span class="s1">errno </span><span class="s2">import </span><span class="s1">WSAEINVAL </span><span class="s2">as </span><span class="s1">EINVAL</span>
+    <span class="s2">from </span><span class="s1">errno </span><span class="s2">import </span><span class="s1">WSAEWOULDBLOCK </span><span class="s2">as </span><span class="s1">EWOULDBLOCK</span>
+    <span class="s2">from </span><span class="s1">errno </span><span class="s2">import </span><span class="s1">WSAEINPROGRESS </span><span class="s2">as </span><span class="s1">EINPROGRESS</span>
+    <span class="s2">from </span><span class="s1">errno </span><span class="s2">import </span><span class="s1">WSAEALREADY </span><span class="s2">as </span><span class="s1">EALREADY</span>
+    <span class="s2">from </span><span class="s1">errno </span><span class="s2">import </span><span class="s1">WSAEISCONN </span><span class="s2">as </span><span class="s1">EISCONN</span>
+    <span class="s2">from </span><span class="s1">gevent.win32util </span><span class="s2">import </span><span class="s1">formatError </span><span class="s2">as </span><span class="s1">strerror</span>
+    <span class="s1">EAGAIN = EWOULDBLOCK</span>
+<span class="s2">else</span><span class="s1">:</span>
+    <span class="s2">from </span><span class="s1">errno </span><span class="s2">import </span><span class="s1">EINVAL</span>
+    <span class="s2">from </span><span class="s1">errno </span><span class="s2">import </span><span class="s1">EWOULDBLOCK</span>
+    <span class="s2">from </span><span class="s1">errno </span><span class="s2">import </span><span class="s1">EINPROGRESS</span>
+    <span class="s2">from </span><span class="s1">errno </span><span class="s2">import </span><span class="s1">EALREADY</span>
+    <span class="s2">from </span><span class="s1">errno </span><span class="s2">import </span><span class="s1">EAGAIN</span>
+    <span class="s2">from </span><span class="s1">errno </span><span class="s2">import </span><span class="s1">EISCONN</span>
+    <span class="s2">from </span><span class="s1">os </span><span class="s2">import </span><span class="s1">strerror</span>
+
+<span class="s2">try</span><span class="s1">:</span>
+    <span class="s2">from </span><span class="s1">errno </span><span class="s2">import </span><span class="s1">EBADF</span>
+<span class="s2">except </span><span class="s1">ImportError:</span>
+    <span class="s1">EBADF = </span><span class="s4">9</span>
+
+<span class="s2">try</span><span class="s1">:</span>
+    <span class="s2">from </span><span class="s1">errno </span><span class="s2">import </span><span class="s1">EHOSTUNREACH</span>
+<span class="s2">except </span><span class="s1">ImportError:</span>
+    <span class="s1">EHOSTUNREACH = -</span><span class="s4">1</span>
+
+<span class="s2">try</span><span class="s1">:</span>
+    <span class="s2">from </span><span class="s1">errno </span><span class="s2">import </span><span class="s1">ECONNREFUSED</span>
+<span class="s2">except </span><span class="s1">ImportError:</span>
+    <span class="s1">ECONNREFUSED = -</span><span class="s4">1</span>
+
+<span class="s0"># macOS can return EPROTOTYPE when writing to a socket that is shutting</span>
+<span class="s0"># Down. Retrying the write should return the expected EPIPE error.</span>
+<span class="s0"># Downstream classes (like pywsgi) know how to handle/ignore EPIPE.</span>
+<span class="s0"># This set is used by socket.send() to decide whether the write should</span>
+<span class="s0"># be retried. The default is to retry only on EWOULDBLOCK. Here we add</span>
+<span class="s0"># EPROTOTYPE on macOS to handle this platform-specific race condition.</span>
+<span class="s1">GSENDAGAIN = (EWOULDBLOCK</span><span class="s2">,</span><span class="s1">)</span>
+<span class="s2">if </span><span class="s1">is_macos:</span>
+    <span class="s2">from </span><span class="s1">errno </span><span class="s2">import </span><span class="s1">EPROTOTYPE</span>
+    <span class="s1">GSENDAGAIN += (EPROTOTYPE</span><span class="s2">,</span><span class="s1">)</span>
+
+<span class="s2">import </span><span class="s1">_socket</span>
+<span class="s1">_realsocket = _socket.socket</span>
+<span class="s2">import </span><span class="s1">socket </span><span class="s2">as </span><span class="s1">__socket__</span>
+<span class="s2">try</span><span class="s1">:</span>
+    <span class="s0"># Provide implementation of socket.socketpair on Windows &lt; 3.5.</span>
+    <span class="s2">import </span><span class="s1">backports.socketpair</span>
+<span class="s2">except </span><span class="s1">ImportError:</span>
+    <span class="s2">pass</span>
+
+<span class="s1">_SocketError = __socket__.error</span>
+
+<span class="s1">_name = _value = </span><span class="s2">None</span>
+<span class="s1">__imports__ = copy_globals(__socket__</span><span class="s2">, </span><span class="s1">globals()</span><span class="s2">,</span>
+                           <span class="s1">only_names=__imports__</span><span class="s2">,</span>
+                           <span class="s1">ignore_missing_names=</span><span class="s2">True</span><span class="s1">)</span>
+
+<span class="s2">for </span><span class="s1">_name </span><span class="s2">in </span><span class="s1">__socket__.__all__:</span>
+    <span class="s1">_value = getattr(__socket__</span><span class="s2">, </span><span class="s1">_name)</span>
+    <span class="s2">if </span><span class="s1">isinstance(_value</span><span class="s2">, </span><span class="s1">(integer_types</span><span class="s2">, </span><span class="s1">string_types)):</span>
+        <span class="s1">globals()[_name] = _value</span>
+        <span class="s1">__imports__.append(_name)</span>
+
+<span class="s2">del </span><span class="s1">_name</span><span class="s2">, </span><span class="s1">_value</span>
+
+<span class="s1">_timeout_error = timeout </span><span class="s0"># pylint: disable=undefined-variable</span>
+
+<span class="s2">from </span><span class="s1">gevent </span><span class="s2">import </span><span class="s1">_hub_primitives</span>
+<span class="s1">_hub_primitives.set_default_timeout_error(_timeout_error)</span>
+
+<span class="s1">wait = _hub_primitives.wait_on_watcher</span>
+<span class="s1">wait_read = _hub_primitives.wait_read</span>
+<span class="s1">wait_write = _hub_primitives.wait_write</span>
+<span class="s1">wait_readwrite = _hub_primitives.wait_readwrite</span>
+
+<span class="s0">#: The exception raised by default on a call to :func:`cancel_wait`</span>
+<span class="s2">class </span><span class="s1">cancel_wait_ex(error): </span><span class="s0"># pylint: disable=undefined-variable</span>
+    <span class="s2">def </span><span class="s1">__init__(self):</span>
+        <span class="s1">super(cancel_wait_ex</span><span class="s2">, </span><span class="s1">self).__init__(</span>
+            <span class="s1">EBADF</span><span class="s2">,</span>
+            <span class="s3">'File descriptor was closed in another greenlet'</span><span class="s1">)</span>
+
+
+<span class="s2">def </span><span class="s1">cancel_wait(watcher</span><span class="s2">, </span><span class="s1">error=cancel_wait_ex):</span>
+    <span class="s5">&quot;&quot;&quot;See :meth:`gevent.hub.Hub.cancel_wait`&quot;&quot;&quot;</span>
+    <span class="s1">get_hub().cancel_wait(watcher</span><span class="s2">, </span><span class="s1">error)</span>
+
+
+<span class="s2">def </span><span class="s1">gethostbyname(hostname):</span>
+    <span class="s5">&quot;&quot;&quot; 
+    gethostbyname(host) -&gt; address 
+ 
+    Return the IP address (a string of the form '255.255.255.255') for a host. 
+ 
+    .. seealso:: :doc:`/dns` 
+    &quot;&quot;&quot;</span>
+    <span class="s2">return </span><span class="s1">get_hub().resolver.gethostbyname(hostname)</span>
+
+
+<span class="s2">def </span><span class="s1">gethostbyname_ex(hostname):</span>
+    <span class="s5">&quot;&quot;&quot; 
+    gethostbyname_ex(host) -&gt; (name, aliaslist, addresslist) 
+ 
+    Return the true host name, a list of aliases, and a list of IP addresses, 
+    for a host.  The host argument is a string giving a host name or IP number. 
+    Resolve host and port into list of address info entries. 
+ 
+    .. seealso:: :doc:`/dns` 
+    &quot;&quot;&quot;</span>
+    <span class="s2">return </span><span class="s1">get_hub().resolver.gethostbyname_ex(hostname)</span>
+
+
+<span class="s2">def </span><span class="s1">getaddrinfo(host</span><span class="s2">, </span><span class="s1">port</span><span class="s2">, </span><span class="s1">family=</span><span class="s4">0</span><span class="s2">, </span><span class="s1">socktype=</span><span class="s4">0</span><span class="s2">, </span><span class="s1">proto=</span><span class="s4">0</span><span class="s2">, </span><span class="s1">flags=</span><span class="s4">0</span><span class="s1">):</span>
+    <span class="s5">&quot;&quot;&quot; 
+    Resolve host and port into list of address info entries. 
+ 
+    Translate the host/port argument into a sequence of 5-tuples that contain 
+    all the necessary arguments for creating a socket connected to that service. 
+    host is a domain name, a string representation of an IPv4/v6 address or 
+    None. port is a string service name such as 'http', a numeric port number or 
+    None. By passing None as the value of host and port, you can pass NULL to 
+    the underlying C API. 
+ 
+    The family, type and proto arguments can be optionally specified in order to 
+    narrow the list of addresses returned. Passing zero as a value for each of 
+    these arguments selects the full range of results. 
+ 
+    .. seealso:: :doc:`/dns` 
+    &quot;&quot;&quot;</span>
+    <span class="s2">return </span><span class="s1">get_hub().resolver.getaddrinfo(host</span><span class="s2">, </span><span class="s1">port</span><span class="s2">, </span><span class="s1">family</span><span class="s2">, </span><span class="s1">socktype</span><span class="s2">, </span><span class="s1">proto</span><span class="s2">, </span><span class="s1">flags)</span>
+
+<span class="s2">if </span><span class="s1">PY3:</span>
+    <span class="s0"># The name of the socktype param changed to type in Python 3.</span>
+    <span class="s0"># See https://github.com/gevent/gevent/issues/960</span>
+    <span class="s0"># Using inspect here to directly detect the condition is painful because we have to</span>
+    <span class="s0"># wrap it with a try/except TypeError because not all Python 2</span>
+    <span class="s0"># versions can get the args of a builtin; we also have to use a with to suppress</span>
+    <span class="s0"># the deprecation warning.</span>
+    <span class="s1">d = getaddrinfo.__doc__</span>
+
+    <span class="s2">def </span><span class="s1">getaddrinfo(host</span><span class="s2">, </span><span class="s1">port</span><span class="s2">, </span><span class="s1">family=</span><span class="s4">0</span><span class="s2">, </span><span class="s1">type=</span><span class="s4">0</span><span class="s2">, </span><span class="s1">proto=</span><span class="s4">0</span><span class="s2">, </span><span class="s1">flags=</span><span class="s4">0</span><span class="s1">):</span>
+        <span class="s0"># pylint:disable=function-redefined, undefined-variable</span>
+        <span class="s0"># Also, on Python 3, we need to translate into the special enums.</span>
+        <span class="s0"># Our lower-level resolvers, including the thread and blocking, which use _socket,</span>
+        <span class="s0"># function simply with integers.</span>
+        <span class="s1">addrlist = get_hub().resolver.getaddrinfo(host</span><span class="s2">, </span><span class="s1">port</span><span class="s2">, </span><span class="s1">family</span><span class="s2">, </span><span class="s1">type</span><span class="s2">, </span><span class="s1">proto</span><span class="s2">, </span><span class="s1">flags)</span>
+        <span class="s1">result = [</span>
+            <span class="s1">(_intenum_converter(af</span><span class="s2">, </span><span class="s1">AddressFamily)</span><span class="s2">,</span>
+             <span class="s1">_intenum_converter(socktype</span><span class="s2">, </span><span class="s1">SocketKind)</span><span class="s2">,</span>
+             <span class="s1">proto</span><span class="s2">, </span><span class="s1">canonname</span><span class="s2">, </span><span class="s1">sa)</span>
+            <span class="s2">for </span><span class="s1">af</span><span class="s2">, </span><span class="s1">socktype</span><span class="s2">, </span><span class="s1">proto</span><span class="s2">, </span><span class="s1">canonname</span><span class="s2">, </span><span class="s1">sa</span>
+            <span class="s2">in </span><span class="s1">addrlist</span>
+        <span class="s1">]</span>
+        <span class="s2">return </span><span class="s1">result</span>
+
+    <span class="s1">getaddrinfo.__doc__ = d</span>
+    <span class="s2">del </span><span class="s1">d</span>
+
+    <span class="s2">def </span><span class="s1">_intenum_converter(value</span><span class="s2">, </span><span class="s1">enum_klass):</span>
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s2">return </span><span class="s1">enum_klass(value)</span>
+        <span class="s2">except </span><span class="s1">ValueError: </span><span class="s0"># pragma: no cover</span>
+            <span class="s2">return </span><span class="s1">value</span>
+
+
+<span class="s2">def </span><span class="s1">gethostbyaddr(ip_address):</span>
+    <span class="s5">&quot;&quot;&quot; 
+    gethostbyaddr(ip_address) -&gt; (name, aliaslist, addresslist) 
+ 
+    Return the true host name, a list of aliases, and a list of IP addresses, 
+    for a host.  The host argument is a string giving a host name or IP number. 
+ 
+    .. seealso:: :doc:`/dns` 
+    &quot;&quot;&quot;</span>
+    <span class="s2">return </span><span class="s1">get_hub().resolver.gethostbyaddr(ip_address)</span>
+
+
+<span class="s2">def </span><span class="s1">getnameinfo(sockaddr</span><span class="s2">, </span><span class="s1">flags):</span>
+    <span class="s5">&quot;&quot;&quot; 
+    getnameinfo(sockaddr, flags) -&gt; (host, port) 
+ 
+    Get host and port for a sockaddr. 
+ 
+    .. seealso:: :doc:`/dns` 
+    &quot;&quot;&quot;</span>
+    <span class="s2">return </span><span class="s1">get_hub().resolver.getnameinfo(sockaddr</span><span class="s2">, </span><span class="s1">flags)</span>
+
+
+<span class="s2">def </span><span class="s1">getfqdn(name=</span><span class="s3">''</span><span class="s1">):</span>
+    <span class="s5">&quot;&quot;&quot;Get fully qualified domain name from name. 
+ 
+    An empty argument is interpreted as meaning the local host. 
+ 
+    First the hostname returned by gethostbyaddr() is checked, then 
+    possibly existing aliases. In case no FQDN is available, hostname 
+    from gethostname() is returned. 
+    &quot;&quot;&quot;</span>
+    <span class="s0"># pylint: disable=undefined-variable</span>
+    <span class="s1">name = name.strip()</span>
+    <span class="s2">if not </span><span class="s1">name </span><span class="s2">or </span><span class="s1">name == </span><span class="s3">'0.0.0.0'</span><span class="s1">:</span>
+        <span class="s1">name = gethostname()</span>
+    <span class="s2">try</span><span class="s1">:</span>
+        <span class="s1">hostname</span><span class="s2">, </span><span class="s1">aliases</span><span class="s2">, </span><span class="s1">_ = gethostbyaddr(name)</span>
+    <span class="s2">except </span><span class="s1">error:</span>
+        <span class="s2">pass</span>
+    <span class="s2">else</span><span class="s1">:</span>
+        <span class="s1">aliases.insert(</span><span class="s4">0</span><span class="s2">, </span><span class="s1">hostname)</span>
+        <span class="s2">for </span><span class="s1">name </span><span class="s2">in </span><span class="s1">aliases: </span><span class="s0"># EWW! pylint:disable=redefined-argument-from-local</span>
+            <span class="s2">if </span><span class="s1">isinstance(name</span><span class="s2">, </span><span class="s1">bytes):</span>
+                <span class="s2">if </span><span class="s6">b'.' </span><span class="s2">in </span><span class="s1">name:</span>
+                    <span class="s2">break</span>
+            <span class="s2">elif </span><span class="s3">'.' </span><span class="s2">in </span><span class="s1">name:</span>
+                <span class="s2">break</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">name = hostname</span>
+    <span class="s2">return </span><span class="s1">name</span>
+
+<span class="s2">def </span><span class="s1">__send_chunk(socket</span><span class="s2">, </span><span class="s1">data_memory</span><span class="s2">, </span><span class="s1">flags</span><span class="s2">, </span><span class="s1">timeleft</span><span class="s2">, </span><span class="s1">end</span><span class="s2">, </span><span class="s1">timeout=_timeout_error):</span>
+    <span class="s5">&quot;&quot;&quot; 
+    Send the complete contents of ``data_memory`` before returning. 
+    This is the core loop around :meth:`send`. 
+ 
+    :param timeleft: Either ``None`` if there is no timeout involved, 
+       or a float indicating the timeout to use. 
+    :param end: Either ``None`` if there is no timeout involved, or 
+       a float giving the absolute end time. 
+    :return: An updated value for ``timeleft`` (or None) 
+    :raises timeout: If ``timeleft`` was given and elapsed while 
+       sending this chunk. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">data_sent = </span><span class="s4">0</span>
+    <span class="s1">len_data_memory = len(data_memory)</span>
+    <span class="s1">started_timer = </span><span class="s4">0</span>
+    <span class="s2">while </span><span class="s1">data_sent &lt; len_data_memory:</span>
+        <span class="s1">chunk = data_memory[data_sent:]</span>
+        <span class="s2">if </span><span class="s1">timeleft </span><span class="s2">is None</span><span class="s1">:</span>
+            <span class="s1">data_sent += socket.send(chunk</span><span class="s2">, </span><span class="s1">flags)</span>
+        <span class="s2">elif </span><span class="s1">started_timer </span><span class="s2">and </span><span class="s1">timeleft &lt;= </span><span class="s4">0</span><span class="s1">:</span>
+            <span class="s0"># Check before sending to guarantee a check</span>
+            <span class="s0"># happens even if each chunk successfully sends its data</span>
+            <span class="s0"># (especially important for SSL sockets since they have large</span>
+            <span class="s0"># buffers). But only do this if we've actually tried to</span>
+            <span class="s0"># send something once to avoid spurious timeouts on non-blocking</span>
+            <span class="s0"># sockets.</span>
+            <span class="s2">raise </span><span class="s1">timeout(</span><span class="s3">'timed out'</span><span class="s1">)</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">started_timer = </span><span class="s4">1</span>
+            <span class="s1">data_sent += socket.send(chunk</span><span class="s2">, </span><span class="s1">flags</span><span class="s2">, </span><span class="s1">timeout=timeleft)</span>
+            <span class="s1">timeleft = end - time.time()</span>
+
+    <span class="s2">return </span><span class="s1">timeleft</span>
+
+<span class="s2">def </span><span class="s1">_sendall(socket</span><span class="s2">, </span><span class="s1">data_memory</span><span class="s2">, </span><span class="s1">flags</span><span class="s2">,</span>
+             <span class="s1">SOL_SOCKET=__socket__.SOL_SOCKET</span><span class="s2">,  </span><span class="s0"># pylint:disable=no-member</span>
+             <span class="s1">SO_SNDBUF=__socket__.SO_SNDBUF):  </span><span class="s0"># pylint:disable=no-member</span>
+    <span class="s5">&quot;&quot;&quot; 
+    Send the *data_memory* (which should be a memoryview) 
+    using the gevent *socket*, performing well on PyPy. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s0"># On PyPy up through 5.10.0, both PyPy2 and PyPy3, subviews</span>
+    <span class="s0"># (slices) of a memoryview() object copy the underlying bytes the</span>
+    <span class="s0"># first time the builtin socket.send() method is called. On a</span>
+    <span class="s0"># non-blocking socket (that thus calls socket.send() many times)</span>
+    <span class="s0"># with a large input, this results in many repeated copies of an</span>
+    <span class="s0"># ever smaller string, depending on the networking buffering. For</span>
+    <span class="s0"># example, if each send() can process 1MB of a 50MB input, and we</span>
+    <span class="s0"># naively pass the entire remaining subview each time, we'd copy</span>
+    <span class="s0"># 49MB, 48MB, 47MB, etc, thus completely killing performance. To</span>
+    <span class="s0"># workaround this problem, we work in reasonable, fixed-size</span>
+    <span class="s0"># chunks. This results in a 10x improvement to bench_sendall.py,</span>
+    <span class="s0"># while having no measurable impact on CPython (since it doesn't</span>
+    <span class="s0"># copy at all the only extra overhead is a few python function</span>
+    <span class="s0"># calls, which is negligible for large inputs).</span>
+
+    <span class="s0"># On one macOS machine, PyPy3 5.10.1 produced ~ 67.53 MB/s before this change,</span>
+    <span class="s0"># and ~ 616.01 MB/s after.</span>
+
+    <span class="s0"># See https://bitbucket.org/pypy/pypy/issues/2091/non-blocking-socketsend-slow-gevent</span>
+
+    <span class="s0"># Too small of a chunk (the socket's buf size is usually too</span>
+    <span class="s0"># small) results in reduced perf due to *too many* calls to send and too many</span>
+    <span class="s0"># small copies. With a buffer of 143K (the default on my system), for</span>
+    <span class="s0"># example, bench_sendall.py yields ~264MB/s, while using 1MB yields</span>
+    <span class="s0"># ~653MB/s (matching CPython). 1MB is arbitrary and might be better</span>
+    <span class="s0"># chosen, say, to match a page size?</span>
+
+    <span class="s1">len_data_memory = len(data_memory)</span>
+    <span class="s2">if not </span><span class="s1">len_data_memory:</span>
+        <span class="s0"># Don't try to send empty data at all, no point, and breaks ssl</span>
+        <span class="s0"># See issue 719</span>
+        <span class="s2">return </span><span class="s4">0</span>
+
+
+    <span class="s1">chunk_size = max(socket.getsockopt(SOL_SOCKET</span><span class="s2">, </span><span class="s1">SO_SNDBUF)</span><span class="s2">, </span><span class="s4">1024 </span><span class="s1">* </span><span class="s4">1024</span><span class="s1">)</span>
+
+    <span class="s1">data_sent = </span><span class="s4">0</span>
+    <span class="s1">end = </span><span class="s2">None</span>
+    <span class="s1">timeleft = </span><span class="s2">None</span>
+    <span class="s2">if </span><span class="s1">socket.timeout </span><span class="s2">is not None</span><span class="s1">:</span>
+        <span class="s1">timeleft = socket.timeout</span>
+        <span class="s1">end = time.time() + timeleft</span>
+
+    <span class="s2">while </span><span class="s1">data_sent &lt; len_data_memory:</span>
+        <span class="s1">chunk_end = min(data_sent + chunk_size</span><span class="s2">, </span><span class="s1">len_data_memory)</span>
+        <span class="s1">chunk = data_memory[data_sent:chunk_end]</span>
+
+        <span class="s1">timeleft = __send_chunk(socket</span><span class="s2">, </span><span class="s1">chunk</span><span class="s2">, </span><span class="s1">flags</span><span class="s2">, </span><span class="s1">timeleft</span><span class="s2">, </span><span class="s1">end)</span>
+        <span class="s1">data_sent += len(chunk) </span><span class="s0"># Guaranteed it sent the whole thing</span>
+
+<span class="s0"># pylint:disable=no-member</span>
+<span class="s1">_RESOLVABLE_FAMILIES = (__socket__.AF_INET</span><span class="s2">,</span><span class="s1">)</span>
+<span class="s2">if </span><span class="s1">__socket__.has_ipv6:</span>
+    <span class="s1">_RESOLVABLE_FAMILIES += (__socket__.AF_INET6</span><span class="s2">,</span><span class="s1">)</span>
+
+<span class="s2">def </span><span class="s1">_resolve_addr(sock</span><span class="s2">, </span><span class="s1">address):</span>
+    <span class="s0"># Internal method: resolve the AF_INET[6] address using</span>
+    <span class="s0"># getaddrinfo.</span>
+    <span class="s2">if </span><span class="s1">sock.family </span><span class="s2">not in </span><span class="s1">_RESOLVABLE_FAMILIES </span><span class="s2">or not </span><span class="s1">isinstance(address</span><span class="s2">, </span><span class="s1">tuple):</span>
+        <span class="s2">return </span><span class="s1">address</span>
+    <span class="s0"># address is (host, port) (ipv4) or (host, port, flowinfo, scopeid) (ipv6).</span>
+    <span class="s0"># If it's already resolved, no need to go through getaddrinfo() again.</span>
+    <span class="s0"># That can lose precision (e.g., on IPv6, it can lose scopeid). The standard library</span>
+    <span class="s0"># does this in socketmodule.c:setipaddr. (This is only part of the logic, the real</span>
+    <span class="s0"># thing is much more complex.)</span>
+    <span class="s2">try</span><span class="s1">:</span>
+        <span class="s2">if </span><span class="s1">__socket__.inet_pton(sock.family</span><span class="s2">, </span><span class="s1">address[</span><span class="s4">0</span><span class="s1">]):</span>
+            <span class="s2">return </span><span class="s1">address</span>
+    <span class="s2">except </span><span class="s1">AttributeError: </span><span class="s0"># pragma: no cover</span>
+        <span class="s0"># inet_pton might not be available.</span>
+        <span class="s2">pass</span>
+    <span class="s2">except </span><span class="s1">_SocketError:</span>
+        <span class="s0"># Not parseable, needs resolved.</span>
+        <span class="s2">pass</span>
+
+
+    <span class="s0"># We don't pass the port to getaddrinfo because the C</span>
+    <span class="s0"># socket module doesn't either (on some systems its</span>
+    <span class="s0"># illegal to do that without also passing socket type and</span>
+    <span class="s0"># protocol). Instead we join the port back at the end.</span>
+    <span class="s0"># See https://github.com/gevent/gevent/issues/1252</span>
+    <span class="s1">host</span><span class="s2">, </span><span class="s1">port = address[:</span><span class="s4">2</span><span class="s1">]</span>
+    <span class="s1">r = getaddrinfo(host</span><span class="s2">, None, </span><span class="s1">sock.family)</span>
+    <span class="s1">address = r[</span><span class="s4">0</span><span class="s1">][-</span><span class="s4">1</span><span class="s1">]</span>
+    <span class="s2">if </span><span class="s1">len(address) == </span><span class="s4">2</span><span class="s1">:</span>
+        <span class="s1">address = (address[</span><span class="s4">0</span><span class="s1">]</span><span class="s2">, </span><span class="s1">port)</span>
+    <span class="s2">else</span><span class="s1">:</span>
+        <span class="s1">address = (address[</span><span class="s4">0</span><span class="s1">]</span><span class="s2">, </span><span class="s1">port</span><span class="s2">, </span><span class="s1">address[</span><span class="s4">2</span><span class="s1">]</span><span class="s2">, </span><span class="s1">address[</span><span class="s4">3</span><span class="s1">])</span>
+    <span class="s2">return </span><span class="s1">address</span>
+
+
+<span class="s1">timeout_default = object()</span>
+
+<span class="s2">class </span><span class="s1">SocketMixin(object):</span>
+    <span class="s0"># pylint:disable=too-many-public-methods</span>
+    <span class="s1">__slots__ = (</span>
+        <span class="s3">'hub'</span><span class="s2">,</span>
+        <span class="s3">'timeout'</span><span class="s2">,</span>
+        <span class="s3">'_read_event'</span><span class="s2">,</span>
+        <span class="s3">'_write_event'</span><span class="s2">,</span>
+        <span class="s3">'_sock'</span><span class="s2">,</span>
+        <span class="s3">'__weakref__'</span><span class="s2">,</span>
+    <span class="s1">)</span>
+
+    <span class="s2">def </span><span class="s1">__init__(self):</span>
+        <span class="s0"># Writing:</span>
+        <span class="s0">#    (self.a, self.b) = (None,) * 2</span>
+        <span class="s0"># generates the fastest bytecode. But At least on PyPy,</span>
+        <span class="s0"># where the SSLSocket subclass has a timeout property,</span>
+        <span class="s0"># it results in the settimeout() method getting the tuple</span>
+        <span class="s0"># as the value, not the unpacked None.</span>
+        <span class="s1">self._read_event = </span><span class="s2">None</span>
+        <span class="s1">self._write_event = </span><span class="s2">None</span>
+        <span class="s1">self._sock = </span><span class="s2">None</span>
+        <span class="s1">self.hub = </span><span class="s2">None</span>
+        <span class="s1">self.timeout = </span><span class="s2">None</span>
+
+    <span class="s2">def </span><span class="s1">_drop_events_and_close(self</span><span class="s2">, </span><span class="s1">closefd=</span><span class="s2">True, </span><span class="s1">_cancel_wait_ex=cancel_wait_ex):</span>
+        <span class="s1">hub = self.hub</span>
+        <span class="s1">read_event = self._read_event</span>
+        <span class="s1">write_event = self._write_event</span>
+        <span class="s1">self._read_event = self._write_event = </span><span class="s2">None</span>
+        <span class="s1">hub.cancel_waits_close_and_then(</span>
+            <span class="s1">(read_event</span><span class="s2">, </span><span class="s1">write_event)</span><span class="s2">,</span>
+            <span class="s1">_cancel_wait_ex</span><span class="s2">,</span>
+            <span class="s0"># Pass the socket to keep it alive until such time as</span>
+            <span class="s0"># the waiters are guaranteed to be closed.</span>
+            <span class="s1">self._drop_ref_on_close </span><span class="s2">if </span><span class="s1">closefd </span><span class="s2">else </span><span class="s1">id</span><span class="s2">,</span>
+            <span class="s1">self._sock</span>
+        <span class="s1">)</span>
+
+    <span class="s2">def </span><span class="s1">_drop_ref_on_close(self</span><span class="s2">, </span><span class="s1">sock):</span>
+        <span class="s2">raise </span><span class="s1">NotImplementedError</span>
+
+    <span class="s2">def </span><span class="s1">_get_ref(self):</span>
+        <span class="s2">return </span><span class="s1">self._read_event.ref </span><span class="s2">or </span><span class="s1">self._write_event.ref</span>
+
+    <span class="s2">def </span><span class="s1">_set_ref(self</span><span class="s2">, </span><span class="s1">value):</span>
+        <span class="s1">self._read_event.ref = value</span>
+        <span class="s1">self._write_event.ref = value</span>
+
+    <span class="s1">ref = property(_get_ref</span><span class="s2">, </span><span class="s1">_set_ref)</span>
+
+    <span class="s1">_wait = _wait_on_socket</span>
+
+    <span class="s0">###</span>
+    <span class="s0"># Common methods defined here need to be added to the</span>
+    <span class="s0"># API documentation specifically.</span>
+    <span class="s0">###</span>
+
+    <span class="s2">def </span><span class="s1">settimeout(self</span><span class="s2">, </span><span class="s1">howlong):</span>
+        <span class="s2">if </span><span class="s1">howlong </span><span class="s2">is not None</span><span class="s1">:</span>
+            <span class="s2">try</span><span class="s1">:</span>
+                <span class="s1">f = howlong.__float__</span>
+            <span class="s2">except </span><span class="s1">AttributeError:</span>
+                <span class="s2">raise </span><span class="s1">TypeError(</span><span class="s3">'a float is required'</span><span class="s2">, </span><span class="s1">howlong</span><span class="s2">, </span><span class="s1">type(howlong))</span>
+            <span class="s1">howlong = f()</span>
+            <span class="s2">if </span><span class="s1">howlong &lt; </span><span class="s4">0.0</span><span class="s1">:</span>
+                <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s3">'Timeout value out of range'</span><span class="s1">)</span>
+        <span class="s0"># avoid recursion with any property on self.timeout</span>
+        <span class="s1">SocketMixin.timeout.__set__(self</span><span class="s2">, </span><span class="s1">howlong)</span>
+
+    <span class="s2">def </span><span class="s1">gettimeout(self):</span>
+        <span class="s0"># avoid recursion with any property on self.timeout</span>
+        <span class="s2">return </span><span class="s1">SocketMixin.timeout.__get__(self</span><span class="s2">, </span><span class="s1">type(self))</span>
+
+    <span class="s2">def </span><span class="s1">setblocking(self</span><span class="s2">, </span><span class="s1">flag):</span>
+        <span class="s0"># Beginning in 3.6.0b3 this is supposed to raise</span>
+        <span class="s0"># if the file descriptor is closed, but the test for it</span>
+        <span class="s0"># involves closing the fileno directly. Since we</span>
+        <span class="s0"># don't touch the fileno here, it doesn't make sense for</span>
+        <span class="s0"># us.</span>
+        <span class="s2">if </span><span class="s1">flag:</span>
+            <span class="s1">self.timeout = </span><span class="s2">None</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">self.timeout = </span><span class="s4">0.0</span>
+
+    <span class="s2">def </span><span class="s1">shutdown(self</span><span class="s2">, </span><span class="s1">how):</span>
+        <span class="s2">if </span><span class="s1">how == </span><span class="s4">0</span><span class="s1">:  </span><span class="s0"># SHUT_RD</span>
+            <span class="s1">self.hub.cancel_wait(self._read_event</span><span class="s2">, </span><span class="s1">cancel_wait_ex)</span>
+        <span class="s2">elif </span><span class="s1">how == </span><span class="s4">1</span><span class="s1">:  </span><span class="s0"># SHUT_WR</span>
+            <span class="s1">self.hub.cancel_wait(self._write_event</span><span class="s2">, </span><span class="s1">cancel_wait_ex)</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">self.hub.cancel_wait(self._read_event</span><span class="s2">, </span><span class="s1">cancel_wait_ex)</span>
+            <span class="s1">self.hub.cancel_wait(self._write_event</span><span class="s2">, </span><span class="s1">cancel_wait_ex)</span>
+        <span class="s1">self._sock.shutdown(how)</span>
+
+    <span class="s1">family = property(</span><span class="s2">lambda </span><span class="s1">self: self._sock.family)</span>
+    <span class="s1">type = property(</span><span class="s2">lambda </span><span class="s1">self: self._sock.type)</span>
+    <span class="s1">proto = property(</span><span class="s2">lambda </span><span class="s1">self: self._sock.proto)</span>
+
+    <span class="s2">def </span><span class="s1">fileno(self):</span>
+        <span class="s2">return </span><span class="s1">self._sock.fileno()</span>
+
+    <span class="s2">def </span><span class="s1">getsockname(self):</span>
+        <span class="s2">return </span><span class="s1">self._sock.getsockname()</span>
+
+    <span class="s2">def </span><span class="s1">getpeername(self):</span>
+        <span class="s2">return </span><span class="s1">self._sock.getpeername()</span>
+
+    <span class="s2">def </span><span class="s1">bind(self</span><span class="s2">, </span><span class="s1">address):</span>
+        <span class="s2">return </span><span class="s1">self._sock.bind(address)</span>
+
+    <span class="s2">def </span><span class="s1">listen(self</span><span class="s2">, </span><span class="s1">*args):</span>
+        <span class="s2">return </span><span class="s1">self._sock.listen(*args)</span>
+
+    <span class="s2">def </span><span class="s1">getsockopt(self</span><span class="s2">, </span><span class="s1">*args):</span>
+        <span class="s2">return </span><span class="s1">self._sock.getsockopt(*args)</span>
+
+    <span class="s2">def </span><span class="s1">setsockopt(self</span><span class="s2">, </span><span class="s1">*args):</span>
+        <span class="s2">return </span><span class="s1">self._sock.setsockopt(*args)</span>
+
+    <span class="s2">if </span><span class="s1">hasattr(__socket__.socket</span><span class="s2">, </span><span class="s3">'ioctl'</span><span class="s1">): </span><span class="s0"># os.name == 'nt'</span>
+        <span class="s2">def </span><span class="s1">ioctl(self</span><span class="s2">, </span><span class="s1">*args):</span>
+            <span class="s2">return </span><span class="s1">self._sock.ioctl(*args)</span>
+    <span class="s2">if </span><span class="s1">hasattr(__socket__.socket</span><span class="s2">, </span><span class="s3">'sleeptaskw'</span><span class="s1">): </span><span class="s0"># os.name == 'riscos</span>
+        <span class="s2">def </span><span class="s1">sleeptaskw(self</span><span class="s2">, </span><span class="s1">*args):</span>
+            <span class="s2">return </span><span class="s1">self._sock.sleeptaskw(*args)</span>
+
+    <span class="s2">def </span><span class="s1">getblocking(self):</span>
+        <span class="s5">&quot;&quot;&quot; 
+        Returns whether the socket will approximate blocking 
+        behaviour. 
+ 
+        .. versionadded:: 1.3a2 
+            Added in Python 3.7. 
+        &quot;&quot;&quot;</span>
+        <span class="s2">return </span><span class="s1">self.timeout != </span><span class="s4">0.0</span>
+
+    <span class="s2">def </span><span class="s1">connect(self</span><span class="s2">, </span><span class="s1">address):</span>
+        <span class="s5">&quot;&quot;&quot; 
+        Connect to *address*. 
+ 
+        .. versionchanged:: 20.6.0 
+            If the host part of the address includes an IPv6 scope ID, 
+            it will be used instead of ignored, if the platform supplies 
+            :func:`socket.inet_pton`. 
+        &quot;&quot;&quot;</span>
+        <span class="s2">if </span><span class="s1">self.timeout == </span><span class="s4">0.0</span><span class="s1">:</span>
+            <span class="s2">return </span><span class="s1">self._sock.connect(address)</span>
+        <span class="s1">address = _resolve_addr(self._sock</span><span class="s2">, </span><span class="s1">address)</span>
+        <span class="s2">with </span><span class="s1">Timeout._start_new_or_dummy(self.timeout</span><span class="s2">, </span><span class="s1">__socket__.timeout(</span><span class="s3">&quot;timed out&quot;</span><span class="s1">)):</span>
+            <span class="s2">while </span><span class="s4">1</span><span class="s1">:</span>
+                <span class="s1">err = self.getsockopt(__socket__.SOL_SOCKET</span><span class="s2">, </span><span class="s1">__socket__.SO_ERROR)</span>
+                <span class="s2">if </span><span class="s1">err:</span>
+                    <span class="s2">raise </span><span class="s1">_SocketError(err</span><span class="s2">, </span><span class="s1">strerror(err))</span>
+                <span class="s1">result = self._sock.connect_ex(address)</span>
+
+                <span class="s2">if not </span><span class="s1">result </span><span class="s2">or </span><span class="s1">result == EISCONN:</span>
+                    <span class="s2">break</span>
+                <span class="s2">if </span><span class="s1">(result </span><span class="s2">in </span><span class="s1">(EWOULDBLOCK</span><span class="s2">, </span><span class="s1">EINPROGRESS</span><span class="s2">, </span><span class="s1">EALREADY)) </span><span class="s2">or </span><span class="s1">(result == EINVAL </span><span class="s2">and </span><span class="s1">is_windows):</span>
+                    <span class="s1">self._wait(self._write_event)</span>
+                <span class="s2">else</span><span class="s1">:</span>
+                    <span class="s2">if </span><span class="s1">(isinstance(address</span><span class="s2">, </span><span class="s1">tuple)</span>
+                            <span class="s2">and </span><span class="s1">address[</span><span class="s4">0</span><span class="s1">] == </span><span class="s3">'fe80::1'</span>
+                            <span class="s2">and </span><span class="s1">result == EHOSTUNREACH):</span>
+                        <span class="s0"># On Python 3.7 on mac, we see EHOSTUNREACH</span>
+                        <span class="s0"># returned for this link-local address, but it really is</span>
+                        <span class="s0"># supposed to be ECONNREFUSED according to the standard library</span>
+                        <span class="s0"># tests (test_socket.NetworkConnectionNoServer.test_create_connection)</span>
+                        <span class="s0"># (On previous versions, that code passed the '127.0.0.1' IPv4 address, so</span>
+                        <span class="s0"># ipv6 link locals were never a factor; 3.7 passes 'localhost'.)</span>
+                        <span class="s0"># It is something of a mystery how the stdlib socket code doesn't</span>
+                        <span class="s0"># produce EHOSTUNREACH---I (JAM) can't see how socketmodule.c would avoid</span>
+                        <span class="s0"># that. The normal connect just calls connect_ex much like we do.</span>
+                        <span class="s1">result = ECONNREFUSED</span>
+                    <span class="s2">raise </span><span class="s1">_SocketError(result</span><span class="s2">, </span><span class="s1">strerror(result))</span>
+
+    <span class="s2">def </span><span class="s1">connect_ex(self</span><span class="s2">, </span><span class="s1">address):</span>
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s2">return </span><span class="s1">self.connect(address) </span><span class="s2">or </span><span class="s4">0</span>
+        <span class="s2">except </span><span class="s1">__socket__.timeout:</span>
+            <span class="s2">return </span><span class="s1">EAGAIN</span>
+        <span class="s2">except </span><span class="s1">__socket__.gaierror: </span><span class="s0"># pylint:disable=try-except-raise</span>
+            <span class="s0"># gaierror/overflowerror/typerror is not silenced by connect_ex;</span>
+            <span class="s0"># gaierror extends error so catch it first</span>
+            <span class="s2">raise</span>
+        <span class="s2">except </span><span class="s1">_SocketError </span><span class="s2">as </span><span class="s1">ex:</span>
+            <span class="s0"># Python 3: error is now OSError and it has various subclasses.</span>
+            <span class="s0"># Only those that apply to actually connecting are silenced by</span>
+            <span class="s0"># connect_ex.</span>
+            <span class="s0"># On Python 3, we want to check ex.errno; on Python 2</span>
+            <span class="s0"># there is no such attribute, we need to look at the first</span>
+            <span class="s0"># argument.</span>
+            <span class="s2">try</span><span class="s1">:</span>
+                <span class="s1">err = ex.errno</span>
+            <span class="s2">except </span><span class="s1">AttributeError:</span>
+                <span class="s1">err = ex.args[</span><span class="s4">0</span><span class="s1">]</span>
+            <span class="s2">if </span><span class="s1">err:</span>
+                <span class="s2">return </span><span class="s1">err</span>
+            <span class="s2">raise</span>
+
+    <span class="s2">def </span><span class="s1">recv(self</span><span class="s2">, </span><span class="s1">*args):</span>
+        <span class="s2">while </span><span class="s4">1</span><span class="s1">:</span>
+            <span class="s2">try</span><span class="s1">:</span>
+                <span class="s2">return </span><span class="s1">self._sock.recv(*args)</span>
+            <span class="s2">except </span><span class="s1">_SocketError </span><span class="s2">as </span><span class="s1">ex:</span>
+                <span class="s2">if </span><span class="s1">ex.args[</span><span class="s4">0</span><span class="s1">] != EWOULDBLOCK </span><span class="s2">or </span><span class="s1">self.timeout == </span><span class="s4">0.0</span><span class="s1">:</span>
+                    <span class="s2">raise</span>
+                <span class="s0"># QQQ without clearing exc_info test__refcount.test_clean_exit fails</span>
+                <span class="s1">exc_clear() </span><span class="s0"># Python 2</span>
+            <span class="s1">self._wait(self._read_event)</span>
+
+    <span class="s2">def </span><span class="s1">recvfrom(self</span><span class="s2">, </span><span class="s1">*args):</span>
+        <span class="s2">while </span><span class="s4">1</span><span class="s1">:</span>
+            <span class="s2">try</span><span class="s1">:</span>
+                <span class="s2">return </span><span class="s1">self._sock.recvfrom(*args)</span>
+            <span class="s2">except </span><span class="s1">_SocketError </span><span class="s2">as </span><span class="s1">ex:</span>
+                <span class="s2">if </span><span class="s1">ex.args[</span><span class="s4">0</span><span class="s1">] != EWOULDBLOCK </span><span class="s2">or </span><span class="s1">self.timeout == </span><span class="s4">0.0</span><span class="s1">:</span>
+                    <span class="s2">raise</span>
+                <span class="s1">exc_clear() </span><span class="s0"># Python 2</span>
+            <span class="s1">self._wait(self._read_event)</span>
+
+    <span class="s2">def </span><span class="s1">recvfrom_into(self</span><span class="s2">, </span><span class="s1">*args):</span>
+        <span class="s2">while </span><span class="s4">1</span><span class="s1">:</span>
+            <span class="s2">try</span><span class="s1">:</span>
+                <span class="s2">return </span><span class="s1">self._sock.recvfrom_into(*args)</span>
+            <span class="s2">except </span><span class="s1">_SocketError </span><span class="s2">as </span><span class="s1">ex:</span>
+                <span class="s2">if </span><span class="s1">ex.args[</span><span class="s4">0</span><span class="s1">] != EWOULDBLOCK </span><span class="s2">or </span><span class="s1">self.timeout == </span><span class="s4">0.0</span><span class="s1">:</span>
+                    <span class="s2">raise</span>
+                <span class="s1">exc_clear() </span><span class="s0"># Python 2</span>
+            <span class="s1">self._wait(self._read_event)</span>
+
+    <span class="s2">def </span><span class="s1">recv_into(self</span><span class="s2">, </span><span class="s1">*args):</span>
+        <span class="s2">while </span><span class="s4">1</span><span class="s1">:</span>
+            <span class="s2">try</span><span class="s1">:</span>
+                <span class="s2">return </span><span class="s1">self._sock.recv_into(*args)</span>
+            <span class="s2">except </span><span class="s1">_SocketError </span><span class="s2">as </span><span class="s1">ex:</span>
+                <span class="s2">if </span><span class="s1">ex.args[</span><span class="s4">0</span><span class="s1">] != EWOULDBLOCK </span><span class="s2">or </span><span class="s1">self.timeout == </span><span class="s4">0.0</span><span class="s1">:</span>
+                    <span class="s2">raise</span>
+                <span class="s1">exc_clear() </span><span class="s0"># Python 2</span>
+            <span class="s1">self._wait(self._read_event)</span>
+
+    <span class="s2">def </span><span class="s1">sendall(self</span><span class="s2">, </span><span class="s1">data</span><span class="s2">, </span><span class="s1">flags=</span><span class="s4">0</span><span class="s1">):</span>
+        <span class="s0"># this sendall is also reused by gevent.ssl.SSLSocket subclass,</span>
+        <span class="s0"># so it should not call self._sock methods directly</span>
+        <span class="s1">data_memory = _get_memory(data)</span>
+        <span class="s2">return </span><span class="s1">_sendall(self</span><span class="s2">, </span><span class="s1">data_memory</span><span class="s2">, </span><span class="s1">flags)</span>
+
+    <span class="s2">def </span><span class="s1">sendto(self</span><span class="s2">, </span><span class="s1">*args):</span>
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s2">return </span><span class="s1">self._sock.sendto(*args)</span>
+        <span class="s2">except </span><span class="s1">_SocketError </span><span class="s2">as </span><span class="s1">ex:</span>
+            <span class="s2">if </span><span class="s1">ex.args[</span><span class="s4">0</span><span class="s1">] != EWOULDBLOCK </span><span class="s2">or </span><span class="s1">self.timeout == </span><span class="s4">0.0</span><span class="s1">:</span>
+                <span class="s2">raise</span>
+            <span class="s1">exc_clear()</span>
+            <span class="s1">self._wait(self._write_event)</span>
+
+            <span class="s2">try</span><span class="s1">:</span>
+                <span class="s2">return </span><span class="s1">self._sock.sendto(*args)</span>
+            <span class="s2">except </span><span class="s1">_SocketError </span><span class="s2">as </span><span class="s1">ex2:</span>
+                <span class="s2">if </span><span class="s1">ex2.args[</span><span class="s4">0</span><span class="s1">] == EWOULDBLOCK:</span>
+                    <span class="s1">exc_clear()</span>
+                    <span class="s2">return </span><span class="s4">0</span>
+                <span class="s2">raise</span>
+
+    <span class="s2">def </span><span class="s1">send(self</span><span class="s2">, </span><span class="s1">data</span><span class="s2">, </span><span class="s1">flags=</span><span class="s4">0</span><span class="s2">, </span><span class="s1">timeout=timeout_default):</span>
+        <span class="s2">if </span><span class="s1">timeout </span><span class="s2">is </span><span class="s1">timeout_default:</span>
+            <span class="s1">timeout = self.timeout</span>
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s2">return </span><span class="s1">self._sock.send(data</span><span class="s2">, </span><span class="s1">flags)</span>
+        <span class="s2">except </span><span class="s1">_SocketError </span><span class="s2">as </span><span class="s1">ex:</span>
+            <span class="s2">if </span><span class="s1">ex.args[</span><span class="s4">0</span><span class="s1">] </span><span class="s2">not in </span><span class="s1">GSENDAGAIN </span><span class="s2">or </span><span class="s1">timeout == </span><span class="s4">0.0</span><span class="s1">:</span>
+                <span class="s2">raise</span>
+            <span class="s1">exc_clear()</span>
+            <span class="s1">self._wait(self._write_event)</span>
+            <span class="s2">try</span><span class="s1">:</span>
+                <span class="s2">return </span><span class="s1">self._sock.send(data</span><span class="s2">, </span><span class="s1">flags)</span>
+            <span class="s2">except </span><span class="s1">_SocketError </span><span class="s2">as </span><span class="s1">ex2:</span>
+                <span class="s2">if </span><span class="s1">ex2.args[</span><span class="s4">0</span><span class="s1">] == EWOULDBLOCK:</span>
+                    <span class="s1">exc_clear()</span>
+                    <span class="s2">return </span><span class="s4">0</span>
+                <span class="s2">raise</span>
+
+    <span class="s1">@classmethod</span>
+    <span class="s2">def </span><span class="s1">_fixup_docstrings(cls):</span>
+        <span class="s2">for </span><span class="s1">k</span><span class="s2">, </span><span class="s1">v </span><span class="s2">in </span><span class="s1">vars(cls).items():</span>
+            <span class="s2">if </span><span class="s1">k.startswith(</span><span class="s3">'_'</span><span class="s1">):</span>
+                <span class="s2">continue</span>
+            <span class="s2">if not </span><span class="s1">hasattr(v</span><span class="s2">, </span><span class="s3">'__doc__'</span><span class="s1">) </span><span class="s2">or </span><span class="s1">v.__doc__:</span>
+                <span class="s2">continue</span>
+            <span class="s1">smeth =  getattr(__socket__.socket</span><span class="s2">, </span><span class="s1">k</span><span class="s2">, None</span><span class="s1">)</span>
+            <span class="s2">if not </span><span class="s1">smeth </span><span class="s2">or not </span><span class="s1">smeth.__doc__:</span>
+                <span class="s2">continue</span>
+
+            <span class="s2">try</span><span class="s1">:</span>
+                <span class="s1">v.__doc__ = smeth.__doc__</span>
+            <span class="s2">except </span><span class="s1">(AttributeError</span><span class="s2">, </span><span class="s1">TypeError):</span>
+                <span class="s0"># slots can't have docs. Py2 raises TypeError,</span>
+                <span class="s0"># Py3 raises AttributeError</span>
+                <span class="s2">continue</span>
+
+<span class="s1">SocketMixin._fixup_docstrings()</span>
+<span class="s2">del </span><span class="s1">SocketMixin._fixup_docstrings</span>
+</pre>
+</body>
+</html>

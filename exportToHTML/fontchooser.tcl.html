@@ -1,0 +1,466 @@
+<html>
+<head>
+<title>fontchooser.tcl</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #a9b7c6;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+fontchooser.tcl</font>
+</center></td></tr></table>
+<pre><span class="s0"># fontchooser.tcl -</span>
+<span class="s0">#</span>
+<span class="s0">#	A themeable Tk font selection dialog. See TIP #324.</span>
+<span class="s0">#</span>
+<span class="s0"># Copyright (C) 2008 Keith Vetter</span>
+<span class="s0"># Copyright (C) 2008 Pat Thoyts &lt;patthoyts@users.sourceforge.net&gt;</span>
+<span class="s0">#</span>
+<span class="s0"># See the file &quot;license.terms&quot; for information on usage and redistribution</span>
+<span class="s0"># of this file, and for a DISCLAIMER OF ALL WARRANTIES.</span>
+
+<span class="s0">namespace eval ::tk::fontchooser {</span>
+    <span class="s0">variable S</span>
+
+    <span class="s0">set S(W) .__tk__fontchooser</span>
+    <span class="s0">set S(fonts) [lsort -dictionary [font families]]</span>
+    <span class="s0">set S(styles) [list \</span>
+                       <span class="s0">[::msgcat::mc &quot;Regular&quot;] \</span>
+                       <span class="s0">[::msgcat::mc &quot;Italic&quot;] \</span>
+                       <span class="s0">[::msgcat::mc &quot;Bold&quot;] \</span>
+                       <span class="s0">[::msgcat::mc &quot;Bold Italic&quot;] \</span>
+                      <span class="s0">]</span>
+
+    <span class="s0">set S(sizes) {8 9 10 11 12 14 16 18 20 22 24 26 28 36 48 72}</span>
+    <span class="s0">set S(strike) 0</span>
+    <span class="s0">set S(under) 0</span>
+    <span class="s0">set S(first) 1</span>
+    <span class="s0">set S(sampletext) [::msgcat::mc &quot;AaBbYyZz01&quot;]</span>
+    <span class="s0">set S(-parent) .</span>
+    <span class="s0">set S(-title) [::msgcat::mc &quot;Font&quot;]</span>
+    <span class="s0">set S(-command) &quot;&quot;</span>
+    <span class="s0">set S(-font) TkDefaultFont</span>
+<span class="s0">}</span>
+
+<span class="s0">proc ::tk::fontchooser::Setup {} {</span>
+    <span class="s0">variable S</span>
+
+    <span class="s0"># Canonical versions of font families, styles, etc. for easier searching</span>
+    <span class="s0">set S(fonts,lcase) {}</span>
+    <span class="s0">foreach font $S(fonts) { lappend S(fonts,lcase) [string tolower $font]}</span>
+    <span class="s0">set S(styles,lcase) {}</span>
+    <span class="s0">foreach style $S(styles) { lappend S(styles,lcase) [string tolower $style]}</span>
+    <span class="s0">set S(sizes,lcase) $S(sizes)</span>
+
+    <span class="s0">::ttk::style layout FontchooserFrame {</span>
+        <span class="s0">Entry.field -sticky news -border true -children {</span>
+            <span class="s0">FontchooserFrame.padding -sticky news</span>
+        <span class="s0">}</span>
+    <span class="s0">}</span>
+    <span class="s0">bind [winfo class .] &lt;&lt;ThemeChanged&gt;&gt; \</span>
+        <span class="s0">[list +ttk::style layout FontchooserFrame \</span>
+             <span class="s0">[ttk::style layout FontchooserFrame]]</span>
+
+    <span class="s0">namespace ensemble create -map {</span>
+        <span class="s0">show ::tk::fontchooser::Show</span>
+        <span class="s0">hide ::tk::fontchooser::Hide</span>
+        <span class="s0">configure ::tk::fontchooser::Configure</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+<span class="s0">::tk::fontchooser::Setup</span>
+
+<span class="s0">proc ::tk::fontchooser::Show {} {</span>
+    <span class="s0">variable S</span>
+    <span class="s0">if {![winfo exists $S(W)]} {</span>
+        <span class="s0">Create</span>
+        <span class="s0">wm transient $S(W) [winfo toplevel $S(-parent)]</span>
+        <span class="s0">tk::PlaceWindow $S(W) widget $S(-parent)</span>
+    <span class="s0">}</span>
+    <span class="s0">wm deiconify $S(W)</span>
+<span class="s0">}</span>
+
+<span class="s0">proc ::tk::fontchooser::Hide {} {</span>
+    <span class="s0">variable S</span>
+    <span class="s0">wm withdraw $S(W)</span>
+<span class="s0">}</span>
+
+<span class="s0">proc ::tk::fontchooser::Configure {args} {</span>
+    <span class="s0">variable S</span>
+
+    <span class="s0">set specs {</span>
+        <span class="s0">{-parent  &quot;&quot; &quot;&quot; . }</span>
+        <span class="s0">{-title   &quot;&quot; &quot;&quot; &quot;&quot;}</span>
+        <span class="s0">{-font    &quot;&quot; &quot;&quot; &quot;&quot;}</span>
+        <span class="s0">{-command &quot;&quot; &quot;&quot; &quot;&quot;}</span>
+    <span class="s0">}</span>
+
+    <span class="s0">if {[llength $args] == 0} {</span>
+        <span class="s0">set result {}</span>
+        <span class="s0">foreach spec $specs {</span>
+            <span class="s0">foreach {name xx yy default} $spec break</span>
+            <span class="s0">lappend result $name \</span>
+                <span class="s0">[expr {[info exists S($name)] ? $S($name) : $default}]</span>
+        <span class="s0">}</span>
+        <span class="s0">lappend result -visible \</span>
+            <span class="s0">[expr {[winfo exists $S(W)] &amp;&amp; [winfo ismapped $S(W)]}]</span>
+        <span class="s0">return $result</span>
+    <span class="s0">}</span>
+    <span class="s0">if {[llength $args] == 1} {</span>
+        <span class="s0">set option [lindex $args 0]</span>
+        <span class="s0">if {[string equal $option &quot;-visible&quot;]} {</span>
+            <span class="s0">return [expr {[winfo exists $S(W)] &amp;&amp; [winfo ismapped $S(W)]}]</span>
+        <span class="s0">} elseif {[info exists S($option)]} {</span>
+            <span class="s0">return $S($option)</span>
+        <span class="s0">}</span>
+        <span class="s0">return -code error -errorcode [list TK LOOKUP OPTION $option] \</span>
+	    <span class="s0">&quot;bad option \&quot;$option\&quot;: must be\</span>
+            <span class="s0">-command, -font, -parent, -title or -visible&quot;</span>
+    <span class="s0">}</span>
+
+    <span class="s0">set cache [dict create -parent $S(-parent) -title $S(-title) \</span>
+                   <span class="s0">-font $S(-font) -command $S(-command)]</span>
+    <span class="s0">set r [tclParseConfigSpec [namespace which -variable S] $specs &quot;&quot; $args]</span>
+    <span class="s0">if {![winfo exists $S(-parent)]} {</span>
+	<span class="s0">set code [list TK LOOKUP WINDOW $S(-parent)]</span>
+        <span class="s0">set err &quot;bad window path name \&quot;$S(-parent)\&quot;&quot;</span>
+        <span class="s0">array set S $cache</span>
+        <span class="s0">return -code error -errorcode $code $err</span>
+    <span class="s0">}</span>
+    <span class="s0">if {[string trim $S(-title)] eq &quot;&quot;} {</span>
+        <span class="s0">set S(-title) [::msgcat::mc &quot;Font&quot;]</span>
+    <span class="s0">}</span>
+    <span class="s0">if {[winfo exists $S(W)] &amp;&amp; [lsearch $args -font] != -1} {</span>
+	<span class="s0">Init $S(-font)</span>
+	<span class="s0">event generate $S(-parent) &lt;&lt;TkFontchooserFontChanged&gt;&gt;</span>
+    <span class="s0">}</span>
+    <span class="s0">return $r</span>
+<span class="s0">}</span>
+
+<span class="s0">proc ::tk::fontchooser::Create {} {</span>
+    <span class="s0">variable S</span>
+    <span class="s0">set windowName __tk__fontchooser</span>
+    <span class="s0">if {$S(-parent) eq &quot;.&quot;} {</span>
+        <span class="s0">set S(W) .$windowName</span>
+    <span class="s0">} else {</span>
+        <span class="s0">set S(W) $S(-parent).$windowName</span>
+    <span class="s0">}</span>
+
+    <span class="s0"># Now build the dialog</span>
+    <span class="s0">if {![winfo exists $S(W)]} {</span>
+        <span class="s0">toplevel $S(W) -class TkFontDialog</span>
+        <span class="s0">if {[package provide tcltest] ne {}} {set ::tk_dialog $S(W)}</span>
+        <span class="s0">wm withdraw $S(W)</span>
+        <span class="s0">wm title $S(W) $S(-title)</span>
+        <span class="s0">wm transient $S(W) [winfo toplevel $S(-parent)]</span>
+
+        <span class="s0">set outer [::ttk::frame $S(W).outer -padding {10 10}]</span>
+        <span class="s0">::tk::AmpWidget ::ttk::label $S(W).font -text [::msgcat::mc &quot;&amp;Font:&quot;]</span>
+        <span class="s0">::tk::AmpWidget ::ttk::label $S(W).style -text [::msgcat::mc &quot;Font st&amp;yle:&quot;]</span>
+        <span class="s0">::tk::AmpWidget ::ttk::label $S(W).size -text [::msgcat::mc &quot;&amp;Size:&quot;]</span>
+        <span class="s0">ttk::entry $S(W).efont -width 18 \</span>
+            <span class="s0">-textvariable [namespace which -variable S](font)</span>
+        <span class="s0">ttk::entry $S(W).estyle -width 10 \</span>
+            <span class="s0">-textvariable [namespace which -variable S](style)</span>
+        <span class="s0">ttk::entry $S(W).esize -textvariable [namespace which -variable S](size) \</span>
+            <span class="s0">-width 3 -validate key -validatecommand {string is double %P}</span>
+
+        <span class="s0">ttk_slistbox $S(W).lfonts -height 7 -exportselection 0 \</span>
+            <span class="s0">-selectmode browse -activestyle none \</span>
+            <span class="s0">-listvariable [namespace which -variable S](fonts)</span>
+        <span class="s0">ttk_slistbox $S(W).lstyles -width 5 -height 7 -exportselection 0 \</span>
+            <span class="s0">-selectmode browse -activestyle none \</span>
+            <span class="s0">-listvariable [namespace which -variable S](styles)</span>
+        <span class="s0">ttk_slistbox $S(W).lsizes -width 4 -height 7 -exportselection 0 \</span>
+            <span class="s0">-selectmode browse -activestyle none \</span>
+            <span class="s0">-listvariable [namespace which -variable S](sizes)</span>
+
+        <span class="s0">set WE $S(W).effects</span>
+        <span class="s0">::ttk::labelframe $WE -text [::msgcat::mc &quot;Effects&quot;]</span>
+        <span class="s0">::tk::AmpWidget ::ttk::checkbutton $WE.strike \</span>
+            <span class="s0">-variable [namespace which -variable S](strike) \</span>
+            <span class="s0">-text [::msgcat::mc &quot;Stri&amp;keout&quot;] \</span>
+            <span class="s0">-command [namespace code [list Click strike]]</span>
+        <span class="s0">::tk::AmpWidget ::ttk::checkbutton $WE.under \</span>
+            <span class="s0">-variable [namespace which -variable S](under) \</span>
+            <span class="s0">-text [::msgcat::mc &quot;&amp;Underline&quot;] \</span>
+            <span class="s0">-command [namespace code [list Click under]]</span>
+
+        <span class="s0">set bbox [::ttk::frame $S(W).bbox]</span>
+        <span class="s0">::ttk::button $S(W).ok -text [::msgcat::mc OK] -default active\</span>
+            <span class="s0">-command [namespace code [list Done 1]]</span>
+        <span class="s0">::ttk::button $S(W).cancel -text [::msgcat::mc Cancel] \</span>
+            <span class="s0">-command [namespace code [list Done 0]]</span>
+        <span class="s0">::tk::AmpWidget ::ttk::button $S(W).apply -text [::msgcat::mc &quot;&amp;Apply&quot;] \</span>
+            <span class="s0">-command [namespace code [list Apply]]</span>
+        <span class="s0">wm protocol $S(W) WM_DELETE_WINDOW [namespace code [list Done 0]]</span>
+
+        <span class="s0"># Calculate minimum sizes</span>
+        <span class="s0">ttk::scrollbar $S(W).tmpvs</span>
+        <span class="s0">set scroll_width [winfo reqwidth $S(W).tmpvs]</span>
+        <span class="s0">destroy $S(W).tmpvs</span>
+        <span class="s0">set minsize(gap) 10</span>
+        <span class="s0">set minsize(bbox) [winfo reqwidth $S(W).ok]</span>
+        <span class="s0">set minsize(fonts) \</span>
+            <span class="s0">[expr {[font measure TkDefaultFont &quot;Helvetica&quot;] + $scroll_width}]</span>
+        <span class="s0">set minsize(styles) \</span>
+            <span class="s0">[expr {[font measure TkDefaultFont &quot;Bold Italic&quot;] + $scroll_width}]</span>
+        <span class="s0">set minsize(sizes) \</span>
+            <span class="s0">[expr {[font measure TkDefaultFont &quot;-99&quot;] + $scroll_width}]</span>
+        <span class="s0">set min [expr {$minsize(gap) * 4}]</span>
+        <span class="s0">foreach {what width} [array get minsize] { incr min $width }</span>
+        <span class="s0">wm minsize $S(W) $min 260</span>
+
+        <span class="s0">bind $S(W) &lt;Return&gt; [namespace code [list Done 1]]</span>
+        <span class="s0">bind $S(W) &lt;Escape&gt; [namespace code [list Done 0]]</span>
+        <span class="s0">bind $S(W) &lt;Map&gt; [namespace code [list Visibility %W 1]]</span>
+        <span class="s0">bind $S(W) &lt;Unmap&gt; [namespace code [list Visibility %W 0]]</span>
+        <span class="s0">bind $S(W) &lt;Destroy&gt; [namespace code [list Visibility %W 0]]</span>
+        <span class="s0">bind $S(W).lfonts.list &lt;&lt;ListboxSelect&gt;&gt; [namespace code [list Click font]]</span>
+        <span class="s0">bind $S(W).lstyles.list &lt;&lt;ListboxSelect&gt;&gt; [namespace code [list Click style]]</span>
+        <span class="s0">bind $S(W).lsizes.list &lt;&lt;ListboxSelect&gt;&gt; [namespace code [list Click size]]</span>
+        <span class="s0">bind $S(W) &lt;Alt-Key&gt; [list ::tk::AltKeyInDialog $S(W) %A]</span>
+        <span class="s0">bind $S(W).font &lt;&lt;AltUnderlined&gt;&gt; [list ::focus $S(W).efont]</span>
+        <span class="s0">bind $S(W).style &lt;&lt;AltUnderlined&gt;&gt; [list ::focus $S(W).estyle]</span>
+        <span class="s0">bind $S(W).size &lt;&lt;AltUnderlined&gt;&gt; [list ::focus $S(W).esize]</span>
+        <span class="s0">bind $S(W).apply &lt;&lt;AltUnderlined&gt;&gt; [namespace code [list Apply]]</span>
+        <span class="s0">bind $WE.strike &lt;&lt;AltUnderlined&gt;&gt; [list $WE.strike invoke]</span>
+        <span class="s0">bind $WE.under &lt;&lt;AltUnderlined&gt;&gt; [list $WE.under invoke]</span>
+
+        <span class="s0">set WS $S(W).sample</span>
+        <span class="s0">::ttk::labelframe $WS -text [::msgcat::mc &quot;Sample&quot;]</span>
+        <span class="s0">::ttk::label $WS.sample -relief sunken -anchor center \</span>
+            <span class="s0">-textvariable [namespace which -variable S](sampletext)</span>
+        <span class="s0">set S(sample) $WS.sample</span>
+        <span class="s0">grid $WS.sample -sticky news -padx 6 -pady 4</span>
+        <span class="s0">grid rowconfigure $WS 0 -weight 1</span>
+        <span class="s0">grid columnconfigure $WS 0 -weight 1</span>
+        <span class="s0">grid propagate $WS 0</span>
+
+        <span class="s0">grid $S(W).ok     -in $bbox -sticky new -pady {0 2}</span>
+        <span class="s0">grid $S(W).cancel -in $bbox -sticky new -pady 2</span>
+        <span class="s0">if {$S(-command) ne &quot;&quot;} {</span>
+            <span class="s0">grid $S(W).apply -in $bbox -sticky new -pady 2</span>
+        <span class="s0">}</span>
+        <span class="s0">grid columnconfigure $bbox 0 -weight 1</span>
+
+        <span class="s0">grid $WE.strike -sticky w -padx 10</span>
+        <span class="s0">grid $WE.under -sticky w -padx 10 -pady {0 30}</span>
+        <span class="s0">grid columnconfigure $WE 1 -weight 1</span>
+
+        <span class="s0">grid $S(W).font   x $S(W).style   x $S(W).size   x       -in $outer -sticky w</span>
+        <span class="s0">grid $S(W).efont  x $S(W).estyle  x $S(W).esize  x $bbox -in $outer -sticky ew</span>
+        <span class="s0">grid $S(W).lfonts x $S(W).lstyles x $S(W).lsizes x ^     -in $outer -sticky news</span>
+        <span class="s0">grid $WE          x $WS           - -            x ^     -in $outer -sticky news -pady {15 30}</span>
+        <span class="s0">grid configure $bbox -sticky n</span>
+        <span class="s0">grid columnconfigure $outer {1 3 5} -minsize $minsize(gap)</span>
+        <span class="s0">grid columnconfigure $outer {0 2 4} -weight 1</span>
+        <span class="s0">grid columnconfigure $outer 0 -minsize $minsize(fonts)</span>
+        <span class="s0">grid columnconfigure $outer 2 -minsize $minsize(styles)</span>
+        <span class="s0">grid columnconfigure $outer 4 -minsize $minsize(sizes)</span>
+        <span class="s0">grid columnconfigure $outer 6 -minsize $minsize(bbox)</span>
+
+        <span class="s0">grid $outer -sticky news</span>
+        <span class="s0">grid rowconfigure $S(W) 0 -weight 1</span>
+        <span class="s0">grid columnconfigure $S(W) 0 -weight 1</span>
+
+        <span class="s0">Init $S(-font)</span>
+
+        <span class="s0">trace add variable [namespace which -variable S](size) \</span>
+            <span class="s0">write [namespace code [list Tracer]]</span>
+        <span class="s0">trace add variable [namespace which -variable S](style) \</span>
+            <span class="s0">write [namespace code [list Tracer]]</span>
+        <span class="s0">trace add variable [namespace which -variable S](font) \</span>
+            <span class="s0">write [namespace code [list Tracer]]</span>
+    <span class="s0">} else {</span>
+        <span class="s0">Init $S(-font)</span>
+    <span class="s0">}</span>
+
+    <span class="s0">return</span>
+<span class="s0">}</span>
+
+<span class="s0"># ::tk::fontchooser::Done --</span>
+<span class="s0">#</span>
+<span class="s0">#       Handles teardown of the dialog, calling -command if needed</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0">#       ok              true if user pressed OK</span>
+<span class="s0">#</span>
+<span class="s0">proc ::tk::::fontchooser::Done {ok} {</span>
+    <span class="s0">variable S</span>
+
+    <span class="s0">if {! $ok} {</span>
+        <span class="s0">set S(result) &quot;&quot;</span>
+    <span class="s0">}</span>
+    <span class="s0">trace vdelete S(size) w [namespace code [list Tracer]]</span>
+    <span class="s0">trace vdelete S(style) w [namespace code [list Tracer]]</span>
+    <span class="s0">trace vdelete S(font) w [namespace code [list Tracer]]</span>
+    <span class="s0">destroy $S(W)</span>
+    <span class="s0">if {$ok &amp;&amp; $S(-command) ne &quot;&quot;} {</span>
+        <span class="s0">uplevel #0 $S(-command) [list $S(result)]</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+
+<span class="s0"># ::tk::fontchooser::Apply --</span>
+<span class="s0">#</span>
+<span class="s0">#	Call the -command procedure appending the current font</span>
+<span class="s0">#	Errors are reported via the background error mechanism</span>
+<span class="s0">#</span>
+<span class="s0">proc ::tk::fontchooser::Apply {} {</span>
+    <span class="s0">variable S</span>
+    <span class="s0">if {$S(-command) ne &quot;&quot;} {</span>
+        <span class="s0">if {[catch {uplevel #0 $S(-command) [list $S(result)]} err]} {</span>
+            <span class="s0">::bgerror $err</span>
+        <span class="s0">}</span>
+    <span class="s0">}</span>
+    <span class="s0">event generate $S(-parent) &lt;&lt;TkFontchooserFontChanged&gt;&gt;</span>
+<span class="s0">}</span>
+
+<span class="s0"># ::tk::fontchooser::Init --</span>
+<span class="s0">#</span>
+<span class="s0">#       Initializes dialog to a default font</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0">#       defaultFont     font to use as the default</span>
+<span class="s0">#</span>
+<span class="s0">proc ::tk::fontchooser::Init {{defaultFont &quot;&quot;}} {</span>
+    <span class="s0">variable S</span>
+
+    <span class="s0">if {$S(first) || $defaultFont ne &quot;&quot;} {</span>
+        <span class="s0">if {$defaultFont eq &quot;&quot;} {</span>
+            <span class="s0">set defaultFont [[entry .___e] cget -font]</span>
+            <span class="s0">destroy .___e</span>
+        <span class="s0">}</span>
+        <span class="s0">array set F [font actual $defaultFont]</span>
+        <span class="s0">set S(font) $F(-family)</span>
+        <span class="s0">set S(size) $F(-size)</span>
+        <span class="s0">set S(strike) $F(-overstrike)</span>
+        <span class="s0">set S(under) $F(-underline)</span>
+        <span class="s0">set S(style) &quot;Regular&quot;</span>
+        <span class="s0">if {$F(-weight) eq &quot;bold&quot; &amp;&amp; $F(-slant) eq &quot;italic&quot;} {</span>
+            <span class="s0">set S(style) &quot;Bold Italic&quot;</span>
+        <span class="s0">} elseif {$F(-weight) eq &quot;bold&quot;} {</span>
+            <span class="s0">set S(style) &quot;Bold&quot;</span>
+        <span class="s0">} elseif {$F(-slant) eq &quot;italic&quot;} {</span>
+            <span class="s0">set S(style) &quot;Italic&quot;</span>
+        <span class="s0">}</span>
+
+        <span class="s0">set S(first) 0</span>
+    <span class="s0">}</span>
+
+    <span class="s0">Tracer a b c</span>
+    <span class="s0">Update</span>
+<span class="s0">}</span>
+
+<span class="s0"># ::tk::fontchooser::Click --</span>
+<span class="s0">#</span>
+<span class="s0">#       Handles all button clicks, updating the appropriate widgets</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0">#       who             which widget got pressed</span>
+<span class="s0">#</span>
+<span class="s0">proc ::tk::fontchooser::Click {who} {</span>
+    <span class="s0">variable S</span>
+
+    <span class="s0">if {$who eq &quot;font&quot;} {</span>
+        <span class="s0">set S(font) [$S(W).lfonts get [$S(W).lfonts curselection]]</span>
+    <span class="s0">} elseif {$who eq &quot;style&quot;} {</span>
+        <span class="s0">set S(style) [$S(W).lstyles get [$S(W).lstyles curselection]]</span>
+    <span class="s0">} elseif {$who eq &quot;size&quot;} {</span>
+        <span class="s0">set S(size) [$S(W).lsizes get [$S(W).lsizes curselection]]</span>
+    <span class="s0">}</span>
+    <span class="s0">Update</span>
+<span class="s0">}</span>
+
+<span class="s0"># ::tk::fontchooser::Tracer --</span>
+<span class="s0">#</span>
+<span class="s0">#       Handles traces on key variables, updating the appropriate widgets</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0">#       standard trace arguments (not used)</span>
+<span class="s0">#</span>
+<span class="s0">proc ::tk::fontchooser::Tracer {var1 var2 op} {</span>
+    <span class="s0">variable S</span>
+
+    <span class="s0">set bad 0</span>
+    <span class="s0">set nstate normal</span>
+    <span class="s0"># Make selection in each listbox</span>
+    <span class="s0">foreach var {font style size} {</span>
+        <span class="s0">set value [string tolower $S($var)]</span>
+        <span class="s0">$S(W).l${var}s selection clear 0 end</span>
+        <span class="s0">set n [lsearch -exact $S(${var}s,lcase) $value]</span>
+        <span class="s0">$S(W).l${var}s selection set $n</span>
+        <span class="s0">if {$n != -1} {</span>
+            <span class="s0">set S($var) [lindex $S(${var}s) $n]</span>
+            <span class="s0">$S(W).e$var icursor end</span>
+            <span class="s0">$S(W).e$var selection clear</span>
+        <span class="s0">} else {                                ;# No match, try prefix</span>
+            <span class="s0"># Size is weird: valid numbers are legal but don't display</span>
+            <span class="s0"># unless in the font size list</span>
+            <span class="s0">set n [lsearch -glob $S(${var}s,lcase) &quot;$value*&quot;]</span>
+            <span class="s0">set bad 1</span>
+            <span class="s0">if {$var ne &quot;size&quot; || ! [string is double -strict $value]} {</span>
+                <span class="s0">set nstate disabled</span>
+            <span class="s0">}</span>
+        <span class="s0">}</span>
+        <span class="s0">$S(W).l${var}s see $n</span>
+    <span class="s0">}</span>
+    <span class="s0">if {!$bad} { Update }</span>
+    <span class="s0">$S(W).ok configure -state $nstate</span>
+<span class="s0">}</span>
+
+<span class="s0"># ::tk::fontchooser::Update --</span>
+<span class="s0">#</span>
+<span class="s0">#       Shows a sample of the currently selected font</span>
+<span class="s0">#</span>
+<span class="s0">proc ::tk::fontchooser::Update {} {</span>
+    <span class="s0">variable S</span>
+
+    <span class="s0">set S(result) [list $S(font) $S(size)]</span>
+    <span class="s0">if {$S(style) eq &quot;Bold&quot;} { lappend S(result) bold }</span>
+    <span class="s0">if {$S(style) eq &quot;Italic&quot;} { lappend S(result) italic }</span>
+    <span class="s0">if {$S(style) eq &quot;Bold Italic&quot;} { lappend S(result) bold italic}</span>
+    <span class="s0">if {$S(strike)} { lappend S(result) overstrike}</span>
+    <span class="s0">if {$S(under)} { lappend S(result) underline}</span>
+
+    <span class="s0">$S(sample) configure -font $S(result)</span>
+<span class="s0">}</span>
+
+<span class="s0"># ::tk::fontchooser::Visibility --</span>
+<span class="s0">#</span>
+<span class="s0">#	Notify the parent when the dialog visibility changes</span>
+<span class="s0">#</span>
+<span class="s0">proc ::tk::fontchooser::Visibility {w visible} {</span>
+    <span class="s0">variable S</span>
+    <span class="s0">if {$w eq $S(W)} {</span>
+        <span class="s0">event generate $S(-parent) &lt;&lt;TkFontchooserVisibility&gt;&gt;</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+
+<span class="s0"># ::tk::fontchooser::ttk_listbox --</span>
+<span class="s0">#</span>
+<span class="s0">#	Create a properly themed scrolled listbox.</span>
+<span class="s0">#	This is exactly right on XP but may need adjusting on other platforms.</span>
+<span class="s0">#</span>
+<span class="s0">proc ::tk::fontchooser::ttk_slistbox {w args} {</span>
+    <span class="s0">set f [ttk::frame $w -style FontchooserFrame -padding 2]</span>
+    <span class="s0">if {[catch {</span>
+        <span class="s0">listbox $f.list -relief flat -highlightthickness 0 -borderwidth 0 {*}$args</span>
+        <span class="s0">ttk::scrollbar $f.vs -command [list $f.list yview]</span>
+        <span class="s0">$f.list configure -yscrollcommand [list $f.vs set]</span>
+        <span class="s0">grid $f.list $f.vs -sticky news</span>
+        <span class="s0">grid rowconfigure $f 0 -weight 1</span>
+        <span class="s0">grid columnconfigure $f 0 -weight 1</span>
+        <span class="s0">interp hide {} $w</span>
+        <span class="s0">interp alias {} $w {} $f.list</span>
+    <span class="s0">} err opt]} {</span>
+        <span class="s0">destroy $f</span>
+        <span class="s0">return -options $opt $err</span>
+    <span class="s0">}</span>
+    <span class="s0">return $w</span>
+<span class="s0">}</span>
+</pre>
+</body>
+</html>

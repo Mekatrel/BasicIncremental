@@ -1,0 +1,380 @@
+<html>
+<head>
+<title>treeview.tcl</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #a9b7c6;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+treeview.tcl</font>
+</center></td></tr></table>
+<pre><span class="s0">#</span>
+<span class="s0"># ttk::treeview widget bindings and utilities.</span>
+<span class="s0">#</span>
+
+<span class="s0">namespace eval ttk::treeview {</span>
+    <span class="s0">variable State</span>
+
+    <span class="s0"># Enter/Leave/Motion</span>
+    <span class="s0">#</span>
+    <span class="s0">set State(activeWidget) 	{}</span>
+    <span class="s0">set State(activeHeading) 	{}</span>
+
+    <span class="s0"># Press/drag/release:</span>
+    <span class="s0">#</span>
+    <span class="s0">set State(pressMode) 	none</span>
+    <span class="s0">set State(pressX)		0</span>
+
+    <span class="s0"># For pressMode == &quot;resize&quot;</span>
+    <span class="s0">set State(resizeColumn)	#0</span>
+
+    <span class="s0"># For pressmode == &quot;heading&quot;</span>
+    <span class="s0">set State(heading)  	{}</span>
+<span class="s0">}</span>
+
+<span class="s0">### Widget bindings.</span>
+<span class="s0">#</span>
+
+<span class="s0">bind Treeview	&lt;Motion&gt; 		{ ttk::treeview::Motion %W %x %y }</span>
+<span class="s0">bind Treeview	&lt;B1-Leave&gt;		{ #nothing }</span>
+<span class="s0">bind Treeview	&lt;Leave&gt;			{ ttk::treeview::ActivateHeading {} {}}</span>
+<span class="s0">bind Treeview	&lt;ButtonPress-1&gt; 	{ ttk::treeview::Press %W %x %y }</span>
+<span class="s0">bind Treeview	&lt;Double-ButtonPress-1&gt; 	{ ttk::treeview::DoubleClick %W %x %y }</span>
+<span class="s0">bind Treeview	&lt;ButtonRelease-1&gt; 	{ ttk::treeview::Release %W %x %y }</span>
+<span class="s0">bind Treeview	&lt;B1-Motion&gt; 		{ ttk::treeview::Drag %W %x %y }</span>
+<span class="s0">bind Treeview 	&lt;KeyPress-Up&gt;    	{ ttk::treeview::Keynav %W up }</span>
+<span class="s0">bind Treeview 	&lt;KeyPress-Down&gt;  	{ ttk::treeview::Keynav %W down }</span>
+<span class="s0">bind Treeview 	&lt;KeyPress-Right&gt; 	{ ttk::treeview::Keynav %W right }</span>
+<span class="s0">bind Treeview 	&lt;KeyPress-Left&gt;  	{ ttk::treeview::Keynav %W left }</span>
+<span class="s0">bind Treeview	&lt;KeyPress-Prior&gt;	{ %W yview scroll -1 pages }</span>
+<span class="s0">bind Treeview	&lt;KeyPress-Next&gt; 	{ %W yview scroll  1 pages }</span>
+<span class="s0">bind Treeview	&lt;KeyPress-Return&gt;	{ ttk::treeview::ToggleFocus %W }</span>
+<span class="s0">bind Treeview	&lt;KeyPress-space&gt;	{ ttk::treeview::ToggleFocus %W }</span>
+
+<span class="s0">bind Treeview	&lt;Shift-ButtonPress-1&gt; \</span>
+		<span class="s0">{ ttk::treeview::Select %W %x %y extend }</span>
+<span class="s0">bind Treeview	&lt;&lt;ToggleSelection&gt;&gt; \</span>
+		<span class="s0">{ ttk::treeview::Select %W %x %y toggle }</span>
+
+<span class="s0">ttk::copyBindings TtkScrollable Treeview </span>
+
+<span class="s0">### Binding procedures.</span>
+<span class="s0">#</span>
+
+<span class="s0">## Keynav -- Keyboard navigation</span>
+<span class="s0">#</span>
+<span class="s0"># @@@ TODO: verify/rewrite up and down code.</span>
+<span class="s0">#</span>
+<span class="s0">proc ttk::treeview::Keynav {w dir} {</span>
+    <span class="s0">set focus [$w focus]</span>
+    <span class="s0">if {$focus eq &quot;&quot;} { return }</span>
+
+    <span class="s0">switch -- $dir {</span>
+	<span class="s0">up {</span>
+	    <span class="s0">if {[set up [$w prev $focus]] eq &quot;&quot;} {</span>
+	        <span class="s0">set focus [$w parent $focus]</span>
+	    <span class="s0">} else {</span>
+		<span class="s0">while {[$w item $up -open] &amp;&amp; [llength [$w children $up]]} {</span>
+		    <span class="s0">set up [lindex [$w children $up] end]</span>
+		<span class="s0">}</span>
+		<span class="s0">set focus $up</span>
+	    <span class="s0">}</span>
+	<span class="s0">}</span>
+	<span class="s0">down {</span>
+	    <span class="s0">if {[$w item $focus -open] &amp;&amp; [llength [$w children $focus]]} {</span>
+	        <span class="s0">set focus [lindex [$w children $focus] 0]</span>
+	    <span class="s0">} else {</span>
+		<span class="s0">set up $focus</span>
+		<span class="s0">while {$up ne &quot;&quot; &amp;&amp; [set down [$w next $up]] eq &quot;&quot;} {</span>
+		    <span class="s0">set up [$w parent $up]</span>
+		<span class="s0">}</span>
+		<span class="s0">set focus $down</span>
+	    <span class="s0">}</span>
+	<span class="s0">}</span>
+	<span class="s0">left {</span>
+	    <span class="s0">if {[$w item $focus -open] &amp;&amp; [llength [$w children $focus]]} {</span>
+	    	<span class="s0">CloseItem $w $focus</span>
+	    <span class="s0">} else {</span>
+	    	<span class="s0">set focus [$w parent $focus]</span>
+	    <span class="s0">}</span>
+	<span class="s0">}</span>
+	<span class="s0">right {</span>
+	    <span class="s0">OpenItem $w $focus</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+
+    <span class="s0">if {$focus != {}} {</span>
+	<span class="s0">SelectOp $w $focus choose</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+
+<span class="s0">## Motion -- pointer motion binding.</span>
+<span class="s0">#	Sets cursor, active element ...</span>
+<span class="s0">#</span>
+<span class="s0">proc ttk::treeview::Motion {w x y} {</span>
+    <span class="s0">set cursor {}</span>
+    <span class="s0">set activeHeading {}</span>
+
+    <span class="s0">switch -- [$w identify region $x $y] {</span>
+	<span class="s0">separator { set cursor hresize }</span>
+	<span class="s0">heading { set activeHeading [$w identify column $x $y] }</span>
+    <span class="s0">}</span>
+
+    <span class="s0">ttk::setCursor $w $cursor</span>
+    <span class="s0">ActivateHeading $w $activeHeading</span>
+<span class="s0">}</span>
+
+<span class="s0">## ActivateHeading -- track active heading element</span>
+<span class="s0">#</span>
+<span class="s0">proc ttk::treeview::ActivateHeading {w heading} {</span>
+    <span class="s0">variable State</span>
+
+    <span class="s0">if {$w != $State(activeWidget) || $heading != $State(activeHeading)} {</span>
+	<span class="s0">if {$State(activeHeading) != {}} {</span>
+	    <span class="s0">$State(activeWidget) heading $State(activeHeading) state !active</span>
+	<span class="s0">}</span>
+	<span class="s0">if {$heading != {}} {</span>
+	    <span class="s0">$w heading $heading state active</span>
+	<span class="s0">}</span>
+	<span class="s0">set State(activeHeading) $heading</span>
+	<span class="s0">set State(activeWidget) $w</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+
+<span class="s0">## Select $w $x $y $selectop</span>
+<span class="s0">#	Binding procedure for selection operations.</span>
+<span class="s0">#	See &quot;Selection modes&quot;, below.</span>
+<span class="s0">#</span>
+<span class="s0">proc ttk::treeview::Select {w x y op} {</span>
+    <span class="s0">if {[set item [$w identify row $x $y]] ne &quot;&quot; } {</span>
+	<span class="s0">SelectOp $w $item $op</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+
+<span class="s0">## DoubleClick -- Double-ButtonPress-1 binding.</span>
+<span class="s0">#</span>
+<span class="s0">proc ttk::treeview::DoubleClick {w x y} {</span>
+    <span class="s0">if {[set row [$w identify row $x $y]] ne &quot;&quot;} {</span>
+	<span class="s0">Toggle $w $row</span>
+    <span class="s0">} else {</span>
+	<span class="s0">Press $w $x $y ;# perform single-click action</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+
+<span class="s0">## Press -- ButtonPress binding.</span>
+<span class="s0">#</span>
+<span class="s0">proc ttk::treeview::Press {w x y} {</span>
+    <span class="s0">focus $w</span>
+    <span class="s0">switch -- [$w identify region $x $y] {</span>
+	<span class="s0">nothing { }</span>
+	<span class="s0">heading { heading.press $w $x $y }</span>
+	<span class="s0">separator { resize.press $w $x $y }</span>
+	<span class="s0">tree -</span>
+	<span class="s0">cell {</span>
+	    <span class="s0">set item [$w identify item $x $y]</span>
+	    <span class="s0">SelectOp $w $item choose</span>
+	    <span class="s0">switch -glob -- [$w identify element $x $y] {</span>
+		<span class="s0">*indicator -</span>
+		<span class="s0">*disclosure { Toggle $w $item }</span>
+	    <span class="s0">}</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+
+<span class="s0">## Drag -- B1-Motion binding</span>
+<span class="s0">#</span>
+<span class="s0">proc ttk::treeview::Drag {w x y} {</span>
+    <span class="s0">variable State</span>
+    <span class="s0">switch $State(pressMode) {</span>
+	<span class="s0">resize	{ resize.drag $w $x }</span>
+	<span class="s0">heading	{ heading.drag $w $x $y }</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+
+<span class="s0">proc ttk::treeview::Release {w x y} {</span>
+    <span class="s0">variable State</span>
+    <span class="s0">switch $State(pressMode) {</span>
+	<span class="s0">resize	{ resize.release $w $x }</span>
+	<span class="s0">heading	{ heading.release $w }</span>
+    <span class="s0">}</span>
+    <span class="s0">set State(pressMode) none</span>
+    <span class="s0">Motion $w $x $y</span>
+<span class="s0">}</span>
+
+<span class="s0">### Interactive column resizing.</span>
+<span class="s0">#</span>
+<span class="s0">proc ttk::treeview::resize.press {w x y} {</span>
+    <span class="s0">variable State</span>
+    <span class="s0">set State(pressMode) &quot;resize&quot;</span>
+    <span class="s0">set State(resizeColumn) [$w identify column $x $y]</span>
+<span class="s0">}</span>
+
+<span class="s0">proc ttk::treeview::resize.drag {w x} {</span>
+    <span class="s0">variable State</span>
+    <span class="s0">$w drag $State(resizeColumn) $x</span>
+<span class="s0">}</span>
+
+<span class="s0">proc ttk::treeview::resize.release {w x} {</span>
+    <span class="s0"># no-op</span>
+<span class="s0">}</span>
+
+<span class="s0">### Heading activation.</span>
+<span class="s0">#</span>
+
+<span class="s0">proc ttk::treeview::heading.press {w x y} {</span>
+    <span class="s0">variable State</span>
+    <span class="s0">set column [$w identify column $x $y]</span>
+    <span class="s0">set State(pressMode) &quot;heading&quot;</span>
+    <span class="s0">set State(heading) $column</span>
+    <span class="s0">$w heading $column state pressed</span>
+<span class="s0">}</span>
+
+<span class="s0">proc ttk::treeview::heading.drag {w x y} {</span>
+    <span class="s0">variable State</span>
+    <span class="s0">if {   [$w identify region $x $y] eq &quot;heading&quot;</span>
+        <span class="s0">&amp;&amp; [$w identify column $x $y] eq $State(heading)</span>
+    <span class="s0">} {</span>
+    	<span class="s0">$w heading $State(heading) state pressed</span>
+    <span class="s0">} else {</span>
+    	<span class="s0">$w heading $State(heading) state !pressed</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+
+<span class="s0">proc ttk::treeview::heading.release {w} {</span>
+    <span class="s0">variable State</span>
+    <span class="s0">if {[lsearch -exact [$w heading $State(heading) state] pressed] &gt;= 0} {</span>
+	<span class="s0">after 0 [$w heading $State(heading) -command]</span>
+    <span class="s0">}</span>
+    <span class="s0">$w heading $State(heading) state !pressed</span>
+<span class="s0">}</span>
+
+<span class="s0">### Selection modes.</span>
+<span class="s0">#</span>
+
+<span class="s0">## SelectOp $w $item [ choose | extend | toggle ] --</span>
+<span class="s0">#	Dispatch to appropriate selection operation</span>
+<span class="s0">#	depending on current value of -selectmode.</span>
+<span class="s0">#</span>
+<span class="s0">proc ttk::treeview::SelectOp {w item op} {</span>
+    <span class="s0">select.$op.[$w cget -selectmode] $w $item</span>
+<span class="s0">}</span>
+
+<span class="s0">## -selectmode none:</span>
+<span class="s0">#</span>
+<span class="s0">proc ttk::treeview::select.choose.none {w item} { $w focus $item }</span>
+<span class="s0">proc ttk::treeview::select.toggle.none {w item} { $w focus $item }</span>
+<span class="s0">proc ttk::treeview::select.extend.none {w item} { $w focus $item }</span>
+
+<span class="s0">## -selectmode browse:</span>
+<span class="s0">#</span>
+<span class="s0">proc ttk::treeview::select.choose.browse {w item} { BrowseTo $w $item }</span>
+<span class="s0">proc ttk::treeview::select.toggle.browse {w item} { BrowseTo $w $item }</span>
+<span class="s0">proc ttk::treeview::select.extend.browse {w item} { BrowseTo $w $item }</span>
+
+<span class="s0">## -selectmode multiple:</span>
+<span class="s0">#</span>
+<span class="s0">proc ttk::treeview::select.choose.extended {w item} {</span>
+    <span class="s0">BrowseTo $w $item</span>
+<span class="s0">}</span>
+<span class="s0">proc ttk::treeview::select.toggle.extended {w item} {</span>
+    <span class="s0">$w selection toggle [list $item]</span>
+<span class="s0">}</span>
+<span class="s0">proc ttk::treeview::select.extend.extended {w item} {</span>
+    <span class="s0">if {[set anchor [$w focus]] ne &quot;&quot;} {</span>
+	<span class="s0">$w selection set [between $w $anchor $item]</span>
+    <span class="s0">} else {</span>
+    	<span class="s0">BrowseTo $w $item</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+
+<span class="s0">### Tree structure utilities.</span>
+<span class="s0">#</span>
+
+<span class="s0">## between $tv $item1 $item2 --</span>
+<span class="s0">#	Returns a list of all items between $item1 and $item2,</span>
+<span class="s0">#	in preorder traversal order.  $item1 and $item2 may be</span>
+<span class="s0">#	in either order.</span>
+<span class="s0">#</span>
+<span class="s0"># NOTES:</span>
+<span class="s0">#	This routine is O(N) in the size of the tree.</span>
+<span class="s0">#	There's probably a way to do this that's O(N) in the number</span>
+<span class="s0">#	of items returned, but I'm not clever enough to figure it out.</span>
+<span class="s0">#</span>
+<span class="s0">proc ttk::treeview::between {tv item1 item2} {</span>
+    <span class="s0">variable between [list]</span>
+    <span class="s0">variable selectingBetween 0</span>
+    <span class="s0">ScanBetween $tv $item1 $item2 {}</span>
+    <span class="s0">return $between</span>
+<span class="s0">}</span>
+
+<span class="s0">## ScanBetween --</span>
+<span class="s0">#	Recursive worker routine for ttk::treeview::between</span>
+<span class="s0">#</span>
+<span class="s0">proc ttk::treeview::ScanBetween {tv item1 item2 item} {</span>
+    <span class="s0">variable between</span>
+    <span class="s0">variable selectingBetween</span>
+
+    <span class="s0">if {$item eq $item1 || $item eq $item2} {</span>
+    	<span class="s0">lappend between $item</span>
+	<span class="s0">set selectingBetween [expr {!$selectingBetween}]</span>
+    <span class="s0">} elseif {$selectingBetween} {</span>
+    	<span class="s0">lappend between $item</span>
+    <span class="s0">}</span>
+    <span class="s0">foreach child [$tv children $item] {</span>
+	<span class="s0">ScanBetween $tv $item1 $item2 $child</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+
+<span class="s0">### User interaction utilities.</span>
+<span class="s0">#</span>
+
+<span class="s0">## OpenItem, CloseItem -- Set the open state of an item, generate event</span>
+<span class="s0">#</span>
+
+<span class="s0">proc ttk::treeview::OpenItem {w item} {</span>
+    <span class="s0">$w focus $item</span>
+    <span class="s0">event generate $w &lt;&lt;TreeviewOpen&gt;&gt;</span>
+    <span class="s0">$w item $item -open true</span>
+<span class="s0">}</span>
+
+<span class="s0">proc ttk::treeview::CloseItem {w item} {</span>
+    <span class="s0">$w item $item -open false</span>
+    <span class="s0">$w focus $item</span>
+    <span class="s0">event generate $w &lt;&lt;TreeviewClose&gt;&gt;</span>
+<span class="s0">}</span>
+
+<span class="s0">## Toggle -- toggle opened/closed state of item</span>
+<span class="s0">#</span>
+<span class="s0">proc ttk::treeview::Toggle {w item} {</span>
+    <span class="s0">if {[$w item $item -open]} {</span>
+	<span class="s0">CloseItem $w $item</span>
+    <span class="s0">} else {</span>
+	<span class="s0">OpenItem $w $item</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+
+<span class="s0">## ToggleFocus -- toggle opened/closed state of focus item</span>
+<span class="s0">#</span>
+<span class="s0">proc ttk::treeview::ToggleFocus {w} {</span>
+    <span class="s0">set item [$w focus]</span>
+    <span class="s0">if {$item ne &quot;&quot;} {</span>
+    	<span class="s0">Toggle $w $item</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+
+<span class="s0">## BrowseTo -- navigate to specified item; set focus and selection</span>
+<span class="s0">#</span>
+<span class="s0">proc ttk::treeview::BrowseTo {w item} {</span>
+    <span class="s0">$w see $item</span>
+    <span class="s0">$w focus $item</span>
+    <span class="s0">$w selection set [list $item]</span>
+<span class="s0">}</span>
+
+<span class="s0">#*EOF*</span>
+</pre>
+</body>
+</html>

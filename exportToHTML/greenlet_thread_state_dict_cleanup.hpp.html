@@ -1,0 +1,140 @@
+<html>
+<head>
+<title>greenlet_thread_state_dict_cleanup.hpp</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #cc7832;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #6a8759;}
+.s3 { color: #808080;}
+.s4 { color: #0f9795;}
+.s5 { color: #6897bb;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+greenlet_thread_state_dict_cleanup.hpp</font>
+</center></td></tr></table>
+<pre><span class="s0">#ifndef </span><span class="s1">GREENLET_THREAD_STATE_DICT_CLEANUP_HPP</span>
+<span class="s0">#define </span><span class="s1">GREENLET_THREAD_STATE_DICT_CLEANUP_HPP</span>
+
+<span class="s0">#include </span><span class="s2">&quot;greenlet_internal.hpp&quot;</span>
+<span class="s0">#include </span><span class="s2">&quot;greenlet_thread_state.hpp&quot;</span>
+
+<span class="s0">#ifdef </span><span class="s1">__clang__</span>
+<span class="s1">#    pragma clang diagnostic push</span>
+<span class="s1">#    pragma clang diagnostic ignored </span><span class="s2">&quot;-Wmissing-field-initializers&quot;</span>
+<span class="s0">#endif</span>
+
+<span class="s0">#ifndef </span><span class="s1">G_THREAD_STATE_DICT_CLEANUP_TYPE</span>
+<span class="s3">// shut the compiler up if it looks at this file in isolation</span>
+<span class="s0">#define </span><span class="s1">ThreadStateCreator </span><span class="s0">int</span>
+<span class="s0">#endif</span>
+
+<span class="s3">// Define a Python object that goes in the Python thread state dict</span>
+<span class="s3">// when the greenlet thread state is created, and which owns the</span>
+<span class="s3">// reference to the greenlet thread local state.</span>
+<span class="s3">// When the thread state dict is cleaned up, so too is the thread</span>
+<span class="s3">// state. This works best if we make sure there are no circular</span>
+<span class="s3">// references to the thread state.</span>
+<span class="s0">typedef struct </span><span class="s1">_PyGreenletCleanup {</span>
+    <span class="s1">PyObject_HEAD</span>
+    <span class="s1">ThreadStateCreator* thread_state_creator;</span>
+<span class="s1">} PyGreenletCleanup;</span>
+
+<span class="s0">static void</span>
+<span class="s1">cleanup_do_dealloc(PyGreenletCleanup* self)</span>
+<span class="s1">{</span>
+    <span class="s1">ThreadStateCreator* tmp = self</span><span class="s4">-&gt;</span><span class="s1">thread_state_creator;</span>
+    <span class="s1">self</span><span class="s4">-&gt;</span><span class="s1">thread_state_creator = nullptr;</span>
+    <span class="s0">if </span><span class="s1">(tmp) {</span>
+        <span class="s0">delete </span><span class="s1">tmp;</span>
+    <span class="s1">}</span>
+<span class="s1">}</span>
+
+<span class="s0">static void</span>
+<span class="s1">cleanup_dealloc(PyGreenletCleanup* self)</span>
+<span class="s1">{</span>
+    <span class="s1">PyObject_GC_UnTrack(self);</span>
+    <span class="s1">cleanup_do_dealloc(self);</span>
+<span class="s1">}</span>
+
+<span class="s0">static int</span>
+<span class="s1">cleanup_clear(PyGreenletCleanup* self)</span>
+<span class="s1">{</span>
+    <span class="s3">// This method is never called by our test cases.</span>
+    <span class="s1">cleanup_do_dealloc(self);</span>
+    <span class="s0">return </span><span class="s5">0</span><span class="s1">;</span>
+<span class="s1">}</span>
+
+<span class="s0">static int</span>
+<span class="s1">cleanup_traverse(PyGreenletCleanup* self, visitproc visit, </span><span class="s0">void</span><span class="s1">* arg)</span>
+<span class="s1">{</span>
+    <span class="s0">if </span><span class="s1">(self</span><span class="s4">-&gt;</span><span class="s1">thread_state_creator) {</span>
+        <span class="s0">return </span><span class="s1">self</span><span class="s4">-&gt;</span><span class="s1">thread_state_creator</span><span class="s4">-&gt;</span><span class="s1">tp_traverse(visit, arg);</span>
+    <span class="s1">}</span>
+    <span class="s0">return </span><span class="s5">0</span><span class="s1">;</span>
+<span class="s1">}</span>
+
+<span class="s0">static int</span>
+<span class="s1">cleanup_is_gc(PyGreenlet* UNUSED(self))</span>
+<span class="s1">{</span>
+    <span class="s0">return </span><span class="s5">1</span><span class="s1">;</span>
+<span class="s1">}</span>
+
+<span class="s0">static </span><span class="s1">PyTypeObject PyGreenletCleanup_Type = {</span>
+    <span class="s1">PyVarObject_HEAD_INIT(NULL, </span><span class="s5">0</span><span class="s1">)</span>
+    <span class="s2">&quot;greenlet._greenlet.ThreadStateCleanup&quot;</span><span class="s1">,</span>
+    <span class="s0">sizeof</span><span class="s1">(</span><span class="s0">struct </span><span class="s1">_PyGreenletCleanup),</span>
+    <span class="s5">0</span><span class="s1">,                   </span><span class="s3">/* tp_itemsize */</span>
+    <span class="s3">/* methods */</span>
+    <span class="s1">(destructor)cleanup_dealloc, </span><span class="s3">/* tp_dealloc */</span>
+    <span class="s5">0</span><span class="s1">,                         </span><span class="s3">/* tp_print */</span>
+    <span class="s5">0</span><span class="s1">,                         </span><span class="s3">/* tp_getattr */</span>
+    <span class="s5">0</span><span class="s1">,                         </span><span class="s3">/* tp_setattr */</span>
+    <span class="s5">0</span><span class="s1">,                         </span><span class="s3">/* tp_compare */</span>
+    <span class="s5">0</span><span class="s1">,                         </span><span class="s3">/* tp_repr */</span>
+    <span class="s5">0</span><span class="s1">,                         </span><span class="s3">/* tp_as _number*/</span>
+    <span class="s5">0</span><span class="s1">,                         </span><span class="s3">/* tp_as _sequence*/</span>
+    <span class="s5">0</span><span class="s1">,                         </span><span class="s3">/* tp_as _mapping*/</span>
+    <span class="s5">0</span><span class="s1">,                         </span><span class="s3">/* tp_hash */</span>
+    <span class="s5">0</span><span class="s1">,                         </span><span class="s3">/* tp_call */</span>
+    <span class="s5">0</span><span class="s1">,                         </span><span class="s3">/* tp_str */</span>
+    <span class="s5">0</span><span class="s1">,                         </span><span class="s3">/* tp_getattro */</span>
+    <span class="s5">0</span><span class="s1">,                         </span><span class="s3">/* tp_setattro */</span>
+    <span class="s5">0</span><span class="s1">,                         </span><span class="s3">/* tp_as_buffer*/</span>
+    <span class="s1">G_TPFLAGS_DEFAULT | Py_TPFLAGS_BASETYPE, </span><span class="s3">/* tp_flags */</span>
+    <span class="s2">&quot;Internal use only&quot;</span><span class="s1">,                        </span><span class="s3">/* tp_doc */</span>
+    <span class="s1">(traverseproc)cleanup_traverse, </span><span class="s3">/* tp_traverse */</span>
+    <span class="s1">(inquiry)cleanup_clear,         </span><span class="s3">/* tp_clear */</span>
+    <span class="s5">0</span><span class="s1">,                                  </span><span class="s3">/* tp_richcompare */</span>
+    <span class="s3">// XXX: Don't our flags promise a weakref?</span>
+    <span class="s5">0</span><span class="s1">,                           </span><span class="s3">/* tp_weaklistoffset */</span>
+    <span class="s5">0</span><span class="s1">,                                  </span><span class="s3">/* tp_iter */</span>
+    <span class="s5">0</span><span class="s1">,                                  </span><span class="s3">/* tp_iternext */</span>
+    <span class="s5">0</span><span class="s1">,                      </span><span class="s3">/* tp_methods */</span>
+    <span class="s5">0</span><span class="s1">,                      </span><span class="s3">/* tp_members */</span>
+    <span class="s5">0</span><span class="s1">,                      </span><span class="s3">/* tp_getset */</span>
+    <span class="s5">0</span><span class="s1">,                                  </span><span class="s3">/* tp_base */</span>
+    <span class="s5">0</span><span class="s1">,                                  </span><span class="s3">/* tp_dict */</span>
+    <span class="s5">0</span><span class="s1">,                                  </span><span class="s3">/* tp_descr_get */</span>
+    <span class="s5">0</span><span class="s1">,                                  </span><span class="s3">/* tp_descr_set */</span>
+    <span class="s5">0</span><span class="s1">,         </span><span class="s3">/* tp_dictoffset */</span>
+    <span class="s5">0</span><span class="s1">,               </span><span class="s3">/* tp_init */</span>
+    <span class="s1">PyType_GenericAlloc,                  </span><span class="s3">/* tp_alloc */</span>
+    <span class="s1">PyType_GenericNew,                          </span><span class="s3">/* tp_new */</span>
+    <span class="s1">PyObject_GC_Del,                   </span><span class="s3">/* tp_free */</span>
+    <span class="s1">(inquiry)cleanup_is_gc,         </span><span class="s3">/* tp_is_gc */</span>
+<span class="s1">};</span>
+
+<span class="s0">#ifdef </span><span class="s1">__clang__</span>
+<span class="s1">#    pragma clang diagnostic pop</span>
+<span class="s0">#endif</span>
+
+
+<span class="s0">#endif</span>
+</pre>
+</body>
+</html>

@@ -1,0 +1,279 @@
+<html>
+<head>
+<title>safetk.tcl</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #a9b7c6;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+safetk.tcl</font>
+</center></td></tr></table>
+<pre><span class="s0"># safetk.tcl --</span>
+<span class="s0">#</span>
+<span class="s0"># Support procs to use Tk in safe interpreters.</span>
+<span class="s0">#</span>
+<span class="s0"># Copyright (c) 1997 Sun Microsystems, Inc.</span>
+<span class="s0">#</span>
+<span class="s0"># See the file &quot;license.terms&quot; for information on usage and redistribution</span>
+<span class="s0"># of this file, and for a DISCLAIMER OF ALL WARRANTIES.</span>
+
+<span class="s0"># see safetk.n for documentation</span>
+
+<span class="s0">#</span>
+<span class="s0">#</span>
+<span class="s0"># Note: It is now ok to let untrusted code being executed</span>
+<span class="s0">#       between the creation of the interp and the actual loading</span>
+<span class="s0">#       of Tk in that interp because the C side Tk_Init will</span>
+<span class="s0">#       now look up the master interp and ask its safe::TkInit</span>
+<span class="s0">#       for the actual parameters to use for it's initialization (if allowed),</span>
+<span class="s0">#       not relying on the slave state.</span>
+<span class="s0">#</span>
+
+<span class="s0"># We use opt (optional arguments parsing)</span>
+<span class="s0">package require opt 0.4.1;</span>
+
+<span class="s0">namespace eval ::safe {</span>
+
+    <span class="s0"># counter for safe toplevels</span>
+    <span class="s0">variable tkSafeId 0</span>
+<span class="s0">}</span>
+
+<span class="s0">#</span>
+<span class="s0"># tkInterpInit : prepare the slave interpreter for tk loading</span>
+<span class="s0">#                most of the real job is done by loadTk</span>
+<span class="s0"># returns the slave name (tkInterpInit does)</span>
+<span class="s0">#</span>
+<span class="s0">proc ::safe::tkInterpInit {slave argv} {</span>
+    <span class="s0">global env tk_library</span>
+
+    <span class="s0"># We have to make sure that the tk_library variable is normalized.</span>
+    <span class="s0">set tk_library [file normalize $tk_library]</span>
+
+    <span class="s0"># Clear Tk's access for that interp (path).</span>
+    <span class="s0">allowTk $slave $argv</span>
+
+    <span class="s0"># Ensure tk_library and subdirs (eg, ttk) are on the access path</span>
+    <span class="s0">::interp eval $slave [list set tk_library [::safe::interpAddToAccessPath $slave $tk_library]]</span>
+    <span class="s0">foreach subdir [::safe::AddSubDirs [list $tk_library]] {</span>
+	<span class="s0">::safe::interpAddToAccessPath $slave $subdir</span>
+    <span class="s0">}</span>
+    <span class="s0">return $slave</span>
+<span class="s0">}</span>
+
+
+<span class="s0"># tkInterpLoadTk:</span>
+<span class="s0"># Do additional configuration as needed (calling tkInterpInit)</span>
+<span class="s0"># and actually load Tk into the slave.</span>
+<span class="s0">#</span>
+<span class="s0"># Either contained in the specified windowId (-use) or</span>
+<span class="s0"># creating a decorated toplevel for it.</span>
+
+<span class="s0"># empty definition for auto_mkIndex</span>
+<span class="s0">proc ::safe::loadTk {} {}</span>
+
+<span class="s0">::tcl::OptProc ::safe::loadTk {</span>
+    <span class="s0">{slave -interp &quot;name of the slave interpreter&quot;}</span>
+    <span class="s0">{-use  -windowId {} &quot;window Id to use (new toplevel otherwise)&quot;}</span>
+    <span class="s0">{-display -displayName {} &quot;display name to use (current one otherwise)&quot;}</span>
+<span class="s0">} {</span>
+    <span class="s0">set displayGiven [::tcl::OptProcArgGiven &quot;-display&quot;]</span>
+    <span class="s0">if {!$displayGiven} {</span>
+	<span class="s0"># Try to get the current display from &quot;.&quot;</span>
+	<span class="s0"># (which might not exist if the master is tk-less)</span>
+	<span class="s0">if {[catch {set display [winfo screen .]}]} {</span>
+	    <span class="s0">if {[info exists ::env(DISPLAY)]} {</span>
+		<span class="s0">set display $::env(DISPLAY)</span>
+	    <span class="s0">} else {</span>
+		<span class="s0">Log $slave &quot;no winfo screen . nor env(DISPLAY)&quot; WARNING</span>
+		<span class="s0">set display &quot;:0.0&quot;</span>
+	    <span class="s0">}</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+
+    <span class="s0"># Get state for access to the cleanupHook.</span>
+    <span class="s0">namespace upvar ::safe S$slave state</span>
+
+    <span class="s0">if {![::tcl::OptProcArgGiven &quot;-use&quot;]} {</span>
+	<span class="s0"># create a decorated toplevel</span>
+	<span class="s0">lassign [tkTopLevel $slave $display] w use</span>
+
+	<span class="s0"># set our delete hook (slave arg is added by interpDelete)</span>
+	<span class="s0"># to clean up both window related code and tkInit(slave)</span>
+	<span class="s0">set state(cleanupHook) [list tkDelete {} $w]</span>
+    <span class="s0">} else {</span>
+	<span class="s0"># set our delete hook (slave arg is added by interpDelete)</span>
+	<span class="s0"># to clean up tkInit(slave)</span>
+	<span class="s0">set state(cleanupHook) [list disallowTk]</span>
+
+	<span class="s0"># Let's be nice and also accept tk window names instead of ids</span>
+	<span class="s0">if {[string match &quot;.*&quot; $use]} {</span>
+	    <span class="s0">set windowName $use</span>
+	    <span class="s0">set use [winfo id $windowName]</span>
+	    <span class="s0">set nDisplay [winfo screen $windowName]</span>
+	<span class="s0">} else {</span>
+	    <span class="s0"># Check for a better -display value</span>
+	    <span class="s0"># (works only for multi screens on single host, but not</span>
+	    <span class="s0">#  cross hosts, for that a tk window name would be better</span>
+	    <span class="s0">#  but embeding is also usefull for non tk names)</span>
+	    <span class="s0">if {![catch {winfo pathname $use} name]} {</span>
+		<span class="s0">set nDisplay [winfo screen $name]</span>
+	    <span class="s0">} else {</span>
+		<span class="s0"># Can't have a better one</span>
+		<span class="s0">set nDisplay $display</span>
+	    <span class="s0">}</span>
+	<span class="s0">}</span>
+	<span class="s0">if {$nDisplay ne $display} {</span>
+	    <span class="s0">if {$displayGiven} {</span>
+		<span class="s0">return -code error -errorcode {TK DISPLAY SAFE} \</span>
+		    <span class="s0">&quot;conflicting -display $display and -use $use -&gt; $nDisplay&quot;</span>
+	    <span class="s0">} else {</span>
+		<span class="s0">set display $nDisplay</span>
+	    <span class="s0">}</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+
+    <span class="s0"># Prepares the slave for tk with those parameters</span>
+    <span class="s0">tkInterpInit $slave [list &quot;-use&quot; $use &quot;-display&quot; $display]</span>
+
+    <span class="s0">load {} Tk $slave</span>
+
+    <span class="s0">return $slave</span>
+<span class="s0">}</span>
+
+<span class="s0">proc ::safe::TkInit {interpPath} {</span>
+    <span class="s0">variable tkInit</span>
+    <span class="s0">if {[info exists tkInit($interpPath)]} {</span>
+	<span class="s0">set value $tkInit($interpPath)</span>
+	<span class="s0">Log $interpPath &quot;TkInit called, returning \&quot;$value\&quot;&quot; NOTICE</span>
+	<span class="s0">return $value</span>
+    <span class="s0">} else {</span>
+	<span class="s0">Log $interpPath &quot;TkInit called for interp with clearance:\</span>
+		<span class="s0">preventing Tk init&quot; ERROR</span>
+	<span class="s0">return -code error -errorcode {TK SAFE PERMISSION} &quot;not allowed&quot;</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+
+<span class="s0"># safe::allowTk --</span>
+<span class="s0">#</span>
+<span class="s0">#	Set tkInit(interpPath) to allow Tk to be initialized in</span>
+<span class="s0">#	safe::TkInit.</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0">#	interpPath	slave interpreter handle</span>
+<span class="s0">#	argv		arguments passed to safe::TkInterpInit</span>
+<span class="s0">#</span>
+<span class="s0"># Results:</span>
+<span class="s0">#	none.</span>
+
+<span class="s0">proc ::safe::allowTk {interpPath argv} {</span>
+    <span class="s0">variable tkInit</span>
+    <span class="s0">set tkInit($interpPath) $argv</span>
+    <span class="s0">return</span>
+<span class="s0">}</span>
+
+
+<span class="s0"># safe::disallowTk --</span>
+<span class="s0">#</span>
+<span class="s0">#	Unset tkInit(interpPath) to disallow Tk from getting initialized</span>
+<span class="s0">#	in safe::TkInit.</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0">#	interpPath	slave interpreter handle</span>
+<span class="s0">#</span>
+<span class="s0"># Results:</span>
+<span class="s0">#	none.</span>
+
+<span class="s0">proc ::safe::disallowTk {interpPath} {</span>
+    <span class="s0">variable tkInit</span>
+    <span class="s0"># This can already be deleted by the DeleteHook of the interp</span>
+    <span class="s0">if {[info exists tkInit($interpPath)]} {</span>
+	<span class="s0">unset tkInit($interpPath)</span>
+    <span class="s0">}</span>
+    <span class="s0">return</span>
+<span class="s0">}</span>
+
+
+<span class="s0"># safe::tkDelete --</span>
+<span class="s0">#</span>
+<span class="s0">#	Clean up the window associated with the interp being deleted.</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0">#	interpPath	slave interpreter handle</span>
+<span class="s0">#</span>
+<span class="s0"># Results:</span>
+<span class="s0">#	none.</span>
+
+<span class="s0">proc ::safe::tkDelete {W window slave} {</span>
+
+    <span class="s0"># we are going to be called for each widget... skip untill it's</span>
+    <span class="s0"># top level</span>
+
+    <span class="s0">Log $slave &quot;Called tkDelete $W $window&quot; NOTICE</span>
+    <span class="s0">if {[::interp exists $slave]} {</span>
+	<span class="s0">if {[catch {::safe::interpDelete $slave} msg]} {</span>
+	    <span class="s0">Log $slave &quot;Deletion error : $msg&quot;</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+    <span class="s0">if {[winfo exists $window]} {</span>
+	<span class="s0">Log $slave &quot;Destroy toplevel $window&quot; NOTICE</span>
+	<span class="s0">destroy $window</span>
+    <span class="s0">}</span>
+
+    <span class="s0"># clean up tkInit(slave)</span>
+    <span class="s0">disallowTk $slave</span>
+    <span class="s0">return</span>
+<span class="s0">}</span>
+
+<span class="s0">proc ::safe::tkTopLevel {slave display} {</span>
+    <span class="s0">variable tkSafeId</span>
+    <span class="s0">incr tkSafeId</span>
+    <span class="s0">set w &quot;.safe$tkSafeId&quot;</span>
+    <span class="s0">if {[catch {toplevel $w -screen $display -class SafeTk} msg]} {</span>
+	<span class="s0">return -code error -errorcode {TK TOPLEVEL SAFE} \</span>
+	    <span class="s0">&quot;Unable to create toplevel for safe slave \&quot;$slave\&quot; ($msg)&quot;</span>
+    <span class="s0">}</span>
+    <span class="s0">Log $slave &quot;New toplevel $w&quot; NOTICE</span>
+
+    <span class="s0">set msg &quot;Untrusted Tcl applet ($slave)&quot;</span>
+    <span class="s0">wm title $w $msg</span>
+
+    <span class="s0"># Control frame (we must create a style for it)</span>
+    <span class="s0">ttk::style layout TWarningFrame {WarningFrame.border -sticky nswe}</span>
+    <span class="s0">ttk::style configure TWarningFrame -background red</span>
+
+    <span class="s0">set wc $w.fc</span>
+    <span class="s0">ttk::frame $wc -relief ridge -borderwidth 4 -style TWarningFrame</span>
+
+    <span class="s0"># We will destroy the interp when the window is destroyed</span>
+    <span class="s0">bindtags $wc [concat Safe$wc [bindtags $wc]]</span>
+    <span class="s0">bind Safe$wc &lt;Destroy&gt; [list ::safe::tkDelete %W $w $slave]</span>
+
+    <span class="s0">ttk::label $wc.l -text $msg -anchor w</span>
+
+    <span class="s0"># We want the button to be the last visible item</span>
+    <span class="s0"># (so be packed first) and at the right and not resizing horizontally</span>
+
+    <span class="s0"># frame the button so it does not expand horizontally</span>
+    <span class="s0"># but still have the default background instead of red one from the parent</span>
+    <span class="s0">ttk::frame  $wc.fb -borderwidth 0</span>
+    <span class="s0">ttk::button $wc.fb.b -text &quot;Delete&quot; \</span>
+	    <span class="s0">-command [list ::safe::tkDelete $w $w $slave]</span>
+    <span class="s0">pack $wc.fb.b -side right -fill both</span>
+    <span class="s0">pack $wc.fb -side right -fill both -expand 1</span>
+    <span class="s0">pack $wc.l -side left -fill both -expand 1 -ipady 2</span>
+    <span class="s0">pack $wc -side bottom -fill x</span>
+
+    <span class="s0"># Container frame</span>
+    <span class="s0">frame $w.c -container 1</span>
+    <span class="s0">pack $w.c -fill both -expand 1</span>
+
+    <span class="s0"># return both the toplevel window name and the id to use for embedding</span>
+    <span class="s0">list $w [winfo id $w.c]</span>
+<span class="s0">}</span>
+</pre>
+</body>
+</html>

@@ -1,0 +1,88 @@
+<html>
+<head>
+<title>test__threading_monkey_in_thread.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #cc7832;}
+.s3 { color: #6a8759;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+test__threading_monkey_in_thread.py</font>
+</center></td></tr></table>
+<pre><span class="s0"># We can monkey-patch in a thread, but things don't work as expected.</span>
+<span class="s2">from </span><span class="s1">__future__ </span><span class="s2">import </span><span class="s1">print_function</span>
+
+<span class="s2">import </span><span class="s1">threading</span>
+<span class="s2">from </span><span class="s1">gevent </span><span class="s2">import </span><span class="s1">monkey</span>
+<span class="s2">import </span><span class="s1">gevent.testing </span><span class="s2">as </span><span class="s1">greentest</span>
+
+
+<span class="s2">class </span><span class="s1">Test(greentest.TestCase):</span>
+
+    <span class="s1">@greentest.ignores_leakcheck </span><span class="s0"># can't be run multiple times</span>
+    <span class="s2">def </span><span class="s1">test_patch_in_thread(self):</span>
+        <span class="s1">all_warnings = []</span>
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s1">get_ident = threading.get_ident</span>
+        <span class="s2">except </span><span class="s1">AttributeError:</span>
+            <span class="s1">get_ident = threading._get_ident</span>
+
+        <span class="s2">def </span><span class="s1">process_warnings(warnings):</span>
+            <span class="s1">all_warnings.extend(warnings)</span>
+        <span class="s1">monkey._process_warnings = process_warnings</span>
+
+        <span class="s1">current = threading.current_thread()</span>
+        <span class="s1">current_id = get_ident()</span>
+
+        <span class="s2">def </span><span class="s1">target():</span>
+            <span class="s1">tcurrent = threading.current_thread()</span>
+            <span class="s1">monkey.patch_all() </span><span class="s0"># pragma: testrunner-no-monkey-combine</span>
+            <span class="s1">tcurrent2 = threading.current_thread()</span>
+            <span class="s1">self.assertIsNot(tcurrent</span><span class="s2">, </span><span class="s1">current)</span>
+            <span class="s0"># We get a dummy thread now</span>
+            <span class="s1">self.assertIsNot(tcurrent</span><span class="s2">, </span><span class="s1">tcurrent2)</span>
+
+        <span class="s1">thread = threading.Thread(target=target)</span>
+        <span class="s1">thread.start()</span>
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s1">thread.join()</span>
+        <span class="s2">except</span><span class="s1">: </span><span class="s0"># pylint:disable=bare-except</span>
+            <span class="s0"># XXX: This can raise LoopExit in some cases.</span>
+            <span class="s1">greentest.reraiseFlakyTestRaceCondition()</span>
+
+        <span class="s1">self.assertNotIsInstance(current</span><span class="s2">, </span><span class="s1">threading._DummyThread)</span>
+        <span class="s1">self.assertIsInstance(current</span><span class="s2">, </span><span class="s1">monkey.get_original(</span><span class="s3">'threading'</span><span class="s2">, </span><span class="s3">'Thread'</span><span class="s1">))</span>
+
+
+        <span class="s0"># We generated some warnings</span>
+        <span class="s2">if </span><span class="s1">greentest.PY3:</span>
+            <span class="s1">self.assertEqual(</span>
+                <span class="s1">all_warnings</span><span class="s2">,</span>
+                <span class="s1">[</span><span class="s3">'Monkey-patching outside the main native thread. Some APIs will not be '</span>
+                 <span class="s3">'available. Expect a KeyError to be printed at shutdown.'</span><span class="s2">,</span>
+                 <span class="s3">'Monkey-patching not on the main thread; threading.main_thread().join() '</span>
+                 <span class="s3">'will hang from a greenlet'</span><span class="s1">])</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">self.assertEqual(</span>
+                <span class="s1">all_warnings</span><span class="s2">,</span>
+                <span class="s1">[</span><span class="s3">'Monkey-patching outside the main native thread. Some APIs will not be '</span>
+                 <span class="s3">'available. Expect a KeyError to be printed at shutdown.'</span><span class="s1">])</span>
+
+
+        <span class="s0"># Manual clean up so we don't get a KeyError</span>
+        <span class="s2">del </span><span class="s1">threading._active[current_id]</span>
+        <span class="s1">threading._active[(getattr(threading</span><span class="s2">, </span><span class="s3">'get_ident'</span><span class="s2">, None</span><span class="s1">) </span><span class="s2">or </span><span class="s1">threading._get_ident)()] = current</span>
+
+
+
+<span class="s2">if </span><span class="s1">__name__ == </span><span class="s3">'__main__'</span><span class="s1">:</span>
+    <span class="s1">greentest.main()</span>
+</pre>
+</body>
+</html>

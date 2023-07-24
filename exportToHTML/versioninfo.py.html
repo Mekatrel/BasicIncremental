@@ -1,0 +1,608 @@
+<html>
+<head>
+<title>versioninfo.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #cc7832;}
+.s3 { color: #629755; font-style: italic;}
+.s4 { color: #6897bb;}
+.s5 { color: #6a8759;}
+.s6 { color: #a5c261;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+versioninfo.py</font>
+</center></td></tr></table>
+<pre><span class="s0"># -*- coding: utf-8 -*-</span>
+<span class="s0">#-----------------------------------------------------------------------------</span>
+<span class="s0"># Copyright (c) 2013-2021, PyInstaller Development Team.</span>
+<span class="s0">#</span>
+<span class="s0"># Distributed under the terms of the GNU General Public License (version 2</span>
+<span class="s0"># or later) with exception for distributing the bootloader.</span>
+<span class="s0">#</span>
+<span class="s0"># The full license is in the file COPYING.txt, distributed with this software.</span>
+<span class="s0">#</span>
+<span class="s0"># SPDX-License-Identifier: (GPL-2.0-or-later WITH Bootloader-exception)</span>
+<span class="s0">#-----------------------------------------------------------------------------</span>
+
+<span class="s2">import </span><span class="s1">struct</span>
+
+<span class="s0"># ::TODO:: #1920 revert to using pypi version</span>
+<span class="s2">import </span><span class="s1">pefile</span>
+
+<span class="s2">from </span><span class="s1">PyInstaller.compat </span><span class="s2">import </span><span class="s1">win32api</span>
+
+
+<span class="s2">def </span><span class="s1">pefile_check_control_flow_guard(filename):</span>
+    <span class="s3">&quot;&quot;&quot; 
+    Checks if the specified PE file has CFG (Control Flow Guard) enabled. 
+ 
+    Parameters 
+    ---------- 
+    filename : str 
+        Path to the PE file to inspect. 
+ 
+    Returns 
+    ---------- 
+    bool 
+        True if file is a PE file with CFG enabled. False if CFG is not enabled or if file could not be processed using 
+        the pefile library. 
+    &quot;&quot;&quot;</span>
+    <span class="s2">try</span><span class="s1">:</span>
+        <span class="s1">pe = pefile.PE(filename</span><span class="s2">, </span><span class="s1">fast_load=</span><span class="s2">True</span><span class="s1">)</span>
+        <span class="s0"># https://docs.microsoft.com/en-us/windows/win32/debug/pe-format</span>
+        <span class="s0"># IMAGE_DLLCHARACTERISTICS_GUARD_CF = 0x4000</span>
+        <span class="s2">return </span><span class="s1">bool(pe.OPTIONAL_HEADER.DllCharacteristics &amp; </span><span class="s4">0x4000</span><span class="s1">)</span>
+    <span class="s2">except </span><span class="s1">Exception:</span>
+        <span class="s2">return False</span>
+
+
+<span class="s0"># Ensures no code from the executable is executed.</span>
+<span class="s1">LOAD_LIBRARY_AS_DATAFILE = </span><span class="s4">2</span>
+
+
+<span class="s2">def </span><span class="s1">getRaw(text):</span>
+    <span class="s3">&quot;&quot;&quot; 
+    Encodes text as UTF-16LE (Microsoft 'Unicode') for use in structs. 
+    &quot;&quot;&quot;</span>
+    <span class="s2">return </span><span class="s1">text.encode(</span><span class="s5">'UTF-16LE'</span><span class="s1">)</span>
+
+
+<span class="s2">def </span><span class="s1">decode(pathnm):</span>
+    <span class="s1">h = win32api.LoadLibraryEx(pathnm</span><span class="s2">, </span><span class="s4">0</span><span class="s2">, </span><span class="s1">LOAD_LIBRARY_AS_DATAFILE)</span>
+    <span class="s1">res = win32api.EnumResourceNames(h</span><span class="s2">, </span><span class="s1">pefile.RESOURCE_TYPE[</span><span class="s5">'RT_VERSION'</span><span class="s1">])</span>
+    <span class="s2">if not </span><span class="s1">len(res):</span>
+        <span class="s2">return None</span>
+    <span class="s1">data = win32api.LoadResource(h</span><span class="s2">, </span><span class="s1">pefile.RESOURCE_TYPE[</span><span class="s5">'RT_VERSION'</span><span class="s1">]</span><span class="s2">, </span><span class="s1">res[</span><span class="s4">0</span><span class="s1">])</span>
+    <span class="s1">vs = VSVersionInfo()</span>
+    <span class="s1">vs.fromRaw(data)</span>
+    <span class="s1">win32api.FreeLibrary(h)</span>
+    <span class="s2">return </span><span class="s1">vs</span>
+
+
+<span class="s2">def </span><span class="s1">nextDWord(offset):</span>
+    <span class="s3">&quot;&quot;&quot; 
+    Align `offset` to the next 4-byte boundary. 
+    &quot;&quot;&quot;</span>
+    <span class="s2">return </span><span class="s1">((offset + </span><span class="s4">3</span><span class="s1">) &gt;&gt; </span><span class="s4">2</span><span class="s1">) &lt;&lt; </span><span class="s4">2</span>
+
+
+<span class="s2">class </span><span class="s1">VSVersionInfo:</span>
+    <span class="s3">&quot;&quot;&quot; 
+    WORD  wLength;        // length of the VS_VERSION_INFO structure 
+    WORD  wValueLength;   // length of the Value member 
+    WORD  wType;          // 1 means text, 0 means binary 
+    WCHAR szKey[];        // Contains the Unicode string &quot;VS_VERSION_INFO&quot;. 
+    WORD  Padding1[]; 
+    VS_FIXEDFILEINFO Value; 
+    WORD  Padding2[]; 
+    WORD  Children[];     // zero or more StringFileInfo or VarFileInfo 
+                          // structures (or both) that are children of the 
+                          // current version structure. 
+    &quot;&quot;&quot;</span>
+    <span class="s2">def </span><span class="s1">__init__(self</span><span class="s2">, </span><span class="s1">ffi=</span><span class="s2">None, </span><span class="s1">kids=</span><span class="s2">None</span><span class="s1">):</span>
+        <span class="s1">self.ffi = ffi</span>
+        <span class="s1">self.kids = kids </span><span class="s2">or </span><span class="s1">[]</span>
+
+    <span class="s2">def </span><span class="s1">fromRaw(self</span><span class="s2">, </span><span class="s1">data):</span>
+        <span class="s1">i</span><span class="s2">, </span><span class="s1">(sublen</span><span class="s2">, </span><span class="s1">vallen</span><span class="s2">, </span><span class="s1">wType</span><span class="s2">, </span><span class="s1">nm) = parseCommon(data)</span>
+        <span class="s0">#vallen is length of the ffi, typ is 0, nm is 'VS_VERSION_INFO'.</span>
+        <span class="s1">i = nextDWord(i)</span>
+        <span class="s0"># Now a VS_FIXEDFILEINFO</span>
+        <span class="s1">self.ffi = FixedFileInfo()</span>
+        <span class="s1">j = self.ffi.fromRaw(data</span><span class="s2">, </span><span class="s1">i)</span>
+        <span class="s1">i = j</span>
+        <span class="s2">while </span><span class="s1">i &lt; sublen:</span>
+            <span class="s1">j = i</span>
+            <span class="s1">i</span><span class="s2">, </span><span class="s1">(csublen</span><span class="s2">, </span><span class="s1">cvallen</span><span class="s2">, </span><span class="s1">ctyp</span><span class="s2">, </span><span class="s1">nm) = parseCommon(data</span><span class="s2">, </span><span class="s1">i)</span>
+            <span class="s2">if </span><span class="s1">nm.strip() == </span><span class="s5">'StringFileInfo'</span><span class="s1">:</span>
+                <span class="s1">sfi = StringFileInfo()</span>
+                <span class="s1">k = sfi.fromRaw(csublen</span><span class="s2">, </span><span class="s1">cvallen</span><span class="s2">, </span><span class="s1">nm</span><span class="s2">, </span><span class="s1">data</span><span class="s2">, </span><span class="s1">i</span><span class="s2">, </span><span class="s1">j + csublen)</span>
+                <span class="s1">self.kids.append(sfi)</span>
+                <span class="s1">i = k</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s1">vfi = VarFileInfo()</span>
+                <span class="s1">k = vfi.fromRaw(csublen</span><span class="s2">, </span><span class="s1">cvallen</span><span class="s2">, </span><span class="s1">nm</span><span class="s2">, </span><span class="s1">data</span><span class="s2">, </span><span class="s1">i</span><span class="s2">, </span><span class="s1">j + csublen)</span>
+                <span class="s1">self.kids.append(vfi)</span>
+                <span class="s1">i = k</span>
+            <span class="s1">i = j + csublen</span>
+            <span class="s1">i = nextDWord(i)</span>
+        <span class="s2">return </span><span class="s1">i</span>
+
+    <span class="s2">def </span><span class="s1">toRaw(self):</span>
+        <span class="s1">raw_name = getRaw(</span><span class="s5">'VS_VERSION_INFO'</span><span class="s1">)</span>
+        <span class="s1">rawffi = self.ffi.toRaw()</span>
+        <span class="s1">vallen = len(rawffi)</span>
+        <span class="s1">typ = </span><span class="s4">0</span>
+        <span class="s1">sublen = </span><span class="s4">6 </span><span class="s1">+ len(raw_name) + </span><span class="s4">2</span>
+        <span class="s1">pad = </span><span class="s6">b''</span>
+        <span class="s2">if </span><span class="s1">sublen % </span><span class="s4">4</span><span class="s1">:</span>
+            <span class="s1">pad = </span><span class="s6">b'</span><span class="s2">\000\000</span><span class="s6">'</span>
+        <span class="s1">sublen = sublen + len(pad) + vallen</span>
+        <span class="s1">pad2 = </span><span class="s6">b''</span>
+        <span class="s2">if </span><span class="s1">sublen % </span><span class="s4">4</span><span class="s1">:</span>
+            <span class="s1">pad2 = </span><span class="s6">b'</span><span class="s2">\000\000</span><span class="s6">'</span>
+        <span class="s1">tmp = </span><span class="s6">b''</span><span class="s1">.join([kid.toRaw() </span><span class="s2">for </span><span class="s1">kid </span><span class="s2">in </span><span class="s1">self.kids])</span>
+        <span class="s1">sublen = sublen + len(pad2) + len(tmp)</span>
+        <span class="s2">return </span><span class="s1">struct.pack(</span><span class="s5">'hhh'</span><span class="s2">, </span><span class="s1">sublen</span><span class="s2">, </span><span class="s1">vallen</span><span class="s2">, </span><span class="s1">typ) + raw_name + </span><span class="s6">b'</span><span class="s2">\000\000</span><span class="s6">' </span><span class="s1">+ pad + rawffi + pad2 + tmp</span>
+
+    <span class="s2">def </span><span class="s1">__eq__(self</span><span class="s2">, </span><span class="s1">other):</span>
+        <span class="s2">return </span><span class="s1">self.toRaw() == other</span>
+
+    <span class="s2">def </span><span class="s1">__str__(self</span><span class="s2">, </span><span class="s1">indent=</span><span class="s5">''</span><span class="s1">):</span>
+        <span class="s1">indent = indent + </span><span class="s5">'  '</span>
+        <span class="s1">tmp = [kid.__str__(indent + </span><span class="s5">'  '</span><span class="s1">) </span><span class="s2">for </span><span class="s1">kid </span><span class="s2">in </span><span class="s1">self.kids]</span>
+        <span class="s1">tmp = </span><span class="s5">', </span><span class="s2">\n</span><span class="s5">'</span><span class="s1">.join(tmp)</span>
+        <span class="s2">return </span><span class="s5">'</span><span class="s2">\n</span><span class="s5">'</span><span class="s1">.join([</span>
+            <span class="s5">&quot;# UTF-8&quot;</span><span class="s2">,</span>
+            <span class="s5">&quot;#&quot;</span><span class="s2">,</span>
+            <span class="s5">&quot;# For more details about fixed file info 'ffi' see:&quot;</span><span class="s2">,</span>
+            <span class="s5">&quot;# http://msdn.microsoft.com/en-us/library/ms646997.aspx&quot;</span><span class="s2">,</span>
+            <span class="s5">&quot;VSVersionInfo(&quot;</span><span class="s2">,</span>
+            <span class="s1">indent + </span><span class="s5">f&quot;ffi=</span><span class="s2">{</span><span class="s1">self.ffi.__str__(indent)</span><span class="s2">}</span><span class="s5">,&quot;</span><span class="s2">,</span>
+            <span class="s1">indent + </span><span class="s5">&quot;kids=[&quot;</span><span class="s2">,</span>
+            <span class="s1">tmp</span><span class="s2">,</span>
+            <span class="s1">indent + </span><span class="s5">&quot;]&quot;</span><span class="s2">,</span>
+            <span class="s5">&quot;)&quot;</span><span class="s2">,</span>
+        <span class="s1">])</span>
+
+    <span class="s2">def </span><span class="s1">__repr__(self):</span>
+        <span class="s2">return </span><span class="s5">&quot;versioninfo.VSVersionInfo(ffi=%r, kids=%r)&quot; </span><span class="s1">% (self.ffi</span><span class="s2">, </span><span class="s1">self.kids)</span>
+
+
+<span class="s2">def </span><span class="s1">parseCommon(data</span><span class="s2">, </span><span class="s1">start=</span><span class="s4">0</span><span class="s1">):</span>
+    <span class="s1">i = start + </span><span class="s4">6</span>
+    <span class="s1">(wLength</span><span class="s2">, </span><span class="s1">wValueLength</span><span class="s2">, </span><span class="s1">wType) = struct.unpack(</span><span class="s5">'3h'</span><span class="s2">, </span><span class="s1">data[start:i])</span>
+    <span class="s1">i</span><span class="s2">, </span><span class="s1">text = parseUString(data</span><span class="s2">, </span><span class="s1">i</span><span class="s2">, </span><span class="s1">i + wLength)</span>
+    <span class="s2">return </span><span class="s1">i</span><span class="s2">, </span><span class="s1">(wLength</span><span class="s2">, </span><span class="s1">wValueLength</span><span class="s2">, </span><span class="s1">wType</span><span class="s2">, </span><span class="s1">text)</span>
+
+
+<span class="s2">def </span><span class="s1">parseUString(data</span><span class="s2">, </span><span class="s1">start</span><span class="s2">, </span><span class="s1">limit):</span>
+    <span class="s1">i = start</span>
+    <span class="s2">while </span><span class="s1">i &lt; limit:</span>
+        <span class="s2">if </span><span class="s1">data[i:i + </span><span class="s4">2</span><span class="s1">] == </span><span class="s6">b'</span><span class="s2">\000\000</span><span class="s6">'</span><span class="s1">:</span>
+            <span class="s2">break</span>
+        <span class="s1">i += </span><span class="s4">2</span>
+    <span class="s1">text = data[start:i].decode(</span><span class="s5">'UTF-16LE'</span><span class="s1">)</span>
+    <span class="s1">i += </span><span class="s4">2</span>
+    <span class="s2">return </span><span class="s1">i</span><span class="s2">, </span><span class="s1">text</span>
+
+
+<span class="s2">class </span><span class="s1">FixedFileInfo:</span>
+    <span class="s3">&quot;&quot;&quot; 
+    DWORD dwSignature;        //Contains the value 0xFEEFO4BD 
+    DWORD dwStrucVersion;     // binary version number of this structure. 
+                              // The high-order word of this member contains 
+                              // the major version number, and the low-order 
+                              // word contains the minor version number. 
+    DWORD dwFileVersionMS;    // most significant 32 bits of the file's binary 
+                              // version number 
+    DWORD dwFileVersionLS;    // 
+    DWORD dwProductVersionMS; // most significant 32 bits of the binary version 
+                              // number of the product with which this file was 
+                              // distributed 
+    DWORD dwProductVersionLS; // 
+    DWORD dwFileFlagsMask;    // bitmask that specifies the valid bits in 
+                              // dwFileFlags. A bit is valid only if it was 
+                              // defined when the file was created. 
+    DWORD dwFileFlags;        // VS_FF_DEBUG, VS_FF_PATCHED etc. 
+    DWORD dwFileOS;           // VOS_NT, VOS_WINDOWS32 etc. 
+    DWORD dwFileType;         // VFT_APP etc. 
+    DWORD dwFileSubtype;      // 0 unless VFT_DRV or VFT_FONT or VFT_VXD 
+    DWORD dwFileDateMS; 
+    DWORD dwFileDateLS; 
+    &quot;&quot;&quot;</span>
+    <span class="s2">def </span><span class="s1">__init__(</span>
+        <span class="s1">self</span><span class="s2">,</span>
+        <span class="s1">filevers=(</span><span class="s4">0</span><span class="s2">, </span><span class="s4">0</span><span class="s2">, </span><span class="s4">0</span><span class="s2">, </span><span class="s4">0</span><span class="s1">)</span><span class="s2">,</span>
+        <span class="s1">prodvers=(</span><span class="s4">0</span><span class="s2">, </span><span class="s4">0</span><span class="s2">, </span><span class="s4">0</span><span class="s2">, </span><span class="s4">0</span><span class="s1">)</span><span class="s2">,</span>
+        <span class="s1">mask=</span><span class="s4">0x3f</span><span class="s2">,</span>
+        <span class="s1">flags=</span><span class="s4">0x0</span><span class="s2">,</span>
+        <span class="s1">OS=</span><span class="s4">0x40004</span><span class="s2">,</span>
+        <span class="s1">fileType=</span><span class="s4">0x1</span><span class="s2">,</span>
+        <span class="s1">subtype=</span><span class="s4">0x0</span><span class="s2">,</span>
+        <span class="s1">date=(</span><span class="s4">0</span><span class="s2">, </span><span class="s4">0</span><span class="s1">)</span>
+    <span class="s1">):</span>
+        <span class="s1">self.sig = </span><span class="s4">0xfeef04bd</span>
+        <span class="s1">self.strucVersion = </span><span class="s4">0x10000</span>
+        <span class="s1">self.fileVersionMS = (filevers[</span><span class="s4">0</span><span class="s1">] &lt;&lt; </span><span class="s4">16</span><span class="s1">) | (filevers[</span><span class="s4">1</span><span class="s1">] &amp; </span><span class="s4">0xffff</span><span class="s1">)</span>
+        <span class="s1">self.fileVersionLS = (filevers[</span><span class="s4">2</span><span class="s1">] &lt;&lt; </span><span class="s4">16</span><span class="s1">) | (filevers[</span><span class="s4">3</span><span class="s1">] &amp; </span><span class="s4">0xffff</span><span class="s1">)</span>
+        <span class="s1">self.productVersionMS = (prodvers[</span><span class="s4">0</span><span class="s1">] &lt;&lt; </span><span class="s4">16</span><span class="s1">) | (prodvers[</span><span class="s4">1</span><span class="s1">] &amp; </span><span class="s4">0xffff</span><span class="s1">)</span>
+        <span class="s1">self.productVersionLS = (prodvers[</span><span class="s4">2</span><span class="s1">] &lt;&lt; </span><span class="s4">16</span><span class="s1">) | (prodvers[</span><span class="s4">3</span><span class="s1">] &amp; </span><span class="s4">0xffff</span><span class="s1">)</span>
+        <span class="s1">self.fileFlagsMask = mask</span>
+        <span class="s1">self.fileFlags = flags</span>
+        <span class="s1">self.fileOS = OS</span>
+        <span class="s1">self.fileType = fileType</span>
+        <span class="s1">self.fileSubtype = subtype</span>
+        <span class="s1">self.fileDateMS = date[</span><span class="s4">0</span><span class="s1">]</span>
+        <span class="s1">self.fileDateLS = date[</span><span class="s4">1</span><span class="s1">]</span>
+
+    <span class="s2">def </span><span class="s1">fromRaw(self</span><span class="s2">, </span><span class="s1">data</span><span class="s2">, </span><span class="s1">i):</span>
+        <span class="s1">(</span>
+            <span class="s1">self.sig</span><span class="s2">,</span>
+            <span class="s1">self.strucVersion</span><span class="s2">,</span>
+            <span class="s1">self.fileVersionMS</span><span class="s2">,</span>
+            <span class="s1">self.fileVersionLS</span><span class="s2">,</span>
+            <span class="s1">self.productVersionMS</span><span class="s2">,</span>
+            <span class="s1">self.productVersionLS</span><span class="s2">,</span>
+            <span class="s1">self.fileFlagsMask</span><span class="s2">,</span>
+            <span class="s1">self.fileFlags</span><span class="s2">,</span>
+            <span class="s1">self.fileOS</span><span class="s2">,</span>
+            <span class="s1">self.fileType</span><span class="s2">,</span>
+            <span class="s1">self.fileSubtype</span><span class="s2">,</span>
+            <span class="s1">self.fileDateMS</span><span class="s2">,</span>
+            <span class="s1">self.fileDateLS</span><span class="s2">,</span>
+        <span class="s1">) = struct.unpack(</span><span class="s5">'13L'</span><span class="s2">, </span><span class="s1">data[i:i + </span><span class="s4">52</span><span class="s1">])</span>
+        <span class="s2">return </span><span class="s1">i + </span><span class="s4">52</span>
+
+    <span class="s2">def </span><span class="s1">toRaw(self):</span>
+        <span class="s2">return </span><span class="s1">struct.pack(</span>
+            <span class="s5">'13L'</span><span class="s2">,</span>
+            <span class="s1">self.sig</span><span class="s2">,</span>
+            <span class="s1">self.strucVersion</span><span class="s2">,</span>
+            <span class="s1">self.fileVersionMS</span><span class="s2">,</span>
+            <span class="s1">self.fileVersionLS</span><span class="s2">,</span>
+            <span class="s1">self.productVersionMS</span><span class="s2">,</span>
+            <span class="s1">self.productVersionLS</span><span class="s2">,</span>
+            <span class="s1">self.fileFlagsMask</span><span class="s2">,</span>
+            <span class="s1">self.fileFlags</span><span class="s2">,</span>
+            <span class="s1">self.fileOS</span><span class="s2">,</span>
+            <span class="s1">self.fileType</span><span class="s2">,</span>
+            <span class="s1">self.fileSubtype</span><span class="s2">,</span>
+            <span class="s1">self.fileDateMS</span><span class="s2">,</span>
+            <span class="s1">self.fileDateLS</span><span class="s2">,</span>
+        <span class="s1">)</span>
+
+    <span class="s2">def </span><span class="s1">__eq__(self</span><span class="s2">, </span><span class="s1">other):</span>
+        <span class="s2">return </span><span class="s1">self.toRaw() == other</span>
+
+    <span class="s2">def </span><span class="s1">__str__(self</span><span class="s2">, </span><span class="s1">indent=</span><span class="s5">''</span><span class="s1">):</span>
+        <span class="s1">fv = (</span>
+            <span class="s1">self.fileVersionMS &gt;&gt; </span><span class="s4">16</span><span class="s2">, </span><span class="s1">self.fileVersionMS &amp; </span><span class="s4">0xffff</span><span class="s2">,</span>
+            <span class="s1">self.fileVersionLS &gt;&gt; </span><span class="s4">16</span><span class="s2">, </span><span class="s1">self.fileVersionLS &amp; </span><span class="s4">0xffff</span><span class="s2">,</span>
+        <span class="s1">)  </span><span class="s0"># yapf: disable</span>
+        <span class="s1">pv = (</span>
+            <span class="s1">self.productVersionMS &gt;&gt; </span><span class="s4">16</span><span class="s2">, </span><span class="s1">self.productVersionMS &amp; </span><span class="s4">0xffff</span><span class="s2">,</span>
+            <span class="s1">self.productVersionLS &gt;&gt; </span><span class="s4">16</span><span class="s2">, </span><span class="s1">self.productVersionLS &amp; </span><span class="s4">0xffff</span><span class="s2">,</span>
+        <span class="s1">)  </span><span class="s0"># yapf: disable</span>
+        <span class="s1">fd = (self.fileDateMS</span><span class="s2">, </span><span class="s1">self.fileDateLS)</span>
+        <span class="s1">tmp = [</span>
+            <span class="s5">'FixedFileInfo('</span><span class="s2">,</span>
+            <span class="s5">'# filevers and prodvers should be always a tuple with four items: (1, 2, 3, 4)'</span><span class="s2">,</span>
+            <span class="s5">'# Set not needed items to zero 0.'</span><span class="s2">,</span>
+            <span class="s5">'filevers=%s,' </span><span class="s1">% (fv</span><span class="s2">,</span><span class="s1">)</span><span class="s2">,</span>
+            <span class="s5">'prodvers=%s,' </span><span class="s1">% (pv</span><span class="s2">,</span><span class="s1">)</span><span class="s2">,</span>
+            <span class="s5">&quot;# Contains a bitmask that specifies the valid bits 'flags'r&quot;</span><span class="s2">,</span>
+            <span class="s5">'mask=%s,' </span><span class="s1">% hex(self.fileFlagsMask)</span><span class="s2">,</span>
+            <span class="s5">'# Contains a bitmask that specifies the Boolean attributes of the file.'</span><span class="s2">,</span>
+            <span class="s5">'flags=%s,' </span><span class="s1">% hex(self.fileFlags)</span><span class="s2">,</span>
+            <span class="s5">'# The operating system for which this file was designed.'</span><span class="s2">,</span>
+            <span class="s5">'# 0x4 - NT and there is no need to change it.'</span><span class="s2">,</span>
+            <span class="s5">'OS=%s,' </span><span class="s1">% hex(self.fileOS)</span><span class="s2">,</span>
+            <span class="s5">'# The general type of file.'</span><span class="s2">,</span>
+            <span class="s5">'# 0x1 - the file is an application.'</span><span class="s2">,</span>
+            <span class="s5">'fileType=%s,' </span><span class="s1">% hex(self.fileType)</span><span class="s2">,</span>
+            <span class="s5">'# The function of the file.'</span><span class="s2">,</span>
+            <span class="s5">'# 0x0 - the function is not defined for this fileType'</span><span class="s2">,</span>
+            <span class="s5">'subtype=%s,' </span><span class="s1">% hex(self.fileSubtype)</span><span class="s2">,</span>
+            <span class="s5">'# Creation date and time stamp.'</span><span class="s2">,</span>
+            <span class="s5">'date=%s' </span><span class="s1">% (fd</span><span class="s2">,</span><span class="s1">)</span><span class="s2">,</span>
+            <span class="s5">')'</span><span class="s2">,</span>
+        <span class="s1">]</span>
+        <span class="s2">return </span><span class="s5">f'</span><span class="s2">\n{</span><span class="s1">indent</span><span class="s2">}  </span><span class="s5">'</span><span class="s1">.join(tmp)</span>
+
+    <span class="s2">def </span><span class="s1">__repr__(self):</span>
+        <span class="s1">fv = (</span>
+            <span class="s1">self.fileVersionMS &gt;&gt; </span><span class="s4">16</span><span class="s2">, </span><span class="s1">self.fileVersionMS &amp; </span><span class="s4">0xffff</span><span class="s2">,</span>
+            <span class="s1">self.fileVersionLS &gt;&gt; </span><span class="s4">16</span><span class="s2">, </span><span class="s1">self.fileVersionLS &amp; </span><span class="s4">0xffff</span><span class="s2">,</span>
+        <span class="s1">)  </span><span class="s0"># yapf: disable</span>
+        <span class="s1">pv = (</span>
+            <span class="s1">self.productVersionMS &gt;&gt; </span><span class="s4">16</span><span class="s2">, </span><span class="s1">self.productVersionMS &amp; </span><span class="s4">0xffff</span><span class="s2">,</span>
+            <span class="s1">self.productVersionLS &gt;&gt; </span><span class="s4">16</span><span class="s2">, </span><span class="s1">self.productVersionLS &amp; </span><span class="s4">0xffff</span><span class="s2">,</span>
+        <span class="s1">)  </span><span class="s0"># yapf: disable</span>
+        <span class="s1">fd = (self.fileDateMS</span><span class="s2">, </span><span class="s1">self.fileDateLS)</span>
+        <span class="s2">return </span><span class="s1">(</span>
+            <span class="s5">'versioninfo.FixedFileInfo(filevers=%r, prodvers=%r, '</span>
+            <span class="s5">'mask=0x%x, flags=0x%x, OS=0x%x, '</span>
+            <span class="s5">'fileType=%r, subtype=0x%x, date=%r)' </span><span class="s1">%</span>
+            <span class="s1">(fv</span><span class="s2">, </span><span class="s1">pv</span><span class="s2">, </span><span class="s1">self.fileFlagsMask</span><span class="s2">, </span><span class="s1">self.fileFlags</span><span class="s2">, </span><span class="s1">self.fileOS</span><span class="s2">, </span><span class="s1">self.fileType</span><span class="s2">, </span><span class="s1">self.fileSubtype</span><span class="s2">, </span><span class="s1">fd)</span>
+        <span class="s1">)</span>
+
+
+<span class="s2">class </span><span class="s1">StringFileInfo(object):</span>
+    <span class="s3">&quot;&quot;&quot; 
+    WORD        wLength;      // length of the version resource 
+    WORD        wValueLength; // length of the Value member in the current 
+                              // VS_VERSION_INFO structure 
+    WORD        wType;        // 1 means text, 0 means binary 
+    WCHAR       szKey[];      // Contains the Unicode string 'StringFileInfo'. 
+    WORD        Padding[]; 
+    StringTable Children[];   // list of zero or more String structures 
+    &quot;&quot;&quot;</span>
+    <span class="s2">def </span><span class="s1">__init__(self</span><span class="s2">, </span><span class="s1">kids=</span><span class="s2">None</span><span class="s1">):</span>
+        <span class="s1">self.name = </span><span class="s5">'StringFileInfo'</span>
+        <span class="s1">self.kids = kids </span><span class="s2">or </span><span class="s1">[]</span>
+
+    <span class="s2">def </span><span class="s1">fromRaw(self</span><span class="s2">, </span><span class="s1">sublen</span><span class="s2">, </span><span class="s1">vallen</span><span class="s2">, </span><span class="s1">name</span><span class="s2">, </span><span class="s1">data</span><span class="s2">, </span><span class="s1">i</span><span class="s2">, </span><span class="s1">limit):</span>
+        <span class="s1">self.name = name</span>
+        <span class="s2">while </span><span class="s1">i &lt; limit:</span>
+            <span class="s1">st = StringTable()</span>
+            <span class="s1">j = st.fromRaw(data</span><span class="s2">, </span><span class="s1">i</span><span class="s2">, </span><span class="s1">limit)</span>
+            <span class="s1">self.kids.append(st)</span>
+            <span class="s1">i = j</span>
+        <span class="s2">return </span><span class="s1">i</span>
+
+    <span class="s2">def </span><span class="s1">toRaw(self):</span>
+        <span class="s1">raw_name = getRaw(self.name)</span>
+        <span class="s1">vallen = </span><span class="s4">0</span>
+        <span class="s1">typ = </span><span class="s4">1</span>
+        <span class="s1">sublen = </span><span class="s4">6 </span><span class="s1">+ len(raw_name) + </span><span class="s4">2</span>
+        <span class="s1">pad = </span><span class="s6">b''</span>
+        <span class="s2">if </span><span class="s1">sublen % </span><span class="s4">4</span><span class="s1">:</span>
+            <span class="s1">pad = </span><span class="s6">b'</span><span class="s2">\000\000</span><span class="s6">'</span>
+        <span class="s1">tmp = </span><span class="s6">b''</span><span class="s1">.join([kid.toRaw() </span><span class="s2">for </span><span class="s1">kid </span><span class="s2">in </span><span class="s1">self.kids])</span>
+        <span class="s1">sublen = sublen + len(pad) + len(tmp)</span>
+        <span class="s2">return </span><span class="s1">struct.pack(</span><span class="s5">'hhh'</span><span class="s2">, </span><span class="s1">sublen</span><span class="s2">, </span><span class="s1">vallen</span><span class="s2">, </span><span class="s1">typ) + raw_name + </span><span class="s6">b'</span><span class="s2">\000\000</span><span class="s6">' </span><span class="s1">+ pad + tmp</span>
+
+    <span class="s2">def </span><span class="s1">__eq__(self</span><span class="s2">, </span><span class="s1">other):</span>
+        <span class="s2">return </span><span class="s1">self.toRaw() == other</span>
+
+    <span class="s2">def </span><span class="s1">__str__(self</span><span class="s2">, </span><span class="s1">indent=</span><span class="s5">''</span><span class="s1">):</span>
+        <span class="s1">new_indent = indent + </span><span class="s5">'  '</span>
+        <span class="s1">tmp = </span><span class="s5">', </span><span class="s2">\n</span><span class="s5">'</span><span class="s1">.join(kid.__str__(new_indent) </span><span class="s2">for </span><span class="s1">kid </span><span class="s2">in </span><span class="s1">self.kids)</span>
+        <span class="s2">return </span><span class="s5">f'</span><span class="s2">{</span><span class="s1">indent</span><span class="s2">}</span><span class="s5">StringFileInfo(</span><span class="s2">\n{</span><span class="s1">new_indent</span><span class="s2">}</span><span class="s5">[</span><span class="s2">\n{</span><span class="s1">tmp</span><span class="s2">}\n{</span><span class="s1">new_indent</span><span class="s2">}</span><span class="s5">])'</span>
+
+    <span class="s2">def </span><span class="s1">__repr__(self):</span>
+        <span class="s2">return </span><span class="s5">'versioninfo.StringFileInfo(%r)' </span><span class="s1">% self.kids</span>
+
+
+<span class="s2">class </span><span class="s1">StringTable:</span>
+    <span class="s3">&quot;&quot;&quot; 
+    WORD   wLength; 
+    WORD   wValueLength; 
+    WORD   wType; 
+    WCHAR  szKey[]; 
+    String Children[];    // list of zero or more String structures. 
+    &quot;&quot;&quot;</span>
+    <span class="s2">def </span><span class="s1">__init__(self</span><span class="s2">, </span><span class="s1">name=</span><span class="s2">None, </span><span class="s1">kids=</span><span class="s2">None</span><span class="s1">):</span>
+        <span class="s1">self.name = name </span><span class="s2">or </span><span class="s5">''</span>
+        <span class="s1">self.kids = kids </span><span class="s2">or </span><span class="s1">[]</span>
+
+    <span class="s2">def </span><span class="s1">fromRaw(self</span><span class="s2">, </span><span class="s1">data</span><span class="s2">, </span><span class="s1">i</span><span class="s2">, </span><span class="s1">limit):</span>
+        <span class="s1">i</span><span class="s2">, </span><span class="s1">(cpsublen</span><span class="s2">, </span><span class="s1">cpwValueLength</span><span class="s2">, </span><span class="s1">cpwType</span><span class="s2">, </span><span class="s1">self.name) = parseCodePage(data</span><span class="s2">, </span><span class="s1">i</span><span class="s2">, </span><span class="s1">limit)  </span><span class="s0"># should be code page junk</span>
+        <span class="s1">i = nextDWord(i)</span>
+        <span class="s2">while </span><span class="s1">i &lt; limit:</span>
+            <span class="s1">ss = StringStruct()</span>
+            <span class="s1">j = ss.fromRaw(data</span><span class="s2">, </span><span class="s1">i</span><span class="s2">, </span><span class="s1">limit)</span>
+            <span class="s1">i = j</span>
+            <span class="s1">self.kids.append(ss)</span>
+            <span class="s1">i = nextDWord(i)</span>
+        <span class="s2">return </span><span class="s1">i</span>
+
+    <span class="s2">def </span><span class="s1">toRaw(self):</span>
+        <span class="s1">raw_name = getRaw(self.name)</span>
+        <span class="s1">vallen = </span><span class="s4">0</span>
+        <span class="s1">typ = </span><span class="s4">1</span>
+        <span class="s1">sublen = </span><span class="s4">6 </span><span class="s1">+ len(raw_name) + </span><span class="s4">2</span>
+        <span class="s1">tmp = []</span>
+        <span class="s2">for </span><span class="s1">kid </span><span class="s2">in </span><span class="s1">self.kids:</span>
+            <span class="s1">raw = kid.toRaw()</span>
+            <span class="s2">if </span><span class="s1">len(raw) % </span><span class="s4">4</span><span class="s1">:</span>
+                <span class="s1">raw = raw + </span><span class="s6">b'</span><span class="s2">\000\000</span><span class="s6">'</span>
+            <span class="s1">tmp.append(raw)</span>
+        <span class="s1">tmp = </span><span class="s6">b''</span><span class="s1">.join(tmp)</span>
+        <span class="s1">sublen += len(tmp)</span>
+        <span class="s2">return </span><span class="s1">struct.pack(</span><span class="s5">'hhh'</span><span class="s2">, </span><span class="s1">sublen</span><span class="s2">, </span><span class="s1">vallen</span><span class="s2">, </span><span class="s1">typ) + raw_name + </span><span class="s6">b'</span><span class="s2">\000\000</span><span class="s6">' </span><span class="s1">+ tmp</span>
+
+    <span class="s2">def </span><span class="s1">__eq__(self</span><span class="s2">, </span><span class="s1">other):</span>
+        <span class="s2">return </span><span class="s1">self.toRaw() == other</span>
+
+    <span class="s2">def </span><span class="s1">__str__(self</span><span class="s2">, </span><span class="s1">indent=</span><span class="s5">''</span><span class="s1">):</span>
+        <span class="s1">new_indent = indent + </span><span class="s5">'  '</span>
+        <span class="s1">tmp = (</span><span class="s5">',</span><span class="s2">\n</span><span class="s5">' </span><span class="s1">+ new_indent).join(str(kid) </span><span class="s2">for </span><span class="s1">kid </span><span class="s2">in </span><span class="s1">self.kids)</span>
+        <span class="s2">return </span><span class="s5">f&quot;</span><span class="s2">{</span><span class="s1">indent</span><span class="s2">}</span><span class="s5">StringTable(</span><span class="s2">\n{</span><span class="s1">new_indent</span><span class="s2">}</span><span class="s5">'</span><span class="s2">{</span><span class="s1">self.name</span><span class="s2">}</span><span class="s5">',</span><span class="s2">\n{</span><span class="s1">new_indent</span><span class="s2">}</span><span class="s5">[</span><span class="s2">{</span><span class="s1">tmp</span><span class="s2">}</span><span class="s5">])&quot;</span>
+
+    <span class="s2">def </span><span class="s1">__repr__(self):</span>
+        <span class="s2">return </span><span class="s5">'versioninfo.StringTable(%r, %r)' </span><span class="s1">% (self.name</span><span class="s2">, </span><span class="s1">self.kids)</span>
+
+
+<span class="s2">class </span><span class="s1">StringStruct:</span>
+    <span class="s3">&quot;&quot;&quot; 
+    WORD   wLength; 
+    WORD   wValueLength; 
+    WORD   wType; 
+    WCHAR  szKey[]; 
+    WORD   Padding[]; 
+    String Value[]; 
+    &quot;&quot;&quot;</span>
+    <span class="s2">def </span><span class="s1">__init__(self</span><span class="s2">, </span><span class="s1">name=</span><span class="s2">None, </span><span class="s1">val=</span><span class="s2">None</span><span class="s1">):</span>
+        <span class="s1">self.name = name </span><span class="s2">or </span><span class="s5">''</span>
+        <span class="s1">self.val = val </span><span class="s2">or </span><span class="s5">''</span>
+
+    <span class="s2">def </span><span class="s1">fromRaw(self</span><span class="s2">, </span><span class="s1">data</span><span class="s2">, </span><span class="s1">i</span><span class="s2">, </span><span class="s1">limit):</span>
+        <span class="s1">i</span><span class="s2">, </span><span class="s1">(sublen</span><span class="s2">, </span><span class="s1">vallen</span><span class="s2">, </span><span class="s1">typ</span><span class="s2">, </span><span class="s1">self.name) = parseCommon(data</span><span class="s2">, </span><span class="s1">i)</span>
+        <span class="s1">limit = i + sublen</span>
+        <span class="s1">i = nextDWord(i)</span>
+        <span class="s1">i</span><span class="s2">, </span><span class="s1">self.val = parseUString(data</span><span class="s2">, </span><span class="s1">i</span><span class="s2">, </span><span class="s1">limit)</span>
+        <span class="s2">return </span><span class="s1">i</span>
+
+    <span class="s2">def </span><span class="s1">toRaw(self):</span>
+        <span class="s1">raw_name = getRaw(self.name)</span>
+        <span class="s1">raw_val = getRaw(self.val)</span>
+        <span class="s0"># TODO: document the size of vallen and sublen.</span>
+        <span class="s1">vallen = len(self.val) + </span><span class="s4">1  </span><span class="s0"># Number of (wide-)characters, not bytes!</span>
+        <span class="s1">typ = </span><span class="s4">1</span>
+        <span class="s1">sublen = </span><span class="s4">6 </span><span class="s1">+ len(raw_name) + </span><span class="s4">2</span>
+        <span class="s1">pad = </span><span class="s6">b''</span>
+        <span class="s2">if </span><span class="s1">sublen % </span><span class="s4">4</span><span class="s1">:</span>
+            <span class="s1">pad = </span><span class="s6">b'</span><span class="s2">\000\000</span><span class="s6">'</span>
+        <span class="s1">sublen = sublen + len(pad) + (vallen * </span><span class="s4">2</span><span class="s1">)</span>
+        <span class="s2">return </span><span class="s1">struct.pack(</span><span class="s5">'hhh'</span><span class="s2">, </span><span class="s1">sublen</span><span class="s2">, </span><span class="s1">vallen</span><span class="s2">, </span><span class="s1">typ) + raw_name + </span><span class="s6">b'</span><span class="s2">\000\000</span><span class="s6">' </span><span class="s1">+ pad + raw_val + </span><span class="s6">b'</span><span class="s2">\000\000</span><span class="s6">'</span>
+
+    <span class="s2">def </span><span class="s1">__eq__(self</span><span class="s2">, </span><span class="s1">other):</span>
+        <span class="s2">return </span><span class="s1">self.toRaw() == other</span>
+
+    <span class="s2">def </span><span class="s1">__str__(self</span><span class="s2">, </span><span class="s1">indent=</span><span class="s5">''</span><span class="s1">):</span>
+        <span class="s2">return </span><span class="s5">&quot;StringStruct('%s', '%s')&quot; </span><span class="s1">% (self.name</span><span class="s2">, </span><span class="s1">self.val)</span>
+
+    <span class="s2">def </span><span class="s1">__repr__(self):</span>
+        <span class="s2">return </span><span class="s5">'versioninfo.StringStruct(%r, %r)' </span><span class="s1">% (self.name</span><span class="s2">, </span><span class="s1">self.val)</span>
+
+
+<span class="s2">def </span><span class="s1">parseCodePage(data</span><span class="s2">, </span><span class="s1">i</span><span class="s2">, </span><span class="s1">limit):</span>
+    <span class="s1">i</span><span class="s2">, </span><span class="s1">(sublen</span><span class="s2">, </span><span class="s1">wValueLength</span><span class="s2">, </span><span class="s1">wType</span><span class="s2">, </span><span class="s1">nm) = parseCommon(data</span><span class="s2">, </span><span class="s1">i)</span>
+    <span class="s2">return </span><span class="s1">i</span><span class="s2">, </span><span class="s1">(sublen</span><span class="s2">, </span><span class="s1">wValueLength</span><span class="s2">, </span><span class="s1">wType</span><span class="s2">, </span><span class="s1">nm)</span>
+
+
+<span class="s2">class </span><span class="s1">VarFileInfo:</span>
+    <span class="s3">&quot;&quot;&quot; 
+    WORD  wLength;        // length of the version resource 
+    WORD  wValueLength;   // length of the Value member in the current 
+                          // VS_VERSION_INFO structure 
+    WORD  wType;          // 1 means text, 0 means binary 
+    WCHAR szKey[];        // Contains the Unicode string 'VarFileInfo'. 
+    WORD  Padding[]; 
+    Var   Children[];     // list of zero or more Var structures 
+    &quot;&quot;&quot;</span>
+    <span class="s2">def </span><span class="s1">__init__(self</span><span class="s2">, </span><span class="s1">kids=</span><span class="s2">None</span><span class="s1">):</span>
+        <span class="s1">self.kids = kids </span><span class="s2">or </span><span class="s1">[]</span>
+
+    <span class="s2">def </span><span class="s1">fromRaw(self</span><span class="s2">, </span><span class="s1">sublen</span><span class="s2">, </span><span class="s1">vallen</span><span class="s2">, </span><span class="s1">name</span><span class="s2">, </span><span class="s1">data</span><span class="s2">, </span><span class="s1">i</span><span class="s2">, </span><span class="s1">limit):</span>
+        <span class="s1">self.sublen = sublen</span>
+        <span class="s1">self.vallen = vallen</span>
+        <span class="s1">self.name = name</span>
+        <span class="s1">i = nextDWord(i)</span>
+        <span class="s2">while </span><span class="s1">i &lt; limit:</span>
+            <span class="s1">vs = VarStruct()</span>
+            <span class="s1">j = vs.fromRaw(data</span><span class="s2">, </span><span class="s1">i</span><span class="s2">, </span><span class="s1">limit)</span>
+            <span class="s1">self.kids.append(vs)</span>
+            <span class="s1">i = j</span>
+        <span class="s2">return </span><span class="s1">i</span>
+
+    <span class="s2">def </span><span class="s1">toRaw(self):</span>
+        <span class="s1">self.vallen = </span><span class="s4">0</span>
+        <span class="s1">self.wType = </span><span class="s4">1</span>
+        <span class="s1">self.name = </span><span class="s5">'VarFileInfo'</span>
+        <span class="s1">raw_name = getRaw(self.name)</span>
+        <span class="s1">sublen = </span><span class="s4">6 </span><span class="s1">+ len(raw_name) + </span><span class="s4">2</span>
+        <span class="s1">pad = </span><span class="s6">b''</span>
+        <span class="s2">if </span><span class="s1">sublen % </span><span class="s4">4</span><span class="s1">:</span>
+            <span class="s1">pad = </span><span class="s6">b'</span><span class="s2">\000\000</span><span class="s6">'</span>
+        <span class="s1">tmp = </span><span class="s6">b''</span><span class="s1">.join([kid.toRaw() </span><span class="s2">for </span><span class="s1">kid </span><span class="s2">in </span><span class="s1">self.kids])</span>
+        <span class="s1">self.sublen = sublen + len(pad) + len(tmp)</span>
+        <span class="s2">return </span><span class="s1">struct.pack(</span><span class="s5">'hhh'</span><span class="s2">, </span><span class="s1">self.sublen</span><span class="s2">, </span><span class="s1">self.vallen</span><span class="s2">, </span><span class="s1">self.wType) + raw_name + </span><span class="s6">b'</span><span class="s2">\000\000</span><span class="s6">' </span><span class="s1">+ pad + tmp</span>
+
+    <span class="s2">def </span><span class="s1">__eq__(self</span><span class="s2">, </span><span class="s1">other):</span>
+        <span class="s2">return </span><span class="s1">self.toRaw() == other</span>
+
+    <span class="s2">def </span><span class="s1">__str__(self</span><span class="s2">, </span><span class="s1">indent=</span><span class="s5">''</span><span class="s1">):</span>
+        <span class="s2">return </span><span class="s1">indent + </span><span class="s5">&quot;VarFileInfo([%s])&quot; </span><span class="s1">% </span><span class="s5">', '</span><span class="s1">.join(str(kid) </span><span class="s2">for </span><span class="s1">kid </span><span class="s2">in </span><span class="s1">self.kids)</span>
+
+    <span class="s2">def </span><span class="s1">__repr__(self):</span>
+        <span class="s2">return </span><span class="s5">'versioninfo.VarFileInfo(%r)' </span><span class="s1">% self.kids</span>
+
+
+<span class="s2">class </span><span class="s1">VarStruct:</span>
+    <span class="s3">&quot;&quot;&quot; 
+    WORD  wLength;        // length of the version resource 
+    WORD  wValueLength;   // length of the Value member in the current 
+                          // VS_VERSION_INFO structure 
+    WORD  wType;          // 1 means text, 0 means binary 
+    WCHAR szKey[];        // Contains the Unicode string 'Translation' 
+                          // or a user-defined key string value 
+    WORD  Padding[];      // 
+    WORD  Value[];        // list of one or more values that are language 
+                          // and code-page identifiers 
+    &quot;&quot;&quot;</span>
+    <span class="s2">def </span><span class="s1">__init__(self</span><span class="s2">, </span><span class="s1">name=</span><span class="s2">None, </span><span class="s1">kids=</span><span class="s2">None</span><span class="s1">):</span>
+        <span class="s1">self.name = name </span><span class="s2">or </span><span class="s5">''</span>
+        <span class="s1">self.kids = kids </span><span class="s2">or </span><span class="s1">[]</span>
+
+    <span class="s2">def </span><span class="s1">fromRaw(self</span><span class="s2">, </span><span class="s1">data</span><span class="s2">, </span><span class="s1">i</span><span class="s2">, </span><span class="s1">limit):</span>
+        <span class="s1">i</span><span class="s2">, </span><span class="s1">(self.sublen</span><span class="s2">, </span><span class="s1">self.wValueLength</span><span class="s2">, </span><span class="s1">self.wType</span><span class="s2">, </span><span class="s1">self.name) = parseCommon(data</span><span class="s2">, </span><span class="s1">i)</span>
+        <span class="s1">i = nextDWord(i)</span>
+        <span class="s2">for </span><span class="s1">j </span><span class="s2">in </span><span class="s1">range(</span><span class="s4">0</span><span class="s2">, </span><span class="s1">self.wValueLength</span><span class="s2">, </span><span class="s4">2</span><span class="s1">):</span>
+            <span class="s1">kid = struct.unpack(</span><span class="s5">'h'</span><span class="s2">, </span><span class="s1">data[i:i + </span><span class="s4">2</span><span class="s1">])[</span><span class="s4">0</span><span class="s1">]</span>
+            <span class="s1">self.kids.append(kid)</span>
+            <span class="s1">i += </span><span class="s4">2</span>
+        <span class="s2">return </span><span class="s1">i</span>
+
+    <span class="s2">def </span><span class="s1">toRaw(self):</span>
+        <span class="s1">self.wValueLength = len(self.kids) * </span><span class="s4">2</span>
+        <span class="s1">self.wType = </span><span class="s4">0</span>
+        <span class="s1">raw_name = getRaw(self.name)</span>
+        <span class="s1">sublen = </span><span class="s4">6 </span><span class="s1">+ len(raw_name) + </span><span class="s4">2</span>
+        <span class="s1">pad = </span><span class="s6">b''</span>
+        <span class="s2">if </span><span class="s1">sublen % </span><span class="s4">4</span><span class="s1">:</span>
+            <span class="s1">pad = </span><span class="s6">b'</span><span class="s2">\000\000</span><span class="s6">'</span>
+        <span class="s1">self.sublen = sublen + len(pad) + self.wValueLength</span>
+        <span class="s1">tmp = </span><span class="s6">b''</span><span class="s1">.join([struct.pack(</span><span class="s5">'h'</span><span class="s2">, </span><span class="s1">kid) </span><span class="s2">for </span><span class="s1">kid </span><span class="s2">in </span><span class="s1">self.kids])</span>
+        <span class="s2">return </span><span class="s1">struct.pack(</span><span class="s5">'hhh'</span><span class="s2">, </span><span class="s1">self.sublen</span><span class="s2">, </span><span class="s1">self.wValueLength</span><span class="s2">, </span><span class="s1">self.wType) + raw_name + </span><span class="s6">b'</span><span class="s2">\000\000</span><span class="s6">' </span><span class="s1">+ pad + tmp</span>
+
+    <span class="s2">def </span><span class="s1">__eq__(self</span><span class="s2">, </span><span class="s1">other):</span>
+        <span class="s2">return </span><span class="s1">self.toRaw() == other</span>
+
+    <span class="s2">def </span><span class="s1">__str__(self</span><span class="s2">, </span><span class="s1">indent=</span><span class="s5">''</span><span class="s1">):</span>
+        <span class="s2">return </span><span class="s5">&quot;VarStruct('%s', %r)&quot; </span><span class="s1">% (self.name</span><span class="s2">, </span><span class="s1">self.kids)</span>
+
+    <span class="s2">def </span><span class="s1">__repr__(self):</span>
+        <span class="s2">return </span><span class="s5">'versioninfo.VarStruct(%r, %r)' </span><span class="s1">% (self.name</span><span class="s2">, </span><span class="s1">self.kids)</span>
+
+
+<span class="s2">def </span><span class="s1">SetVersion(exenm</span><span class="s2">, </span><span class="s1">versionfile):</span>
+    <span class="s2">if </span><span class="s1">isinstance(versionfile</span><span class="s2">, </span><span class="s1">VSVersionInfo):</span>
+        <span class="s1">vs = versionfile</span>
+    <span class="s2">else</span><span class="s1">:</span>
+        <span class="s0"># Read and parse the version file. It may have a byte order marker or encoding cookie - respect it if it does.</span>
+        <span class="s2">from </span><span class="s1">PyInstaller.utils.misc </span><span class="s2">import </span><span class="s1">decode</span>
+        <span class="s2">with </span><span class="s1">open(versionfile</span><span class="s2">, </span><span class="s5">'rb'</span><span class="s1">) </span><span class="s2">as </span><span class="s1">fp:</span>
+            <span class="s1">txt = decode(fp.read())</span>
+        <span class="s1">vs = eval(txt)</span>
+
+    <span class="s0"># Remember overlay</span>
+    <span class="s1">pe = pefile.PE(exenm</span><span class="s2">, </span><span class="s1">fast_load=</span><span class="s2">True</span><span class="s1">)</span>
+    <span class="s1">overlay_before = pe.get_overlay()</span>
+    <span class="s1">pe.close()</span>
+
+    <span class="s1">hdst = win32api.BeginUpdateResource(exenm</span><span class="s2">, </span><span class="s4">0</span><span class="s1">)</span>
+    <span class="s1">win32api.UpdateResource(hdst</span><span class="s2">, </span><span class="s1">pefile.RESOURCE_TYPE[</span><span class="s5">'RT_VERSION'</span><span class="s1">]</span><span class="s2">, </span><span class="s4">1</span><span class="s2">, </span><span class="s1">vs.toRaw())</span>
+    <span class="s1">win32api.EndUpdateResource(hdst</span><span class="s2">, </span><span class="s4">0</span><span class="s1">)</span>
+
+    <span class="s2">if </span><span class="s1">overlay_before:</span>
+        <span class="s0"># Check if the overlay is still present</span>
+        <span class="s1">pe = pefile.PE(exenm</span><span class="s2">, </span><span class="s1">fast_load=</span><span class="s2">True</span><span class="s1">)</span>
+        <span class="s1">overlay_after = pe.get_overlay()</span>
+        <span class="s1">pe.close()</span>
+
+        <span class="s0"># If the update removed the overlay data, re-append it</span>
+        <span class="s2">if not </span><span class="s1">overlay_after:</span>
+            <span class="s2">with </span><span class="s1">open(exenm</span><span class="s2">, </span><span class="s5">'ab'</span><span class="s1">) </span><span class="s2">as </span><span class="s1">exef:</span>
+                <span class="s1">exef.write(overlay_before)</span>
+</pre>
+</body>
+</html>

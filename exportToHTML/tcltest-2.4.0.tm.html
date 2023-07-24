@@ -1,0 +1,3437 @@
+<html>
+<head>
+<title>tcltest-2.4.0.tm</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #a9b7c6;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+tcltest-2.4.0.tm</font>
+</center></td></tr></table>
+<pre><span class="s0"># tcltest.tcl --</span>
+<span class="s0">#</span>
+<span class="s0">#	This file contains support code for the Tcl test suite.  It</span>
+<span class="s0">#       defines the tcltest namespace and finds and defines the output</span>
+<span class="s0">#       directory, constraints available, output and error channels,</span>
+<span class="s0">#	etc. used by Tcl tests.  See the tcltest man page for more</span>
+<span class="s0">#	details.</span>
+<span class="s0">#</span>
+<span class="s0">#       This design was based on the Tcl testing approach designed and</span>
+<span class="s0">#       initially implemented by Mary Ann May-Pumphrey of Sun</span>
+<span class="s0">#	Microsystems.</span>
+<span class="s0">#</span>
+<span class="s0"># Copyright (c) 1994-1997 Sun Microsystems, Inc.</span>
+<span class="s0"># Copyright (c) 1998-1999 by Scriptics Corporation.</span>
+<span class="s0"># Copyright (c) 2000 by Ajuba Solutions</span>
+<span class="s0"># Contributions from Don Porter, NIST, 2002.  (not subject to US copyright)</span>
+<span class="s0"># All rights reserved.</span>
+
+<span class="s0">package require Tcl 8.5		;# -verbose line uses [info frame]</span>
+<span class="s0">namespace eval tcltest {</span>
+
+    <span class="s0"># When the version number changes, be sure to update the pkgIndex.tcl file,</span>
+    <span class="s0"># and the install directory in the Makefiles.  When the minor version</span>
+    <span class="s0"># changes (new feature) be sure to update the man page as well.</span>
+    <span class="s0">variable Version 2.4.0</span>
+
+    <span class="s0"># Compatibility support for dumb variables defined in tcltest 1</span>
+    <span class="s0"># Do not use these.  Call [package provide Tcl] and [info patchlevel]</span>
+    <span class="s0"># yourself.  You don't need tcltest to wrap it for you.</span>
+    <span class="s0">variable version [package provide Tcl]</span>
+    <span class="s0">variable patchLevel [info patchlevel]</span>
+
+<span class="s0">##### Export the public tcltest procs; several categories</span>
+    <span class="s0">#</span>
+    <span class="s0"># Export the main functional commands that do useful things</span>
+    <span class="s0">namespace export cleanupTests loadTestedCommands makeDirectory \</span>
+	<span class="s0">makeFile removeDirectory removeFile runAllTests test</span>
+
+    <span class="s0"># Export configuration commands that control the functional commands</span>
+    <span class="s0">namespace export configure customMatch errorChannel interpreter \</span>
+	    <span class="s0">outputChannel testConstraint</span>
+
+    <span class="s0"># Export commands that are duplication (candidates for deprecation)</span>
+    <span class="s0">namespace export bytestring		;# dups [encoding convertfrom identity]</span>
+    <span class="s0">namespace export debug		;#	[configure -debug]</span>
+    <span class="s0">namespace export errorFile		;#	[configure -errfile]</span>
+    <span class="s0">namespace export limitConstraints	;#	[configure -limitconstraints]</span>
+    <span class="s0">namespace export loadFile		;#	[configure -loadfile]</span>
+    <span class="s0">namespace export loadScript		;#	[configure -load]</span>
+    <span class="s0">namespace export match		;#	[configure -match]</span>
+    <span class="s0">namespace export matchFiles		;#	[configure -file]</span>
+    <span class="s0">namespace export matchDirectories	;#	[configure -relateddir]</span>
+    <span class="s0">namespace export normalizeMsg	;#	application of [customMatch]</span>
+    <span class="s0">namespace export normalizePath	;#	[file normalize] (8.4)</span>
+    <span class="s0">namespace export outputFile		;#	[configure -outfile]</span>
+    <span class="s0">namespace export preserveCore	;#	[configure -preservecore]</span>
+    <span class="s0">namespace export singleProcess	;#	[configure -singleproc]</span>
+    <span class="s0">namespace export skip		;#	[configure -skip]</span>
+    <span class="s0">namespace export skipFiles		;#	[configure -notfile]</span>
+    <span class="s0">namespace export skipDirectories	;#	[configure -asidefromdir]</span>
+    <span class="s0">namespace export temporaryDirectory	;#	[configure -tmpdir]</span>
+    <span class="s0">namespace export testsDirectory	;#	[configure -testdir]</span>
+    <span class="s0">namespace export verbose		;#	[configure -verbose]</span>
+    <span class="s0">namespace export viewFile		;#	binary encoding [read]</span>
+    <span class="s0">namespace export workingDirectory	;#	[cd] [pwd]</span>
+
+    <span class="s0"># Export deprecated commands for tcltest 1 compatibility</span>
+    <span class="s0">namespace export getMatchingFiles mainThread restoreState saveState \</span>
+	    <span class="s0">threadReap</span>
+
+    <span class="s0"># tcltest::normalizePath --</span>
+    <span class="s0">#</span>
+    <span class="s0">#     This procedure resolves any symlinks in the path thus creating</span>
+    <span class="s0">#     a path without internal redirection. It assumes that the</span>
+    <span class="s0">#     incoming path is absolute.</span>
+    <span class="s0">#</span>
+    <span class="s0"># Arguments</span>
+    <span class="s0">#     pathVar - name of variable containing path to modify.</span>
+    <span class="s0">#</span>
+    <span class="s0"># Results</span>
+    <span class="s0">#     The path is modified in place.</span>
+    <span class="s0">#</span>
+    <span class="s0"># Side Effects:</span>
+    <span class="s0">#     None.</span>
+    <span class="s0">#</span>
+    <span class="s0">proc normalizePath {pathVar} {</span>
+	<span class="s0">upvar 1 $pathVar path</span>
+	<span class="s0">set oldpwd [pwd]</span>
+	<span class="s0">catch {cd $path}</span>
+	<span class="s0">set path [pwd]</span>
+	<span class="s0">cd $oldpwd</span>
+	<span class="s0">return $path</span>
+    <span class="s0">}</span>
+
+<span class="s0">##### Verification commands used to test values of variables and options</span>
+    <span class="s0">#</span>
+    <span class="s0"># Verification command that accepts everything</span>
+    <span class="s0">proc AcceptAll {value} {</span>
+	<span class="s0">return $value</span>
+    <span class="s0">}</span>
+
+    <span class="s0"># Verification command that accepts valid Tcl lists</span>
+    <span class="s0">proc AcceptList { list } {</span>
+	<span class="s0">return [lrange $list 0 end]</span>
+    <span class="s0">}</span>
+
+    <span class="s0"># Verification command that accepts a glob pattern</span>
+    <span class="s0">proc AcceptPattern { pattern } {</span>
+	<span class="s0">return [AcceptAll $pattern]</span>
+    <span class="s0">}</span>
+
+    <span class="s0"># Verification command that accepts integers</span>
+    <span class="s0">proc AcceptInteger { level } {</span>
+	<span class="s0">return [incr level 0]</span>
+    <span class="s0">}</span>
+
+    <span class="s0"># Verification command that accepts boolean values</span>
+    <span class="s0">proc AcceptBoolean { boolean } {</span>
+	<span class="s0">return [expr {$boolean &amp;&amp; $boolean}]</span>
+    <span class="s0">}</span>
+
+    <span class="s0"># Verification command that accepts (syntactically) valid Tcl scripts</span>
+    <span class="s0">proc AcceptScript { script } {</span>
+	<span class="s0">if {![info complete $script]} {</span>
+	    <span class="s0">return -code error &quot;invalid Tcl script: $script&quot;</span>
+	<span class="s0">}</span>
+	<span class="s0">return $script</span>
+    <span class="s0">}</span>
+
+    <span class="s0"># Verification command that accepts (converts to) absolute pathnames</span>
+    <span class="s0">proc AcceptAbsolutePath { path } {</span>
+	<span class="s0">return [file join [pwd] $path]</span>
+    <span class="s0">}</span>
+
+    <span class="s0"># Verification command that accepts existing readable directories</span>
+    <span class="s0">proc AcceptReadable { path } {</span>
+	<span class="s0">if {![file readable $path]} {</span>
+	    <span class="s0">return -code error &quot;\&quot;$path\&quot; is not readable&quot;</span>
+	<span class="s0">}</span>
+	<span class="s0">return $path</span>
+    <span class="s0">}</span>
+    <span class="s0">proc AcceptDirectory { directory } {</span>
+	<span class="s0">set directory [AcceptAbsolutePath $directory]</span>
+	<span class="s0">if {![file exists $directory]} {</span>
+	    <span class="s0">return -code error &quot;\&quot;$directory\&quot; does not exist&quot;</span>
+	<span class="s0">}</span>
+	<span class="s0">if {![file isdir $directory]} {</span>
+	    <span class="s0">return -code error &quot;\&quot;$directory\&quot; is not a directory&quot;</span>
+	<span class="s0">}</span>
+	<span class="s0">return [AcceptReadable $directory]</span>
+    <span class="s0">}</span>
+
+<span class="s0">##### Initialize internal arrays of tcltest, but only if the caller</span>
+    <span class="s0"># has not already pre-initialized them.  This is done to support</span>
+    <span class="s0"># compatibility with older tests that directly access internals</span>
+    <span class="s0"># rather than go through command interfaces.</span>
+    <span class="s0">#</span>
+    <span class="s0">proc ArrayDefault {varName value} {</span>
+	<span class="s0">variable $varName</span>
+	<span class="s0">if {[array exists $varName]} {</span>
+	    <span class="s0">return</span>
+	<span class="s0">}</span>
+	<span class="s0">if {[info exists $varName]} {</span>
+	    <span class="s0"># Pre-initialized value is a scalar: destroy it!</span>
+	    <span class="s0">unset $varName</span>
+	<span class="s0">}</span>
+	<span class="s0">array set $varName $value</span>
+    <span class="s0">}</span>
+
+    <span class="s0"># save the original environment so that it can be restored later</span>
+    <span class="s0">ArrayDefault originalEnv [array get ::env]</span>
+
+    <span class="s0"># initialize numTests array to keep track of the number of tests</span>
+    <span class="s0"># that pass, fail, and are skipped.</span>
+    <span class="s0">ArrayDefault numTests [list Total 0 Passed 0 Skipped 0 Failed 0]</span>
+
+    <span class="s0"># createdNewFiles will store test files as indices and the list of</span>
+    <span class="s0"># files (that should not have been) left behind by the test files</span>
+    <span class="s0"># as values.</span>
+    <span class="s0">ArrayDefault createdNewFiles {}</span>
+
+    <span class="s0"># initialize skippedBecause array to keep track of constraints that</span>
+    <span class="s0"># kept tests from running; a constraint name of &quot;userSpecifiedSkip&quot;</span>
+    <span class="s0"># means that the test appeared on the list of tests that matched the</span>
+    <span class="s0"># -skip value given to the flag; &quot;userSpecifiedNonMatch&quot; means that</span>
+    <span class="s0"># the test didn't match the argument given to the -match flag; both</span>
+    <span class="s0"># of these constraints are counted only if tcltest::debug is set to</span>
+    <span class="s0"># true.</span>
+    <span class="s0">ArrayDefault skippedBecause {}</span>
+
+    <span class="s0"># initialize the testConstraints array to keep track of valid</span>
+    <span class="s0"># predefined constraints (see the explanation for the</span>
+    <span class="s0"># InitConstraints proc for more details).</span>
+    <span class="s0">ArrayDefault testConstraints {}</span>
+
+<span class="s0">##### Initialize internal variables of tcltest, but only if the caller</span>
+    <span class="s0"># has not already pre-initialized them.  This is done to support</span>
+    <span class="s0"># compatibility with older tests that directly access internals</span>
+    <span class="s0"># rather than go through command interfaces.</span>
+    <span class="s0">#</span>
+    <span class="s0">proc Default {varName value {verify AcceptAll}} {</span>
+	<span class="s0">variable $varName</span>
+	<span class="s0">if {![info exists $varName]} {</span>
+	    <span class="s0">variable $varName [$verify $value]</span>
+	<span class="s0">} else {</span>
+	    <span class="s0">variable $varName [$verify [set $varName]]</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+
+    <span class="s0"># Save any arguments that we might want to pass through to other</span>
+    <span class="s0"># programs.  This is used by the -args flag.</span>
+    <span class="s0"># FINDUSER</span>
+    <span class="s0">Default parameters {}</span>
+
+    <span class="s0"># Count the number of files tested (0 if runAllTests wasn't called).</span>
+    <span class="s0"># runAllTests will set testSingleFile to false, so stats will</span>
+    <span class="s0"># not be printed until runAllTests calls the cleanupTests proc.</span>
+    <span class="s0"># The currentFailure var stores the boolean value of whether the</span>
+    <span class="s0"># current test file has had any failures.  The failFiles list</span>
+    <span class="s0"># stores the names of test files that had failures.</span>
+    <span class="s0">Default numTestFiles 0 AcceptInteger</span>
+    <span class="s0">Default testSingleFile true AcceptBoolean</span>
+    <span class="s0">Default currentFailure false AcceptBoolean</span>
+    <span class="s0">Default failFiles {} AcceptList</span>
+
+    <span class="s0"># Tests should remove all files they create.  The test suite will</span>
+    <span class="s0"># check the current working dir for files created by the tests.</span>
+    <span class="s0"># filesMade keeps track of such files created using the makeFile and</span>
+    <span class="s0"># makeDirectory procedures.  filesExisted stores the names of</span>
+    <span class="s0"># pre-existing files.</span>
+    <span class="s0">#</span>
+    <span class="s0"># Note that $filesExisted lists only those files that exist in</span>
+    <span class="s0"># the original [temporaryDirectory].</span>
+    <span class="s0">Default filesMade {} AcceptList</span>
+    <span class="s0">Default filesExisted {} AcceptList</span>
+    <span class="s0">proc FillFilesExisted {} {</span>
+	<span class="s0">variable filesExisted</span>
+
+	<span class="s0"># Save the names of files that already exist in the scratch directory.</span>
+	<span class="s0">foreach file [glob -nocomplain -directory [temporaryDirectory] *] {</span>
+	    <span class="s0">lappend filesExisted [file tail $file]</span>
+	<span class="s0">}</span>
+
+	<span class="s0"># After successful filling, turn this into a no-op.</span>
+	<span class="s0">proc FillFilesExisted args {}</span>
+    <span class="s0">}</span>
+
+    <span class="s0"># Kept only for compatibility</span>
+    <span class="s0">Default constraintsSpecified {} AcceptList</span>
+    <span class="s0">trace add variable constraintsSpecified read [namespace code {</span>
+	    <span class="s0">set constraintsSpecified [array names testConstraints] ;#}]</span>
+
+    <span class="s0"># tests that use threads need to know which is the main thread</span>
+    <span class="s0">Default mainThread 1</span>
+    <span class="s0">variable mainThread</span>
+    <span class="s0">if {[info commands thread::id] ne {}} {</span>
+	<span class="s0">set mainThread [thread::id]</span>
+    <span class="s0">} elseif {[info commands testthread] ne {}} {</span>
+	<span class="s0">set mainThread [testthread id]</span>
+    <span class="s0">}</span>
+
+    <span class="s0"># Set workingDirectory to [pwd]. The default output directory for</span>
+    <span class="s0"># Tcl tests is the working directory.  Whenever this value changes</span>
+    <span class="s0"># change to that directory.</span>
+    <span class="s0">variable workingDirectory</span>
+    <span class="s0">trace add variable workingDirectory write \</span>
+	    <span class="s0">[namespace code {cd $workingDirectory ;#}]</span>
+
+    <span class="s0">Default workingDirectory [pwd] AcceptAbsolutePath</span>
+    <span class="s0">proc workingDirectory { {dir &quot;&quot;} } {</span>
+	<span class="s0">variable workingDirectory</span>
+	<span class="s0">if {[llength [info level 0]] == 1} {</span>
+	    <span class="s0">return $workingDirectory</span>
+	<span class="s0">}</span>
+	<span class="s0">set workingDirectory [AcceptAbsolutePath $dir]</span>
+    <span class="s0">}</span>
+
+    <span class="s0"># Set the location of the execuatble</span>
+    <span class="s0">Default tcltest [info nameofexecutable]</span>
+    <span class="s0">trace add variable tcltest write [namespace code {testConstraint stdio \</span>
+	    <span class="s0">[eval [ConstraintInitializer stdio]] ;#}]</span>
+
+    <span class="s0"># save the platform information so it can be restored later</span>
+    <span class="s0">Default originalTclPlatform [array get ::tcl_platform]</span>
+
+    <span class="s0"># If a core file exists, save its modification time.</span>
+    <span class="s0">if {[file exists [file join [workingDirectory] core]]} {</span>
+	<span class="s0">Default coreModTime \</span>
+		<span class="s0">[file mtime [file join [workingDirectory] core]]</span>
+    <span class="s0">}</span>
+
+    <span class="s0"># stdout and stderr buffers for use when we want to store them</span>
+    <span class="s0">Default outData {}</span>
+    <span class="s0">Default errData {}</span>
+
+    <span class="s0"># keep track of test level for nested test commands</span>
+    <span class="s0">variable testLevel 0</span>
+
+    <span class="s0"># the variables and procs that existed when saveState was called are</span>
+    <span class="s0"># stored in a variable of the same name</span>
+    <span class="s0">Default saveState {}</span>
+
+    <span class="s0"># Internationalization support -- used in [SetIso8859_1_Locale] and</span>
+    <span class="s0"># [RestoreLocale]. Those commands are used in cmdIL.test.</span>
+
+    <span class="s0">if {![info exists [namespace current]::isoLocale]} {</span>
+	<span class="s0">variable isoLocale fr</span>
+	<span class="s0">switch -- $::tcl_platform(platform) {</span>
+	    <span class="s0">&quot;unix&quot; {</span>
+
+		<span class="s0"># Try some 'known' values for some platforms:</span>
+
+		<span class="s0">switch -exact -- $::tcl_platform(os) {</span>
+		    <span class="s0">&quot;FreeBSD&quot; {</span>
+			<span class="s0">set isoLocale fr_FR.ISO_8859-1</span>
+		    <span class="s0">}</span>
+		    <span class="s0">HP-UX {</span>
+			<span class="s0">set isoLocale fr_FR.iso88591</span>
+		    <span class="s0">}</span>
+		    <span class="s0">Linux -</span>
+		    <span class="s0">IRIX {</span>
+			<span class="s0">set isoLocale fr</span>
+		    <span class="s0">}</span>
+		    <span class="s0">default {</span>
+
+			<span class="s0"># Works on SunOS 4 and Solaris, and maybe</span>
+			<span class="s0"># others...  Define it to something else on your</span>
+			<span class="s0"># system if you want to test those.</span>
+
+			<span class="s0">set isoLocale iso_8859_1</span>
+		    <span class="s0">}</span>
+		<span class="s0">}</span>
+	    <span class="s0">}</span>
+	    <span class="s0">&quot;windows&quot; {</span>
+		<span class="s0">set isoLocale French</span>
+	    <span class="s0">}</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+
+    <span class="s0">variable ChannelsWeOpened; array set ChannelsWeOpened {}</span>
+    <span class="s0"># output goes to stdout by default</span>
+    <span class="s0">Default outputChannel stdout</span>
+    <span class="s0">proc outputChannel { {filename &quot;&quot;} } {</span>
+	<span class="s0">variable outputChannel</span>
+	<span class="s0">variable ChannelsWeOpened</span>
+
+	<span class="s0"># This is very subtle and tricky, so let me try to explain.</span>
+	<span class="s0"># (Hopefully this longer comment will be clear when I come</span>
+	<span class="s0"># back in a few months, unlike its predecessor :) )</span>
+	<span class="s0">#</span>
+	<span class="s0"># The [outputChannel] command (and underlying variable) have to</span>
+	<span class="s0"># be kept in sync with the [configure -outfile] configuration</span>
+	<span class="s0"># option ( and underlying variable Option(-outfile) ).  This is</span>
+	<span class="s0"># accomplished with a write trace on Option(-outfile) that will</span>
+	<span class="s0"># update [outputChannel] whenver a new value is written.  That</span>
+	<span class="s0"># much is easy.</span>
+	<span class="s0">#</span>
+	<span class="s0"># The trick is that in order to maintain compatibility with</span>
+	<span class="s0"># version 1 of tcltest, we must allow every configuration option</span>
+	<span class="s0"># to get its inital value from command line arguments.  This is</span>
+	<span class="s0"># accomplished by setting initial read traces on all the</span>
+	<span class="s0"># configuration options to parse the command line option the first</span>
+	<span class="s0"># time they are read.  These traces are cancelled whenever the</span>
+	<span class="s0"># program itself calls [configure].</span>
+	<span class="s0">#</span>
+	<span class="s0"># OK, then so to support tcltest 1 compatibility, it seems we want</span>
+	<span class="s0"># to get the return from [outputFile] to trigger the read traces,</span>
+	<span class="s0"># just in case.</span>
+	<span class="s0">#</span>
+	<span class="s0"># BUT!  A little known feature of Tcl variable traces is that</span>
+	<span class="s0"># traces are disabled during the handling of other traces.  So,</span>
+	<span class="s0"># if we trigger read traces on Option(-outfile) and that triggers</span>
+	<span class="s0"># command line parsing which turns around and sets an initial</span>
+	<span class="s0"># value for Option(-outfile) -- &lt;whew!&gt; -- the write trace that</span>
+	<span class="s0"># would keep [outputChannel] in sync with that new initial value</span>
+	<span class="s0"># would not fire!</span>
+	<span class="s0">#</span>
+	<span class="s0"># SO, finally, as a workaround, instead of triggering read traces</span>
+	<span class="s0"># by invoking [outputFile], we instead trigger the same set of</span>
+	<span class="s0"># read traces by invoking [debug].  Any command that reads a</span>
+	<span class="s0"># configuration option would do.  [debug] is just a handy one.</span>
+	<span class="s0"># The end result is that we support tcltest 1 compatibility and</span>
+	<span class="s0"># keep outputChannel and -outfile in sync in all cases.</span>
+	<span class="s0">debug</span>
+
+	<span class="s0">if {[llength [info level 0]] == 1} {</span>
+	    <span class="s0">return $outputChannel</span>
+	<span class="s0">}</span>
+	<span class="s0">if {[info exists ChannelsWeOpened($outputChannel)]} {</span>
+	    <span class="s0">close $outputChannel</span>
+	    <span class="s0">unset ChannelsWeOpened($outputChannel)</span>
+	<span class="s0">}</span>
+	<span class="s0">switch -exact -- $filename {</span>
+	    <span class="s0">stderr -</span>
+	    <span class="s0">stdout {</span>
+		<span class="s0">set outputChannel $filename</span>
+	    <span class="s0">}</span>
+	    <span class="s0">default {</span>
+		<span class="s0">set outputChannel [open $filename a]</span>
+		<span class="s0">set ChannelsWeOpened($outputChannel) 1</span>
+
+		<span class="s0"># If we created the file in [temporaryDirectory], then</span>
+		<span class="s0"># [cleanupTests] will delete it, unless we claim it was</span>
+		<span class="s0"># already there.</span>
+		<span class="s0">set outdir [normalizePath [file dirname \</span>
+			<span class="s0">[file join [pwd] $filename]]]</span>
+		<span class="s0">if {$outdir eq [temporaryDirectory]} {</span>
+		    <span class="s0">variable filesExisted</span>
+		    <span class="s0">FillFilesExisted</span>
+		    <span class="s0">set filename [file tail $filename]</span>
+		    <span class="s0">if {$filename ni $filesExisted} {</span>
+			<span class="s0">lappend filesExisted $filename</span>
+		    <span class="s0">}</span>
+		<span class="s0">}</span>
+	    <span class="s0">}</span>
+	<span class="s0">}</span>
+	<span class="s0">return $outputChannel</span>
+    <span class="s0">}</span>
+
+    <span class="s0"># errors go to stderr by default</span>
+    <span class="s0">Default errorChannel stderr</span>
+    <span class="s0">proc errorChannel { {filename &quot;&quot;} } {</span>
+	<span class="s0">variable errorChannel</span>
+	<span class="s0">variable ChannelsWeOpened</span>
+
+	<span class="s0"># This is subtle and tricky.  See the comment above in</span>
+	<span class="s0"># [outputChannel] for a detailed explanation.</span>
+	<span class="s0">debug</span>
+
+	<span class="s0">if {[llength [info level 0]] == 1} {</span>
+	    <span class="s0">return $errorChannel</span>
+	<span class="s0">}</span>
+	<span class="s0">if {[info exists ChannelsWeOpened($errorChannel)]} {</span>
+	    <span class="s0">close $errorChannel</span>
+	    <span class="s0">unset ChannelsWeOpened($errorChannel)</span>
+	<span class="s0">}</span>
+	<span class="s0">switch -exact -- $filename {</span>
+	    <span class="s0">stderr -</span>
+	    <span class="s0">stdout {</span>
+		<span class="s0">set errorChannel $filename</span>
+	    <span class="s0">}</span>
+	    <span class="s0">default {</span>
+		<span class="s0">set errorChannel [open $filename a]</span>
+		<span class="s0">set ChannelsWeOpened($errorChannel) 1</span>
+
+		<span class="s0"># If we created the file in [temporaryDirectory], then</span>
+		<span class="s0"># [cleanupTests] will delete it, unless we claim it was</span>
+		<span class="s0"># already there.</span>
+		<span class="s0">set outdir [normalizePath [file dirname \</span>
+			<span class="s0">[file join [pwd] $filename]]]</span>
+		<span class="s0">if {$outdir eq [temporaryDirectory]} {</span>
+		    <span class="s0">variable filesExisted</span>
+		    <span class="s0">FillFilesExisted</span>
+		    <span class="s0">set filename [file tail $filename]</span>
+		    <span class="s0">if {$filename ni $filesExisted} {</span>
+			<span class="s0">lappend filesExisted $filename</span>
+		    <span class="s0">}</span>
+		<span class="s0">}</span>
+	    <span class="s0">}</span>
+	<span class="s0">}</span>
+	<span class="s0">return $errorChannel</span>
+    <span class="s0">}</span>
+
+<span class="s0">##### Set up the configurable options</span>
+    <span class="s0">#</span>
+    <span class="s0"># The configurable options of the package</span>
+    <span class="s0">variable Option; array set Option {}</span>
+
+    <span class="s0"># Usage strings for those options</span>
+    <span class="s0">variable Usage; array set Usage {}</span>
+
+    <span class="s0"># Verification commands for those options</span>
+    <span class="s0">variable Verify; array set Verify {}</span>
+
+    <span class="s0"># Initialize the default values of the configurable options that are</span>
+    <span class="s0"># historically associated with an exported variable.  If that variable</span>
+    <span class="s0"># is already set, support compatibility by accepting its pre-set value.</span>
+    <span class="s0"># Use [trace] to establish ongoing connection between the deprecated</span>
+    <span class="s0"># exported variable and the modern option kept as a true internal var.</span>
+    <span class="s0"># Also set up usage string and value testing for the option.</span>
+    <span class="s0">proc Option {option value usage {verify AcceptAll} {varName {}}} {</span>
+	<span class="s0">variable Option</span>
+	<span class="s0">variable Verify</span>
+	<span class="s0">variable Usage</span>
+	<span class="s0">variable OptionControlledVariables</span>
+	<span class="s0">variable DefaultValue</span>
+	<span class="s0">set Usage($option) $usage</span>
+	<span class="s0">set Verify($option) $verify</span>
+	<span class="s0">set DefaultValue($option) $value</span>
+	<span class="s0">if {[catch {$verify $value} msg]} {</span>
+	    <span class="s0">return -code error $msg</span>
+	<span class="s0">} else {</span>
+	    <span class="s0">set Option($option) $msg</span>
+	<span class="s0">}</span>
+	<span class="s0">if {[string length $varName]} {</span>
+	    <span class="s0">variable $varName</span>
+	    <span class="s0">if {[info exists $varName]} {</span>
+		<span class="s0">if {[catch {$verify [set $varName]} msg]} {</span>
+		    <span class="s0">return -code error $msg</span>
+		<span class="s0">} else {</span>
+		    <span class="s0">set Option($option) $msg</span>
+		<span class="s0">}</span>
+		<span class="s0">unset $varName</span>
+	    <span class="s0">}</span>
+	    <span class="s0">namespace eval [namespace current] \</span>
+	    	    <span class="s0">[list upvar 0 Option($option) $varName]</span>
+	    <span class="s0"># Workaround for Bug (now Feature Request) 572889.  Grrrr....</span>
+	    <span class="s0"># Track all the variables tied to options</span>
+	    <span class="s0">lappend OptionControlledVariables $varName</span>
+	    <span class="s0"># Later, set auto-configure read traces on all</span>
+	    <span class="s0"># of them, since a single trace on Option does not work.</span>
+	    <span class="s0">proc $varName {{value {}}} [subst -nocommands {</span>
+		<span class="s0">if {[llength [info level 0]] == 2} {</span>
+		    <span class="s0">Configure $option [set value]</span>
+		<span class="s0">}</span>
+		<span class="s0">return [Configure $option]</span>
+	    <span class="s0">}]</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+
+    <span class="s0">proc MatchingOption {option} {</span>
+	<span class="s0">variable Option</span>
+	<span class="s0">set match [array names Option $option*]</span>
+	<span class="s0">switch -- [llength $match] {</span>
+	    <span class="s0">0 {</span>
+		<span class="s0">set sorted [lsort [array names Option]]</span>
+		<span class="s0">set values [join [lrange $sorted 0 end-1] &quot;, &quot;]</span>
+		<span class="s0">append values &quot;, or [lindex $sorted end]&quot;</span>
+		<span class="s0">return -code error &quot;unknown option $option: should be\</span>
+			<span class="s0">one of $values&quot;</span>
+	    <span class="s0">}</span>
+	    <span class="s0">1 {</span>
+		<span class="s0">return [lindex $match 0]</span>
+	    <span class="s0">}</span>
+	    <span class="s0">default {</span>
+		<span class="s0"># Exact match trumps ambiguity</span>
+		<span class="s0">if {$option in $match} {</span>
+		    <span class="s0">return $option</span>
+		<span class="s0">}</span>
+		<span class="s0">set values [join [lrange $match 0 end-1] &quot;, &quot;]</span>
+		<span class="s0">append values &quot;, or [lindex $match end]&quot;</span>
+		<span class="s0">return -code error &quot;ambiguous option $option:\</span>
+			<span class="s0">could match $values&quot;</span>
+	    <span class="s0">}</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+
+    <span class="s0">proc EstablishAutoConfigureTraces {} {</span>
+	<span class="s0">variable OptionControlledVariables</span>
+	<span class="s0">foreach varName [concat $OptionControlledVariables Option] {</span>
+	    <span class="s0">variable $varName</span>
+	    <span class="s0">trace add variable $varName read [namespace code {</span>
+		    <span class="s0">ProcessCmdLineArgs ;#}]</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+
+    <span class="s0">proc RemoveAutoConfigureTraces {} {</span>
+	<span class="s0">variable OptionControlledVariables</span>
+	<span class="s0">foreach varName [concat $OptionControlledVariables Option] {</span>
+	    <span class="s0">variable $varName</span>
+	    <span class="s0">foreach pair [trace info variable $varName] {</span>
+		<span class="s0">lassign $pair op cmd</span>
+		<span class="s0">if {($op eq &quot;read&quot;) &amp;&amp;</span>
+			<span class="s0">[string match *ProcessCmdLineArgs* $cmd]} {</span>
+		    <span class="s0">trace remove variable $varName $op $cmd</span>
+		<span class="s0">}</span>
+	    <span class="s0">}</span>
+	<span class="s0">}</span>
+	<span class="s0"># Once the traces are removed, this can become a no-op</span>
+	<span class="s0">proc RemoveAutoConfigureTraces {} {}</span>
+    <span class="s0">}</span>
+
+    <span class="s0">proc Configure args {</span>
+	<span class="s0">variable Option</span>
+	<span class="s0">variable Verify</span>
+	<span class="s0">set n [llength $args]</span>
+	<span class="s0">if {$n == 0} {</span>
+	    <span class="s0">return [lsort [array names Option]]</span>
+	<span class="s0">}</span>
+	<span class="s0">if {$n == 1} {</span>
+	    <span class="s0">if {[catch {MatchingOption [lindex $args 0]} option]} {</span>
+		<span class="s0">return -code error $option</span>
+	    <span class="s0">}</span>
+	    <span class="s0">return $Option($option)</span>
+	<span class="s0">}</span>
+	<span class="s0">while {[llength $args] &gt; 1} {</span>
+	    <span class="s0">if {[catch {MatchingOption [lindex $args 0]} option]} {</span>
+		<span class="s0">return -code error $option</span>
+	    <span class="s0">}</span>
+	    <span class="s0">if {[catch {$Verify($option) [lindex $args 1]} value]} {</span>
+		<span class="s0">return -code error &quot;invalid $option\</span>
+			<span class="s0">value \&quot;[lindex $args 1]\&quot;: $value&quot;</span>
+	    <span class="s0">}</span>
+	    <span class="s0">set Option($option) $value</span>
+	    <span class="s0">set args [lrange $args 2 end]</span>
+	<span class="s0">}</span>
+	<span class="s0">if {[llength $args]} {</span>
+	    <span class="s0">if {[catch {MatchingOption [lindex $args 0]} option]} {</span>
+		<span class="s0">return -code error $option</span>
+	    <span class="s0">}</span>
+	    <span class="s0">return -code error &quot;missing value for option $option&quot;</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+    <span class="s0">proc configure args {</span>
+	<span class="s0">if {[llength $args] &gt; 1} {</span>
+	    <span class="s0">RemoveAutoConfigureTraces</span>
+	<span class="s0">}</span>
+	<span class="s0">set code [catch {Configure {*}$args} msg]</span>
+	<span class="s0">return -code $code $msg</span>
+    <span class="s0">}</span>
+
+    <span class="s0">proc AcceptVerbose { level } {</span>
+	<span class="s0">set level [AcceptList $level]</span>
+	<span class="s0">set levelMap {</span>
+	    <span class="s0">l list</span>
+	    <span class="s0">p pass</span>
+	    <span class="s0">b body</span>
+	    <span class="s0">s skip</span>
+	    <span class="s0">t start</span>
+	    <span class="s0">e error</span>
+	    <span class="s0">l line</span>
+	    <span class="s0">m msec</span>
+	    <span class="s0">u usec</span>
+	<span class="s0">}</span>
+	<span class="s0">set levelRegexp &quot;^([join [dict values $levelMap] |])\$&quot;</span>
+	<span class="s0">if {[llength $level] == 1} {</span>
+	    <span class="s0">if {![regexp $levelRegexp $level]} {</span>
+		<span class="s0"># translate single characters abbreviations to expanded list</span>
+		<span class="s0">set level [string map $levelMap [split $level {}]]</span>
+	    <span class="s0">}</span>
+	<span class="s0">}</span>
+	<span class="s0">set valid [list]</span>
+	<span class="s0">foreach v $level {</span>
+	    <span class="s0">if {[regexp $levelRegexp $v]} {</span>
+		<span class="s0">lappend valid $v</span>
+	    <span class="s0">}</span>
+	<span class="s0">}</span>
+	<span class="s0">return $valid</span>
+    <span class="s0">}</span>
+
+    <span class="s0">proc IsVerbose {level} {</span>
+	<span class="s0">variable Option</span>
+	<span class="s0">return [expr {[lsearch -exact $Option(-verbose) $level] != -1}]</span>
+    <span class="s0">}</span>
+
+    <span class="s0"># Default verbosity is to show bodies of failed tests</span>
+    <span class="s0">Option -verbose {body error} {</span>
+	<span class="s0">Takes any combination of the values 'p', 's', 'b', 't', 'e' and 'l'.</span>
+	<span class="s0">Test suite will display all passed tests if 'p' is specified, all</span>
+	<span class="s0">skipped tests if 's' is specified, the bodies of failed tests if</span>
+	<span class="s0">'b' is specified, and when tests start if 't' is specified.</span>
+	<span class="s0">ErrorInfo is displayed if 'e' is specified. Source file line</span>
+	<span class="s0">information of failed tests is displayed if 'l' is specified.</span>
+    <span class="s0">} AcceptVerbose verbose</span>
+
+    <span class="s0"># Match and skip patterns default to the empty list, except for</span>
+    <span class="s0"># matchFiles, which defaults to all .test files in the</span>
+    <span class="s0"># testsDirectory and matchDirectories, which defaults to all</span>
+    <span class="s0"># directories.</span>
+    <span class="s0">Option -match * {</span>
+	<span class="s0">Run all tests within the specified files that match one of the</span>
+	<span class="s0">list of glob patterns given.</span>
+    <span class="s0">} AcceptList match</span>
+
+    <span class="s0">Option -skip {} {</span>
+	<span class="s0">Skip all tests within the specified tests (via -match) and files</span>
+	<span class="s0">that match one of the list of glob patterns given.</span>
+    <span class="s0">} AcceptList skip</span>
+
+    <span class="s0">Option -file *.test {</span>
+	<span class="s0">Run tests in all test files that match the glob pattern given.</span>
+    <span class="s0">} AcceptPattern matchFiles</span>
+
+    <span class="s0"># By default, skip files that appear to be SCCS lock files.</span>
+    <span class="s0">Option -notfile l.*.test {</span>
+	<span class="s0">Skip all test files that match the glob pattern given.</span>
+    <span class="s0">} AcceptPattern skipFiles</span>
+
+    <span class="s0">Option -relateddir * {</span>
+	<span class="s0">Run tests in directories that match the glob pattern given.</span>
+    <span class="s0">} AcceptPattern matchDirectories</span>
+
+    <span class="s0">Option -asidefromdir {} {</span>
+	<span class="s0">Skip tests in directories that match the glob pattern given.</span>
+    <span class="s0">} AcceptPattern skipDirectories</span>
+
+    <span class="s0"># By default, don't save core files</span>
+    <span class="s0">Option -preservecore 0 {</span>
+	<span class="s0">If 2, save any core files produced during testing in the directory</span>
+	<span class="s0">specified by -tmpdir. If 1, notify the user if core files are</span>
+	<span class="s0">created.</span>
+    <span class="s0">} AcceptInteger preserveCore</span>
+
+    <span class="s0"># debug output doesn't get printed by default; debug level 1 spits</span>
+    <span class="s0"># up only the tests that were skipped because they didn't match or</span>
+    <span class="s0"># were specifically skipped.  A debug level of 2 would spit up the</span>
+    <span class="s0"># tcltest variables and flags provided; a debug level of 3 causes</span>
+    <span class="s0"># some additional output regarding operations of the test harness.</span>
+    <span class="s0"># The tcltest package currently implements only up to debug level 3.</span>
+    <span class="s0">Option -debug 0 {</span>
+	<span class="s0">Internal debug level</span>
+    <span class="s0">} AcceptInteger debug</span>
+
+    <span class="s0">proc SetSelectedConstraints args {</span>
+	<span class="s0">variable Option</span>
+	<span class="s0">foreach c $Option(-constraints) {</span>
+	    <span class="s0">testConstraint $c 1</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+    <span class="s0">Option -constraints {} {</span>
+	<span class="s0">Do not skip the listed constraints listed in -constraints.</span>
+    <span class="s0">} AcceptList</span>
+    <span class="s0">trace add variable Option(-constraints) write \</span>
+	    <span class="s0">[namespace code {SetSelectedConstraints ;#}]</span>
+
+    <span class="s0"># Don't run only the &quot;-constraint&quot; specified tests by default</span>
+    <span class="s0">proc ClearUnselectedConstraints args {</span>
+	<span class="s0">variable Option</span>
+	<span class="s0">variable testConstraints</span>
+	<span class="s0">if {!$Option(-limitconstraints)} {return}</span>
+	<span class="s0">foreach c [array names testConstraints] {</span>
+	    <span class="s0">if {$c ni $Option(-constraints)} {</span>
+		<span class="s0">testConstraint $c 0</span>
+	    <span class="s0">}</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+    <span class="s0">Option -limitconstraints 0 {</span>
+	<span class="s0">whether to run only tests with the constraints</span>
+    <span class="s0">} AcceptBoolean limitConstraints</span>
+    <span class="s0">trace add variable Option(-limitconstraints) write \</span>
+	    <span class="s0">[namespace code {ClearUnselectedConstraints ;#}]</span>
+
+    <span class="s0"># A test application has to know how to load the tested commands</span>
+    <span class="s0"># into the interpreter.</span>
+    <span class="s0">Option -load {} {</span>
+	<span class="s0">Specifies the script to load the tested commands.</span>
+    <span class="s0">} AcceptScript loadScript</span>
+
+    <span class="s0"># Default is to run each test file in a separate process</span>
+    <span class="s0">Option -singleproc 0 {</span>
+	<span class="s0">whether to run all tests in one process</span>
+    <span class="s0">} AcceptBoolean singleProcess</span>
+
+    <span class="s0">proc AcceptTemporaryDirectory { directory } {</span>
+	<span class="s0">set directory [AcceptAbsolutePath $directory]</span>
+	<span class="s0">if {![file exists $directory]} {</span>
+	    <span class="s0">file mkdir $directory</span>
+	<span class="s0">}</span>
+	<span class="s0">set directory [AcceptDirectory $directory]</span>
+	<span class="s0">if {![file writable $directory]} {</span>
+	    <span class="s0">if {[workingDirectory] eq $directory} {</span>
+		<span class="s0"># Special exception: accept the default value</span>
+		<span class="s0"># even if the directory is not writable</span>
+		<span class="s0">return $directory</span>
+	    <span class="s0">}</span>
+	    <span class="s0">return -code error &quot;\&quot;$directory\&quot; is not writeable&quot;</span>
+	<span class="s0">}</span>
+	<span class="s0">return $directory</span>
+    <span class="s0">}</span>
+
+    <span class="s0"># Directory where files should be created</span>
+    <span class="s0">Option -tmpdir [workingDirectory] {</span>
+	<span class="s0">Save temporary files in the specified directory.</span>
+    <span class="s0">} AcceptTemporaryDirectory temporaryDirectory</span>
+    <span class="s0">trace add variable Option(-tmpdir) write \</span>
+	    <span class="s0">[namespace code {normalizePath Option(-tmpdir) ;#}]</span>
+
+    <span class="s0"># Tests should not rely on the current working directory.</span>
+    <span class="s0"># Files that are part of the test suite should be accessed relative</span>
+    <span class="s0"># to [testsDirectory]</span>
+    <span class="s0">Option -testdir [workingDirectory] {</span>
+	<span class="s0">Search tests in the specified directory.</span>
+    <span class="s0">} AcceptDirectory testsDirectory</span>
+    <span class="s0">trace add variable Option(-testdir) write \</span>
+	    <span class="s0">[namespace code {normalizePath Option(-testdir) ;#}]</span>
+
+    <span class="s0">proc AcceptLoadFile { file } {</span>
+	<span class="s0">if {$file eq {}} {return $file}</span>
+	<span class="s0">set file [file join [temporaryDirectory] $file]</span>
+	<span class="s0">return [AcceptReadable $file]</span>
+    <span class="s0">}</span>
+    <span class="s0">proc ReadLoadScript {args} {</span>
+	<span class="s0">variable Option</span>
+	<span class="s0">if {$Option(-loadfile) eq {}} {return}</span>
+	<span class="s0">set tmp [open $Option(-loadfile) r]</span>
+	<span class="s0">loadScript [read $tmp]</span>
+	<span class="s0">close $tmp</span>
+    <span class="s0">}</span>
+    <span class="s0">Option -loadfile {} {</span>
+	<span class="s0">Read the script to load the tested commands from the specified file.</span>
+    <span class="s0">} AcceptLoadFile loadFile</span>
+    <span class="s0">trace add variable Option(-loadfile) write [namespace code ReadLoadScript]</span>
+
+    <span class="s0">proc AcceptOutFile { file } {</span>
+	<span class="s0">if {[string equal stderr $file]} {return $file}</span>
+	<span class="s0">if {[string equal stdout $file]} {return $file}</span>
+	<span class="s0">return [file join [temporaryDirectory] $file]</span>
+    <span class="s0">}</span>
+
+    <span class="s0"># output goes to stdout by default</span>
+    <span class="s0">Option -outfile stdout {</span>
+	<span class="s0">Send output from test runs to the specified file.</span>
+    <span class="s0">} AcceptOutFile outputFile</span>
+    <span class="s0">trace add variable Option(-outfile) write \</span>
+	    <span class="s0">[namespace code {outputChannel $Option(-outfile) ;#}]</span>
+
+    <span class="s0"># errors go to stderr by default</span>
+    <span class="s0">Option -errfile stderr {</span>
+	<span class="s0">Send errors from test runs to the specified file.</span>
+    <span class="s0">} AcceptOutFile errorFile</span>
+    <span class="s0">trace add variable Option(-errfile) write \</span>
+	    <span class="s0">[namespace code {errorChannel $Option(-errfile) ;#}]</span>
+
+    <span class="s0">proc loadIntoSlaveInterpreter {slave args} {</span>
+	<span class="s0">variable Version</span>
+	<span class="s0">interp eval $slave [package ifneeded tcltest $Version]</span>
+	<span class="s0">interp eval $slave &quot;tcltest::configure {*}{$args}&quot;</span>
+	<span class="s0">interp alias $slave ::tcltest::ReportToMaster \</span>
+	    <span class="s0">{} ::tcltest::ReportedFromSlave</span>
+    <span class="s0">}</span>
+    <span class="s0">proc ReportedFromSlave {total passed skipped failed because newfiles} {</span>
+	<span class="s0">variable numTests</span>
+	<span class="s0">variable skippedBecause</span>
+	<span class="s0">variable createdNewFiles</span>
+	<span class="s0">incr numTests(Total)   $total</span>
+	<span class="s0">incr numTests(Passed)  $passed</span>
+	<span class="s0">incr numTests(Skipped) $skipped</span>
+	<span class="s0">incr numTests(Failed)  $failed</span>
+	<span class="s0">foreach {constraint count} $because {</span>
+	    <span class="s0">incr skippedBecause($constraint) $count</span>
+	<span class="s0">}</span>
+	<span class="s0">foreach {testfile created} $newfiles {</span>
+	    <span class="s0">lappend createdNewFiles($testfile) {*}$created</span>
+	<span class="s0">}</span>
+	<span class="s0">return</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+
+<span class="s0">#####################################################################</span>
+
+<span class="s0"># tcltest::Debug* --</span>
+<span class="s0">#</span>
+<span class="s0">#     Internal helper procedures to write out debug information</span>
+<span class="s0">#     dependent on the chosen level. A test shell may overide</span>
+<span class="s0">#     them, f.e. to redirect the output into a different</span>
+<span class="s0">#     channel, or even into a GUI.</span>
+
+<span class="s0"># tcltest::DebugPuts --</span>
+<span class="s0">#</span>
+<span class="s0">#     Prints the specified string if the current debug level is</span>
+<span class="s0">#     higher than the provided level argument.</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0">#     level   The lowest debug level triggering the output</span>
+<span class="s0">#     string  The string to print out.</span>
+<span class="s0">#</span>
+<span class="s0"># Results:</span>
+<span class="s0">#     Prints the string. Nothing else is allowed.</span>
+<span class="s0">#</span>
+<span class="s0"># Side Effects:</span>
+<span class="s0">#     None.</span>
+<span class="s0">#</span>
+
+<span class="s0">proc tcltest::DebugPuts {level string} {</span>
+    <span class="s0">variable debug</span>
+    <span class="s0">if {$debug &gt;= $level} {</span>
+	<span class="s0">puts $string</span>
+    <span class="s0">}</span>
+    <span class="s0">return</span>
+<span class="s0">}</span>
+
+<span class="s0"># tcltest::DebugPArray --</span>
+<span class="s0">#</span>
+<span class="s0">#     Prints the contents of the specified array if the current</span>
+<span class="s0">#       debug level is higher than the provided level argument</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0">#     level           The lowest debug level triggering the output</span>
+<span class="s0">#     arrayvar        The name of the array to print out.</span>
+<span class="s0">#</span>
+<span class="s0"># Results:</span>
+<span class="s0">#     Prints the contents of the array. Nothing else is allowed.</span>
+<span class="s0">#</span>
+<span class="s0"># Side Effects:</span>
+<span class="s0">#     None.</span>
+<span class="s0">#</span>
+
+<span class="s0">proc tcltest::DebugPArray {level arrayvar} {</span>
+    <span class="s0">variable debug</span>
+
+    <span class="s0">if {$debug &gt;= $level} {</span>
+	<span class="s0">catch {upvar 1 $arrayvar $arrayvar}</span>
+	<span class="s0">parray $arrayvar</span>
+    <span class="s0">}</span>
+    <span class="s0">return</span>
+<span class="s0">}</span>
+
+<span class="s0"># Define our own [parray] in ::tcltest that will inherit use of the [puts]</span>
+<span class="s0"># defined in ::tcltest.  NOTE: Ought to construct with [info args] and</span>
+<span class="s0"># [info default], but can't be bothered now.  If [parray] changes, then</span>
+<span class="s0"># this will need changing too.</span>
+<span class="s0">auto_load ::parray</span>
+<span class="s0">proc tcltest::parray {a {pattern *}} [info body ::parray]</span>
+
+<span class="s0"># tcltest::DebugDo --</span>
+<span class="s0">#</span>
+<span class="s0">#     Executes the script if the current debug level is greater than</span>
+<span class="s0">#       the provided level argument</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0">#     level   The lowest debug level triggering the execution.</span>
+<span class="s0">#     script  The tcl script executed upon a debug level high enough.</span>
+<span class="s0">#</span>
+<span class="s0"># Results:</span>
+<span class="s0">#     Arbitrary side effects, dependent on the executed script.</span>
+<span class="s0">#</span>
+<span class="s0"># Side Effects:</span>
+<span class="s0">#     None.</span>
+<span class="s0">#</span>
+
+<span class="s0">proc tcltest::DebugDo {level script} {</span>
+    <span class="s0">variable debug</span>
+
+    <span class="s0">if {$debug &gt;= $level} {</span>
+	<span class="s0">uplevel 1 $script</span>
+    <span class="s0">}</span>
+    <span class="s0">return</span>
+<span class="s0">}</span>
+
+<span class="s0">#####################################################################</span>
+
+<span class="s0">proc tcltest::Warn {msg} {</span>
+    <span class="s0">puts [outputChannel] &quot;WARNING: $msg&quot;</span>
+<span class="s0">}</span>
+
+<span class="s0"># tcltest::mainThread</span>
+<span class="s0">#</span>
+<span class="s0">#     Accessor command for tcltest variable mainThread.</span>
+<span class="s0">#</span>
+<span class="s0">proc tcltest::mainThread { {new &quot;&quot;} } {</span>
+    <span class="s0">variable mainThread</span>
+    <span class="s0">if {[llength [info level 0]] == 1} {</span>
+	<span class="s0">return $mainThread</span>
+    <span class="s0">}</span>
+    <span class="s0">set mainThread $new</span>
+<span class="s0">}</span>
+
+<span class="s0"># tcltest::testConstraint --</span>
+<span class="s0">#</span>
+<span class="s0">#	sets a test constraint to a value; to do multiple constraints,</span>
+<span class="s0">#       call this proc multiple times.  also returns the value of the</span>
+<span class="s0">#       named constraint if no value was supplied.</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0">#	constraint - name of the constraint</span>
+<span class="s0">#       value - new value for constraint (should be boolean) - if not</span>
+<span class="s0">#               supplied, this is a query</span>
+<span class="s0">#</span>
+<span class="s0"># Results:</span>
+<span class="s0">#	content of tcltest::testConstraints($constraint)</span>
+<span class="s0">#</span>
+<span class="s0"># Side effects:</span>
+<span class="s0">#	none</span>
+
+<span class="s0">proc tcltest::testConstraint {constraint {value &quot;&quot;}} {</span>
+    <span class="s0">variable testConstraints</span>
+    <span class="s0">variable Option</span>
+    <span class="s0">DebugPuts 3 &quot;entering testConstraint $constraint $value&quot;</span>
+    <span class="s0">if {[llength [info level 0]] == 2} {</span>
+	<span class="s0">return $testConstraints($constraint)</span>
+    <span class="s0">}</span>
+    <span class="s0"># Check for boolean values</span>
+    <span class="s0">if {[catch {expr {$value &amp;&amp; $value}} msg]} {</span>
+	<span class="s0">return -code error $msg</span>
+    <span class="s0">}</span>
+    <span class="s0">if {[limitConstraints] &amp;&amp; ($constraint ni $Option(-constraints))} {</span>
+	<span class="s0">set value 0</span>
+    <span class="s0">}</span>
+    <span class="s0">set testConstraints($constraint) $value</span>
+<span class="s0">}</span>
+
+<span class="s0"># tcltest::interpreter --</span>
+<span class="s0">#</span>
+<span class="s0">#	the interpreter name stored in tcltest::tcltest</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0">#	executable name</span>
+<span class="s0">#</span>
+<span class="s0"># Results:</span>
+<span class="s0">#	content of tcltest::tcltest</span>
+<span class="s0">#</span>
+<span class="s0"># Side effects:</span>
+<span class="s0">#	None.</span>
+
+<span class="s0">proc tcltest::interpreter { {interp &quot;&quot;} } {</span>
+    <span class="s0">variable tcltest</span>
+    <span class="s0">if {[llength [info level 0]] == 1} {</span>
+	<span class="s0">return $tcltest</span>
+    <span class="s0">}</span>
+    <span class="s0">set tcltest $interp</span>
+<span class="s0">}</span>
+
+<span class="s0">#####################################################################</span>
+
+<span class="s0"># tcltest::AddToSkippedBecause --</span>
+<span class="s0">#</span>
+<span class="s0">#	Increments the variable used to track how many tests were</span>
+<span class="s0">#       skipped because of a particular constraint.</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0">#	constraint     The name of the constraint to be modified</span>
+<span class="s0">#</span>
+<span class="s0"># Results:</span>
+<span class="s0">#	Modifies tcltest::skippedBecause; sets the variable to 1 if</span>
+<span class="s0">#       didn't previously exist - otherwise, it just increments it.</span>
+<span class="s0">#</span>
+<span class="s0"># Side effects:</span>
+<span class="s0">#	None.</span>
+
+<span class="s0">proc tcltest::AddToSkippedBecause { constraint {value 1}} {</span>
+    <span class="s0"># add the constraint to the list of constraints that kept tests</span>
+    <span class="s0"># from running</span>
+    <span class="s0">variable skippedBecause</span>
+
+    <span class="s0">if {[info exists skippedBecause($constraint)]} {</span>
+	<span class="s0">incr skippedBecause($constraint) $value</span>
+    <span class="s0">} else {</span>
+	<span class="s0">set skippedBecause($constraint) $value</span>
+    <span class="s0">}</span>
+    <span class="s0">return</span>
+<span class="s0">}</span>
+
+<span class="s0"># tcltest::PrintError --</span>
+<span class="s0">#</span>
+<span class="s0">#	Prints errors to tcltest::errorChannel and then flushes that</span>
+<span class="s0">#       channel, making sure that all messages are &lt; 80 characters per</span>
+<span class="s0">#       line.</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0">#	errorMsg     String containing the error to be printed</span>
+<span class="s0">#</span>
+<span class="s0"># Results:</span>
+<span class="s0">#	None.</span>
+<span class="s0">#</span>
+<span class="s0"># Side effects:</span>
+<span class="s0">#	None.</span>
+
+<span class="s0">proc tcltest::PrintError {errorMsg} {</span>
+    <span class="s0">set InitialMessage &quot;Error:  &quot;</span>
+    <span class="s0">set InitialMsgLen  [string length $InitialMessage]</span>
+    <span class="s0">puts -nonewline [errorChannel] $InitialMessage</span>
+
+    <span class="s0"># Keep track of where the end of the string is.</span>
+    <span class="s0">set endingIndex [string length $errorMsg]</span>
+
+    <span class="s0">if {$endingIndex &lt; (80 - $InitialMsgLen)} {</span>
+	<span class="s0">puts [errorChannel] $errorMsg</span>
+    <span class="s0">} else {</span>
+	<span class="s0"># Print up to 80 characters on the first line, including the</span>
+	<span class="s0"># InitialMessage.</span>
+	<span class="s0">set beginningIndex [string last &quot; &quot; [string range $errorMsg 0 \</span>
+		<span class="s0">[expr {80 - $InitialMsgLen}]]]</span>
+	<span class="s0">puts [errorChannel] [string range $errorMsg 0 $beginningIndex]</span>
+
+	<span class="s0">while {$beginningIndex ne &quot;end&quot;} {</span>
+	    <span class="s0">puts -nonewline [errorChannel] \</span>
+		    <span class="s0">[string repeat &quot; &quot; $InitialMsgLen]</span>
+	    <span class="s0">if {($endingIndex - $beginningIndex)</span>
+		    <span class="s0">&lt; (80 - $InitialMsgLen)} {</span>
+		<span class="s0">puts [errorChannel] [string trim \</span>
+			<span class="s0">[string range $errorMsg $beginningIndex end]]</span>
+		<span class="s0">break</span>
+	    <span class="s0">} else {</span>
+		<span class="s0">set newEndingIndex [expr {[string last &quot; &quot; \</span>
+			<span class="s0">[string range $errorMsg $beginningIndex \</span>
+				<span class="s0">[expr {$beginningIndex</span>
+					<span class="s0">+ (80 - $InitialMsgLen)}]</span>
+		<span class="s0">]] + $beginningIndex}]</span>
+		<span class="s0">if {($newEndingIndex &lt;= 0)</span>
+			<span class="s0">|| ($newEndingIndex &lt;= $beginningIndex)} {</span>
+		    <span class="s0">set newEndingIndex end</span>
+		<span class="s0">}</span>
+		<span class="s0">puts [errorChannel] [string trim \</span>
+			<span class="s0">[string range $errorMsg \</span>
+			    <span class="s0">$beginningIndex $newEndingIndex]]</span>
+		<span class="s0">set beginningIndex $newEndingIndex</span>
+	    <span class="s0">}</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+    <span class="s0">flush [errorChannel]</span>
+    <span class="s0">return</span>
+<span class="s0">}</span>
+
+<span class="s0"># tcltest::SafeFetch --</span>
+<span class="s0">#</span>
+<span class="s0">#	 The following trace procedure makes it so that we can safely</span>
+<span class="s0">#        refer to non-existent members of the testConstraints array</span>
+<span class="s0">#        without causing an error.  Instead, reading a non-existent</span>
+<span class="s0">#        member will return 0. This is necessary because tests are</span>
+<span class="s0">#        allowed to use constraint &quot;X&quot; without ensuring that</span>
+<span class="s0">#        testConstraints(&quot;X&quot;) is defined.</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0">#	n1 - name of the array (testConstraints)</span>
+<span class="s0">#       n2 - array key value (constraint name)</span>
+<span class="s0">#       op - operation performed on testConstraints (generally r)</span>
+<span class="s0">#</span>
+<span class="s0"># Results:</span>
+<span class="s0">#	none</span>
+<span class="s0">#</span>
+<span class="s0"># Side effects:</span>
+<span class="s0">#	sets testConstraints($n2) to 0 if it's referenced but never</span>
+<span class="s0">#       before used</span>
+
+<span class="s0">proc tcltest::SafeFetch {n1 n2 op} {</span>
+    <span class="s0">variable testConstraints</span>
+    <span class="s0">DebugPuts 3 &quot;entering SafeFetch $n1 $n2 $op&quot;</span>
+    <span class="s0">if {$n2 eq {}} {return}</span>
+    <span class="s0">if {![info exists testConstraints($n2)]} {</span>
+	<span class="s0">if {[catch {testConstraint $n2 [eval [ConstraintInitializer $n2]]}]} {</span>
+	    <span class="s0">testConstraint $n2 0</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+
+<span class="s0"># tcltest::ConstraintInitializer --</span>
+<span class="s0">#</span>
+<span class="s0">#	Get or set a script that when evaluated in the tcltest namespace</span>
+<span class="s0">#	will return a boolean value with which to initialize the</span>
+<span class="s0">#	associated constraint.</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0">#	constraint - name of the constraint initialized by the script</span>
+<span class="s0">#	script - the initializer script</span>
+<span class="s0">#</span>
+<span class="s0"># Results</span>
+<span class="s0">#	boolean value of the constraint - enabled or disabled</span>
+<span class="s0">#</span>
+<span class="s0"># Side effects:</span>
+<span class="s0">#	Constraint is initialized for future reference by [test]</span>
+<span class="s0">proc tcltest::ConstraintInitializer {constraint {script &quot;&quot;}} {</span>
+    <span class="s0">variable ConstraintInitializer</span>
+    <span class="s0">DebugPuts 3 &quot;entering ConstraintInitializer $constraint $script&quot;</span>
+    <span class="s0">if {[llength [info level 0]] == 2} {</span>
+	<span class="s0">return $ConstraintInitializer($constraint)</span>
+    <span class="s0">}</span>
+    <span class="s0"># Check for boolean values</span>
+    <span class="s0">if {![info complete $script]} {</span>
+	<span class="s0">return -code error &quot;ConstraintInitializer must be complete script&quot;</span>
+    <span class="s0">}</span>
+    <span class="s0">set ConstraintInitializer($constraint) $script</span>
+<span class="s0">}</span>
+
+<span class="s0"># tcltest::InitConstraints --</span>
+<span class="s0">#</span>
+<span class="s0"># Call all registered constraint initializers to force initialization</span>
+<span class="s0"># of all known constraints.</span>
+<span class="s0"># See the tcltest man page for the list of built-in constraints defined</span>
+<span class="s0"># in this procedure.</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0">#	none</span>
+<span class="s0">#</span>
+<span class="s0"># Results:</span>
+<span class="s0">#	The testConstraints array is reset to have an index for each</span>
+<span class="s0">#	built-in test constraint.</span>
+<span class="s0">#</span>
+<span class="s0"># Side Effects:</span>
+<span class="s0">#       None.</span>
+<span class="s0">#</span>
+
+<span class="s0">proc tcltest::InitConstraints {} {</span>
+    <span class="s0">variable ConstraintInitializer</span>
+    <span class="s0">initConstraintsHook</span>
+    <span class="s0">foreach constraint [array names ConstraintInitializer] {</span>
+	<span class="s0">testConstraint $constraint</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+
+<span class="s0">proc tcltest::DefineConstraintInitializers {} {</span>
+    <span class="s0">ConstraintInitializer singleTestInterp {singleProcess}</span>
+
+    <span class="s0"># All the 'pc' constraints are here for backward compatibility and</span>
+    <span class="s0"># are not documented.  They have been replaced with equivalent 'win'</span>
+    <span class="s0"># constraints.</span>
+
+    <span class="s0">ConstraintInitializer unixOnly \</span>
+	    <span class="s0">{string equal $::tcl_platform(platform) unix}</span>
+    <span class="s0">ConstraintInitializer macOnly \</span>
+	    <span class="s0">{string equal $::tcl_platform(platform) macintosh}</span>
+    <span class="s0">ConstraintInitializer pcOnly \</span>
+	    <span class="s0">{string equal $::tcl_platform(platform) windows}</span>
+    <span class="s0">ConstraintInitializer winOnly \</span>
+	    <span class="s0">{string equal $::tcl_platform(platform) windows}</span>
+
+    <span class="s0">ConstraintInitializer unix {testConstraint unixOnly}</span>
+    <span class="s0">ConstraintInitializer mac {testConstraint macOnly}</span>
+    <span class="s0">ConstraintInitializer pc {testConstraint pcOnly}</span>
+    <span class="s0">ConstraintInitializer win {testConstraint winOnly}</span>
+
+    <span class="s0">ConstraintInitializer unixOrPc \</span>
+	    <span class="s0">{expr {[testConstraint unix] || [testConstraint pc]}}</span>
+    <span class="s0">ConstraintInitializer macOrPc \</span>
+	    <span class="s0">{expr {[testConstraint mac] || [testConstraint pc]}}</span>
+    <span class="s0">ConstraintInitializer unixOrWin \</span>
+	    <span class="s0">{expr {[testConstraint unix] || [testConstraint win]}}</span>
+    <span class="s0">ConstraintInitializer macOrWin \</span>
+	    <span class="s0">{expr {[testConstraint mac] || [testConstraint win]}}</span>
+    <span class="s0">ConstraintInitializer macOrUnix \</span>
+	    <span class="s0">{expr {[testConstraint mac] || [testConstraint unix]}}</span>
+
+    <span class="s0">ConstraintInitializer nt {string equal $::tcl_platform(os) &quot;Windows NT&quot;}</span>
+    <span class="s0">ConstraintInitializer 95 {string equal $::tcl_platform(os) &quot;Windows 95&quot;}</span>
+    <span class="s0">ConstraintInitializer 98 {string equal $::tcl_platform(os) &quot;Windows 98&quot;}</span>
+
+    <span class="s0"># The following Constraints switches are used to mark tests that</span>
+    <span class="s0"># should work, but have been temporarily disabled on certain</span>
+    <span class="s0"># platforms because they don't and we haven't gotten around to</span>
+    <span class="s0"># fixing the underlying problem.</span>
+
+    <span class="s0">ConstraintInitializer tempNotPc {expr {![testConstraint pc]}}</span>
+    <span class="s0">ConstraintInitializer tempNotWin {expr {![testConstraint win]}}</span>
+    <span class="s0">ConstraintInitializer tempNotMac {expr {![testConstraint mac]}}</span>
+    <span class="s0">ConstraintInitializer tempNotUnix {expr {![testConstraint unix]}}</span>
+
+    <span class="s0"># The following Constraints switches are used to mark tests that</span>
+    <span class="s0"># crash on certain platforms, so that they can be reactivated again</span>
+    <span class="s0"># when the underlying problem is fixed.</span>
+
+    <span class="s0">ConstraintInitializer pcCrash {expr {![testConstraint pc]}}</span>
+    <span class="s0">ConstraintInitializer winCrash {expr {![testConstraint win]}}</span>
+    <span class="s0">ConstraintInitializer macCrash {expr {![testConstraint mac]}}</span>
+    <span class="s0">ConstraintInitializer unixCrash {expr {![testConstraint unix]}}</span>
+
+    <span class="s0"># Skip empty tests</span>
+
+    <span class="s0">ConstraintInitializer emptyTest {format 0}</span>
+
+    <span class="s0"># By default, tests that expose known bugs are skipped.</span>
+
+    <span class="s0">ConstraintInitializer knownBug {format 0}</span>
+
+    <span class="s0"># By default, non-portable tests are skipped.</span>
+
+    <span class="s0">ConstraintInitializer nonPortable {format 0}</span>
+
+    <span class="s0"># Some tests require user interaction.</span>
+
+    <span class="s0">ConstraintInitializer userInteraction {format 0}</span>
+
+    <span class="s0"># Some tests must be skipped if the interpreter is not in</span>
+    <span class="s0"># interactive mode</span>
+
+    <span class="s0">ConstraintInitializer interactive \</span>
+	    <span class="s0">{expr {[info exists ::tcl_interactive] &amp;&amp; $::tcl_interactive}}</span>
+
+    <span class="s0"># Some tests can only be run if the installation came from a CD</span>
+    <span class="s0"># image instead of a web image.  Some tests must be skipped if you</span>
+    <span class="s0"># are running as root on Unix.  Other tests can only be run if you</span>
+    <span class="s0"># are running as root on Unix.</span>
+
+    <span class="s0">ConstraintInitializer root {expr \</span>
+	    <span class="s0">{($::tcl_platform(platform) eq &quot;unix&quot;) &amp;&amp;</span>
+		    <span class="s0">($::tcl_platform(user) in {root {}})}}</span>
+    <span class="s0">ConstraintInitializer notRoot {expr {![testConstraint root]}}</span>
+
+    <span class="s0"># Set nonBlockFiles constraint: 1 means this platform supports</span>
+    <span class="s0"># setting files into nonblocking mode.</span>
+
+    <span class="s0">ConstraintInitializer nonBlockFiles {</span>
+	    <span class="s0">set code [expr {[catch {set f [open defs r]}]</span>
+		    <span class="s0">|| [catch {chan configure $f -blocking off}]}]</span>
+	    <span class="s0">catch {close $f}</span>
+	    <span class="s0">set code</span>
+    <span class="s0">}</span>
+
+    <span class="s0"># Set asyncPipeClose constraint: 1 means this platform supports</span>
+    <span class="s0"># async flush and async close on a pipe.</span>
+    <span class="s0">#</span>
+    <span class="s0"># Test for SCO Unix - cannot run async flushing tests because a</span>
+    <span class="s0"># potential problem with select is apparently interfering.</span>
+    <span class="s0"># (Mark Diekhans).</span>
+
+    <span class="s0">ConstraintInitializer asyncPipeClose {expr {</span>
+	    <span class="s0">!([string equal unix $::tcl_platform(platform)]</span>
+	    <span class="s0">&amp;&amp; ([catch {exec uname -X | fgrep {Release = 3.2v}}] == 0))}}</span>
+
+    <span class="s0"># Test to see if we have a broken version of sprintf with respect</span>
+    <span class="s0"># to the &quot;e&quot; format of floating-point numbers.</span>
+
+    <span class="s0">ConstraintInitializer eformat {string equal [format %g 5e-5] 5e-05}</span>
+
+    <span class="s0"># Test to see if execed commands such as cat, echo, rm and so forth</span>
+    <span class="s0"># are present on this machine.</span>
+
+    <span class="s0">ConstraintInitializer unixExecs {</span>
+	<span class="s0">set code 1</span>
+        <span class="s0">if {$::tcl_platform(platform) eq &quot;macintosh&quot;} {</span>
+	    <span class="s0">set code 0</span>
+        <span class="s0">}</span>
+        <span class="s0">if {$::tcl_platform(platform) eq &quot;windows&quot;} {</span>
+	    <span class="s0">if {[catch {</span>
+	        <span class="s0">set file _tcl_test_remove_me.txt</span>
+	        <span class="s0">makeFile {hello} $file</span>
+	    <span class="s0">}]} {</span>
+	        <span class="s0">set code 0</span>
+	    <span class="s0">} elseif {</span>
+	        <span class="s0">[catch {exec cat $file}] ||</span>
+	        <span class="s0">[catch {exec echo hello}] ||</span>
+	        <span class="s0">[catch {exec sh -c echo hello}] ||</span>
+	        <span class="s0">[catch {exec wc $file}] ||</span>
+	        <span class="s0">[catch {exec sleep 1}] ||</span>
+	        <span class="s0">[catch {exec echo abc &gt; $file}] ||</span>
+	        <span class="s0">[catch {exec chmod 644 $file}] ||</span>
+	        <span class="s0">[catch {exec rm $file}] ||</span>
+	        <span class="s0">[llength [auto_execok mkdir]] == 0 ||</span>
+	        <span class="s0">[llength [auto_execok fgrep]] == 0 ||</span>
+	        <span class="s0">[llength [auto_execok grep]] == 0 ||</span>
+	        <span class="s0">[llength [auto_execok ps]] == 0</span>
+	    <span class="s0">} {</span>
+	        <span class="s0">set code 0</span>
+	    <span class="s0">}</span>
+	    <span class="s0">removeFile $file</span>
+        <span class="s0">}</span>
+	<span class="s0">set code</span>
+    <span class="s0">}</span>
+
+    <span class="s0">ConstraintInitializer stdio {</span>
+	<span class="s0">set code 0</span>
+	<span class="s0">if {![catch {set f [open &quot;|[list [interpreter]]&quot; w]}]} {</span>
+	    <span class="s0">if {![catch {puts $f exit}]} {</span>
+		<span class="s0">if {![catch {close $f}]} {</span>
+		    <span class="s0">set code 1</span>
+		<span class="s0">}</span>
+	    <span class="s0">}</span>
+	<span class="s0">}</span>
+	<span class="s0">set code</span>
+    <span class="s0">}</span>
+
+    <span class="s0"># Deliberately call socket with the wrong number of arguments.  The</span>
+    <span class="s0"># error message you get will indicate whether sockets are available</span>
+    <span class="s0"># on this system.</span>
+
+    <span class="s0">ConstraintInitializer socket {</span>
+	<span class="s0">catch {socket} msg</span>
+	<span class="s0">string compare $msg &quot;sockets are not available on this system&quot;</span>
+    <span class="s0">}</span>
+
+    <span class="s0"># Check for internationalization</span>
+    <span class="s0">ConstraintInitializer hasIsoLocale {</span>
+	<span class="s0">if {[llength [info commands testlocale]] == 0} {</span>
+	    <span class="s0">set code 0</span>
+	<span class="s0">} else {</span>
+	    <span class="s0">set code [string length [SetIso8859_1_Locale]]</span>
+	    <span class="s0">RestoreLocale</span>
+	<span class="s0">}</span>
+	<span class="s0">set code</span>
+    <span class="s0">}</span>
+
+<span class="s0">}</span>
+<span class="s0">#####################################################################</span>
+
+<span class="s0"># Usage and command line arguments processing.</span>
+
+<span class="s0"># tcltest::PrintUsageInfo</span>
+<span class="s0">#</span>
+<span class="s0">#	Prints out the usage information for package tcltest.  This can</span>
+<span class="s0">#	be customized with the redefinition of [PrintUsageInfoHook].</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0">#	none</span>
+<span class="s0">#</span>
+<span class="s0"># Results:</span>
+<span class="s0">#       none</span>
+<span class="s0">#</span>
+<span class="s0"># Side Effects:</span>
+<span class="s0">#       none</span>
+<span class="s0">proc tcltest::PrintUsageInfo {} {</span>
+    <span class="s0">puts [Usage]</span>
+    <span class="s0">PrintUsageInfoHook</span>
+<span class="s0">}</span>
+
+<span class="s0">proc tcltest::Usage { {option &quot;&quot;} } {</span>
+    <span class="s0">variable Usage</span>
+    <span class="s0">variable Verify</span>
+    <span class="s0">if {[llength [info level 0]] == 1} {</span>
+	<span class="s0">set msg &quot;Usage: [file tail [info nameofexecutable]] script &quot;</span>
+	<span class="s0">append msg &quot;?-help? ?flag value? ... \n&quot;</span>
+	<span class="s0">append msg &quot;Available flags (and valid input values) are:&quot;</span>
+
+	<span class="s0">set max 0</span>
+	<span class="s0">set allOpts [concat -help [Configure]]</span>
+	<span class="s0">foreach opt $allOpts {</span>
+	    <span class="s0">set foo [Usage $opt]</span>
+	    <span class="s0">lassign $foo x type($opt) usage($opt)</span>
+	    <span class="s0">set line($opt) &quot;  $opt $type($opt)  &quot;</span>
+	    <span class="s0">set length($opt) [string length $line($opt)]</span>
+	    <span class="s0">if {$length($opt) &gt; $max} {set max $length($opt)}</span>
+	<span class="s0">}</span>
+	<span class="s0">set rest [expr {72 - $max}]</span>
+	<span class="s0">foreach opt $allOpts {</span>
+	    <span class="s0">append msg \n$line($opt)</span>
+	    <span class="s0">append msg [string repeat &quot; &quot; [expr {$max - $length($opt)}]]</span>
+	    <span class="s0">set u [string trim $usage($opt)]</span>
+	    <span class="s0">catch {append u &quot;  (default: \[[Configure $opt]])&quot;}</span>
+	    <span class="s0">regsub -all {\s*\n\s*} $u &quot; &quot; u</span>
+	    <span class="s0">while {[string length $u] &gt; $rest} {</span>
+		<span class="s0">set break [string wordstart $u $rest]</span>
+		<span class="s0">if {$break == 0} {</span>
+		    <span class="s0">set break [string wordend $u 0]</span>
+		<span class="s0">}</span>
+		<span class="s0">append msg [string range $u 0 [expr {$break - 1}]]</span>
+		<span class="s0">set u [string trim [string range $u $break end]]</span>
+		<span class="s0">append msg \n[string repeat &quot; &quot; $max]</span>
+	    <span class="s0">}</span>
+	    <span class="s0">append msg $u</span>
+	<span class="s0">}</span>
+	<span class="s0">return $msg\n</span>
+    <span class="s0">} elseif {$option eq &quot;-help&quot;} {</span>
+	<span class="s0">return [list -help &quot;&quot; &quot;Display this usage information.&quot;]</span>
+    <span class="s0">} else {</span>
+	<span class="s0">set type [lindex [info args $Verify($option)] 0]</span>
+	<span class="s0">return [list $option $type $Usage($option)]</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+
+<span class="s0"># tcltest::ProcessFlags --</span>
+<span class="s0">#</span>
+<span class="s0">#	process command line arguments supplied in the flagArray - this</span>
+<span class="s0">#	is called by processCmdLineArgs.  Modifies tcltest variables</span>
+<span class="s0">#	according to the content of the flagArray.</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0">#	flagArray - array containing name/value pairs of flags</span>
+<span class="s0">#</span>
+<span class="s0"># Results:</span>
+<span class="s0">#	sets tcltest variables according to their values as defined by</span>
+<span class="s0">#       flagArray</span>
+<span class="s0">#</span>
+<span class="s0"># Side effects:</span>
+<span class="s0">#	None.</span>
+
+<span class="s0">proc tcltest::ProcessFlags {flagArray} {</span>
+    <span class="s0"># Process -help first</span>
+    <span class="s0">if {&quot;-help&quot; in $flagArray} {</span>
+	<span class="s0">PrintUsageInfo</span>
+	<span class="s0">exit 1</span>
+    <span class="s0">}</span>
+
+    <span class="s0">if {[llength $flagArray] == 0} {</span>
+	<span class="s0">RemoveAutoConfigureTraces</span>
+    <span class="s0">} else {</span>
+	<span class="s0">set args $flagArray</span>
+	<span class="s0">while {[llength $args] &gt; 1 &amp;&amp; [catch {configure {*}$args} msg]} {</span>
+
+	    <span class="s0"># Something went wrong parsing $args for tcltest options</span>
+	    <span class="s0"># Check whether the problem is &quot;unknown option&quot;</span>
+	    <span class="s0">if {[regexp {^unknown option (\S+):} $msg -&gt; option]} {</span>
+		<span class="s0"># Could be this is an option the Hook knows about</span>
+		<span class="s0">set moreOptions [processCmdLineArgsAddFlagsHook]</span>
+		<span class="s0">if {$option ni $moreOptions} {</span>
+		    <span class="s0"># Nope.  Report the error, including additional options,</span>
+		    <span class="s0"># but keep going</span>
+		    <span class="s0">if {[llength $moreOptions]} {</span>
+			<span class="s0">append msg &quot;, &quot;</span>
+			<span class="s0">append msg [join [lrange $moreOptions 0 end-1] &quot;, &quot;]</span>
+			<span class="s0">append msg &quot;or [lindex $moreOptions end]&quot;</span>
+		    <span class="s0">}</span>
+		    <span class="s0">Warn $msg</span>
+		<span class="s0">}</span>
+	    <span class="s0">} else {</span>
+		<span class="s0"># error is something other than &quot;unknown option&quot;</span>
+		<span class="s0"># notify user of the error; and exit</span>
+		<span class="s0">puts [errorChannel] $msg</span>
+		<span class="s0">exit 1</span>
+	    <span class="s0">}</span>
+
+	    <span class="s0"># To recover, find that unknown option and remove up to it.</span>
+	    <span class="s0"># then retry</span>
+	    <span class="s0">while {[lindex $args 0] ne $option} {</span>
+		<span class="s0">set args [lrange $args 2 end]</span>
+	    <span class="s0">}</span>
+	    <span class="s0">set args [lrange $args 2 end]</span>
+	<span class="s0">}</span>
+	<span class="s0">if {[llength $args] == 1} {</span>
+	    <span class="s0">puts [errorChannel] \</span>
+		    <span class="s0">&quot;missing value for option [lindex $args 0]&quot;</span>
+	    <span class="s0">exit 1</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+
+    <span class="s0"># Call the hook</span>
+    <span class="s0">catch {</span>
+        <span class="s0">array set flag $flagArray</span>
+        <span class="s0">processCmdLineArgsHook [array get flag]</span>
+    <span class="s0">}</span>
+    <span class="s0">return</span>
+<span class="s0">}</span>
+
+<span class="s0"># tcltest::ProcessCmdLineArgs --</span>
+<span class="s0">#</span>
+<span class="s0">#       This procedure must be run after constraint initialization is</span>
+<span class="s0">#	set up (by [DefineConstraintInitializers]) because some constraints</span>
+<span class="s0">#	can be overridden.</span>
+<span class="s0">#</span>
+<span class="s0">#       Perform configuration according to the command-line options.</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0">#	none</span>
+<span class="s0">#</span>
+<span class="s0"># Results:</span>
+<span class="s0">#	Sets the above-named variables in the tcltest namespace.</span>
+<span class="s0">#</span>
+<span class="s0"># Side Effects:</span>
+<span class="s0">#       None.</span>
+<span class="s0">#</span>
+
+<span class="s0">proc tcltest::ProcessCmdLineArgs {} {</span>
+    <span class="s0">variable originalEnv</span>
+    <span class="s0">variable testConstraints</span>
+
+    <span class="s0"># The &quot;argv&quot; var doesn't exist in some cases, so use {}.</span>
+    <span class="s0">if {![info exists ::argv]} {</span>
+	<span class="s0">ProcessFlags {}</span>
+    <span class="s0">} else {</span>
+	<span class="s0">ProcessFlags $::argv</span>
+    <span class="s0">}</span>
+
+    <span class="s0"># Spit out everything you know if we're at a debug level 2 or</span>
+    <span class="s0"># greater</span>
+    <span class="s0">DebugPuts 2 &quot;Flags passed into tcltest:&quot;</span>
+    <span class="s0">if {[info exists ::env(TCLTEST_OPTIONS)]} {</span>
+	<span class="s0">DebugPuts 2 \</span>
+		<span class="s0">&quot;    ::env(TCLTEST_OPTIONS): $::env(TCLTEST_OPTIONS)&quot;</span>
+    <span class="s0">}</span>
+    <span class="s0">if {[info exists ::argv]} {</span>
+	<span class="s0">DebugPuts 2 &quot;    argv: $::argv&quot;</span>
+    <span class="s0">}</span>
+    <span class="s0">DebugPuts    2 &quot;tcltest::debug              = [debug]&quot;</span>
+    <span class="s0">DebugPuts    2 &quot;tcltest::testsDirectory     = [testsDirectory]&quot;</span>
+    <span class="s0">DebugPuts    2 &quot;tcltest::workingDirectory   = [workingDirectory]&quot;</span>
+    <span class="s0">DebugPuts    2 &quot;tcltest::temporaryDirectory = [temporaryDirectory]&quot;</span>
+    <span class="s0">DebugPuts    2 &quot;tcltest::outputChannel      = [outputChannel]&quot;</span>
+    <span class="s0">DebugPuts    2 &quot;tcltest::errorChannel       = [errorChannel]&quot;</span>
+    <span class="s0">DebugPuts    2 &quot;Original environment (tcltest::originalEnv):&quot;</span>
+    <span class="s0">DebugPArray  2 originalEnv</span>
+    <span class="s0">DebugPuts    2 &quot;Constraints:&quot;</span>
+    <span class="s0">DebugPArray  2 testConstraints</span>
+<span class="s0">}</span>
+
+<span class="s0">#####################################################################</span>
+
+<span class="s0"># Code to run the tests goes here.</span>
+
+<span class="s0"># tcltest::TestPuts --</span>
+<span class="s0">#</span>
+<span class="s0">#	Used to redefine puts in test environment.  Stores whatever goes</span>
+<span class="s0">#	out on stdout in tcltest::outData and stderr in errData before</span>
+<span class="s0">#	sending it on to the regular puts.</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0">#	same as standard puts</span>
+<span class="s0">#</span>
+<span class="s0"># Results:</span>
+<span class="s0">#	none</span>
+<span class="s0">#</span>
+<span class="s0"># Side effects:</span>
+<span class="s0">#       Intercepts puts; data that would otherwise go to stdout, stderr,</span>
+<span class="s0">#	or file channels specified in outputChannel and errorChannel</span>
+<span class="s0">#	does not get sent to the normal puts function.</span>
+<span class="s0">namespace eval tcltest::Replace {</span>
+    <span class="s0">namespace export puts</span>
+<span class="s0">}</span>
+<span class="s0">proc tcltest::Replace::puts {args} {</span>
+    <span class="s0">variable [namespace parent]::outData</span>
+    <span class="s0">variable [namespace parent]::errData</span>
+    <span class="s0">switch [llength $args] {</span>
+	<span class="s0">1 {</span>
+	    <span class="s0"># Only the string to be printed is specified</span>
+	    <span class="s0">append outData [lindex $args 0]\n</span>
+	    <span class="s0">return</span>
+	    <span class="s0"># return [Puts [lindex $args 0]]</span>
+	<span class="s0">}</span>
+	<span class="s0">2 {</span>
+	    <span class="s0"># Either -nonewline or channelId has been specified</span>
+	    <span class="s0">if {[lindex $args 0] eq &quot;-nonewline&quot;} {</span>
+		<span class="s0">append outData [lindex $args end]</span>
+		<span class="s0">return</span>
+		<span class="s0"># return [Puts -nonewline [lindex $args end]]</span>
+	    <span class="s0">} else {</span>
+		<span class="s0">set channel [lindex $args 0]</span>
+		<span class="s0">set newline \n</span>
+	    <span class="s0">}</span>
+	<span class="s0">}</span>
+	<span class="s0">3 {</span>
+	    <span class="s0">if {[lindex $args 0] eq &quot;-nonewline&quot;} {</span>
+		<span class="s0"># Both -nonewline and channelId are specified, unless</span>
+		<span class="s0"># it's an error.  -nonewline is supposed to be argv[0].</span>
+		<span class="s0">set channel [lindex $args 1]</span>
+		<span class="s0">set newline &quot;&quot;</span>
+	    <span class="s0">}</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+
+    <span class="s0">if {[info exists channel]} {</span>
+	<span class="s0">if {$channel in [list [[namespace parent]::outputChannel] stdout]} {</span>
+	    <span class="s0">append outData [lindex $args end]$newline</span>
+	    <span class="s0">return</span>
+	<span class="s0">} elseif {$channel in [list [[namespace parent]::errorChannel] stderr]} {</span>
+	    <span class="s0">append errData [lindex $args end]$newline</span>
+	    <span class="s0">return</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+
+    <span class="s0"># If we haven't returned by now, we don't know how to handle the</span>
+    <span class="s0"># input.  Let puts handle it.</span>
+    <span class="s0">return [Puts {*}$args]</span>
+<span class="s0">}</span>
+
+<span class="s0"># tcltest::Eval --</span>
+<span class="s0">#</span>
+<span class="s0">#	Evaluate the script in the test environment.  If ignoreOutput is</span>
+<span class="s0">#       false, store data sent to stderr and stdout in outData and</span>
+<span class="s0">#       errData.  Otherwise, ignore this output altogether.</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0">#	script             Script to evaluate</span>
+<span class="s0">#       ?ignoreOutput?     Indicates whether or not to ignore output</span>
+<span class="s0">#			   sent to stdout &amp; stderr</span>
+<span class="s0">#</span>
+<span class="s0"># Results:</span>
+<span class="s0">#	result from running the script</span>
+<span class="s0">#</span>
+<span class="s0"># Side effects:</span>
+<span class="s0">#	Empties the contents of outData and errData before running a</span>
+<span class="s0">#	test if ignoreOutput is set to 0.</span>
+
+<span class="s0">proc tcltest::Eval {script {ignoreOutput 1}} {</span>
+    <span class="s0">variable outData</span>
+    <span class="s0">variable errData</span>
+    <span class="s0">DebugPuts 3 &quot;[lindex [info level 0] 0] called&quot;</span>
+    <span class="s0">if {!$ignoreOutput} {</span>
+	<span class="s0">set outData {}</span>
+	<span class="s0">set errData {}</span>
+	<span class="s0">rename ::puts [namespace current]::Replace::Puts</span>
+	<span class="s0">namespace eval :: [list namespace import [namespace origin Replace::puts]]</span>
+	<span class="s0">namespace import Replace::puts</span>
+    <span class="s0">}</span>
+    <span class="s0">set result [uplevel 1 $script]</span>
+    <span class="s0">if {!$ignoreOutput} {</span>
+	<span class="s0">namespace forget puts</span>
+	<span class="s0">namespace eval :: namespace forget puts</span>
+	<span class="s0">rename [namespace current]::Replace::Puts ::puts</span>
+    <span class="s0">}</span>
+    <span class="s0">return $result</span>
+<span class="s0">}</span>
+
+<span class="s0"># tcltest::CompareStrings --</span>
+<span class="s0">#</span>
+<span class="s0">#	compares the expected answer to the actual answer, depending on</span>
+<span class="s0">#	the mode provided.  Mode determines whether a regexp, exact,</span>
+<span class="s0">#	glob or custom comparison is done.</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0">#	actual - string containing the actual result</span>
+<span class="s0">#       expected - pattern to be matched against</span>
+<span class="s0">#       mode - type of comparison to be done</span>
+<span class="s0">#</span>
+<span class="s0"># Results:</span>
+<span class="s0">#	result of the match</span>
+<span class="s0">#</span>
+<span class="s0"># Side effects:</span>
+<span class="s0">#	None.</span>
+
+<span class="s0">proc tcltest::CompareStrings {actual expected mode} {</span>
+    <span class="s0">variable CustomMatch</span>
+    <span class="s0">if {![info exists CustomMatch($mode)]} {</span>
+        <span class="s0">return -code error &quot;No matching command registered for `-match $mode'&quot;</span>
+    <span class="s0">}</span>
+    <span class="s0">set match [namespace eval :: $CustomMatch($mode) [list $expected $actual]]</span>
+    <span class="s0">if {[catch {expr {$match &amp;&amp; $match}} result]} {</span>
+	<span class="s0">return -code error &quot;Invalid result from `-match $mode' command: $result&quot;</span>
+    <span class="s0">}</span>
+    <span class="s0">return $match</span>
+<span class="s0">}</span>
+
+<span class="s0"># tcltest::customMatch --</span>
+<span class="s0">#</span>
+<span class="s0">#	registers a command to be called when a particular type of</span>
+<span class="s0">#	matching is required.</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0">#	nickname - Keyword for the type of matching</span>
+<span class="s0">#	cmd - Incomplete command that implements that type of matching</span>
+<span class="s0">#		when completed with expected string and actual string</span>
+<span class="s0">#		and then evaluated.</span>
+<span class="s0">#</span>
+<span class="s0"># Results:</span>
+<span class="s0">#	None.</span>
+<span class="s0">#</span>
+<span class="s0"># Side effects:</span>
+<span class="s0">#	Sets the variable tcltest::CustomMatch</span>
+
+<span class="s0">proc tcltest::customMatch {mode script} {</span>
+    <span class="s0">variable CustomMatch</span>
+    <span class="s0">if {![info complete $script]} {</span>
+	<span class="s0">return -code error \</span>
+		<span class="s0">&quot;invalid customMatch script; can't evaluate after completion&quot;</span>
+    <span class="s0">}</span>
+    <span class="s0">set CustomMatch($mode) $script</span>
+<span class="s0">}</span>
+
+<span class="s0"># tcltest::SubstArguments list</span>
+<span class="s0">#</span>
+<span class="s0"># This helper function takes in a list of words, then perform a</span>
+<span class="s0"># substitution on the list as though each word in the list is a separate</span>
+<span class="s0"># argument to the Tcl function.  For example, if this function is</span>
+<span class="s0"># invoked as:</span>
+<span class="s0">#</span>
+<span class="s0">#      SubstArguments {$a {$a}}</span>
+<span class="s0">#</span>
+<span class="s0"># Then it is as though the function is invoked as:</span>
+<span class="s0">#</span>
+<span class="s0">#      SubstArguments $a {$a}</span>
+<span class="s0">#</span>
+<span class="s0"># This code is adapted from Paul Duffin's function &quot;SplitIntoWords&quot;.</span>
+<span class="s0"># The original function can be found  on:</span>
+<span class="s0">#</span>
+<span class="s0">#      http://purl.org/thecliff/tcl/wiki/858.html</span>
+<span class="s0">#</span>
+<span class="s0"># Results:</span>
+<span class="s0">#     a list containing the result of the substitution</span>
+<span class="s0">#</span>
+<span class="s0"># Exceptions:</span>
+<span class="s0">#     An error may occur if the list containing unbalanced quote or</span>
+<span class="s0">#     unknown variable.</span>
+<span class="s0">#</span>
+<span class="s0"># Side Effects:</span>
+<span class="s0">#     None.</span>
+<span class="s0">#</span>
+
+<span class="s0">proc tcltest::SubstArguments {argList} {</span>
+
+    <span class="s0"># We need to split the argList up into tokens but cannot use list</span>
+    <span class="s0"># operations as they throw away some significant quoting, and</span>
+    <span class="s0"># [split] ignores braces as it should.  Therefore what we do is</span>
+    <span class="s0"># gradually build up a string out of whitespace seperated strings.</span>
+    <span class="s0"># We cannot use [split] to split the argList into whitespace</span>
+    <span class="s0"># separated strings as it throws away the whitespace which maybe</span>
+    <span class="s0"># important so we have to do it all by hand.</span>
+
+    <span class="s0">set result {}</span>
+    <span class="s0">set token &quot;&quot;</span>
+
+    <span class="s0">while {[string length $argList]} {</span>
+        <span class="s0"># Look for the next word containing a quote: &quot; { }</span>
+        <span class="s0">if {[regexp -indices {[^ \t\n]*[\&quot;\{\}]+[^ \t\n]*} \</span>
+		<span class="s0">$argList all]} {</span>
+            <span class="s0"># Get the text leading up to this word, but not including</span>
+	    <span class="s0"># this word, from the argList.</span>
+            <span class="s0">set text [string range $argList 0 \</span>
+		    <span class="s0">[expr {[lindex $all 0] - 1}]]</span>
+            <span class="s0"># Get the word with the quote</span>
+            <span class="s0">set word [string range $argList \</span>
+                    <span class="s0">[lindex $all 0] [lindex $all 1]]</span>
+
+            <span class="s0"># Remove all text up to and including the word from the</span>
+            <span class="s0"># argList.</span>
+            <span class="s0">set argList [string range $argList \</span>
+                    <span class="s0">[expr {[lindex $all 1] + 1}] end]</span>
+        <span class="s0">} else {</span>
+            <span class="s0"># Take everything up to the end of the argList.</span>
+            <span class="s0">set text $argList</span>
+            <span class="s0">set word {}</span>
+            <span class="s0">set argList {}</span>
+        <span class="s0">}</span>
+
+        <span class="s0">if {$token ne {}} {</span>
+            <span class="s0"># If we saw a word with quote before, then there is a</span>
+            <span class="s0"># multi-word token starting with that word.  In this case,</span>
+            <span class="s0"># add the text and the current word to this token.</span>
+            <span class="s0">append token $text $word</span>
+        <span class="s0">} else {</span>
+            <span class="s0"># Add the text to the result.  There is no need to parse</span>
+            <span class="s0"># the text because it couldn't be a part of any multi-word</span>
+            <span class="s0"># token.  Then start a new multi-word token with the word</span>
+            <span class="s0"># because we need to pass this token to the Tcl parser to</span>
+            <span class="s0"># check for balancing quotes</span>
+            <span class="s0">append result $text</span>
+            <span class="s0">set token $word</span>
+        <span class="s0">}</span>
+
+        <span class="s0">if { [catch {llength $token} length] == 0 &amp;&amp; $length == 1} {</span>
+            <span class="s0"># The token is a valid list so add it to the result.</span>
+            <span class="s0"># lappend result [string trim $token]</span>
+            <span class="s0">append result \{$token\}</span>
+            <span class="s0">set token {}</span>
+        <span class="s0">}</span>
+    <span class="s0">}</span>
+
+    <span class="s0"># If the last token has not been added to the list then there</span>
+    <span class="s0"># is a problem.</span>
+    <span class="s0">if { [string length $token] } {</span>
+        <span class="s0">error &quot;incomplete token \&quot;$token\&quot;&quot;</span>
+    <span class="s0">}</span>
+
+    <span class="s0">return $result</span>
+<span class="s0">}</span>
+
+
+<span class="s0"># tcltest::test --</span>
+<span class="s0">#</span>
+<span class="s0"># This procedure runs a test and prints an error message if the test</span>
+<span class="s0"># fails.  If verbose has been set, it also prints a message even if the</span>
+<span class="s0"># test succeeds.  The test will be skipped if it doesn't match the</span>
+<span class="s0"># match variable, if it matches an element in skip, or if one of the</span>
+<span class="s0"># elements of &quot;constraints&quot; turns out not to be true.</span>
+<span class="s0">#</span>
+<span class="s0"># If testLevel is 1, then this is a top level test, and we record</span>
+<span class="s0"># pass/fail information; otherwise, this information is not logged and</span>
+<span class="s0"># is not added to running totals.</span>
+<span class="s0">#</span>
+<span class="s0"># Attributes:</span>
+<span class="s0">#   Only description is a required attribute.  All others are optional.</span>
+<span class="s0">#   Default values are indicated.</span>
+<span class="s0">#</span>
+<span class="s0">#   constraints -	A list of one or more keywords, each of which</span>
+<span class="s0">#			must be the name of an element in the array</span>
+<span class="s0">#			&quot;testConstraints&quot;.  If any of these elements is</span>
+<span class="s0">#			zero, the test is skipped. This attribute is</span>
+<span class="s0">#			optional; default is {}</span>
+<span class="s0">#   body -	        Script to run to carry out the test.  It must</span>
+<span class="s0">#		        return a result that can be checked for</span>
+<span class="s0">#		        correctness.  This attribute is optional;</span>
+<span class="s0">#                       default is {}</span>
+<span class="s0">#   result -	        Expected result from script.  This attribute is</span>
+<span class="s0">#                       optional; default is {}.</span>
+<span class="s0">#   output -            Expected output sent to stdout.  This attribute</span>
+<span class="s0">#                       is optional; default is {}.</span>
+<span class="s0">#   errorOutput -       Expected output sent to stderr.  This attribute</span>
+<span class="s0">#                       is optional; default is {}.</span>
+<span class="s0">#   returnCodes -       Expected return codes.  This attribute is</span>
+<span class="s0">#                       optional; default is {0 2}.</span>
+<span class="s0">#   setup -             Code to run before $script (above).  This</span>
+<span class="s0">#                       attribute is optional; default is {}.</span>
+<span class="s0">#   cleanup -           Code to run after $script (above).  This</span>
+<span class="s0">#                       attribute is optional; default is {}.</span>
+<span class="s0">#   match -             specifies type of matching to do on result,</span>
+<span class="s0">#                       output, errorOutput; this must be a string</span>
+<span class="s0">#			previously registered by a call to [customMatch].</span>
+<span class="s0">#			The strings exact, glob, and regexp are pre-registered</span>
+<span class="s0">#			by the tcltest package.  Default value is exact.</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0">#   name -		Name of test, in the form foo-1.2.</span>
+<span class="s0">#   description -	Short textual description of the test, to</span>
+<span class="s0">#  		  	help humans understand what it does.</span>
+<span class="s0">#</span>
+<span class="s0"># Results:</span>
+<span class="s0">#	None.</span>
+<span class="s0">#</span>
+<span class="s0"># Side effects:</span>
+<span class="s0">#       Just about anything is possible depending on the test.</span>
+<span class="s0">#</span>
+
+<span class="s0">proc tcltest::test {name description args} {</span>
+    <span class="s0">global tcl_platform</span>
+    <span class="s0">variable testLevel</span>
+    <span class="s0">variable coreModTime</span>
+    <span class="s0">DebugPuts 3 &quot;test $name $args&quot;</span>
+    <span class="s0">DebugDo 1 {</span>
+	<span class="s0">variable TestNames</span>
+	<span class="s0">catch {</span>
+	    <span class="s0">puts &quot;test name '$name' re-used; prior use in $TestNames($name)&quot;</span>
+	<span class="s0">}</span>
+	<span class="s0">set TestNames($name) [info script]</span>
+    <span class="s0">}</span>
+
+    <span class="s0">FillFilesExisted</span>
+    <span class="s0">incr testLevel</span>
+
+    <span class="s0"># Pre-define everything to null except output and errorOutput.  We</span>
+    <span class="s0"># determine whether or not to trap output based on whether or not</span>
+    <span class="s0"># these variables (output &amp; errorOutput) are defined.</span>
+    <span class="s0">lassign {} constraints setup cleanup body result returnCodes match</span>
+
+    <span class="s0"># Set the default match mode</span>
+    <span class="s0">set match exact</span>
+
+    <span class="s0"># Set the default match values for return codes (0 is the standard</span>
+    <span class="s0"># expected return value if everything went well; 2 represents</span>
+    <span class="s0"># 'return' being used in the test script).</span>
+    <span class="s0">set returnCodes [list 0 2]</span>
+
+    <span class="s0"># The old test format can't have a 3rd argument (constraints or</span>
+    <span class="s0"># script) that starts with '-'.</span>
+    <span class="s0">if {[string match -* [lindex $args 0]] || ([llength $args] &lt;= 1)} {</span>
+	<span class="s0">if {[llength $args] == 1} {</span>
+	    <span class="s0">set list [SubstArguments [lindex $args 0]]</span>
+	    <span class="s0">foreach {element value} $list {</span>
+		<span class="s0">set testAttributes($element) $value</span>
+	    <span class="s0">}</span>
+	    <span class="s0">foreach item {constraints match setup body cleanup \</span>
+		    <span class="s0">result returnCodes output errorOutput} {</span>
+		<span class="s0">if {[info exists testAttributes(-$item)]} {</span>
+		    <span class="s0">set testAttributes(-$item) [uplevel 1 \</span>
+			    <span class="s0">::concat $testAttributes(-$item)]</span>
+		<span class="s0">}</span>
+	    <span class="s0">}</span>
+	<span class="s0">} else {</span>
+	    <span class="s0">array set testAttributes $args</span>
+	<span class="s0">}</span>
+
+	<span class="s0">set validFlags {-setup -cleanup -body -result -returnCodes \</span>
+		<span class="s0">-match -output -errorOutput -constraints}</span>
+
+	<span class="s0">foreach flag [array names testAttributes] {</span>
+	    <span class="s0">if {$flag ni $validFlags} {</span>
+		<span class="s0">incr testLevel -1</span>
+		<span class="s0">set sorted [lsort $validFlags]</span>
+		<span class="s0">set options [join [lrange $sorted 0 end-1] &quot;, &quot;]</span>
+		<span class="s0">append options &quot;, or [lindex $sorted end]&quot;</span>
+		<span class="s0">return -code error &quot;bad option \&quot;$flag\&quot;: must be $options&quot;</span>
+	    <span class="s0">}</span>
+	<span class="s0">}</span>
+
+	<span class="s0"># store whatever the user gave us</span>
+	<span class="s0">foreach item [array names testAttributes] {</span>
+	    <span class="s0">set [string trimleft $item &quot;-&quot;] $testAttributes($item)</span>
+	<span class="s0">}</span>
+
+	<span class="s0"># Check the values supplied for -match</span>
+	<span class="s0">variable CustomMatch</span>
+	<span class="s0">if {$match ni [array names CustomMatch]} {</span>
+	    <span class="s0">incr testLevel -1</span>
+	    <span class="s0">set sorted [lsort [array names CustomMatch]]</span>
+	    <span class="s0">set values [join [lrange $sorted 0 end-1] &quot;, &quot;]</span>
+	    <span class="s0">append values &quot;, or [lindex $sorted end]&quot;</span>
+	    <span class="s0">return -code error &quot;bad -match value \&quot;$match\&quot;:\</span>
+		    <span class="s0">must be $values&quot;</span>
+	<span class="s0">}</span>
+
+	<span class="s0"># Replace symbolic valies supplied for -returnCodes</span>
+	<span class="s0">foreach {strcode numcode} {ok 0 normal 0 error 1 return 2 break 3 continue 4} {</span>
+	    <span class="s0">set returnCodes [string map -nocase [list $strcode $numcode] $returnCodes]</span>
+	<span class="s0">}</span>
+    <span class="s0">} else {</span>
+	<span class="s0"># This is parsing for the old test command format; it is here</span>
+	<span class="s0"># for backward compatibility.</span>
+	<span class="s0">set result [lindex $args end]</span>
+	<span class="s0">if {[llength $args] == 2} {</span>
+	    <span class="s0">set body [lindex $args 0]</span>
+	<span class="s0">} elseif {[llength $args] == 3} {</span>
+	    <span class="s0">set constraints [lindex $args 0]</span>
+	    <span class="s0">set body [lindex $args 1]</span>
+	<span class="s0">} else {</span>
+	    <span class="s0">incr testLevel -1</span>
+	    <span class="s0">return -code error &quot;wrong # args:\</span>
+		    <span class="s0">should be \&quot;test name desc ?options?\&quot;&quot;</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+
+    <span class="s0">if {[Skipped $name $constraints]} {</span>
+	<span class="s0">incr testLevel -1</span>
+	<span class="s0">return</span>
+    <span class="s0">}</span>
+
+    <span class="s0"># Save information about the core file.</span>
+    <span class="s0">if {[preserveCore]} {</span>
+	<span class="s0">if {[file exists [file join [workingDirectory] core]]} {</span>
+	    <span class="s0">set coreModTime [file mtime [file join [workingDirectory] core]]</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+
+    <span class="s0"># First, run the setup script</span>
+    <span class="s0">set code [catch {uplevel 1 $setup} setupMsg]</span>
+    <span class="s0">if {$code == 1} {</span>
+	<span class="s0">set errorInfo(setup) $::errorInfo</span>
+	<span class="s0">set errorCode(setup) $::errorCode</span>
+    <span class="s0">}</span>
+    <span class="s0">set setupFailure [expr {$code != 0}]</span>
+
+    <span class="s0"># Only run the test body if the setup was successful</span>
+    <span class="s0">if {!$setupFailure} {</span>
+
+	<span class="s0"># Register startup time</span>
+	<span class="s0">if {[IsVerbose msec] || [IsVerbose usec]} {</span>
+	    <span class="s0">set timeStart [clock microseconds]</span>
+	<span class="s0">}</span>
+
+	<span class="s0"># Verbose notification of $body start</span>
+	<span class="s0">if {[IsVerbose start]} {</span>
+	    <span class="s0">puts [outputChannel] &quot;---- $name start&quot;</span>
+	    <span class="s0">flush [outputChannel]</span>
+	<span class="s0">}</span>
+
+	<span class="s0">set command [list [namespace origin RunTest] $name $body]</span>
+	<span class="s0">if {[info exists output] || [info exists errorOutput]} {</span>
+	    <span class="s0">set testResult [uplevel 1 [list [namespace origin Eval] $command 0]]</span>
+	<span class="s0">} else {</span>
+	    <span class="s0">set testResult [uplevel 1 [list [namespace origin Eval] $command 1]]</span>
+	<span class="s0">}</span>
+	<span class="s0">lassign $testResult actualAnswer returnCode</span>
+	<span class="s0">if {$returnCode == 1} {</span>
+	    <span class="s0">set errorInfo(body) $::errorInfo</span>
+	    <span class="s0">set errorCode(body) $::errorCode</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+
+    <span class="s0"># check if the return code matched the expected return code</span>
+    <span class="s0">set codeFailure 0</span>
+    <span class="s0">if {!$setupFailure &amp;&amp; ($returnCode ni $returnCodes)} {</span>
+	<span class="s0">set codeFailure 1</span>
+    <span class="s0">}</span>
+
+    <span class="s0"># If expected output/error strings exist, we have to compare</span>
+    <span class="s0"># them.  If the comparison fails, then so did the test.</span>
+    <span class="s0">set outputFailure 0</span>
+    <span class="s0">variable outData</span>
+    <span class="s0">if {[info exists output] &amp;&amp; !$codeFailure} {</span>
+	<span class="s0">if {[set outputCompare [catch {</span>
+	    <span class="s0">CompareStrings $outData $output $match</span>
+	<span class="s0">} outputMatch]] == 0} {</span>
+	    <span class="s0">set outputFailure [expr {!$outputMatch}]</span>
+	<span class="s0">} else {</span>
+	    <span class="s0">set outputFailure 1</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+
+    <span class="s0">set errorFailure 0</span>
+    <span class="s0">variable errData</span>
+    <span class="s0">if {[info exists errorOutput] &amp;&amp; !$codeFailure} {</span>
+	<span class="s0">if {[set errorCompare [catch {</span>
+	    <span class="s0">CompareStrings $errData $errorOutput $match</span>
+	<span class="s0">} errorMatch]] == 0} {</span>
+	    <span class="s0">set errorFailure [expr {!$errorMatch}]</span>
+	<span class="s0">} else {</span>
+	    <span class="s0">set errorFailure 1</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+
+    <span class="s0"># check if the answer matched the expected answer</span>
+    <span class="s0"># Only check if we ran the body of the test (no setup failure)</span>
+    <span class="s0">if {$setupFailure || $codeFailure} {</span>
+	<span class="s0">set scriptFailure 0</span>
+    <span class="s0">} elseif {[set scriptCompare [catch {</span>
+	<span class="s0">CompareStrings $actualAnswer $result $match</span>
+    <span class="s0">} scriptMatch]] == 0} {</span>
+	<span class="s0">set scriptFailure [expr {!$scriptMatch}]</span>
+    <span class="s0">} else {</span>
+	<span class="s0">set scriptFailure 1</span>
+    <span class="s0">}</span>
+
+    <span class="s0"># Always run the cleanup script</span>
+    <span class="s0">set code [catch {uplevel 1 $cleanup} cleanupMsg]</span>
+    <span class="s0">if {$code == 1} {</span>
+	<span class="s0">set errorInfo(cleanup) $::errorInfo</span>
+	<span class="s0">set errorCode(cleanup) $::errorCode</span>
+    <span class="s0">}</span>
+    <span class="s0">set cleanupFailure [expr {$code != 0}]</span>
+
+    <span class="s0">set coreFailure 0</span>
+    <span class="s0">set coreMsg &quot;&quot;</span>
+    <span class="s0"># check for a core file first - if one was created by the test,</span>
+    <span class="s0"># then the test failed</span>
+    <span class="s0">if {[preserveCore]} {</span>
+	<span class="s0">if {[file exists [file join [workingDirectory] core]]} {</span>
+	    <span class="s0"># There's only a test failure if there is a core file</span>
+	    <span class="s0"># and (1) there previously wasn't one or (2) the new</span>
+	    <span class="s0"># one is different from the old one.</span>
+	    <span class="s0">if {[info exists coreModTime]} {</span>
+		<span class="s0">if {$coreModTime != [file mtime \</span>
+			<span class="s0">[file join [workingDirectory] core]]} {</span>
+		    <span class="s0">set coreFailure 1</span>
+		<span class="s0">}</span>
+	    <span class="s0">} else {</span>
+		<span class="s0">set coreFailure 1</span>
+	    <span class="s0">}</span>
+
+	    <span class="s0">if {([preserveCore] &gt; 1) &amp;&amp; ($coreFailure)} {</span>
+		<span class="s0">append coreMsg &quot;\nMoving file to:\</span>
+		    <span class="s0">[file join [temporaryDirectory] core-$name]&quot;</span>
+		<span class="s0">catch {file rename -force -- \</span>
+		    <span class="s0">[file join [workingDirectory] core] \</span>
+		    <span class="s0">[file join [temporaryDirectory] core-$name]</span>
+		<span class="s0">} msg</span>
+		<span class="s0">if {$msg ne {}} {</span>
+		    <span class="s0">append coreMsg &quot;\nError:\</span>
+			<span class="s0">Problem renaming core file: $msg&quot;</span>
+		<span class="s0">}</span>
+	    <span class="s0">}</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+
+    <span class="s0">if {[IsVerbose msec] || [IsVerbose usec]} {</span>
+	<span class="s0">set t [expr {[clock microseconds] - $timeStart}]</span>
+	<span class="s0">if {[IsVerbose usec]} {</span>
+	    <span class="s0">puts [outputChannel] &quot;++++ $name took $t μs&quot;</span>
+	<span class="s0">}</span>
+	<span class="s0">if {[IsVerbose msec]} {</span>
+	    <span class="s0">puts [outputChannel] &quot;++++ $name took [expr {round($t/1000.)}] ms&quot;</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+
+    <span class="s0"># if we didn't experience any failures, then we passed</span>
+    <span class="s0">variable numTests</span>
+    <span class="s0">if {!($setupFailure || $cleanupFailure || $coreFailure</span>
+	    <span class="s0">|| $outputFailure || $errorFailure || $codeFailure</span>
+	    <span class="s0">|| $scriptFailure)} {</span>
+	<span class="s0">if {$testLevel == 1} {</span>
+	    <span class="s0">incr numTests(Passed)</span>
+	    <span class="s0">if {[IsVerbose pass]} {</span>
+		<span class="s0">puts [outputChannel] &quot;++++ $name PASSED&quot;</span>
+	    <span class="s0">}</span>
+	<span class="s0">}</span>
+	<span class="s0">incr testLevel -1</span>
+	<span class="s0">return</span>
+    <span class="s0">}</span>
+
+    <span class="s0"># We know the test failed, tally it...</span>
+    <span class="s0">if {$testLevel == 1} {</span>
+	<span class="s0">incr numTests(Failed)</span>
+    <span class="s0">}</span>
+
+    <span class="s0"># ... then report according to the type of failure</span>
+    <span class="s0">variable currentFailure true</span>
+    <span class="s0">if {![IsVerbose body]} {</span>
+	<span class="s0">set body &quot;&quot;</span>
+    <span class="s0">}</span>
+    <span class="s0">puts [outputChannel] &quot;\n&quot;</span>
+    <span class="s0">if {[IsVerbose line]} {</span>
+	<span class="s0">if {![catch {set testFrame [info frame -1]}] &amp;&amp;</span>
+		<span class="s0">[dict get $testFrame type] eq &quot;source&quot;} {</span>
+	    <span class="s0">set testFile [dict get $testFrame file]</span>
+	    <span class="s0">set testLine [dict get $testFrame line]</span>
+	<span class="s0">} else {</span>
+	    <span class="s0">set testFile [file normalize [uplevel 1 {info script}]]</span>
+	    <span class="s0">if {[file readable $testFile]} {</span>
+		<span class="s0">set testFd [open $testFile r]</span>
+		<span class="s0">set testLine [expr {[lsearch -regexp \</span>
+			<span class="s0">[split [read $testFd] &quot;\n&quot;] \</span>
+			<span class="s0">&quot;^\[ \t\]*test [string map {. \\.} $name] &quot;] + 1}]</span>
+		<span class="s0">close $testFd</span>
+	    <span class="s0">}</span>
+	<span class="s0">}</span>
+	<span class="s0">if {[info exists testLine]} {</span>
+	    <span class="s0">puts [outputChannel] &quot;$testFile:$testLine: error: test failed:\</span>
+		    <span class="s0">$name [string trim $description]&quot;</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+    <span class="s0">puts [outputChannel] &quot;==== $name\</span>
+	    <span class="s0">[string trim $description] FAILED&quot;</span>
+    <span class="s0">if {[string length $body]} {</span>
+	<span class="s0">puts [outputChannel] &quot;==== Contents of test case:&quot;</span>
+	<span class="s0">puts [outputChannel] $body</span>
+    <span class="s0">}</span>
+    <span class="s0">if {$setupFailure} {</span>
+	<span class="s0">puts [outputChannel] &quot;---- Test setup\</span>
+		<span class="s0">failed:\n$setupMsg&quot;</span>
+	<span class="s0">if {[info exists errorInfo(setup)]} {</span>
+	    <span class="s0">puts [outputChannel] &quot;---- errorInfo(setup): $errorInfo(setup)&quot;</span>
+	    <span class="s0">puts [outputChannel] &quot;---- errorCode(setup): $errorCode(setup)&quot;</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+    <span class="s0">if {$scriptFailure} {</span>
+	<span class="s0">if {$scriptCompare} {</span>
+	    <span class="s0">puts [outputChannel] &quot;---- Error testing result: $scriptMatch&quot;</span>
+	<span class="s0">} else {</span>
+	    <span class="s0">puts [outputChannel] &quot;---- Result was:\n$actualAnswer&quot;</span>
+	    <span class="s0">puts [outputChannel] &quot;---- Result should have been\</span>
+		    <span class="s0">($match matching):\n$result&quot;</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+    <span class="s0">if {$codeFailure} {</span>
+	<span class="s0">switch -- $returnCode {</span>
+	    <span class="s0">0 { set msg &quot;Test completed normally&quot; }</span>
+	    <span class="s0">1 { set msg &quot;Test generated error&quot; }</span>
+	    <span class="s0">2 { set msg &quot;Test generated return exception&quot; }</span>
+	    <span class="s0">3 { set msg &quot;Test generated break exception&quot; }</span>
+	    <span class="s0">4 { set msg &quot;Test generated continue exception&quot; }</span>
+	    <span class="s0">default { set msg &quot;Test generated exception&quot; }</span>
+	<span class="s0">}</span>
+	<span class="s0">puts [outputChannel] &quot;---- $msg; Return code was: $returnCode&quot;</span>
+	<span class="s0">puts [outputChannel] &quot;---- Return code should have been\</span>
+		<span class="s0">one of: $returnCodes&quot;</span>
+	<span class="s0">if {[IsVerbose error]} {</span>
+	    <span class="s0">if {[info exists errorInfo(body)] &amp;&amp; (1 ni $returnCodes)} {</span>
+		<span class="s0">puts [outputChannel] &quot;---- errorInfo: $errorInfo(body)&quot;</span>
+		<span class="s0">puts [outputChannel] &quot;---- errorCode: $errorCode(body)&quot;</span>
+	    <span class="s0">}</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+    <span class="s0">if {$outputFailure} {</span>
+	<span class="s0">if {$outputCompare} {</span>
+	    <span class="s0">puts [outputChannel] &quot;---- Error testing output: $outputMatch&quot;</span>
+	<span class="s0">} else {</span>
+	    <span class="s0">puts [outputChannel] &quot;---- Output was:\n$outData&quot;</span>
+	    <span class="s0">puts [outputChannel] &quot;---- Output should have been\</span>
+		    <span class="s0">($match matching):\n$output&quot;</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+    <span class="s0">if {$errorFailure} {</span>
+	<span class="s0">if {$errorCompare} {</span>
+	    <span class="s0">puts [outputChannel] &quot;---- Error testing errorOutput: $errorMatch&quot;</span>
+	<span class="s0">} else {</span>
+	    <span class="s0">puts [outputChannel] &quot;---- Error output was:\n$errData&quot;</span>
+	    <span class="s0">puts [outputChannel] &quot;---- Error output should have\</span>
+		    <span class="s0">been ($match matching):\n$errorOutput&quot;</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+    <span class="s0">if {$cleanupFailure} {</span>
+	<span class="s0">puts [outputChannel] &quot;---- Test cleanup failed:\n$cleanupMsg&quot;</span>
+	<span class="s0">if {[info exists errorInfo(cleanup)]} {</span>
+	    <span class="s0">puts [outputChannel] &quot;---- errorInfo(cleanup): $errorInfo(cleanup)&quot;</span>
+	    <span class="s0">puts [outputChannel] &quot;---- errorCode(cleanup): $errorCode(cleanup)&quot;</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+    <span class="s0">if {$coreFailure} {</span>
+	<span class="s0">puts [outputChannel] &quot;---- Core file produced while running\</span>
+		<span class="s0">test!  $coreMsg&quot;</span>
+    <span class="s0">}</span>
+    <span class="s0">puts [outputChannel] &quot;==== $name FAILED\n&quot;</span>
+
+    <span class="s0">incr testLevel -1</span>
+    <span class="s0">return</span>
+<span class="s0">}</span>
+
+<span class="s0"># Skipped --</span>
+<span class="s0">#</span>
+<span class="s0"># Given a test name and it constraints, returns a boolean indicating</span>
+<span class="s0"># whether the current configuration says the test should be skipped.</span>
+<span class="s0">#</span>
+<span class="s0"># Side Effects:  Maintains tally of total tests seen and tests skipped.</span>
+<span class="s0">#</span>
+<span class="s0">proc tcltest::Skipped {name constraints} {</span>
+    <span class="s0">variable testLevel</span>
+    <span class="s0">variable numTests</span>
+    <span class="s0">variable testConstraints</span>
+
+    <span class="s0">if {$testLevel == 1} {</span>
+	<span class="s0">incr numTests(Total)</span>
+    <span class="s0">}</span>
+    <span class="s0"># skip the test if it's name matches an element of skip</span>
+    <span class="s0">foreach pattern [skip] {</span>
+	<span class="s0">if {[string match $pattern $name]} {</span>
+	    <span class="s0">if {$testLevel == 1} {</span>
+		<span class="s0">incr numTests(Skipped)</span>
+		<span class="s0">DebugDo 1 {AddToSkippedBecause userSpecifiedSkip}</span>
+	    <span class="s0">}</span>
+	    <span class="s0">return 1</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+    <span class="s0"># skip the test if it's name doesn't match any element of match</span>
+    <span class="s0">set ok 0</span>
+    <span class="s0">foreach pattern [match] {</span>
+	<span class="s0">if {[string match $pattern $name]} {</span>
+	    <span class="s0">set ok 1</span>
+	    <span class="s0">break</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+    <span class="s0">if {!$ok} {</span>
+	<span class="s0">if {$testLevel == 1} {</span>
+	    <span class="s0">incr numTests(Skipped)</span>
+	    <span class="s0">DebugDo 1 {AddToSkippedBecause userSpecifiedNonMatch}</span>
+	<span class="s0">}</span>
+	<span class="s0">return 1</span>
+    <span class="s0">}</span>
+    <span class="s0">if {$constraints eq {}} {</span>
+	<span class="s0"># If we're limited to the listed constraints and there aren't</span>
+	<span class="s0"># any listed, then we shouldn't run the test.</span>
+	<span class="s0">if {[limitConstraints]} {</span>
+	    <span class="s0">AddToSkippedBecause userSpecifiedLimitConstraint</span>
+	    <span class="s0">if {$testLevel == 1} {</span>
+		<span class="s0">incr numTests(Skipped)</span>
+	    <span class="s0">}</span>
+	    <span class="s0">return 1</span>
+	<span class="s0">}</span>
+    <span class="s0">} else {</span>
+	<span class="s0"># &quot;constraints&quot; argument exists;</span>
+	<span class="s0"># make sure that the constraints are satisfied.</span>
+
+	<span class="s0">set doTest 0</span>
+	<span class="s0">if {[string match {*[$\[]*} $constraints] != 0} {</span>
+	    <span class="s0"># full expression, e.g. {$foo &gt; [info tclversion]}</span>
+	    <span class="s0">catch {set doTest [uplevel #0 [list expr $constraints]]}</span>
+	<span class="s0">} elseif {[regexp {[^.:_a-zA-Z0-9 \n\r\t]+} $constraints] != 0} {</span>
+	    <span class="s0"># something like {a || b} should be turned into</span>
+	    <span class="s0"># $testConstraints(a) || $testConstraints(b).</span>
+	    <span class="s0">regsub -all {[.\w]+} $constraints {$testConstraints(&amp;)} c</span>
+	    <span class="s0">catch {set doTest [eval [list expr $c]]}</span>
+	<span class="s0">} elseif {![catch {llength $constraints}]} {</span>
+	    <span class="s0"># just simple constraints such as {unixOnly fonts}.</span>
+	    <span class="s0">set doTest 1</span>
+	    <span class="s0">foreach constraint $constraints {</span>
+		<span class="s0">if {(![info exists testConstraints($constraint)]) \</span>
+			<span class="s0">|| (!$testConstraints($constraint))} {</span>
+		    <span class="s0">set doTest 0</span>
+
+		    <span class="s0"># store the constraint that kept the test from</span>
+		    <span class="s0"># running</span>
+		    <span class="s0">set constraints $constraint</span>
+		    <span class="s0">break</span>
+		<span class="s0">}</span>
+	    <span class="s0">}</span>
+	<span class="s0">}</span>
+
+	<span class="s0">if {!$doTest} {</span>
+	    <span class="s0">if {[IsVerbose skip]} {</span>
+		<span class="s0">puts [outputChannel] &quot;++++ $name SKIPPED: $constraints&quot;</span>
+	    <span class="s0">}</span>
+
+	    <span class="s0">if {$testLevel == 1} {</span>
+		<span class="s0">incr numTests(Skipped)</span>
+		<span class="s0">AddToSkippedBecause $constraints</span>
+	    <span class="s0">}</span>
+	    <span class="s0">return 1</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+    <span class="s0">return 0</span>
+<span class="s0">}</span>
+
+<span class="s0"># RunTest --</span>
+<span class="s0">#</span>
+<span class="s0"># This is where the body of a test is evaluated.  The combination of</span>
+<span class="s0"># [RunTest] and [Eval] allows the output and error output of the test</span>
+<span class="s0"># body to be captured for comparison against the expected values.</span>
+
+<span class="s0">proc tcltest::RunTest {name script} {</span>
+    <span class="s0">DebugPuts 3 &quot;Running $name {$script}&quot;</span>
+
+    <span class="s0"># If there is no &quot;memory&quot; command (because memory debugging isn't</span>
+    <span class="s0"># enabled), then don't attempt to use the command.</span>
+
+    <span class="s0">if {[llength [info commands memory]] == 1} {</span>
+	<span class="s0">memory tag $name</span>
+    <span class="s0">}</span>
+
+    <span class="s0">set code [catch {uplevel 1 $script} actualAnswer]</span>
+
+    <span class="s0">return [list $actualAnswer $code]</span>
+<span class="s0">}</span>
+
+<span class="s0">#####################################################################</span>
+
+<span class="s0"># tcltest::cleanupTestsHook --</span>
+<span class="s0">#</span>
+<span class="s0">#	This hook allows a harness that builds upon tcltest to specify</span>
+<span class="s0">#       additional things that should be done at cleanup.</span>
+<span class="s0">#</span>
+
+<span class="s0">if {[llength [info commands tcltest::cleanupTestsHook]] == 0} {</span>
+    <span class="s0">proc tcltest::cleanupTestsHook {} {}</span>
+<span class="s0">}</span>
+
+<span class="s0"># tcltest::cleanupTests --</span>
+<span class="s0">#</span>
+<span class="s0"># Remove files and dirs created using the makeFile and makeDirectory</span>
+<span class="s0"># commands since the last time this proc was invoked.</span>
+<span class="s0">#</span>
+<span class="s0"># Print the names of the files created without the makeFile command</span>
+<span class="s0"># since the tests were invoked.</span>
+<span class="s0">#</span>
+<span class="s0"># Print the number tests (total, passed, failed, and skipped) since the</span>
+<span class="s0"># tests were invoked.</span>
+<span class="s0">#</span>
+<span class="s0"># Restore original environment (as reported by special variable env).</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0">#      calledFromAllFile - if 0, behave as if we are running a single</span>
+<span class="s0">#      test file within an entire suite of tests.  if we aren't running</span>
+<span class="s0">#      a single test file, then don't report status.  check for new</span>
+<span class="s0">#      files created during the test run and report on them.  if 1,</span>
+<span class="s0">#      report collated status from all the test file runs.</span>
+<span class="s0">#</span>
+<span class="s0"># Results:</span>
+<span class="s0">#      None.</span>
+<span class="s0">#</span>
+<span class="s0"># Side Effects:</span>
+<span class="s0">#      None</span>
+<span class="s0">#</span>
+
+<span class="s0">proc tcltest::cleanupTests {{calledFromAllFile 0}} {</span>
+    <span class="s0">variable filesMade</span>
+    <span class="s0">variable filesExisted</span>
+    <span class="s0">variable createdNewFiles</span>
+    <span class="s0">variable testSingleFile</span>
+    <span class="s0">variable numTests</span>
+    <span class="s0">variable numTestFiles</span>
+    <span class="s0">variable failFiles</span>
+    <span class="s0">variable skippedBecause</span>
+    <span class="s0">variable currentFailure</span>
+    <span class="s0">variable originalEnv</span>
+    <span class="s0">variable originalTclPlatform</span>
+    <span class="s0">variable coreModTime</span>
+
+    <span class="s0">FillFilesExisted</span>
+    <span class="s0">set testFileName [file tail [info script]]</span>
+
+    <span class="s0"># Hook to handle reporting to a parent interpreter</span>
+    <span class="s0">if {[llength [info commands [namespace current]::ReportToMaster]]} {</span>
+	<span class="s0">ReportToMaster $numTests(Total) $numTests(Passed) $numTests(Skipped) \</span>
+	    <span class="s0">$numTests(Failed) [array get skippedBecause] \</span>
+	    <span class="s0">[array get createdNewFiles]</span>
+	<span class="s0">set testSingleFile false</span>
+    <span class="s0">}</span>
+
+    <span class="s0"># Call the cleanup hook</span>
+    <span class="s0">cleanupTestsHook</span>
+
+    <span class="s0"># Remove files and directories created by the makeFile and</span>
+    <span class="s0"># makeDirectory procedures.  Record the names of files in</span>
+    <span class="s0"># workingDirectory that were not pre-existing, and associate them</span>
+    <span class="s0"># with the test file that created them.</span>
+
+    <span class="s0">if {!$calledFromAllFile} {</span>
+	<span class="s0">foreach file $filesMade {</span>
+	    <span class="s0">if {[file exists $file]} {</span>
+		<span class="s0">DebugDo 1 {Warn &quot;cleanupTests deleting $file...&quot;}</span>
+		<span class="s0">catch {file delete -force -- $file}</span>
+	    <span class="s0">}</span>
+	<span class="s0">}</span>
+	<span class="s0">set currentFiles {}</span>
+	<span class="s0">foreach file [glob -nocomplain \</span>
+		<span class="s0">-directory [temporaryDirectory] *] {</span>
+	    <span class="s0">lappend currentFiles [file tail $file]</span>
+	<span class="s0">}</span>
+	<span class="s0">set newFiles {}</span>
+	<span class="s0">foreach file $currentFiles {</span>
+	    <span class="s0">if {$file ni $filesExisted} {</span>
+		<span class="s0">lappend newFiles $file</span>
+	    <span class="s0">}</span>
+	<span class="s0">}</span>
+	<span class="s0">set filesExisted $currentFiles</span>
+	<span class="s0">if {[llength $newFiles] &gt; 0} {</span>
+	    <span class="s0">set createdNewFiles($testFileName) $newFiles</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+
+    <span class="s0">if {$calledFromAllFile || $testSingleFile} {</span>
+
+	<span class="s0"># print stats</span>
+
+	<span class="s0">puts -nonewline [outputChannel] &quot;$testFileName:&quot;</span>
+	<span class="s0">foreach index [list &quot;Total&quot; &quot;Passed&quot; &quot;Skipped&quot; &quot;Failed&quot;] {</span>
+	    <span class="s0">puts -nonewline [outputChannel] \</span>
+		    <span class="s0">&quot;\t$index\t$numTests($index)&quot;</span>
+	<span class="s0">}</span>
+	<span class="s0">puts [outputChannel] &quot;&quot;</span>
+
+	<span class="s0"># print number test files sourced</span>
+	<span class="s0"># print names of files that ran tests which failed</span>
+
+	<span class="s0">if {$calledFromAllFile} {</span>
+	    <span class="s0">puts [outputChannel] \</span>
+		    <span class="s0">&quot;Sourced $numTestFiles Test Files.&quot;</span>
+	    <span class="s0">set numTestFiles 0</span>
+	    <span class="s0">if {[llength $failFiles] &gt; 0} {</span>
+		<span class="s0">puts [outputChannel] \</span>
+			<span class="s0">&quot;Files with failing tests: $failFiles&quot;</span>
+		<span class="s0">set failFiles {}</span>
+	    <span class="s0">}</span>
+	<span class="s0">}</span>
+
+	<span class="s0"># if any tests were skipped, print the constraints that kept</span>
+	<span class="s0"># them from running.</span>
+
+	<span class="s0">set constraintList [array names skippedBecause]</span>
+	<span class="s0">if {[llength $constraintList] &gt; 0} {</span>
+	    <span class="s0">puts [outputChannel] \</span>
+		    <span class="s0">&quot;Number of tests skipped for each constraint:&quot;</span>
+	    <span class="s0">foreach constraint [lsort $constraintList] {</span>
+		<span class="s0">puts [outputChannel] \</span>
+			<span class="s0">&quot;\t$skippedBecause($constraint)\t$constraint&quot;</span>
+		<span class="s0">unset skippedBecause($constraint)</span>
+	    <span class="s0">}</span>
+	<span class="s0">}</span>
+
+	<span class="s0"># report the names of test files in createdNewFiles, and reset</span>
+	<span class="s0"># the array to be empty.</span>
+
+	<span class="s0">set testFilesThatTurded [lsort [array names createdNewFiles]]</span>
+	<span class="s0">if {[llength $testFilesThatTurded] &gt; 0} {</span>
+	    <span class="s0">puts [outputChannel] &quot;Warning: files left behind:&quot;</span>
+	    <span class="s0">foreach testFile $testFilesThatTurded {</span>
+		<span class="s0">puts [outputChannel] \</span>
+			<span class="s0">&quot;\t$testFile:\t$createdNewFiles($testFile)&quot;</span>
+		<span class="s0">unset createdNewFiles($testFile)</span>
+	    <span class="s0">}</span>
+	<span class="s0">}</span>
+
+	<span class="s0"># reset filesMade, filesExisted, and numTests</span>
+
+	<span class="s0">set filesMade {}</span>
+	<span class="s0">foreach index [list &quot;Total&quot; &quot;Passed&quot; &quot;Skipped&quot; &quot;Failed&quot;] {</span>
+	    <span class="s0">set numTests($index) 0</span>
+	<span class="s0">}</span>
+
+	<span class="s0"># exit only if running Tk in non-interactive mode</span>
+	<span class="s0"># This should be changed to determine if an event</span>
+	<span class="s0"># loop is running, which is the real issue.</span>
+	<span class="s0"># Actually, this doesn't belong here at all.  A package</span>
+	<span class="s0"># really has no business [exit]-ing an application.</span>
+	<span class="s0">if {![catch {package present Tk}] &amp;&amp; ![testConstraint interactive]} {</span>
+	    <span class="s0">exit</span>
+	<span class="s0">}</span>
+    <span class="s0">} else {</span>
+
+	<span class="s0"># if we're deferring stat-reporting until all files are sourced,</span>
+	<span class="s0"># then add current file to failFile list if any tests in this</span>
+	<span class="s0"># file failed</span>
+
+	<span class="s0">if {$currentFailure &amp;&amp; ($testFileName ni $failFiles)} {</span>
+	    <span class="s0">lappend failFiles $testFileName</span>
+	<span class="s0">}</span>
+	<span class="s0">set currentFailure false</span>
+
+	<span class="s0"># restore the environment to the state it was in before this package</span>
+	<span class="s0"># was loaded</span>
+
+	<span class="s0">set newEnv {}</span>
+	<span class="s0">set changedEnv {}</span>
+	<span class="s0">set removedEnv {}</span>
+	<span class="s0">foreach index [array names ::env] {</span>
+	    <span class="s0">if {![info exists originalEnv($index)]} {</span>
+		<span class="s0">lappend newEnv $index</span>
+		<span class="s0">unset ::env($index)</span>
+	    <span class="s0">}</span>
+	<span class="s0">}</span>
+	<span class="s0">foreach index [array names originalEnv] {</span>
+	    <span class="s0">if {![info exists ::env($index)]} {</span>
+		<span class="s0">lappend removedEnv $index</span>
+		<span class="s0">set ::env($index) $originalEnv($index)</span>
+	    <span class="s0">} elseif {$::env($index) ne $originalEnv($index)} {</span>
+		<span class="s0">lappend changedEnv $index</span>
+		<span class="s0">set ::env($index) $originalEnv($index)</span>
+	    <span class="s0">}</span>
+	<span class="s0">}</span>
+	<span class="s0">if {[llength $newEnv] &gt; 0} {</span>
+	    <span class="s0">puts [outputChannel] \</span>
+		    <span class="s0">&quot;env array elements created:\t$newEnv&quot;</span>
+	<span class="s0">}</span>
+	<span class="s0">if {[llength $changedEnv] &gt; 0} {</span>
+	    <span class="s0">puts [outputChannel] \</span>
+		    <span class="s0">&quot;env array elements changed:\t$changedEnv&quot;</span>
+	<span class="s0">}</span>
+	<span class="s0">if {[llength $removedEnv] &gt; 0} {</span>
+	    <span class="s0">puts [outputChannel] \</span>
+		    <span class="s0">&quot;env array elements removed:\t$removedEnv&quot;</span>
+	<span class="s0">}</span>
+
+	<span class="s0">set changedTclPlatform {}</span>
+	<span class="s0">foreach index [array names originalTclPlatform] {</span>
+	    <span class="s0">if {$::tcl_platform($index) \</span>
+		    <span class="s0">!= $originalTclPlatform($index)} {</span>
+		<span class="s0">lappend changedTclPlatform $index</span>
+		<span class="s0">set ::tcl_platform($index) $originalTclPlatform($index)</span>
+	    <span class="s0">}</span>
+	<span class="s0">}</span>
+	<span class="s0">if {[llength $changedTclPlatform] &gt; 0} {</span>
+	    <span class="s0">puts [outputChannel] &quot;tcl_platform array elements\</span>
+		    <span class="s0">changed:\t$changedTclPlatform&quot;</span>
+	<span class="s0">}</span>
+
+	<span class="s0">if {[file exists [file join [workingDirectory] core]]} {</span>
+	    <span class="s0">if {[preserveCore] &gt; 1} {</span>
+		<span class="s0">puts &quot;rename core file (&gt; 1)&quot;</span>
+		<span class="s0">puts [outputChannel] &quot;produced core file! \</span>
+			<span class="s0">Moving file to: \</span>
+			<span class="s0">[file join [temporaryDirectory] core-$testFileName]&quot;</span>
+		<span class="s0">catch {file rename -force -- \</span>
+			<span class="s0">[file join [workingDirectory] core] \</span>
+			<span class="s0">[file join [temporaryDirectory] core-$testFileName]</span>
+		<span class="s0">} msg</span>
+		<span class="s0">if {$msg ne {}} {</span>
+		    <span class="s0">PrintError &quot;Problem renaming file: $msg&quot;</span>
+		<span class="s0">}</span>
+	    <span class="s0">} else {</span>
+		<span class="s0"># Print a message if there is a core file and (1) there</span>
+		<span class="s0"># previously wasn't one or (2) the new one is different</span>
+		<span class="s0"># from the old one.</span>
+
+		<span class="s0">if {[info exists coreModTime]} {</span>
+		    <span class="s0">if {$coreModTime != [file mtime \</span>
+			    <span class="s0">[file join [workingDirectory] core]]} {</span>
+			<span class="s0">puts [outputChannel] &quot;A core file was created!&quot;</span>
+		    <span class="s0">}</span>
+		<span class="s0">} else {</span>
+		    <span class="s0">puts [outputChannel] &quot;A core file was created!&quot;</span>
+		<span class="s0">}</span>
+	    <span class="s0">}</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+    <span class="s0">flush [outputChannel]</span>
+    <span class="s0">flush [errorChannel]</span>
+    <span class="s0">return</span>
+<span class="s0">}</span>
+
+<span class="s0">#####################################################################</span>
+
+<span class="s0"># Procs that determine which tests/test files to run</span>
+
+<span class="s0"># tcltest::GetMatchingFiles</span>
+<span class="s0">#</span>
+<span class="s0">#       Looks at the patterns given to match and skip files and uses</span>
+<span class="s0">#	them to put together a list of the tests that will be run.</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0">#       directory to search</span>
+<span class="s0">#</span>
+<span class="s0"># Results:</span>
+<span class="s0">#       The constructed list is returned to the user.  This will</span>
+<span class="s0">#	primarily be used in 'all.tcl' files.  It is used in</span>
+<span class="s0">#	runAllTests.</span>
+<span class="s0">#</span>
+<span class="s0"># Side Effects:</span>
+<span class="s0">#       None</span>
+
+<span class="s0"># a lower case version is needed for compatibility with tcltest 1.0</span>
+<span class="s0">proc tcltest::getMatchingFiles args {GetMatchingFiles {*}$args}</span>
+
+<span class="s0">proc tcltest::GetMatchingFiles { args } {</span>
+    <span class="s0">if {[llength $args]} {</span>
+	<span class="s0">set dirList $args</span>
+    <span class="s0">} else {</span>
+	<span class="s0"># Finding tests only in [testsDirectory] is normal operation.</span>
+	<span class="s0"># This procedure is written to accept multiple directory arguments</span>
+	<span class="s0"># only to satisfy version 1 compatibility.</span>
+	<span class="s0">set dirList [list [testsDirectory]]</span>
+    <span class="s0">}</span>
+
+    <span class="s0">set matchingFiles [list]</span>
+    <span class="s0">foreach directory $dirList {</span>
+
+	<span class="s0"># List files in $directory that match patterns to run.</span>
+	<span class="s0">set matchFileList [list]</span>
+	<span class="s0">foreach match [matchFiles] {</span>
+	    <span class="s0">set matchFileList [concat $matchFileList \</span>
+		    <span class="s0">[glob -directory $directory -types {b c f p s} \</span>
+		    <span class="s0">-nocomplain -- $match]]</span>
+	<span class="s0">}</span>
+
+	<span class="s0"># List files in $directory that match patterns to skip.</span>
+	<span class="s0">set skipFileList [list]</span>
+	<span class="s0">foreach skip [skipFiles] {</span>
+	    <span class="s0">set skipFileList [concat $skipFileList \</span>
+		    <span class="s0">[glob -directory $directory -types {b c f p s} \</span>
+		    <span class="s0">-nocomplain -- $skip]]</span>
+	<span class="s0">}</span>
+
+	<span class="s0"># Add to result list all files in match list and not in skip list</span>
+	<span class="s0">foreach file $matchFileList {</span>
+	    <span class="s0">if {$file ni $skipFileList} {</span>
+		<span class="s0">lappend matchingFiles $file</span>
+	    <span class="s0">}</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+
+    <span class="s0">if {[llength $matchingFiles] == 0} {</span>
+	<span class="s0">PrintError &quot;No test files remain after applying your match and\</span>
+		<span class="s0">skip patterns!&quot;</span>
+    <span class="s0">}</span>
+    <span class="s0">return $matchingFiles</span>
+<span class="s0">}</span>
+
+<span class="s0"># tcltest::GetMatchingDirectories --</span>
+<span class="s0">#</span>
+<span class="s0">#	Looks at the patterns given to match and skip directories and</span>
+<span class="s0">#	uses them to put together a list of the test directories that we</span>
+<span class="s0">#	should attempt to run.  (Only subdirectories containing an</span>
+<span class="s0">#	&quot;all.tcl&quot; file are put into the list.)</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0">#	root directory from which to search</span>
+<span class="s0">#</span>
+<span class="s0"># Results:</span>
+<span class="s0">#	The constructed list is returned to the user.  This is used in</span>
+<span class="s0">#	the primary all.tcl file.</span>
+<span class="s0">#</span>
+<span class="s0"># Side Effects:</span>
+<span class="s0">#       None.</span>
+
+<span class="s0">proc tcltest::GetMatchingDirectories {rootdir} {</span>
+
+    <span class="s0"># Determine the skip list first, to avoid [glob]-ing over subdirectories</span>
+    <span class="s0"># we're going to throw away anyway.  Be sure we skip the $rootdir if it</span>
+    <span class="s0"># comes up to avoid infinite loops.</span>
+    <span class="s0">set skipDirs [list $rootdir]</span>
+    <span class="s0">foreach pattern [skipDirectories] {</span>
+	<span class="s0">set skipDirs [concat $skipDirs [glob -directory $rootdir -types d \</span>
+		<span class="s0">-nocomplain -- $pattern]]</span>
+    <span class="s0">}</span>
+
+    <span class="s0"># Now step through the matching directories, prune out the skipped ones</span>
+    <span class="s0"># as you go.</span>
+    <span class="s0">set matchDirs [list]</span>
+    <span class="s0">foreach pattern [matchDirectories] {</span>
+	<span class="s0">foreach path [glob -directory $rootdir -types d -nocomplain -- \</span>
+		<span class="s0">$pattern] {</span>
+	    <span class="s0">if {$path ni $skipDirs} {</span>
+		<span class="s0">set matchDirs [concat $matchDirs [GetMatchingDirectories $path]]</span>
+		<span class="s0">if {[file exists [file join $path all.tcl]]} {</span>
+		    <span class="s0">lappend matchDirs $path</span>
+		<span class="s0">}</span>
+	    <span class="s0">}</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+
+    <span class="s0">if {[llength $matchDirs] == 0} {</span>
+	<span class="s0">DebugPuts 1 &quot;No test directories remain after applying match\</span>
+		<span class="s0">and skip patterns!&quot;</span>
+    <span class="s0">}</span>
+    <span class="s0">return [lsort $matchDirs]</span>
+<span class="s0">}</span>
+
+<span class="s0"># tcltest::runAllTests --</span>
+<span class="s0">#</span>
+<span class="s0">#	prints output and sources test files according to the match and</span>
+<span class="s0">#	skip patterns provided.  after sourcing test files, it goes on</span>
+<span class="s0">#	to source all.tcl files in matching test subdirectories.</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0">#	shell being tested</span>
+<span class="s0">#</span>
+<span class="s0"># Results:</span>
+<span class="s0">#	None.</span>
+<span class="s0">#</span>
+<span class="s0"># Side effects:</span>
+<span class="s0">#	None.</span>
+
+<span class="s0">proc tcltest::runAllTests { {shell &quot;&quot;} } {</span>
+    <span class="s0">variable testSingleFile</span>
+    <span class="s0">variable numTestFiles</span>
+    <span class="s0">variable numTests</span>
+    <span class="s0">variable failFiles</span>
+    <span class="s0">variable DefaultValue</span>
+
+    <span class="s0">FillFilesExisted</span>
+    <span class="s0">if {[llength [info level 0]] == 1} {</span>
+	<span class="s0">set shell [interpreter]</span>
+    <span class="s0">}</span>
+
+    <span class="s0">set testSingleFile false</span>
+
+    <span class="s0">puts [outputChannel] &quot;Tests running in interp:  $shell&quot;</span>
+    <span class="s0">puts [outputChannel] &quot;Tests located in:  [testsDirectory]&quot;</span>
+    <span class="s0">puts [outputChannel] &quot;Tests running in:  [workingDirectory]&quot;</span>
+    <span class="s0">puts [outputChannel] &quot;Temporary files stored in\</span>
+	    <span class="s0">[temporaryDirectory]&quot;</span>
+
+    <span class="s0"># [file system] first available in Tcl 8.4</span>
+    <span class="s0">if {![catch {file system [testsDirectory]} result]</span>
+	    <span class="s0">&amp;&amp; ([lindex $result 0] ne &quot;native&quot;)} {</span>
+	<span class="s0"># If we aren't running in the native filesystem, then we must</span>
+	<span class="s0"># run the tests in a single process (via 'source'), because</span>
+	<span class="s0"># trying to run then via a pipe will fail since the files don't</span>
+	<span class="s0"># really exist.</span>
+	<span class="s0">singleProcess 1</span>
+    <span class="s0">}</span>
+
+    <span class="s0">if {[singleProcess]} {</span>
+	<span class="s0">puts [outputChannel] \</span>
+		<span class="s0">&quot;Test files sourced into current interpreter&quot;</span>
+    <span class="s0">} else {</span>
+	<span class="s0">puts [outputChannel] \</span>
+		<span class="s0">&quot;Test files run in separate interpreters&quot;</span>
+    <span class="s0">}</span>
+    <span class="s0">if {[llength [skip]] &gt; 0} {</span>
+	<span class="s0">puts [outputChannel] &quot;Skipping tests that match:  [skip]&quot;</span>
+    <span class="s0">}</span>
+    <span class="s0">puts [outputChannel] &quot;Running tests that match:  [match]&quot;</span>
+
+    <span class="s0">if {[llength [skipFiles]] &gt; 0} {</span>
+	<span class="s0">puts [outputChannel] \</span>
+		<span class="s0">&quot;Skipping test files that match:  [skipFiles]&quot;</span>
+    <span class="s0">}</span>
+    <span class="s0">if {[llength [matchFiles]] &gt; 0} {</span>
+	<span class="s0">puts [outputChannel] \</span>
+		<span class="s0">&quot;Only running test files that match:  [matchFiles]&quot;</span>
+    <span class="s0">}</span>
+
+    <span class="s0">set timeCmd {clock format [clock seconds]}</span>
+    <span class="s0">puts [outputChannel] &quot;Tests began at [eval $timeCmd]&quot;</span>
+
+    <span class="s0"># Run each of the specified tests</span>
+    <span class="s0">foreach file [lsort [GetMatchingFiles]] {</span>
+	<span class="s0">set tail [file tail $file]</span>
+	<span class="s0">puts [outputChannel] $tail</span>
+	<span class="s0">flush [outputChannel]</span>
+
+	<span class="s0">if {[singleProcess]} {</span>
+	    <span class="s0">incr numTestFiles</span>
+	    <span class="s0">uplevel 1 [list ::source $file]</span>
+	<span class="s0">} else {</span>
+	    <span class="s0"># Pass along our configuration to the child processes.</span>
+	    <span class="s0"># EXCEPT for the -outfile, because the parent process</span>
+	    <span class="s0"># needs to read and process output of children.</span>
+	    <span class="s0">set childargv [list]</span>
+	    <span class="s0">foreach opt [Configure] {</span>
+		<span class="s0">if {$opt eq &quot;-outfile&quot;} {continue}</span>
+		<span class="s0">set value [Configure $opt]</span>
+		<span class="s0"># Don't bother passing default configuration options</span>
+		<span class="s0">if {$value eq $DefaultValue($opt)} {</span>
+			<span class="s0">continue</span>
+		<span class="s0">}</span>
+		<span class="s0">lappend childargv $opt $value</span>
+	    <span class="s0">}</span>
+	    <span class="s0">set cmd [linsert $childargv 0 | $shell $file]</span>
+	    <span class="s0">if {[catch {</span>
+		<span class="s0">incr numTestFiles</span>
+		<span class="s0">set pipeFd [open $cmd &quot;r&quot;]</span>
+		<span class="s0">while {[gets $pipeFd line] &gt;= 0} {</span>
+		    <span class="s0">if {[regexp [join {</span>
+			    <span class="s0">{^([^:]+):\t}</span>
+			    <span class="s0">{Total\t([0-9]+)\t}</span>
+			    <span class="s0">{Passed\t([0-9]+)\t}</span>
+			    <span class="s0">{Skipped\t([0-9]+)\t}</span>
+			    <span class="s0">{Failed\t([0-9]+)}</span>
+			    <span class="s0">} &quot;&quot;] $line null testFile \</span>
+			    <span class="s0">Total Passed Skipped Failed]} {</span>
+			<span class="s0">foreach index {Total Passed Skipped Failed} {</span>
+			    <span class="s0">incr numTests($index) [set $index]</span>
+			<span class="s0">}</span>
+			<span class="s0">if {$Failed &gt; 0} {</span>
+			    <span class="s0">lappend failFiles $testFile</span>
+			<span class="s0">}</span>
+		    <span class="s0">} elseif {[regexp [join {</span>
+			    <span class="s0">{^Number of tests skipped }</span>
+			    <span class="s0">{for each constraint:}</span>
+			    <span class="s0">{|^\t(\d+)\t(.+)$}</span>
+			    <span class="s0">} &quot;&quot;] $line match skipped constraint]} {</span>
+			<span class="s0">if {[string match \t* $match]} {</span>
+			    <span class="s0">AddToSkippedBecause $constraint $skipped</span>
+			<span class="s0">}</span>
+		    <span class="s0">} else {</span>
+			<span class="s0">puts [outputChannel] $line</span>
+		    <span class="s0">}</span>
+		<span class="s0">}</span>
+		<span class="s0">close $pipeFd</span>
+	    <span class="s0">} msg]} {</span>
+		<span class="s0">puts [outputChannel] &quot;Test file error: $msg&quot;</span>
+		<span class="s0"># append the name of the test to a list to be reported</span>
+		<span class="s0"># later</span>
+		<span class="s0">lappend testFileFailures $file</span>
+	    <span class="s0">}</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+
+    <span class="s0"># cleanup</span>
+    <span class="s0">puts [outputChannel] &quot;\nTests ended at [eval $timeCmd]&quot;</span>
+    <span class="s0">cleanupTests 1</span>
+    <span class="s0">if {[info exists testFileFailures]} {</span>
+	<span class="s0">puts [outputChannel] &quot;\nTest files exiting with errors:  \n&quot;</span>
+	<span class="s0">foreach file $testFileFailures {</span>
+	    <span class="s0">puts [outputChannel] &quot;  [file tail $file]\n&quot;</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+
+    <span class="s0"># Checking for subdirectories in which to run tests</span>
+    <span class="s0">foreach directory [GetMatchingDirectories [testsDirectory]] {</span>
+	<span class="s0">set dir [file tail $directory]</span>
+	<span class="s0">puts [outputChannel] [string repeat ~ 44]</span>
+	<span class="s0">puts [outputChannel] &quot;$dir test began at [eval $timeCmd]\n&quot;</span>
+
+	<span class="s0">uplevel 1 [list ::source [file join $directory all.tcl]]</span>
+
+	<span class="s0">set endTime [eval $timeCmd]</span>
+	<span class="s0">puts [outputChannel] &quot;\n$dir test ended at $endTime&quot;</span>
+	<span class="s0">puts [outputChannel] &quot;&quot;</span>
+	<span class="s0">puts [outputChannel] [string repeat ~ 44]</span>
+    <span class="s0">}</span>
+    <span class="s0">return</span>
+<span class="s0">}</span>
+
+<span class="s0">#####################################################################</span>
+
+<span class="s0"># Test utility procs - not used in tcltest, but may be useful for</span>
+<span class="s0"># testing.</span>
+
+<span class="s0"># tcltest::loadTestedCommands --</span>
+<span class="s0">#</span>
+<span class="s0">#     Uses the specified script to load the commands to test. Allowed to</span>
+<span class="s0">#     be empty, as the tested commands could have been compiled into the</span>
+<span class="s0">#     interpreter.</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments</span>
+<span class="s0">#     none</span>
+<span class="s0">#</span>
+<span class="s0"># Results</span>
+<span class="s0">#     none</span>
+<span class="s0">#</span>
+<span class="s0"># Side Effects:</span>
+<span class="s0">#     none.</span>
+
+<span class="s0">proc tcltest::loadTestedCommands {} {</span>
+    <span class="s0">return [uplevel 1 [loadScript]]</span>
+<span class="s0">}</span>
+
+<span class="s0"># tcltest::saveState --</span>
+<span class="s0">#</span>
+<span class="s0">#	Save information regarding what procs and variables exist.</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0">#	none</span>
+<span class="s0">#</span>
+<span class="s0"># Results:</span>
+<span class="s0">#	Modifies the variable saveState</span>
+<span class="s0">#</span>
+<span class="s0"># Side effects:</span>
+<span class="s0">#	None.</span>
+
+<span class="s0">proc tcltest::saveState {} {</span>
+    <span class="s0">variable saveState</span>
+    <span class="s0">uplevel 1 [list ::set [namespace which -variable saveState]] \</span>
+	    <span class="s0">{[::list [::info procs] [::info vars]]}</span>
+    <span class="s0">DebugPuts  2 &quot;[lindex [info level 0] 0]: $saveState&quot;</span>
+    <span class="s0">return</span>
+<span class="s0">}</span>
+
+<span class="s0"># tcltest::restoreState --</span>
+<span class="s0">#</span>
+<span class="s0">#	Remove procs and variables that didn't exist before the call to</span>
+<span class="s0">#       [saveState].</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0">#	none</span>
+<span class="s0">#</span>
+<span class="s0"># Results:</span>
+<span class="s0">#	Removes procs and variables from your environment if they don't</span>
+<span class="s0">#	exist in the saveState variable.</span>
+<span class="s0">#</span>
+<span class="s0"># Side effects:</span>
+<span class="s0">#	None.</span>
+
+<span class="s0">proc tcltest::restoreState {} {</span>
+    <span class="s0">variable saveState</span>
+    <span class="s0">foreach p [uplevel 1 {::info procs}] {</span>
+	<span class="s0">if {($p ni [lindex $saveState 0]) &amp;&amp; (&quot;[namespace current]::$p&quot; ne</span>
+		<span class="s0">[uplevel 1 [list ::namespace origin $p]])} {</span>
+
+	    <span class="s0">DebugPuts 2 &quot;[lindex [info level 0] 0]: Removing proc $p&quot;</span>
+	    <span class="s0">uplevel 1 [list ::catch [list ::rename $p {}]]</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+    <span class="s0">foreach p [uplevel 1 {::info vars}] {</span>
+	<span class="s0">if {$p ni [lindex $saveState 1]} {</span>
+	    <span class="s0">DebugPuts 2 &quot;[lindex [info level 0] 0]:\</span>
+		    <span class="s0">Removing variable $p&quot;</span>
+	    <span class="s0">uplevel 1 [list ::catch [list ::unset $p]]</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+    <span class="s0">return</span>
+<span class="s0">}</span>
+
+<span class="s0"># tcltest::normalizeMsg --</span>
+<span class="s0">#</span>
+<span class="s0">#	Removes &quot;extra&quot; newlines from a string.</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0">#	msg        String to be modified</span>
+<span class="s0">#</span>
+<span class="s0"># Results:</span>
+<span class="s0">#	string with extra newlines removed</span>
+<span class="s0">#</span>
+<span class="s0"># Side effects:</span>
+<span class="s0">#	None.</span>
+
+<span class="s0">proc tcltest::normalizeMsg {msg} {</span>
+    <span class="s0">regsub &quot;\n$&quot; [string tolower $msg] &quot;&quot; msg</span>
+    <span class="s0">set msg [string map [list &quot;\n\n&quot; &quot;\n&quot;] $msg]</span>
+    <span class="s0">return [string map [list &quot;\n\}&quot; &quot;\}&quot;] $msg]</span>
+<span class="s0">}</span>
+
+<span class="s0"># tcltest::makeFile --</span>
+<span class="s0">#</span>
+<span class="s0"># Create a new file with the name &lt;name&gt;, and write &lt;contents&gt; to it.</span>
+<span class="s0">#</span>
+<span class="s0"># If this file hasn't been created via makeFile since the last time</span>
+<span class="s0"># cleanupTests was called, add it to the $filesMade list, so it will be</span>
+<span class="s0"># removed by the next call to cleanupTests.</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0">#	contents        content of the new file</span>
+<span class="s0">#       name            name of the new file</span>
+<span class="s0">#       directory       directory name for new file</span>
+<span class="s0">#</span>
+<span class="s0"># Results:</span>
+<span class="s0">#	absolute path to the file created</span>
+<span class="s0">#</span>
+<span class="s0"># Side effects:</span>
+<span class="s0">#	None.</span>
+
+<span class="s0">proc tcltest::makeFile {contents name {directory &quot;&quot;}} {</span>
+    <span class="s0">variable filesMade</span>
+    <span class="s0">FillFilesExisted</span>
+
+    <span class="s0">if {[llength [info level 0]] == 3} {</span>
+	<span class="s0">set directory [temporaryDirectory]</span>
+    <span class="s0">}</span>
+
+    <span class="s0">set fullName [file join $directory $name]</span>
+
+    <span class="s0">DebugPuts 3 &quot;[lindex [info level 0] 0]:\</span>
+	     <span class="s0">putting ``$contents'' into $fullName&quot;</span>
+
+    <span class="s0">set fd [open $fullName w]</span>
+    <span class="s0">chan configure $fd -translation lf</span>
+    <span class="s0">if {[string index $contents end] eq &quot;\n&quot;} {</span>
+	<span class="s0">puts -nonewline $fd $contents</span>
+    <span class="s0">} else {</span>
+	<span class="s0">puts $fd $contents</span>
+    <span class="s0">}</span>
+    <span class="s0">close $fd</span>
+
+    <span class="s0">if {$fullName ni $filesMade} {</span>
+	<span class="s0">lappend filesMade $fullName</span>
+    <span class="s0">}</span>
+    <span class="s0">return $fullName</span>
+<span class="s0">}</span>
+
+<span class="s0"># tcltest::removeFile --</span>
+<span class="s0">#</span>
+<span class="s0">#	Removes the named file from the filesystem</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0">#	name          file to be removed</span>
+<span class="s0">#       directory     directory from which to remove file</span>
+<span class="s0">#</span>
+<span class="s0"># Results:</span>
+<span class="s0">#	return value from [file delete]</span>
+<span class="s0">#</span>
+<span class="s0"># Side effects:</span>
+<span class="s0">#	None.</span>
+
+<span class="s0">proc tcltest::removeFile {name {directory &quot;&quot;}} {</span>
+    <span class="s0">variable filesMade</span>
+    <span class="s0">FillFilesExisted</span>
+    <span class="s0">if {[llength [info level 0]] == 2} {</span>
+	<span class="s0">set directory [temporaryDirectory]</span>
+    <span class="s0">}</span>
+    <span class="s0">set fullName [file join $directory $name]</span>
+    <span class="s0">DebugPuts 3 &quot;[lindex [info level 0] 0]: removing $fullName&quot;</span>
+    <span class="s0">set idx [lsearch -exact $filesMade $fullName]</span>
+    <span class="s0">set filesMade [lreplace $filesMade $idx $idx]</span>
+    <span class="s0">if {$idx == -1} {</span>
+	<span class="s0">DebugDo 1 {</span>
+	    <span class="s0">Warn &quot;removeFile removing \&quot;$fullName\&quot;:\n  not created by makeFile&quot;</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+    <span class="s0">if {![file isfile $fullName]} {</span>
+	<span class="s0">DebugDo 1 {</span>
+	    <span class="s0">Warn &quot;removeFile removing \&quot;$fullName\&quot;:\n  not a file&quot;</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+    <span class="s0">return [file delete -- $fullName]</span>
+<span class="s0">}</span>
+
+<span class="s0"># tcltest::makeDirectory --</span>
+<span class="s0">#</span>
+<span class="s0"># Create a new dir with the name &lt;name&gt;.</span>
+<span class="s0">#</span>
+<span class="s0"># If this dir hasn't been created via makeDirectory since the last time</span>
+<span class="s0"># cleanupTests was called, add it to the $directoriesMade list, so it</span>
+<span class="s0"># will be removed by the next call to cleanupTests.</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0">#       name            name of the new directory</span>
+<span class="s0">#       directory       directory in which to create new dir</span>
+<span class="s0">#</span>
+<span class="s0"># Results:</span>
+<span class="s0">#	absolute path to the directory created</span>
+<span class="s0">#</span>
+<span class="s0"># Side effects:</span>
+<span class="s0">#	None.</span>
+
+<span class="s0">proc tcltest::makeDirectory {name {directory &quot;&quot;}} {</span>
+    <span class="s0">variable filesMade</span>
+    <span class="s0">FillFilesExisted</span>
+    <span class="s0">if {[llength [info level 0]] == 2} {</span>
+	<span class="s0">set directory [temporaryDirectory]</span>
+    <span class="s0">}</span>
+    <span class="s0">set fullName [file join $directory $name]</span>
+    <span class="s0">DebugPuts 3 &quot;[lindex [info level 0] 0]: creating $fullName&quot;</span>
+    <span class="s0">file mkdir $fullName</span>
+    <span class="s0">if {$fullName ni $filesMade} {</span>
+	<span class="s0">lappend filesMade $fullName</span>
+    <span class="s0">}</span>
+    <span class="s0">return $fullName</span>
+<span class="s0">}</span>
+
+<span class="s0"># tcltest::removeDirectory --</span>
+<span class="s0">#</span>
+<span class="s0">#	Removes a named directory from the file system.</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0">#	name          Name of the directory to remove</span>
+<span class="s0">#       directory     Directory from which to remove</span>
+<span class="s0">#</span>
+<span class="s0"># Results:</span>
+<span class="s0">#	return value from [file delete]</span>
+<span class="s0">#</span>
+<span class="s0"># Side effects:</span>
+<span class="s0">#	None</span>
+
+<span class="s0">proc tcltest::removeDirectory {name {directory &quot;&quot;}} {</span>
+    <span class="s0">variable filesMade</span>
+    <span class="s0">FillFilesExisted</span>
+    <span class="s0">if {[llength [info level 0]] == 2} {</span>
+	<span class="s0">set directory [temporaryDirectory]</span>
+    <span class="s0">}</span>
+    <span class="s0">set fullName [file join $directory $name]</span>
+    <span class="s0">DebugPuts 3 &quot;[lindex [info level 0] 0]: deleting $fullName&quot;</span>
+    <span class="s0">set idx [lsearch -exact $filesMade $fullName]</span>
+    <span class="s0">set filesMade [lreplace $filesMade $idx $idx]</span>
+    <span class="s0">if {$idx == -1} {</span>
+	<span class="s0">DebugDo 1 {</span>
+	    <span class="s0">Warn &quot;removeDirectory removing \&quot;$fullName\&quot;:\n  not created\</span>
+		    <span class="s0">by makeDirectory&quot;</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+    <span class="s0">if {![file isdirectory $fullName]} {</span>
+	<span class="s0">DebugDo 1 {</span>
+	    <span class="s0">Warn &quot;removeDirectory removing \&quot;$fullName\&quot;:\n  not a directory&quot;</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+    <span class="s0">return [file delete -force -- $fullName]</span>
+<span class="s0">}</span>
+
+<span class="s0"># tcltest::viewFile --</span>
+<span class="s0">#</span>
+<span class="s0">#	reads the content of a file and returns it</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0">#	name of the file to read</span>
+<span class="s0">#       directory in which file is located</span>
+<span class="s0">#</span>
+<span class="s0"># Results:</span>
+<span class="s0">#	content of the named file</span>
+<span class="s0">#</span>
+<span class="s0"># Side effects:</span>
+<span class="s0">#	None.</span>
+
+<span class="s0">proc tcltest::viewFile {name {directory &quot;&quot;}} {</span>
+    <span class="s0">FillFilesExisted</span>
+    <span class="s0">if {[llength [info level 0]] == 2} {</span>
+	<span class="s0">set directory [temporaryDirectory]</span>
+    <span class="s0">}</span>
+    <span class="s0">set fullName [file join $directory $name]</span>
+    <span class="s0">set f [open $fullName]</span>
+    <span class="s0">set data [read -nonewline $f]</span>
+    <span class="s0">close $f</span>
+    <span class="s0">return $data</span>
+<span class="s0">}</span>
+
+<span class="s0"># tcltest::bytestring --</span>
+<span class="s0">#</span>
+<span class="s0"># Construct a string that consists of the requested sequence of bytes,</span>
+<span class="s0"># as opposed to a string of properly formed UTF-8 characters.</span>
+<span class="s0"># This allows the tester to</span>
+<span class="s0"># 1. Create denormalized or improperly formed strings to pass to C</span>
+<span class="s0">#    procedures that are supposed to accept strings with embedded NULL</span>
+<span class="s0">#    bytes.</span>
+<span class="s0"># 2. Confirm that a string result has a certain pattern of bytes, for</span>
+<span class="s0">#    instance to confirm that &quot;\xe0\0&quot; in a Tcl script is stored</span>
+<span class="s0">#    internally in UTF-8 as the sequence of bytes &quot;\xc3\xa0\xc0\x80&quot;.</span>
+<span class="s0">#</span>
+<span class="s0"># Generally, it's a bad idea to examine the bytes in a Tcl string or to</span>
+<span class="s0"># construct improperly formed strings in this manner, because it involves</span>
+<span class="s0"># exposing that Tcl uses UTF-8 internally.</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0">#	string being converted</span>
+<span class="s0">#</span>
+<span class="s0"># Results:</span>
+<span class="s0">#	result fom encoding</span>
+<span class="s0">#</span>
+<span class="s0"># Side effects:</span>
+<span class="s0">#	None</span>
+
+<span class="s0">proc tcltest::bytestring {string} {</span>
+    <span class="s0">return [encoding convertfrom identity $string]</span>
+<span class="s0">}</span>
+
+<span class="s0"># tcltest::OpenFiles --</span>
+<span class="s0">#</span>
+<span class="s0">#	used in io tests, uses testchannel</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0">#	None.</span>
+<span class="s0">#</span>
+<span class="s0"># Results:</span>
+<span class="s0">#	???</span>
+<span class="s0">#</span>
+<span class="s0"># Side effects:</span>
+<span class="s0">#	None.</span>
+
+<span class="s0">proc tcltest::OpenFiles {} {</span>
+    <span class="s0">if {[catch {testchannel open} result]} {</span>
+	<span class="s0">return {}</span>
+    <span class="s0">}</span>
+    <span class="s0">return $result</span>
+<span class="s0">}</span>
+
+<span class="s0"># tcltest::LeakFiles --</span>
+<span class="s0">#</span>
+<span class="s0">#	used in io tests, uses testchannel</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0">#	None.</span>
+<span class="s0">#</span>
+<span class="s0"># Results:</span>
+<span class="s0">#	???</span>
+<span class="s0">#</span>
+<span class="s0"># Side effects:</span>
+<span class="s0">#	None.</span>
+
+<span class="s0">proc tcltest::LeakFiles {old} {</span>
+    <span class="s0">if {[catch {testchannel open} new]} {</span>
+	<span class="s0">return {}</span>
+    <span class="s0">}</span>
+    <span class="s0">set leak {}</span>
+    <span class="s0">foreach p $new {</span>
+	<span class="s0">if {$p ni $old} {</span>
+	    <span class="s0">lappend leak $p</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+    <span class="s0">return $leak</span>
+<span class="s0">}</span>
+
+<span class="s0">#</span>
+<span class="s0"># Internationalization / ISO support procs     -- dl</span>
+<span class="s0">#</span>
+
+<span class="s0"># tcltest::SetIso8859_1_Locale --</span>
+<span class="s0">#</span>
+<span class="s0">#	used in cmdIL.test, uses testlocale</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0">#	None.</span>
+<span class="s0">#</span>
+<span class="s0"># Results:</span>
+<span class="s0">#	None.</span>
+<span class="s0">#</span>
+<span class="s0"># Side effects:</span>
+<span class="s0">#	None.</span>
+
+<span class="s0">proc tcltest::SetIso8859_1_Locale {} {</span>
+    <span class="s0">variable previousLocale</span>
+    <span class="s0">variable isoLocale</span>
+    <span class="s0">if {[info commands testlocale] != &quot;&quot;} {</span>
+	<span class="s0">set previousLocale [testlocale ctype]</span>
+	<span class="s0">testlocale ctype $isoLocale</span>
+    <span class="s0">}</span>
+    <span class="s0">return</span>
+<span class="s0">}</span>
+
+<span class="s0"># tcltest::RestoreLocale --</span>
+<span class="s0">#</span>
+<span class="s0">#	used in cmdIL.test, uses testlocale</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0">#	None.</span>
+<span class="s0">#</span>
+<span class="s0"># Results:</span>
+<span class="s0">#	None.</span>
+<span class="s0">#</span>
+<span class="s0"># Side effects:</span>
+<span class="s0">#	None.</span>
+
+<span class="s0">proc tcltest::RestoreLocale {} {</span>
+    <span class="s0">variable previousLocale</span>
+    <span class="s0">if {[info commands testlocale] != &quot;&quot;} {</span>
+	<span class="s0">testlocale ctype $previousLocale</span>
+    <span class="s0">}</span>
+    <span class="s0">return</span>
+<span class="s0">}</span>
+
+<span class="s0"># tcltest::threadReap --</span>
+<span class="s0">#</span>
+<span class="s0">#	Kill all threads except for the main thread.</span>
+<span class="s0">#	Do nothing if testthread is not defined.</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0">#	none.</span>
+<span class="s0">#</span>
+<span class="s0"># Results:</span>
+<span class="s0">#	Returns the number of existing threads.</span>
+<span class="s0">#</span>
+<span class="s0"># Side Effects:</span>
+<span class="s0">#       none.</span>
+<span class="s0">#</span>
+
+<span class="s0">proc tcltest::threadReap {} {</span>
+    <span class="s0">if {[info commands testthread] ne {}} {</span>
+
+	<span class="s0"># testthread built into tcltest</span>
+
+	<span class="s0">testthread errorproc ThreadNullError</span>
+	<span class="s0">while {[llength [testthread names]] &gt; 1} {</span>
+	    <span class="s0">foreach tid [testthread names] {</span>
+		<span class="s0">if {$tid != [mainThread]} {</span>
+		    <span class="s0">catch {</span>
+			<span class="s0">testthread send -async $tid {testthread exit}</span>
+		    <span class="s0">}</span>
+		<span class="s0">}</span>
+	    <span class="s0">}</span>
+	    <span class="s0">## Enter a bit a sleep to give the threads enough breathing</span>
+	    <span class="s0">## room to kill themselves off, otherwise the end up with a</span>
+	    <span class="s0">## massive queue of repeated events</span>
+	    <span class="s0">after 1</span>
+	<span class="s0">}</span>
+	<span class="s0">testthread errorproc ThreadError</span>
+	<span class="s0">return [llength [testthread names]]</span>
+    <span class="s0">} elseif {[info commands thread::id] ne {}} {</span>
+
+	<span class="s0"># Thread extension</span>
+
+	<span class="s0">thread::errorproc ThreadNullError</span>
+	<span class="s0">while {[llength [thread::names]] &gt; 1} {</span>
+	    <span class="s0">foreach tid [thread::names] {</span>
+		<span class="s0">if {$tid != [mainThread]} {</span>
+		    <span class="s0">catch {thread::send -async $tid {thread::exit}}</span>
+		<span class="s0">}</span>
+	    <span class="s0">}</span>
+	    <span class="s0">## Enter a bit a sleep to give the threads enough breathing</span>
+	    <span class="s0">## room to kill themselves off, otherwise the end up with a</span>
+	    <span class="s0">## massive queue of repeated events</span>
+	    <span class="s0">after 1</span>
+	<span class="s0">}</span>
+	<span class="s0">thread::errorproc ThreadError</span>
+	<span class="s0">return [llength [thread::names]]</span>
+    <span class="s0">} else {</span>
+	<span class="s0">return 1</span>
+    <span class="s0">}</span>
+    <span class="s0">return 0</span>
+<span class="s0">}</span>
+
+<span class="s0"># Initialize the constraints and set up command line arguments</span>
+<span class="s0">namespace eval tcltest {</span>
+    <span class="s0"># Define initializers for all the built-in contraint definitions</span>
+    <span class="s0">DefineConstraintInitializers</span>
+
+    <span class="s0"># Set up the constraints in the testConstraints array to be lazily</span>
+    <span class="s0"># initialized by a registered initializer, or by &quot;false&quot; if no</span>
+    <span class="s0"># initializer is registered.</span>
+    <span class="s0">trace add variable testConstraints read [namespace code SafeFetch]</span>
+
+    <span class="s0"># Only initialize constraints at package load time if an</span>
+    <span class="s0"># [initConstraintsHook] has been pre-defined.  This is only</span>
+    <span class="s0"># for compatibility support.  The modern way to add a custom</span>
+    <span class="s0"># test constraint is to just call the [testConstraint] command</span>
+    <span class="s0"># straight away, without all this &quot;hook&quot; nonsense.</span>
+    <span class="s0">if {[namespace current] eq</span>
+	    <span class="s0">[namespace qualifiers [namespace which initConstraintsHook]]} {</span>
+	<span class="s0">InitConstraints</span>
+    <span class="s0">} else {</span>
+	<span class="s0">proc initConstraintsHook {} {}</span>
+    <span class="s0">}</span>
+
+    <span class="s0"># Define the standard match commands</span>
+    <span class="s0">customMatch exact	[list string equal]</span>
+    <span class="s0">customMatch glob	[list string match]</span>
+    <span class="s0">customMatch regexp	[list regexp --]</span>
+
+    <span class="s0"># If the TCLTEST_OPTIONS environment variable exists, configure</span>
+    <span class="s0"># tcltest according to the option values it specifies.  This has</span>
+    <span class="s0"># the effect of resetting tcltest's default configuration.</span>
+    <span class="s0">proc ConfigureFromEnvironment {} {</span>
+	<span class="s0">upvar #0 env(TCLTEST_OPTIONS) options</span>
+	<span class="s0">if {[catch {llength $options} msg]} {</span>
+	    <span class="s0">Warn &quot;invalid TCLTEST_OPTIONS \&quot;$options\&quot;:\n  invalid\</span>
+		    <span class="s0">Tcl list: $msg&quot;</span>
+	    <span class="s0">return</span>
+	<span class="s0">}</span>
+	<span class="s0">if {[llength $options] % 2} {</span>
+	    <span class="s0">Warn &quot;invalid TCLTEST_OPTIONS: \&quot;$options\&quot;:\n  should be\</span>
+		    <span class="s0">-option value ?-option value ...?&quot;</span>
+	    <span class="s0">return</span>
+	<span class="s0">}</span>
+	<span class="s0">if {[catch {Configure {*}$options} msg]} {</span>
+	    <span class="s0">Warn &quot;invalid TCLTEST_OPTIONS: \&quot;$options\&quot;:\n  $msg&quot;</span>
+	    <span class="s0">return</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+    <span class="s0">if {[info exists ::env(TCLTEST_OPTIONS)]} {</span>
+	<span class="s0">ConfigureFromEnvironment</span>
+    <span class="s0">}</span>
+
+    <span class="s0">proc LoadTimeCmdLineArgParsingRequired {} {</span>
+	<span class="s0">set required false</span>
+	<span class="s0">if {[info exists ::argv] &amp;&amp; (&quot;-help&quot; in $::argv)} {</span>
+	    <span class="s0"># The command line asks for -help, so give it (and exit)</span>
+	    <span class="s0"># right now.  ([configure] does not process -help)</span>
+	    <span class="s0">set required true</span>
+	<span class="s0">}</span>
+	<span class="s0">foreach hook { PrintUsageInfoHook processCmdLineArgsHook</span>
+			<span class="s0">processCmdLineArgsAddFlagsHook } {</span>
+	    <span class="s0">if {[namespace current] eq</span>
+		    <span class="s0">[namespace qualifiers [namespace which $hook]]} {</span>
+		<span class="s0">set required true</span>
+	    <span class="s0">} else {</span>
+		<span class="s0">proc $hook args {}</span>
+	    <span class="s0">}</span>
+	<span class="s0">}</span>
+	<span class="s0">return $required</span>
+    <span class="s0">}</span>
+
+    <span class="s0"># Only initialize configurable options from the command line arguments</span>
+    <span class="s0"># at package load time if necessary for backward compatibility.  This</span>
+    <span class="s0"># lets the tcltest user call [configure] for themselves if they wish.</span>
+    <span class="s0"># Traces are established for auto-configuration from the command line</span>
+    <span class="s0"># if any configurable options are accessed before the user calls</span>
+    <span class="s0"># [configure].</span>
+    <span class="s0">if {[LoadTimeCmdLineArgParsingRequired]} {</span>
+	<span class="s0">ProcessCmdLineArgs</span>
+    <span class="s0">} else {</span>
+	<span class="s0">EstablishAutoConfigureTraces</span>
+    <span class="s0">}</span>
+
+    <span class="s0">package provide [namespace tail [namespace current]] $Version</span>
+<span class="s0">}</span>
+</pre>
+</body>
+</html>

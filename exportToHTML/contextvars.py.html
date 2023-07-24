@@ -1,0 +1,369 @@
+<html>
+<head>
+<title>contextvars.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #629755; font-style: italic;}
+.s3 { color: #cc7832;}
+.s4 { color: #6a8759;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+contextvars.py</font>
+</center></td></tr></table>
+<pre><span class="s0"># -*- coding: utf-8 -*-</span>
+<span class="s2">&quot;&quot;&quot; 
+Cooperative ``contextvars`` module. 
+ 
+This module was added to Python 3.7. The gevent version is available 
+on all supported versions of Python. However, see an important note 
+about gevent 20.9. 
+ 
+Context variables are like greenlet-local variables, just more 
+inconvenient to use. They were designed to work around limitations in 
+:mod:`asyncio` and are rarely needed by greenlet-based code. 
+ 
+The primary difference is that snapshots of the state of all context 
+variables in a given greenlet can be taken, and later restored for 
+execution; modifications to context variables are &quot;scoped&quot; to the 
+duration that a particular context is active. (This state-restoration 
+support is rarely useful for greenlets because instead of always 
+running &quot;tasks&quot; sequentially within a single thread like `asyncio` 
+does, greenlet-based code usually spawns new greenlets to handle each 
+task.) 
+ 
+The gevent implementation is based on the Python reference implementation 
+from :pep:`567` and doesn't have much optimization. In particular, setting 
+context values isn't constant time. 
+ 
+.. versionadded:: 1.5a3 
+.. versionchanged:: 20.9.0 
+   On Python 3.7 and above, this module is no longer monkey-patched 
+   in place of the standard library version. 
+   gevent depends on greenlet 0.4.17 which includes support for context variables. 
+   This means that any number of greenlets can be running any number of asyncio tasks 
+   each with their own context variables. This module is only greenlet aware, not 
+   asyncio task aware, so its use is not recommended on Python 3.7 and above. 
+ 
+   On previous versions of Python, this module continues to be a solution for 
+   backporting code. It is also available if you wish to use the contextvar API 
+   in a strictly greenlet-local manner. 
+&quot;&quot;&quot;</span>
+<span class="s3">from </span><span class="s1">__future__ </span><span class="s3">import </span><span class="s1">absolute_import</span>
+<span class="s3">from </span><span class="s1">__future__ </span><span class="s3">import </span><span class="s1">division</span>
+<span class="s3">from </span><span class="s1">__future__ </span><span class="s3">import </span><span class="s1">print_function</span>
+
+
+<span class="s1">__all__ = [</span>
+    <span class="s4">'ContextVar'</span><span class="s3">,</span>
+    <span class="s4">'Context'</span><span class="s3">,</span>
+    <span class="s4">'copy_context'</span><span class="s3">,</span>
+    <span class="s4">'Token'</span><span class="s3">,</span>
+<span class="s1">]</span>
+
+<span class="s3">try</span><span class="s1">:</span>
+    <span class="s3">from </span><span class="s1">collections.abc </span><span class="s3">import </span><span class="s1">Mapping</span>
+<span class="s3">except </span><span class="s1">ImportError:</span>
+    <span class="s3">from </span><span class="s1">collections </span><span class="s3">import </span><span class="s1">Mapping </span><span class="s0"># pylint:disable=deprecated-class</span>
+
+<span class="s3">from </span><span class="s1">gevent._compat </span><span class="s3">import </span><span class="s1">PY37</span>
+<span class="s3">from </span><span class="s1">gevent._util </span><span class="s3">import </span><span class="s1">_NONE</span>
+<span class="s3">from </span><span class="s1">gevent.local </span><span class="s3">import </span><span class="s1">local</span>
+
+<span class="s1">__stdlib_expected__ = __all__</span>
+<span class="s1">__implements__ = __stdlib_expected__ </span><span class="s3">if </span><span class="s1">PY37 </span><span class="s3">else None</span>
+
+<span class="s0"># In the reference implementation, the interpreter level OS thread state</span>
+<span class="s0"># is modified to contain a pointer to the current context. Obviously we can't</span>
+<span class="s0"># touch that here because we're not tied to CPython's internals; plus, of course,</span>
+<span class="s0"># we want to operate with greenlets, not OS threads. So we use a greenlet-local object</span>
+<span class="s0"># to store the active context.</span>
+<span class="s3">class </span><span class="s1">_ContextState(local):</span>
+
+    <span class="s3">def </span><span class="s1">__init__(self):</span>
+        <span class="s1">self.context = Context()</span>
+
+
+<span class="s3">def </span><span class="s1">_not_base_type(cls):</span>
+    <span class="s0"># This is not given in the PEP but is tested in test_context.</span>
+    <span class="s0"># Assign this method to __init_subclass__ in each type that can't</span>
+    <span class="s0"># be subclassed. (This only works in 3.6+, but context vars are only in</span>
+    <span class="s0"># 3.7+)</span>
+    <span class="s3">raise </span><span class="s1">TypeError(</span><span class="s4">&quot;not an acceptable base type&quot;</span><span class="s1">)</span>
+
+<span class="s3">class </span><span class="s1">_ContextData(object):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    A copy-on-write immutable mapping from ContextVar 
+    keys to arbitrary values. Setting values requires a 
+    copy, making it O(n), not O(1). 
+    &quot;&quot;&quot;</span>
+
+    <span class="s0"># In theory, the HAMT used by the stdlib contextvars module could</span>
+    <span class="s0"># be used: It's often available at _testcapi.hamt() (see</span>
+    <span class="s0"># test_context). We'd need to be sure to add a correct __hash__</span>
+    <span class="s0"># method to ContextVar to make that work well. (See</span>
+    <span class="s0"># Python/context.c:contextvar_generate_hash.)</span>
+
+    <span class="s1">__slots__ = (</span>
+        <span class="s4">'_mapping'</span><span class="s3">,</span>
+    <span class="s1">)</span>
+
+    <span class="s3">def </span><span class="s1">__init__(self):</span>
+        <span class="s1">self._mapping = {}</span>
+
+    <span class="s3">def </span><span class="s1">__getitem__(self</span><span class="s3">, </span><span class="s1">key):</span>
+        <span class="s3">return </span><span class="s1">self._mapping[key]</span>
+
+    <span class="s3">def </span><span class="s1">__contains__(self</span><span class="s3">, </span><span class="s1">key):</span>
+        <span class="s3">return </span><span class="s1">key </span><span class="s3">in </span><span class="s1">self._mapping</span>
+
+    <span class="s3">def </span><span class="s1">__len__(self):</span>
+        <span class="s3">return </span><span class="s1">len(self._mapping)</span>
+
+    <span class="s3">def </span><span class="s1">__iter__(self):</span>
+        <span class="s3">return </span><span class="s1">iter(self._mapping)</span>
+
+    <span class="s3">def </span><span class="s1">set(self</span><span class="s3">, </span><span class="s1">key</span><span class="s3">, </span><span class="s1">value):</span>
+        <span class="s1">copy = _ContextData()</span>
+        <span class="s1">copy._mapping = self._mapping.copy()</span>
+        <span class="s1">copy._mapping[key] = value</span>
+        <span class="s3">return </span><span class="s1">copy</span>
+
+    <span class="s3">def </span><span class="s1">delete(self</span><span class="s3">, </span><span class="s1">key):</span>
+        <span class="s1">copy = _ContextData()</span>
+        <span class="s1">copy._mapping = self._mapping.copy()</span>
+        <span class="s3">del </span><span class="s1">copy._mapping[key]</span>
+        <span class="s3">return </span><span class="s1">copy</span>
+
+
+<span class="s3">class </span><span class="s1">ContextVar(object):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Implementation of :class:`contextvars.ContextVar`. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s1">__slots__ = (</span>
+        <span class="s4">'_name'</span><span class="s3">,</span>
+        <span class="s4">'_default'</span><span class="s3">,</span>
+    <span class="s1">)</span>
+
+    <span class="s3">def </span><span class="s1">__init__(self</span><span class="s3">, </span><span class="s1">name</span><span class="s3">, </span><span class="s1">default=_NONE):</span>
+        <span class="s1">self._name = name</span>
+        <span class="s1">self._default = default</span>
+
+    <span class="s1">__init_subclass__ = classmethod(_not_base_type)</span>
+
+    <span class="s1">@classmethod</span>
+    <span class="s3">def </span><span class="s1">__class_getitem__(cls</span><span class="s3">, </span><span class="s1">_):</span>
+        <span class="s0"># For typing support: ContextVar[str].</span>
+        <span class="s0"># Not in the PEP.</span>
+        <span class="s0"># sigh.</span>
+        <span class="s3">return </span><span class="s1">cls</span>
+
+    <span class="s1">@property</span>
+    <span class="s3">def </span><span class="s1">name(self):</span>
+        <span class="s3">return </span><span class="s1">self._name</span>
+
+    <span class="s3">def </span><span class="s1">get(self</span><span class="s3">, </span><span class="s1">default=_NONE):</span>
+        <span class="s1">context = _context_state.context</span>
+        <span class="s3">try</span><span class="s1">:</span>
+            <span class="s3">return </span><span class="s1">context[self]</span>
+        <span class="s3">except </span><span class="s1">KeyError:</span>
+            <span class="s3">pass</span>
+
+        <span class="s3">if </span><span class="s1">default </span><span class="s3">is not </span><span class="s1">_NONE:</span>
+            <span class="s3">return </span><span class="s1">default</span>
+
+        <span class="s3">if </span><span class="s1">self._default </span><span class="s3">is not </span><span class="s1">_NONE:</span>
+            <span class="s3">return </span><span class="s1">self._default</span>
+
+        <span class="s3">raise </span><span class="s1">LookupError</span>
+
+    <span class="s3">def </span><span class="s1">set(self</span><span class="s3">, </span><span class="s1">value):</span>
+        <span class="s1">context = _context_state.context</span>
+        <span class="s3">return </span><span class="s1">context._set_value(self</span><span class="s3">, </span><span class="s1">value)</span>
+
+    <span class="s3">def </span><span class="s1">reset(self</span><span class="s3">, </span><span class="s1">token):</span>
+        <span class="s1">token._reset(self)</span>
+
+    <span class="s3">def </span><span class="s1">__repr__(self):</span>
+        <span class="s0"># This is not captured in the PEP but is tested by test_context</span>
+        <span class="s3">return </span><span class="s4">'&lt;%s.%s name=%r default=%r at 0x%x&gt;' </span><span class="s1">% (</span>
+            <span class="s1">type(self).__module__</span><span class="s3">,</span>
+            <span class="s1">type(self).__name__</span><span class="s3">,</span>
+            <span class="s1">self._name</span><span class="s3">,</span>
+            <span class="s1">self._default</span><span class="s3">,</span>
+            <span class="s1">id(self)</span>
+        <span class="s1">)</span>
+
+
+<span class="s3">class </span><span class="s1">Token(object):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Opaque implementation of :class:`contextvars.Token`. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s1">MISSING = _NONE</span>
+
+    <span class="s1">__slots__ = (</span>
+        <span class="s4">'_context'</span><span class="s3">,</span>
+        <span class="s4">'_var'</span><span class="s3">,</span>
+        <span class="s4">'_old_value'</span><span class="s3">,</span>
+        <span class="s4">'_used'</span><span class="s3">,</span>
+    <span class="s1">)</span>
+
+    <span class="s3">def </span><span class="s1">__init__(self</span><span class="s3">, </span><span class="s1">context</span><span class="s3">, </span><span class="s1">var</span><span class="s3">, </span><span class="s1">old_value):</span>
+        <span class="s1">self._context = context</span>
+        <span class="s1">self._var = var</span>
+        <span class="s1">self._old_value = old_value</span>
+        <span class="s1">self._used = </span><span class="s3">False</span>
+
+    <span class="s1">__init_subclass__ = classmethod(_not_base_type)</span>
+
+    <span class="s1">@property</span>
+    <span class="s3">def </span><span class="s1">var(self):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        A read-only attribute pointing to the variable that created the token 
+        &quot;&quot;&quot;</span>
+        <span class="s3">return </span><span class="s1">self._var</span>
+
+    <span class="s1">@property</span>
+    <span class="s3">def </span><span class="s1">old_value(self):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        A read-only attribute set to the value the variable had before 
+        the ``set()`` call, or to :attr:`MISSING` if the variable wasn't set 
+        before. 
+        &quot;&quot;&quot;</span>
+        <span class="s3">return </span><span class="s1">self._old_value</span>
+
+    <span class="s3">def </span><span class="s1">_reset(self</span><span class="s3">, </span><span class="s1">var):</span>
+        <span class="s3">if </span><span class="s1">self._used:</span>
+            <span class="s3">raise </span><span class="s1">RuntimeError(</span><span class="s4">&quot;Taken has already been used once&quot;</span><span class="s1">)</span>
+
+        <span class="s3">if </span><span class="s1">self._var </span><span class="s3">is not </span><span class="s1">var:</span>
+            <span class="s3">raise </span><span class="s1">ValueError(</span><span class="s4">&quot;Token was created by a different ContextVar&quot;</span><span class="s1">)</span>
+
+        <span class="s3">if </span><span class="s1">self._context </span><span class="s3">is not </span><span class="s1">_context_state.context:</span>
+            <span class="s3">raise </span><span class="s1">ValueError(</span><span class="s4">&quot;Token was created in a different Context&quot;</span><span class="s1">)</span>
+
+        <span class="s1">self._used = </span><span class="s3">True</span>
+        <span class="s3">if </span><span class="s1">self._old_value </span><span class="s3">is </span><span class="s1">self.MISSING:</span>
+            <span class="s1">self._context._delete(var)</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s1">self._context._reset_value(var</span><span class="s3">, </span><span class="s1">self._old_value)</span>
+
+    <span class="s3">def </span><span class="s1">__repr__(self):</span>
+        <span class="s0"># This is not captured in the PEP but is tested by test_context</span>
+        <span class="s3">return </span><span class="s4">'&lt;%s.%s%s var=%r at 0x%x&gt;' </span><span class="s1">% (</span>
+            <span class="s1">type(self).__module__</span><span class="s3">,</span>
+            <span class="s1">type(self).__name__</span><span class="s3">,</span>
+            <span class="s4">' used' </span><span class="s3">if </span><span class="s1">self._used </span><span class="s3">else </span><span class="s4">''</span><span class="s3">,</span>
+            <span class="s1">self._var</span><span class="s3">,</span>
+            <span class="s1">id(self)</span><span class="s3">,</span>
+        <span class="s1">)</span>
+
+<span class="s3">class </span><span class="s1">Context(Mapping):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Implementation of :class:`contextvars.Context` 
+    &quot;&quot;&quot;</span>
+
+    <span class="s1">__slots__ = (</span>
+        <span class="s4">'_data'</span><span class="s3">,</span>
+        <span class="s4">'_prev_context'</span><span class="s3">,</span>
+    <span class="s1">)</span>
+
+    <span class="s3">def </span><span class="s1">__init__(self):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Creates an empty context. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">self._data = _ContextData()</span>
+        <span class="s1">self._prev_context = </span><span class="s3">None</span>
+
+    <span class="s1">__init_subclass__ = classmethod(_not_base_type)</span>
+
+    <span class="s3">def </span><span class="s1">run(self</span><span class="s3">, </span><span class="s1">function</span><span class="s3">, </span><span class="s1">*args</span><span class="s3">, </span><span class="s1">**kwargs):</span>
+        <span class="s3">if </span><span class="s1">self._prev_context </span><span class="s3">is not None</span><span class="s1">:</span>
+            <span class="s3">raise </span><span class="s1">RuntimeError(</span>
+                <span class="s4">&quot;Cannot enter context; %s is already entered&quot; </span><span class="s1">% (self</span><span class="s3">,</span><span class="s1">)</span>
+            <span class="s1">)</span>
+
+        <span class="s1">self._prev_context = _context_state.context</span>
+        <span class="s3">try</span><span class="s1">:</span>
+            <span class="s1">_context_state.context = self</span>
+            <span class="s3">return </span><span class="s1">function(*args</span><span class="s3">, </span><span class="s1">**kwargs)</span>
+        <span class="s3">finally</span><span class="s1">:</span>
+            <span class="s1">_context_state.context = self._prev_context</span>
+            <span class="s1">self._prev_context = </span><span class="s3">None</span>
+
+    <span class="s3">def </span><span class="s1">copy(self):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Return a shallow copy. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">result = Context()</span>
+        <span class="s1">result._data = self._data</span>
+        <span class="s3">return </span><span class="s1">result</span>
+
+    <span class="s0">###</span>
+    <span class="s0"># Operations used by ContextVar and Token</span>
+    <span class="s0">###</span>
+
+    <span class="s3">def </span><span class="s1">_set_value(self</span><span class="s3">, </span><span class="s1">var</span><span class="s3">, </span><span class="s1">value):</span>
+        <span class="s3">try</span><span class="s1">:</span>
+            <span class="s1">old_value = self._data[var]</span>
+        <span class="s3">except </span><span class="s1">KeyError:</span>
+            <span class="s1">old_value = Token.MISSING</span>
+
+        <span class="s1">self._data = self._data.set(var</span><span class="s3">, </span><span class="s1">value)</span>
+        <span class="s3">return </span><span class="s1">Token(self</span><span class="s3">, </span><span class="s1">var</span><span class="s3">, </span><span class="s1">old_value)</span>
+
+    <span class="s3">def </span><span class="s1">_delete(self</span><span class="s3">, </span><span class="s1">var):</span>
+        <span class="s1">self._data = self._data.delete(var)</span>
+
+    <span class="s3">def </span><span class="s1">_reset_value(self</span><span class="s3">, </span><span class="s1">var</span><span class="s3">, </span><span class="s1">old_value):</span>
+        <span class="s1">self._data = self._data.set(var</span><span class="s3">, </span><span class="s1">old_value)</span>
+
+    <span class="s0"># Note that all Mapping methods, including Context.__getitem__ and</span>
+    <span class="s0"># Context.get, ignore default values for context variables (i.e.</span>
+    <span class="s0"># ContextVar.default). This means that for a variable var that was</span>
+    <span class="s0"># created with a default value and was not set in the context:</span>
+    <span class="s0">#</span>
+    <span class="s0"># - context[var] raises a KeyError,</span>
+    <span class="s0"># - var in context returns False,</span>
+    <span class="s0"># - the variable isn't included in context.items(), etc.</span>
+
+    <span class="s0"># Checking the type of key isn't part of the PEP but is tested by</span>
+    <span class="s0"># test_context.py.</span>
+    <span class="s1">@staticmethod</span>
+    <span class="s3">def </span><span class="s1">__check_key(key):</span>
+        <span class="s3">if </span><span class="s1">type(key) </span><span class="s3">is not </span><span class="s1">ContextVar: </span><span class="s0"># pylint:disable=unidiomatic-typecheck</span>
+            <span class="s3">raise </span><span class="s1">TypeError(</span><span class="s4">&quot;ContextVar key was expected&quot;</span><span class="s1">)</span>
+
+    <span class="s3">def </span><span class="s1">__getitem__(self</span><span class="s3">, </span><span class="s1">key):</span>
+        <span class="s1">self.__check_key(key)</span>
+        <span class="s3">return </span><span class="s1">self._data[key]</span>
+
+    <span class="s3">def </span><span class="s1">__contains__(self</span><span class="s3">, </span><span class="s1">key):</span>
+        <span class="s1">self.__check_key(key)</span>
+        <span class="s3">return </span><span class="s1">key </span><span class="s3">in </span><span class="s1">self._data</span>
+
+    <span class="s3">def </span><span class="s1">__len__(self):</span>
+        <span class="s3">return </span><span class="s1">len(self._data)</span>
+
+    <span class="s3">def </span><span class="s1">__iter__(self):</span>
+        <span class="s3">return </span><span class="s1">iter(self._data)</span>
+
+
+<span class="s3">def </span><span class="s1">copy_context():</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Return a shallow copy of the current context. 
+    &quot;&quot;&quot;</span>
+    <span class="s3">return </span><span class="s1">_context_state.context.copy()</span>
+
+
+<span class="s1">_context_state = _ContextState()</span>
+</pre>
+</body>
+</html>

@@ -1,0 +1,551 @@
+<html>
+<head>
+<title>_semaphore.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #cc7832;}
+.s3 { color: #6a8759;}
+.s4 { color: #629755; font-style: italic;}
+.s5 { color: #6897bb;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+_semaphore.py</font>
+</center></td></tr></table>
+<pre><span class="s0"># cython: auto_pickle=False,embedsignature=True,always_allow_keywords=False</span>
+<span class="s0">###</span>
+<span class="s0"># This file is ``gevent._semaphore`` so that it can be compiled by Cython</span>
+<span class="s0"># individually. However, this is not the place to import from. Everyone,</span>
+<span class="s0"># gevent internal code included, must import from ``gevent.lock``.</span>
+<span class="s0"># The only exception are .pxd files which need access to the</span>
+<span class="s0"># C code; the PURE_PYTHON things that have to happen and which are</span>
+<span class="s0"># handled in ``gevent.lock``, do not apply to them.</span>
+<span class="s0">###</span>
+<span class="s2">from </span><span class="s1">__future__ </span><span class="s2">import </span><span class="s1">print_function</span><span class="s2">, </span><span class="s1">absolute_import</span><span class="s2">, </span><span class="s1">division</span>
+
+<span class="s1">__all__ = [</span>
+    <span class="s3">'Semaphore'</span><span class="s2">,</span>
+    <span class="s3">'BoundedSemaphore'</span><span class="s2">,</span>
+<span class="s1">]</span>
+
+<span class="s2">from </span><span class="s1">time </span><span class="s2">import </span><span class="s1">sleep </span><span class="s2">as </span><span class="s1">_native_sleep</span>
+
+<span class="s2">from </span><span class="s1">gevent._compat </span><span class="s2">import </span><span class="s1">monotonic</span>
+<span class="s2">from </span><span class="s1">gevent.exceptions </span><span class="s2">import </span><span class="s1">InvalidThreadUseError</span>
+<span class="s2">from </span><span class="s1">gevent.exceptions </span><span class="s2">import </span><span class="s1">LoopExit</span>
+<span class="s2">from </span><span class="s1">gevent.timeout </span><span class="s2">import </span><span class="s1">Timeout</span>
+
+<span class="s2">def </span><span class="s1">_get_linkable():</span>
+    <span class="s1">x = __import__(</span><span class="s3">'gevent._abstract_linkable'</span><span class="s1">)</span>
+    <span class="s2">return </span><span class="s1">x._abstract_linkable.AbstractLinkable</span>
+<span class="s1">locals()[</span><span class="s3">'AbstractLinkable'</span><span class="s1">] = _get_linkable()</span>
+<span class="s2">del </span><span class="s1">_get_linkable</span>
+
+<span class="s2">from </span><span class="s1">gevent._hub_local </span><span class="s2">import </span><span class="s1">get_hub_if_exists</span>
+<span class="s2">from </span><span class="s1">gevent._hub_local </span><span class="s2">import </span><span class="s1">get_hub</span>
+<span class="s2">from </span><span class="s1">gevent.hub </span><span class="s2">import </span><span class="s1">spawn_raw</span>
+
+<span class="s2">class </span><span class="s1">_LockReleaseLink(object):</span>
+    <span class="s1">__slots__ = (</span>
+        <span class="s3">'lock'</span><span class="s2">,</span>
+    <span class="s1">)</span>
+
+    <span class="s2">def </span><span class="s1">__init__(self</span><span class="s2">, </span><span class="s1">lock):</span>
+        <span class="s1">self.lock = lock</span>
+
+    <span class="s2">def </span><span class="s1">__call__(self</span><span class="s2">, </span><span class="s1">_):</span>
+        <span class="s1">self.lock.release()</span>
+
+<span class="s1">_UNSET = object()</span>
+<span class="s1">_MULTI = object()</span>
+
+<span class="s2">class </span><span class="s1">Semaphore(AbstractLinkable): </span><span class="s0"># pylint:disable=undefined-variable</span>
+    <span class="s4">&quot;&quot;&quot; 
+    Semaphore(value=1) -&gt; Semaphore 
+ 
+    .. seealso:: :class:`BoundedSemaphore` for a safer version that prevents 
+       some classes of bugs. If unsure, most users should opt for `BoundedSemaphore`. 
+ 
+    A semaphore manages a counter representing the number of `release` 
+    calls minus the number of `acquire` calls, plus an initial value. 
+    The `acquire` method blocks if necessary until it can return 
+    without making the counter negative. A semaphore does not track ownership 
+    by greenlets; any greenlet can call `release`, whether or not it has previously 
+    called `acquire`. 
+ 
+    If not given, ``value`` defaults to 1. 
+ 
+    The semaphore is a context manager and can be used in ``with`` statements. 
+ 
+    This Semaphore's ``__exit__`` method does not call the trace function 
+    on CPython, but does under PyPy. 
+ 
+    .. versionchanged:: 1.4.0 
+        Document that the order in which waiters are awakened is not specified. It was not 
+        specified previously, but due to CPython implementation quirks usually went in FIFO order. 
+    .. versionchanged:: 1.5a3 
+       Waiting greenlets are now awakened in the order in which they waited. 
+    .. versionchanged:: 1.5a3 
+       The low-level ``rawlink`` method (most users won't use this) now automatically 
+       unlinks waiters before calling them. 
+    .. versionchanged:: 20.12.0 
+       Improved support for multi-threaded usage. When multi-threaded usage is detected, 
+       instances will no longer create the thread's hub if it's not present. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s1">__slots__ = (</span>
+        <span class="s3">'counter'</span><span class="s2">,</span>
+        <span class="s0"># long integer, signed (Py2) or unsigned (Py3); see comments</span>
+        <span class="s0"># in the .pxd file for why we store as Python object. Set to ``_UNSET``</span>
+        <span class="s0"># initially. Set to the ident of the first thread that</span>
+        <span class="s0"># acquires us. If we later see a different thread ident, set</span>
+        <span class="s0"># to ``_MULTI``.</span>
+        <span class="s3">'_multithreaded'</span><span class="s2">,</span>
+    <span class="s1">)</span>
+
+    <span class="s2">def </span><span class="s1">__init__(self</span><span class="s2">, </span><span class="s1">value=</span><span class="s5">1</span><span class="s2">, </span><span class="s1">hub=</span><span class="s2">None</span><span class="s1">):</span>
+        <span class="s1">self.counter = value</span>
+        <span class="s2">if </span><span class="s1">self.counter &lt; </span><span class="s5">0</span><span class="s1">: </span><span class="s0"># Do the check after Cython native int conversion</span>
+            <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s3">&quot;semaphore initial value must be &gt;= 0&quot;</span><span class="s1">)</span>
+        <span class="s1">super(Semaphore</span><span class="s2">, </span><span class="s1">self).__init__(hub)</span>
+        <span class="s1">self._notify_all = </span><span class="s2">False</span>
+        <span class="s1">self._multithreaded = _UNSET</span>
+
+    <span class="s2">def </span><span class="s1">__str__(self):</span>
+        <span class="s2">return </span><span class="s3">'&lt;%s at 0x%x counter=%s _links[%s]&gt;' </span><span class="s1">% (</span>
+            <span class="s1">self.__class__.__name__</span><span class="s2">,</span>
+            <span class="s1">id(self)</span><span class="s2">,</span>
+            <span class="s1">self.counter</span><span class="s2">,</span>
+            <span class="s1">self.linkcount()</span>
+        <span class="s1">)</span>
+
+    <span class="s2">def </span><span class="s1">locked(self):</span>
+        <span class="s4">&quot;&quot;&quot; 
+        Return a boolean indicating whether the semaphore can be 
+        acquired (`False` if the semaphore *can* be acquired). Most 
+        useful with binary semaphores (those with an initial value of 1). 
+ 
+        :rtype: bool 
+        &quot;&quot;&quot;</span>
+        <span class="s2">return </span><span class="s1">self.counter &lt;= </span><span class="s5">0</span>
+
+    <span class="s2">def </span><span class="s1">release(self):</span>
+        <span class="s4">&quot;&quot;&quot; 
+        Release the semaphore, notifying any waiters if needed. There 
+        is no return value. 
+ 
+        .. note:: 
+ 
+            This can be used to over-release the semaphore. 
+            (Release more times than it has been acquired or was initially 
+            created with.) 
+ 
+            This is usually a sign of a bug, but under some circumstances it can be 
+            used deliberately, for example, to model the arrival of additional 
+            resources. 
+ 
+        :rtype: None 
+        &quot;&quot;&quot;</span>
+        <span class="s1">self.counter += </span><span class="s5">1</span>
+        <span class="s1">self._check_and_notify()</span>
+        <span class="s2">return </span><span class="s1">self.counter</span>
+
+    <span class="s2">def </span><span class="s1">ready(self):</span>
+        <span class="s4">&quot;&quot;&quot; 
+        Return a boolean indicating whether the semaphore can be 
+        acquired (`True` if the semaphore can be acquired). 
+ 
+        :rtype: bool 
+        &quot;&quot;&quot;</span>
+        <span class="s2">return </span><span class="s1">self.counter &gt; </span><span class="s5">0</span>
+
+    <span class="s2">def </span><span class="s1">_start_notify(self):</span>
+        <span class="s1">self._check_and_notify()</span>
+
+    <span class="s2">def </span><span class="s1">_wait_return_value(self</span><span class="s2">, </span><span class="s1">waited</span><span class="s2">, </span><span class="s1">wait_success):</span>
+        <span class="s2">if </span><span class="s1">waited:</span>
+            <span class="s2">return </span><span class="s1">wait_success</span>
+        <span class="s0"># We didn't even wait, we must be good to go.</span>
+        <span class="s0"># XXX: This is probably dead code, we're careful not to go into the wait</span>
+        <span class="s0"># state if we don't expect to need to</span>
+        <span class="s2">return True</span>
+
+    <span class="s2">def </span><span class="s1">wait(self</span><span class="s2">, </span><span class="s1">timeout=</span><span class="s2">None</span><span class="s1">):</span>
+        <span class="s4">&quot;&quot;&quot; 
+        Wait until it is possible to acquire this semaphore, or until the optional 
+        *timeout* elapses. 
+ 
+        .. note:: If this semaphore was initialized with a *value* of 0, 
+           this method will block forever if no timeout is given. 
+ 
+        :keyword float timeout: If given, specifies the maximum amount of seconds 
+           this method will block. 
+        :return: A number indicating how many times the semaphore can be acquired 
+            before blocking. *This could be 0,* if other waiters acquired 
+            the semaphore. 
+        :rtype: int 
+        &quot;&quot;&quot;</span>
+        <span class="s2">if </span><span class="s1">self.counter &gt; </span><span class="s5">0</span><span class="s1">:</span>
+            <span class="s2">return </span><span class="s1">self.counter</span>
+
+        <span class="s1">self._wait(timeout) </span><span class="s0"># return value irrelevant, whether we got it or got a timeout</span>
+        <span class="s2">return </span><span class="s1">self.counter</span>
+
+    <span class="s2">def </span><span class="s1">acquire(self</span><span class="s2">, </span><span class="s1">blocking=</span><span class="s2">True, </span><span class="s1">timeout=</span><span class="s2">None</span><span class="s1">):</span>
+        <span class="s4">&quot;&quot;&quot; 
+        acquire(blocking=True, timeout=None) -&gt; bool 
+ 
+        Acquire the semaphore. 
+ 
+        .. note:: If this semaphore was initialized with a *value* of 0, 
+           this method will block forever (unless a timeout is given or blocking is 
+           set to false). 
+ 
+        :keyword bool blocking: If True (the default), this function will block 
+           until the semaphore is acquired. 
+        :keyword float timeout: If given, and *blocking* is true, 
+           specifies the maximum amount of seconds 
+           this method will block. 
+        :return: A `bool` indicating whether the semaphore was acquired. 
+           If ``blocking`` is True and ``timeout`` is None (the default), then 
+           (so long as this semaphore was initialized with a size greater than 0) 
+           this will always return True. If a timeout was given, and it expired before 
+           the semaphore was acquired, False will be returned. (Note that this can still 
+           raise a ``Timeout`` exception, if some other caller had already started a timer.) 
+        &quot;&quot;&quot;</span>
+        <span class="s0"># pylint:disable=too-many-return-statements,too-many-branches</span>
+        <span class="s0"># Sadly, the body of this method is rather complicated.</span>
+        <span class="s2">if </span><span class="s1">self._multithreaded </span><span class="s2">is </span><span class="s1">_UNSET:</span>
+            <span class="s1">self._multithreaded = self._get_thread_ident()</span>
+        <span class="s2">elif </span><span class="s1">self._multithreaded != self._get_thread_ident():</span>
+            <span class="s1">self._multithreaded = _MULTI</span>
+
+        <span class="s0"># We conceptually now belong to the hub of the thread that</span>
+        <span class="s0"># called this, whether or not we have to block. Note that we</span>
+        <span class="s0"># cannot force it to be created yet, because Semaphore is used</span>
+        <span class="s0"># by importlib.ModuleLock which is used when importing the hub</span>
+        <span class="s0"># itself! This also checks for cross-thread issues.</span>
+        <span class="s1">invalid_thread_use = </span><span class="s2">None</span>
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s1">self._capture_hub(</span><span class="s2">False</span><span class="s1">)</span>
+        <span class="s2">except </span><span class="s1">InvalidThreadUseError </span><span class="s2">as </span><span class="s1">e:</span>
+            <span class="s0"># My hub belongs to some other thread. We didn't release the GIL/object lock</span>
+            <span class="s0"># by raising the exception, so we know this is still true.</span>
+            <span class="s1">invalid_thread_use = e.args</span>
+            <span class="s1">e = </span><span class="s2">None</span>
+            <span class="s2">if not </span><span class="s1">self.counter </span><span class="s2">and </span><span class="s1">blocking:</span>
+                <span class="s0"># We would need to block. So coordinate with the main hub.</span>
+                <span class="s2">return </span><span class="s1">self.__acquire_from_other_thread(invalid_thread_use</span><span class="s2">, </span><span class="s1">blocking</span><span class="s2">, </span><span class="s1">timeout)</span>
+
+        <span class="s2">if </span><span class="s1">self.counter &gt; </span><span class="s5">0</span><span class="s1">:</span>
+            <span class="s1">self.counter -= </span><span class="s5">1</span>
+            <span class="s2">return True</span>
+
+        <span class="s2">if not </span><span class="s1">blocking:</span>
+            <span class="s2">return False</span>
+
+        <span class="s2">if </span><span class="s1">self._multithreaded </span><span class="s2">is not </span><span class="s1">_MULTI </span><span class="s2">and </span><span class="s1">self.hub </span><span class="s2">is None</span><span class="s1">: </span><span class="s0"># pylint:disable=access-member-before-definition</span>
+            <span class="s1">self.hub = get_hub() </span><span class="s0"># pylint:disable=attribute-defined-outside-init</span>
+
+        <span class="s2">if </span><span class="s1">self.hub </span><span class="s2">is None and not </span><span class="s1">invalid_thread_use:</span>
+            <span class="s0"># Someone else is holding us. There's not a hub here,</span>
+            <span class="s0"># nor is there a hub in that thread. We'll need to use regular locks.</span>
+            <span class="s0"># This will be unfair to yet a third thread that tries to use us with greenlets.</span>
+            <span class="s2">return </span><span class="s1">self.__acquire_from_other_thread(</span>
+                <span class="s1">(</span><span class="s2">None, None, </span><span class="s1">self._getcurrent()</span><span class="s2">, </span><span class="s3">&quot;NoHubs&quot;</span><span class="s1">)</span><span class="s2">,</span>
+                <span class="s1">blocking</span><span class="s2">,</span>
+                <span class="s1">timeout</span>
+            <span class="s1">)</span>
+
+        <span class="s0"># self._wait may drop both the GIL and the _lock_lock.</span>
+        <span class="s0"># By the time we regain control, both have been reacquired.</span>
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s1">success = self._wait(timeout)</span>
+        <span class="s2">except </span><span class="s1">LoopExit </span><span class="s2">as </span><span class="s1">ex:</span>
+            <span class="s1">args = ex.args</span>
+            <span class="s1">ex = </span><span class="s2">None</span>
+            <span class="s2">if </span><span class="s1">self.counter:</span>
+                <span class="s1">success = </span><span class="s2">True</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s0"># Avoid using ex.hub property to keep holding the GIL</span>
+                <span class="s2">if </span><span class="s1">len(args) == </span><span class="s5">3 </span><span class="s2">and </span><span class="s1">args[</span><span class="s5">1</span><span class="s1">].main_hub:</span>
+                    <span class="s0"># The main hub, meaning the main thread. We probably can do nothing with this.</span>
+                    <span class="s2">raise</span>
+                <span class="s2">return </span><span class="s1">self.__acquire_from_other_thread(</span>
+                    <span class="s1">(self.hub</span><span class="s2">, </span><span class="s1">get_hub_if_exists()</span><span class="s2">, </span><span class="s1">self._getcurrent()</span><span class="s2">, </span><span class="s3">&quot;LoopExit&quot;</span><span class="s1">)</span><span class="s2">,</span>
+                    <span class="s1">blocking</span><span class="s2">,</span>
+                    <span class="s1">timeout)</span>
+
+        <span class="s2">if not </span><span class="s1">success:</span>
+            <span class="s2">assert </span><span class="s1">timeout </span><span class="s2">is not None</span>
+            <span class="s0"># Our timer expired.</span>
+            <span class="s2">return False</span>
+
+        <span class="s0"># Neither our timer or another one expired, so we blocked until</span>
+        <span class="s0"># awoke. Therefore, the counter is ours</span>
+        <span class="s2">assert </span><span class="s1">self.counter &gt; </span><span class="s5">0</span><span class="s2">, </span><span class="s1">(self.counter</span><span class="s2">, </span><span class="s1">blocking</span><span class="s2">, </span><span class="s1">timeout</span><span class="s2">, </span><span class="s1">success</span><span class="s2">,</span><span class="s1">)</span>
+        <span class="s1">self.counter -= </span><span class="s5">1</span>
+        <span class="s2">return True</span>
+
+    <span class="s1">_py3k_acquire = acquire </span><span class="s0"># PyPy needs this; it must be static for Cython</span>
+
+    <span class="s2">def </span><span class="s1">__enter__(self):</span>
+        <span class="s1">self.acquire()</span>
+
+    <span class="s2">def </span><span class="s1">__exit__(self</span><span class="s2">, </span><span class="s1">t</span><span class="s2">, </span><span class="s1">v</span><span class="s2">, </span><span class="s1">tb):</span>
+        <span class="s1">self.release()</span>
+
+    <span class="s2">def </span><span class="s1">_handle_unswitched_notifications(self</span><span class="s2">, </span><span class="s1">unswitched):</span>
+        <span class="s0"># If we fail to switch to a greenlet in another thread to send</span>
+        <span class="s0"># a notification, just re-queue it, in the hopes that the</span>
+        <span class="s0"># other thread will eventually run notifications itself.</span>
+        <span class="s0">#</span>
+        <span class="s0"># We CANNOT do what the ``super()`` does and actually allow</span>
+        <span class="s0"># this notification to get run sometime in the future by</span>
+        <span class="s0"># scheduling a callback in the other thread. The algorithm</span>
+        <span class="s0"># that we use to handle cross-thread locking/unlocking was</span>
+        <span class="s0"># designed before the schedule-a-callback mechanism was</span>
+        <span class="s0"># implemented. If we allow this to be run as a callback, we</span>
+        <span class="s0"># can find ourself the victim of ``InvalidSwitchError`` (or</span>
+        <span class="s0"># worse, silent corruption) because the switch can come at an</span>
+        <span class="s0"># unexpected time: *after* the destination thread has already</span>
+        <span class="s0"># acquired the lock.</span>
+        <span class="s0">#</span>
+        <span class="s0"># This manifests in a fairly reliable test failure,</span>
+        <span class="s0"># ``gevent.tests.test__semaphore``</span>
+        <span class="s0"># ``TestSemaphoreMultiThread.test_dueling_threads_with_hub``,</span>
+        <span class="s0"># but ONLY when running in PURE_PYTHON mode.</span>
+        <span class="s0">#</span>
+        <span class="s0"># TODO: Maybe we can rewrite that part of the algorithm to be friendly to</span>
+        <span class="s0"># running the callbacks?</span>
+        <span class="s1">self._links.extend(unswitched)</span>
+
+    <span class="s2">def </span><span class="s1">__add_link(self</span><span class="s2">, </span><span class="s1">link):</span>
+        <span class="s2">if not </span><span class="s1">self._notifier:</span>
+            <span class="s1">self.rawlink(link)</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">self._notifier.args[</span><span class="s5">0</span><span class="s1">].append(link)</span>
+
+    <span class="s2">def </span><span class="s1">__acquire_from_other_thread(self</span><span class="s2">, </span><span class="s1">ex_args</span><span class="s2">, </span><span class="s1">blocking</span><span class="s2">, </span><span class="s1">timeout):</span>
+        <span class="s2">assert </span><span class="s1">blocking</span>
+        <span class="s0"># Some other hub owns this object. We must ask it to wake us</span>
+        <span class="s0"># up. In general, we can't use a Python-level ``Lock`` because</span>
+        <span class="s0">#</span>
+        <span class="s0"># (1) it doesn't support a timeout on all platforms; and</span>
+        <span class="s0"># (2) we don't want to block this hub from running.</span>
+        <span class="s0">#</span>
+        <span class="s0"># So we need to do so in a way that cooperates with *two*</span>
+        <span class="s0"># hubs. That's what an async watcher is built for.</span>
+        <span class="s0">#</span>
+        <span class="s0"># Of course, if we don't actually have two hubs, then we must find some other</span>
+        <span class="s0"># solution. That involves using a lock.</span>
+
+        <span class="s0"># We have to take an action that drops the GIL and drops the object lock</span>
+        <span class="s0"># to allow the main thread (the thread for our hub) to advance.</span>
+        <span class="s1">owning_hub = ex_args[</span><span class="s5">0</span><span class="s1">]</span>
+        <span class="s1">hub_for_this_thread = ex_args[</span><span class="s5">1</span><span class="s1">]</span>
+        <span class="s1">current_greenlet = ex_args[</span><span class="s5">2</span><span class="s1">]</span>
+
+        <span class="s2">if </span><span class="s1">owning_hub </span><span class="s2">is None and </span><span class="s1">hub_for_this_thread </span><span class="s2">is None</span><span class="s1">:</span>
+            <span class="s2">return </span><span class="s1">self.__acquire_without_hubs(timeout)</span>
+
+        <span class="s2">if </span><span class="s1">hub_for_this_thread </span><span class="s2">is None</span><span class="s1">:</span>
+            <span class="s0"># Probably a background worker thread. We don't want to create</span>
+            <span class="s0"># the hub if not needed, and since it didn't exist there are no</span>
+            <span class="s0"># other greenlets that we could yield to anyway, so there's nothing</span>
+            <span class="s0"># to block and no reason to try to avoid blocking, so using a native</span>
+            <span class="s0"># lock is the simplest way to go.</span>
+            <span class="s2">return </span><span class="s1">self.__acquire_using_other_hub(owning_hub</span><span class="s2">, </span><span class="s1">timeout)</span>
+
+        <span class="s0"># We have a hub we don't want to block. Use an async watcher</span>
+        <span class="s0"># and ask the next releaser of this object to wake us up.</span>
+        <span class="s2">return </span><span class="s1">self.__acquire_using_two_hubs(hub_for_this_thread</span><span class="s2">,</span>
+                                             <span class="s1">current_greenlet</span><span class="s2">,</span>
+                                             <span class="s1">timeout)</span>
+
+    <span class="s2">def </span><span class="s1">__acquire_using_two_hubs(self</span><span class="s2">,</span>
+                                 <span class="s1">hub_for_this_thread</span><span class="s2">,</span>
+                                 <span class="s1">current_greenlet</span><span class="s2">,</span>
+                                 <span class="s1">timeout):</span>
+        <span class="s0"># Allocating and starting the watcher *could* release the GIL.</span>
+        <span class="s0"># with the libev corcext, allocating won't, but starting briefly will.</span>
+        <span class="s0"># With other backends, allocating might, and starting might also.</span>
+        <span class="s0"># So...</span>
+        <span class="s1">watcher = hub_for_this_thread.loop.async_()</span>
+        <span class="s1">send = watcher.send_ignoring_arg</span>
+        <span class="s1">watcher.start(current_greenlet.switch</span><span class="s2">, </span><span class="s1">self)</span>
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s2">with </span><span class="s1">Timeout._start_new_or_dummy(timeout) </span><span class="s2">as </span><span class="s1">timer:</span>
+                <span class="s0"># ... now that we're back holding the GIL, we need to verify our</span>
+                <span class="s0"># state.</span>
+                <span class="s2">try</span><span class="s1">:</span>
+                    <span class="s2">while </span><span class="s5">1</span><span class="s1">:</span>
+                        <span class="s2">if </span><span class="s1">self.counter &gt; </span><span class="s5">0</span><span class="s1">:</span>
+                            <span class="s1">self.counter -= </span><span class="s5">1</span>
+                            <span class="s2">assert </span><span class="s1">self.counter &gt;= </span><span class="s5">0</span><span class="s2">, </span><span class="s1">(self</span><span class="s2">,</span><span class="s1">)</span>
+                            <span class="s2">return True</span>
+
+                        <span class="s1">self.__add_link(send)</span>
+
+                        <span class="s0"># Releases the object lock</span>
+                        <span class="s1">self._switch_to_hub(hub_for_this_thread)</span>
+                        <span class="s0"># We waited and got notified. We should be ready now, so a non-blocking</span>
+                        <span class="s0"># acquire() should succeed. But sometimes we get spurious notifications?</span>
+                        <span class="s0"># It's not entirely clear how. So we need to loop until we get it, or until</span>
+                        <span class="s0"># the timer expires</span>
+                        <span class="s1">result = self.acquire(</span><span class="s5">0</span><span class="s1">)</span>
+                        <span class="s2">if </span><span class="s1">result:</span>
+                            <span class="s2">return </span><span class="s1">result</span>
+                <span class="s2">except </span><span class="s1">Timeout </span><span class="s2">as </span><span class="s1">tex:</span>
+                    <span class="s2">if </span><span class="s1">tex </span><span class="s2">is not </span><span class="s1">timer:</span>
+                        <span class="s2">raise</span>
+                    <span class="s2">return False</span>
+        <span class="s2">finally</span><span class="s1">:</span>
+            <span class="s1">self._quiet_unlink_all(send)</span>
+            <span class="s1">watcher.stop()</span>
+            <span class="s1">watcher.close()</span>
+
+    <span class="s2">def </span><span class="s1">__acquire_from_other_thread_cb(self</span><span class="s2">, </span><span class="s1">results</span><span class="s2">, </span><span class="s1">blocking</span><span class="s2">, </span><span class="s1">timeout</span><span class="s2">, </span><span class="s1">thread_lock):</span>
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s1">result = self.acquire(blocking</span><span class="s2">, </span><span class="s1">timeout)</span>
+            <span class="s1">results.append(result)</span>
+        <span class="s2">finally</span><span class="s1">:</span>
+            <span class="s1">thread_lock.release()</span>
+        <span class="s2">return </span><span class="s1">result</span>
+
+    <span class="s2">def </span><span class="s1">__acquire_using_other_hub(self</span><span class="s2">, </span><span class="s1">owning_hub</span><span class="s2">, </span><span class="s1">timeout):</span>
+        <span class="s2">assert </span><span class="s1">owning_hub </span><span class="s2">is not </span><span class="s1">get_hub_if_exists()</span>
+        <span class="s1">thread_lock = self._allocate_lock()</span>
+        <span class="s1">thread_lock.acquire()</span>
+        <span class="s1">results = []</span>
+
+        <span class="s1">owning_hub.loop.run_callback_threadsafe(</span>
+            <span class="s1">spawn_raw</span><span class="s2">,</span>
+            <span class="s1">self.__acquire_from_other_thread_cb</span><span class="s2">,</span>
+            <span class="s1">results</span><span class="s2">,</span>
+            <span class="s5">1</span><span class="s2">,       </span><span class="s0"># blocking,</span>
+            <span class="s1">timeout</span><span class="s2">, </span><span class="s0"># timeout,</span>
+            <span class="s1">thread_lock)</span>
+
+        <span class="s0"># We MUST use a blocking acquire here, or at least be sure we keep going</span>
+        <span class="s0"># until we acquire it. If we timed out waiting here,</span>
+        <span class="s0"># just before the callback runs, then we would be out of sync.</span>
+        <span class="s1">self.__spin_on_native_lock(thread_lock</span><span class="s2">, None</span><span class="s1">)</span>
+        <span class="s2">return </span><span class="s1">results[</span><span class="s5">0</span><span class="s1">]</span>
+
+    <span class="s2">def </span><span class="s1">__acquire_without_hubs(self</span><span class="s2">, </span><span class="s1">timeout):</span>
+        <span class="s1">thread_lock = self._allocate_lock()</span>
+        <span class="s1">thread_lock.acquire()</span>
+        <span class="s1">absolute_expiration = </span><span class="s5">0</span>
+        <span class="s1">begin = </span><span class="s5">0</span>
+        <span class="s2">if </span><span class="s1">timeout:</span>
+            <span class="s1">absolute_expiration = monotonic() + timeout</span>
+
+        <span class="s0"># Cython won't compile a lambda here</span>
+        <span class="s1">link = _LockReleaseLink(thread_lock)</span>
+        <span class="s2">while </span><span class="s5">1</span><span class="s1">:</span>
+            <span class="s1">self.__add_link(link)</span>
+            <span class="s2">if </span><span class="s1">absolute_expiration:</span>
+                <span class="s1">begin = monotonic()</span>
+
+            <span class="s1">got_native = self.__spin_on_native_lock(thread_lock</span><span class="s2">, </span><span class="s1">timeout)</span>
+            <span class="s1">self._quiet_unlink_all(link)</span>
+            <span class="s2">if </span><span class="s1">got_native:</span>
+                <span class="s2">if </span><span class="s1">self.acquire(</span><span class="s5">0</span><span class="s1">):</span>
+                    <span class="s2">return True</span>
+            <span class="s2">if </span><span class="s1">absolute_expiration:</span>
+                <span class="s1">now = monotonic()</span>
+                <span class="s2">if </span><span class="s1">now &gt;= absolute_expiration:</span>
+                    <span class="s2">return False</span>
+                <span class="s1">duration = now - begin</span>
+                <span class="s1">timeout -= duration</span>
+                <span class="s2">if </span><span class="s1">timeout &lt;= </span><span class="s5">0</span><span class="s1">:</span>
+                    <span class="s2">return False</span>
+
+    <span class="s2">def </span><span class="s1">__spin_on_native_lock(self</span><span class="s2">, </span><span class="s1">thread_lock</span><span class="s2">, </span><span class="s1">timeout):</span>
+        <span class="s1">expiration = </span><span class="s5">0</span>
+        <span class="s2">if </span><span class="s1">timeout:</span>
+            <span class="s1">expiration = monotonic() + timeout</span>
+
+        <span class="s1">self._drop_lock_for_switch_out()</span>
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s0"># TODO: When timeout is given and the lock supports that</span>
+            <span class="s0"># (Python 3), pass that.</span>
+            <span class="s0"># Python 2 has terrible behaviour where lock acquires can't</span>
+            <span class="s0"># be interrupted, so we use a spin loop</span>
+            <span class="s2">while not </span><span class="s1">thread_lock.acquire(</span><span class="s5">0</span><span class="s1">):</span>
+                <span class="s2">if </span><span class="s1">expiration </span><span class="s2">and </span><span class="s1">monotonic() &gt;= expiration:</span>
+                    <span class="s2">return False</span>
+
+                <span class="s1">_native_sleep(</span><span class="s5">0.001</span><span class="s1">)</span>
+            <span class="s2">return True</span>
+        <span class="s2">finally</span><span class="s1">:</span>
+            <span class="s1">self._acquire_lock_for_switch_in()</span>
+
+
+<span class="s2">class </span><span class="s1">BoundedSemaphore(Semaphore):</span>
+    <span class="s4">&quot;&quot;&quot; 
+    BoundedSemaphore(value=1) -&gt; BoundedSemaphore 
+ 
+    A bounded semaphore checks to make sure its current value doesn't 
+    exceed its initial value. If it does, :class:`ValueError` is 
+    raised. In most situations semaphores are used to guard resources 
+    with limited capacity. If the semaphore is released too many times 
+    it's a sign of a bug. 
+ 
+    If not given, *value* defaults to 1. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s1">__slots__ = (</span>
+        <span class="s3">'_initial_value'</span><span class="s2">,</span>
+    <span class="s1">)</span>
+
+    <span class="s0">#: For monkey-patching, allow changing the class of error we raise</span>
+    <span class="s1">_OVER_RELEASE_ERROR = ValueError</span>
+
+    <span class="s2">def </span><span class="s1">__init__(self</span><span class="s2">, </span><span class="s1">*args</span><span class="s2">, </span><span class="s1">**kwargs):</span>
+        <span class="s1">Semaphore.__init__(self</span><span class="s2">, </span><span class="s1">*args</span><span class="s2">, </span><span class="s1">**kwargs)</span>
+        <span class="s1">self._initial_value = self.counter</span>
+
+    <span class="s2">def </span><span class="s1">release(self):</span>
+        <span class="s4">&quot;&quot;&quot; 
+        Like :meth:`Semaphore.release`, but raises :class:`ValueError` 
+        if the semaphore is being over-released. 
+        &quot;&quot;&quot;</span>
+        <span class="s2">if </span><span class="s1">self.counter &gt;= self._initial_value:</span>
+            <span class="s2">raise </span><span class="s1">self._OVER_RELEASE_ERROR(</span><span class="s3">&quot;Semaphore released too many times&quot;</span><span class="s1">)</span>
+        <span class="s1">counter = Semaphore.release(self)</span>
+        <span class="s0"># When we are absolutely certain that no one holds this semaphore,</span>
+        <span class="s0"># release our hub and go back to floating. This assists in cross-thread</span>
+        <span class="s0"># uses.</span>
+        <span class="s2">if </span><span class="s1">counter == self._initial_value:</span>
+            <span class="s1">self.hub = </span><span class="s2">None </span><span class="s0"># pylint:disable=attribute-defined-outside-init</span>
+        <span class="s2">return </span><span class="s1">counter</span>
+
+    <span class="s2">def </span><span class="s1">_at_fork_reinit(self):</span>
+        <span class="s1">super(BoundedSemaphore</span><span class="s2">, </span><span class="s1">self)._at_fork_reinit()</span>
+        <span class="s1">self.counter = self._initial_value</span>
+
+
+<span class="s0"># By building the semaphore with Cython under PyPy, we get</span>
+<span class="s0"># atomic operations (specifically, exiting/releasing), at the</span>
+<span class="s0"># cost of some speed (one trivial semaphore micro-benchmark put the pure-python version</span>
+<span class="s0"># at around 1s and the compiled version at around 4s). Some clever subclassing</span>
+<span class="s0"># and having only the bare minimum be in cython might help reduce that penalty.</span>
+<span class="s0"># NOTE: You must use version 0.23.4 or later to avoid a memory leak.</span>
+<span class="s0"># https://mail.python.org/pipermail/cython-devel/2015-October/004571.html</span>
+<span class="s0"># However, that's all for naught on up to and including PyPy 4.0.1 which</span>
+<span class="s0"># have some serious crashing bugs with GC interacting with cython.</span>
+<span class="s0"># It hasn't been tested since then, and PURE_PYTHON is assumed to be true</span>
+<span class="s0"># for PyPy in all cases anyway, so this does nothing.</span>
+
+<span class="s2">from </span><span class="s1">gevent._util </span><span class="s2">import </span><span class="s1">import_c_accel</span>
+<span class="s1">import_c_accel(globals()</span><span class="s2">, </span><span class="s3">'gevent.__semaphore'</span><span class="s1">)</span>
+</pre>
+</body>
+</html>

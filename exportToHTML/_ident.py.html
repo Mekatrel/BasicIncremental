@@ -1,0 +1,104 @@
+<html>
+<head>
+<title>_ident.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #cc7832;}
+.s3 { color: #6a8759;}
+.s4 { color: #629755; font-style: italic;}
+.s5 { color: #6897bb;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+_ident.py</font>
+</center></td></tr></table>
+<pre><span class="s0"># -*- coding: utf-8 -*-</span>
+<span class="s0"># Copyright 2018 gevent contributors. See LICENSE for details.</span>
+<span class="s0"># cython: auto_pickle=False,embedsignature=True,always_allow_keywords=False</span>
+
+<span class="s2">from </span><span class="s1">__future__ </span><span class="s2">import </span><span class="s1">absolute_import</span>
+<span class="s2">from </span><span class="s1">__future__ </span><span class="s2">import </span><span class="s1">division</span>
+<span class="s2">from </span><span class="s1">__future__ </span><span class="s2">import </span><span class="s1">print_function</span>
+
+
+<span class="s2">from </span><span class="s1">weakref </span><span class="s2">import </span><span class="s1">WeakKeyDictionary</span>
+<span class="s2">from </span><span class="s1">weakref </span><span class="s2">import </span><span class="s1">ref</span>
+
+<span class="s2">from </span><span class="s1">heapq </span><span class="s2">import </span><span class="s1">heappop</span>
+<span class="s2">from </span><span class="s1">heapq </span><span class="s2">import </span><span class="s1">heappush</span>
+
+<span class="s1">__all__ = [</span>
+    <span class="s3">'IdentRegistry'</span><span class="s2">,</span>
+<span class="s1">]</span>
+
+<span class="s2">class </span><span class="s1">ValuedWeakRef(ref):</span>
+    <span class="s4">&quot;&quot;&quot; 
+    A weak ref with an associated value. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s1">__slots__ = (</span><span class="s3">'value'</span><span class="s2">,</span><span class="s1">)</span>
+
+
+<span class="s2">class </span><span class="s1">IdentRegistry(object):</span>
+    <span class="s4">&quot;&quot;&quot; 
+    Maintains a unique mapping of (small) non-negative integer identifiers 
+    to objects that can be weakly referenced. 
+ 
+    It is guaranteed that no two objects will have the the same 
+    identifier at the same time, as long as those objects are 
+    also uniquely hashable. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s2">def </span><span class="s1">__init__(self):</span>
+        <span class="s0"># {obj -&gt; (ident, wref(obj))}</span>
+        <span class="s1">self._registry = WeakKeyDictionary()</span>
+
+        <span class="s0"># A heap of numbers that have been used and returned</span>
+        <span class="s1">self._available_idents = []</span>
+
+    <span class="s2">def </span><span class="s1">get_ident(self</span><span class="s2">, </span><span class="s1">obj):</span>
+        <span class="s4">&quot;&quot;&quot; 
+        Retrieve the identifier for *obj*, creating one 
+        if necessary. 
+        &quot;&quot;&quot;</span>
+
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s2">return </span><span class="s1">self._registry[obj][</span><span class="s5">0</span><span class="s1">]</span>
+        <span class="s2">except </span><span class="s1">KeyError:</span>
+            <span class="s2">pass</span>
+
+        <span class="s2">if </span><span class="s1">self._available_idents:</span>
+            <span class="s0"># Take the smallest free number</span>
+            <span class="s1">ident = heappop(self._available_idents)</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s0"># Allocate a bigger one</span>
+            <span class="s1">ident = len(self._registry)</span>
+
+        <span class="s1">vref = ValuedWeakRef(obj</span><span class="s2">, </span><span class="s1">self._return_ident)</span>
+        <span class="s1">vref.value = ident </span><span class="s0"># pylint:disable=assigning-non-slot,attribute-defined-outside-init</span>
+        <span class="s1">self._registry[obj] = (ident</span><span class="s2">, </span><span class="s1">vref)</span>
+        <span class="s2">return </span><span class="s1">ident</span>
+
+    <span class="s2">def </span><span class="s1">_return_ident(self</span><span class="s2">, </span><span class="s1">vref):</span>
+        <span class="s0"># By the time this is called, self._registry has been</span>
+        <span class="s0"># updated</span>
+        <span class="s2">if </span><span class="s1">heappush </span><span class="s2">is not None</span><span class="s1">:</span>
+            <span class="s0"># Under some circumstances we can get called</span>
+            <span class="s0"># when the interpreter is shutting down, and globals</span>
+            <span class="s0"># aren't available any more.</span>
+            <span class="s1">heappush(self._available_idents</span><span class="s2">, </span><span class="s1">vref.value)</span>
+
+    <span class="s2">def </span><span class="s1">__len__(self):</span>
+        <span class="s2">return </span><span class="s1">len(self._registry)</span>
+
+
+<span class="s2">from </span><span class="s1">gevent._util </span><span class="s2">import </span><span class="s1">import_c_accel</span>
+<span class="s1">import_c_accel(globals()</span><span class="s2">, </span><span class="s3">'gevent.__ident'</span><span class="s1">)</span>
+</pre>
+</body>
+</html>

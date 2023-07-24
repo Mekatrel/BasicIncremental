@@ -1,0 +1,486 @@
+<html>
+<head>
+<title>testcase.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #cc7832;}
+.s3 { color: #6897bb;}
+.s4 { color: #6a8759;}
+.s5 { color: #629755; font-style: italic;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+testcase.py</font>
+</center></td></tr></table>
+<pre><span class="s0"># Copyright (c) 2018 gevent community</span>
+<span class="s0">#</span>
+<span class="s0"># Permission is hereby granted, free of charge, to any person obtaining a copy</span>
+<span class="s0"># of this software and associated documentation files (the &quot;Software&quot;), to deal</span>
+<span class="s0"># in the Software without restriction, including without limitation the rights</span>
+<span class="s0"># to use, copy, modify, merge, publish, distribute, sublicense, and/or sell</span>
+<span class="s0"># copies of the Software, and to permit persons to whom the Software is</span>
+<span class="s0"># furnished to do so, subject to the following conditions:</span>
+<span class="s0">#</span>
+<span class="s0"># The above copyright notice and this permission notice shall be included in</span>
+<span class="s0"># all copies or substantial portions of the Software.</span>
+<span class="s0">#</span>
+<span class="s0"># THE SOFTWARE IS PROVIDED &quot;AS IS&quot;, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR</span>
+<span class="s0"># IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,</span>
+<span class="s0"># FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE</span>
+<span class="s0"># AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER</span>
+<span class="s0"># LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,</span>
+<span class="s0"># OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN</span>
+<span class="s0"># THE SOFTWARE.</span>
+<span class="s2">from </span><span class="s1">__future__ </span><span class="s2">import </span><span class="s1">absolute_import</span><span class="s2">, </span><span class="s1">print_function</span><span class="s2">, </span><span class="s1">division</span>
+
+<span class="s2">import </span><span class="s1">sys</span>
+<span class="s2">import </span><span class="s1">os.path</span>
+<span class="s2">from </span><span class="s1">contextlib </span><span class="s2">import </span><span class="s1">contextmanager</span>
+<span class="s2">from </span><span class="s1">unittest </span><span class="s2">import </span><span class="s1">TestCase </span><span class="s2">as </span><span class="s1">BaseTestCase</span>
+<span class="s2">from </span><span class="s1">functools </span><span class="s2">import </span><span class="s1">wraps</span>
+
+<span class="s2">import </span><span class="s1">gevent</span>
+<span class="s2">from </span><span class="s1">gevent._util </span><span class="s2">import </span><span class="s1">LazyOnClass</span>
+<span class="s2">from </span><span class="s1">gevent._compat </span><span class="s2">import </span><span class="s1">perf_counter</span>
+<span class="s2">from </span><span class="s1">gevent._compat </span><span class="s2">import </span><span class="s1">get_clock_info</span>
+<span class="s2">from </span><span class="s1">gevent._hub_local </span><span class="s2">import </span><span class="s1">get_hub_if_exists</span>
+
+<span class="s2">from </span><span class="s1">. </span><span class="s2">import </span><span class="s1">sysinfo</span>
+<span class="s2">from </span><span class="s1">. </span><span class="s2">import </span><span class="s1">params</span>
+<span class="s2">from </span><span class="s1">. </span><span class="s2">import </span><span class="s1">leakcheck</span>
+<span class="s2">from </span><span class="s1">. </span><span class="s2">import </span><span class="s1">errorhandler</span>
+<span class="s2">from </span><span class="s1">. </span><span class="s2">import </span><span class="s1">flaky</span>
+
+<span class="s2">from </span><span class="s1">.patched_tests_setup </span><span class="s2">import </span><span class="s1">get_switch_expected</span>
+
+<span class="s2">class </span><span class="s1">TimeAssertMixin(object):</span>
+    <span class="s1">@flaky.reraises_flaky_timeout()</span>
+    <span class="s2">def </span><span class="s1">assertTimeoutAlmostEqual(self</span><span class="s2">, </span><span class="s1">first</span><span class="s2">, </span><span class="s1">second</span><span class="s2">, </span><span class="s1">places=</span><span class="s2">None, </span><span class="s1">msg=</span><span class="s2">None, </span><span class="s1">delta=</span><span class="s2">None</span><span class="s1">):</span>
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s1">self.assertAlmostEqual(first</span><span class="s2">, </span><span class="s1">second</span><span class="s2">, </span><span class="s1">places=places</span><span class="s2">, </span><span class="s1">msg=msg</span><span class="s2">, </span><span class="s1">delta=delta)</span>
+        <span class="s2">except </span><span class="s1">AssertionError:</span>
+            <span class="s1">flaky.reraiseFlakyTestTimeout()</span>
+
+
+    <span class="s2">if </span><span class="s1">sysinfo.EXPECT_POOR_TIMER_RESOLUTION:</span>
+        <span class="s0"># pylint:disable=unused-argument</span>
+        <span class="s2">def </span><span class="s1">assertTimeWithinRange(self</span><span class="s2">, </span><span class="s1">time_taken</span><span class="s2">, </span><span class="s1">min_time</span><span class="s2">, </span><span class="s1">max_time):</span>
+            <span class="s2">return</span>
+    <span class="s2">else</span><span class="s1">:</span>
+        <span class="s2">def </span><span class="s1">assertTimeWithinRange(self</span><span class="s2">, </span><span class="s1">time_taken</span><span class="s2">, </span><span class="s1">min_time</span><span class="s2">, </span><span class="s1">max_time):</span>
+            <span class="s1">self.assertLessEqual(time_taken</span><span class="s2">, </span><span class="s1">max_time)</span>
+            <span class="s1">self.assertGreaterEqual(time_taken</span><span class="s2">, </span><span class="s1">min_time)</span>
+
+    <span class="s1">@contextmanager</span>
+    <span class="s2">def </span><span class="s1">runs_in_given_time(self</span><span class="s2">, </span><span class="s1">expected</span><span class="s2">, </span><span class="s1">fuzzy=</span><span class="s2">None, </span><span class="s1">min_time=</span><span class="s2">None</span><span class="s1">):</span>
+        <span class="s2">if </span><span class="s1">fuzzy </span><span class="s2">is None</span><span class="s1">:</span>
+            <span class="s2">if </span><span class="s1">sysinfo.EXPECT_POOR_TIMER_RESOLUTION </span><span class="s2">or </span><span class="s1">sysinfo.LIBUV:</span>
+                <span class="s0"># The noted timer jitter issues on appveyor/pypy3</span>
+                <span class="s1">fuzzy = expected * </span><span class="s3">5.0</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s1">fuzzy = expected / </span><span class="s3">2.0</span>
+        <span class="s1">min_time = min_time </span><span class="s2">if </span><span class="s1">min_time </span><span class="s2">is not None else </span><span class="s1">expected - fuzzy</span>
+        <span class="s1">max_time = expected + fuzzy</span>
+        <span class="s1">start = perf_counter()</span>
+        <span class="s2">yield </span><span class="s1">(min_time</span><span class="s2">, </span><span class="s1">max_time)</span>
+        <span class="s1">elapsed = perf_counter() - start</span>
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s1">self.assertTrue(</span>
+                <span class="s1">min_time &lt;= elapsed &lt;= max_time</span><span class="s2">,</span>
+                <span class="s4">'Expected: %r; elapsed: %r; min: %r; max: %r; fuzzy %r; clock_info: %s' </span><span class="s1">% (</span>
+                    <span class="s1">expected</span><span class="s2">, </span><span class="s1">elapsed</span><span class="s2">, </span><span class="s1">min_time</span><span class="s2">, </span><span class="s1">max_time</span><span class="s2">, </span><span class="s1">fuzzy</span><span class="s2">, </span><span class="s1">get_clock_info(</span><span class="s4">'perf_counter'</span><span class="s1">)</span>
+                <span class="s1">))</span>
+        <span class="s2">except </span><span class="s1">AssertionError:</span>
+            <span class="s1">flaky.reraiseFlakyTestRaceCondition()</span>
+
+    <span class="s2">def </span><span class="s1">runs_in_no_time(</span>
+            <span class="s1">self</span><span class="s2">,</span>
+            <span class="s1">fuzzy=(</span><span class="s3">0.01 </span><span class="s2">if not </span><span class="s1">sysinfo.EXPECT_POOR_TIMER_RESOLUTION </span><span class="s2">and not </span><span class="s1">sysinfo.LIBUV </span><span class="s2">else </span><span class="s3">1.0</span><span class="s1">)):</span>
+        <span class="s2">return </span><span class="s1">self.runs_in_given_time(</span><span class="s3">0.0</span><span class="s2">, </span><span class="s1">fuzzy)</span>
+
+
+<span class="s2">class </span><span class="s1">GreenletAssertMixin(object):</span>
+    <span class="s5">&quot;&quot;&quot;Assertions related to greenlets.&quot;&quot;&quot;</span>
+
+    <span class="s2">def </span><span class="s1">assert_greenlet_ready(self</span><span class="s2">, </span><span class="s1">g):</span>
+        <span class="s1">self.assertTrue(g.dead</span><span class="s2">, </span><span class="s1">g)</span>
+        <span class="s1">self.assertTrue(g.ready()</span><span class="s2">, </span><span class="s1">g)</span>
+        <span class="s1">self.assertFalse(g</span><span class="s2">, </span><span class="s1">g)</span>
+
+    <span class="s2">def </span><span class="s1">assert_greenlet_not_ready(self</span><span class="s2">, </span><span class="s1">g):</span>
+        <span class="s1">self.assertFalse(g.dead</span><span class="s2">, </span><span class="s1">g)</span>
+        <span class="s1">self.assertFalse(g.ready()</span><span class="s2">, </span><span class="s1">g)</span>
+
+    <span class="s2">def </span><span class="s1">assert_greenlet_spawned(self</span><span class="s2">, </span><span class="s1">g):</span>
+        <span class="s1">self.assertTrue(g.started</span><span class="s2">, </span><span class="s1">g)</span>
+        <span class="s1">self.assertFalse(g.dead</span><span class="s2">, </span><span class="s1">g)</span>
+
+    <span class="s0"># No difference between spawned and switched-to once</span>
+    <span class="s1">assert_greenlet_started = assert_greenlet_spawned</span>
+
+    <span class="s2">def </span><span class="s1">assert_greenlet_finished(self</span><span class="s2">, </span><span class="s1">g):</span>
+        <span class="s1">self.assertFalse(g.started</span><span class="s2">, </span><span class="s1">g)</span>
+        <span class="s1">self.assertTrue(g.dead</span><span class="s2">, </span><span class="s1">g)</span>
+
+
+<span class="s2">class </span><span class="s1">StringAssertMixin(object):</span>
+    <span class="s5">&quot;&quot;&quot; 
+    Assertions dealing with strings. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s1">@LazyOnClass</span>
+    <span class="s2">def </span><span class="s1">HEX_NUM_RE(self):</span>
+        <span class="s2">import </span><span class="s1">re</span>
+        <span class="s2">return </span><span class="s1">re.compile(</span><span class="s4">'-?0x[0123456789abcdef]+L?'</span><span class="s2">, </span><span class="s1">re.I)</span>
+
+    <span class="s2">def </span><span class="s1">normalize_addr(self</span><span class="s2">, </span><span class="s1">s</span><span class="s2">, </span><span class="s1">replace=</span><span class="s4">'X'</span><span class="s1">):</span>
+        <span class="s0"># https://github.com/PyCQA/pylint/issues/1127</span>
+        <span class="s2">return </span><span class="s1">self.HEX_NUM_RE.sub(replace</span><span class="s2">, </span><span class="s1">s) </span><span class="s0"># pylint:disable=no-member</span>
+
+    <span class="s2">def </span><span class="s1">normalize_module(self</span><span class="s2">, </span><span class="s1">s</span><span class="s2">, </span><span class="s1">module=</span><span class="s2">None, </span><span class="s1">replace=</span><span class="s4">'module'</span><span class="s1">):</span>
+        <span class="s2">if </span><span class="s1">module </span><span class="s2">is None</span><span class="s1">:</span>
+            <span class="s1">module = type(self).__module__</span>
+
+        <span class="s2">return </span><span class="s1">s.replace(module</span><span class="s2">, </span><span class="s1">replace)</span>
+
+    <span class="s2">def </span><span class="s1">normalize(self</span><span class="s2">, </span><span class="s1">s):</span>
+        <span class="s2">return </span><span class="s1">self.normalize_module(self.normalize_addr(s))</span>
+
+    <span class="s2">def </span><span class="s1">assert_nstr_endswith(self</span><span class="s2">, </span><span class="s1">o</span><span class="s2">, </span><span class="s1">val):</span>
+        <span class="s1">s = str(o)</span>
+        <span class="s1">n = self.normalize(s)</span>
+        <span class="s1">self.assertTrue(n.endswith(val)</span><span class="s2">, </span><span class="s1">(s</span><span class="s2">, </span><span class="s1">n))</span>
+
+    <span class="s2">def </span><span class="s1">assert_nstr_startswith(self</span><span class="s2">, </span><span class="s1">o</span><span class="s2">, </span><span class="s1">val):</span>
+        <span class="s1">s = str(o)</span>
+        <span class="s1">n = self.normalize(s)</span>
+        <span class="s1">self.assertTrue(n.startswith(val)</span><span class="s2">, </span><span class="s1">(s</span><span class="s2">, </span><span class="s1">n))</span>
+
+
+
+<span class="s2">class </span><span class="s1">TestTimeout(gevent.Timeout):</span>
+    <span class="s1">_expire_info = </span><span class="s4">''</span>
+
+    <span class="s2">def </span><span class="s1">__init__(self</span><span class="s2">, </span><span class="s1">timeout</span><span class="s2">, </span><span class="s1">method=</span><span class="s4">'Not Given'</span><span class="s1">):</span>
+        <span class="s1">gevent.Timeout.__init__(</span>
+            <span class="s1">self</span><span class="s2">,</span>
+            <span class="s1">timeout</span><span class="s2">,</span>
+            <span class="s4">'%r: test timed out</span><span class="s2">\n</span><span class="s4">' </span><span class="s1">% (method</span><span class="s2">,</span><span class="s1">)</span><span class="s2">,</span>
+            <span class="s1">ref=</span><span class="s2">False</span>
+        <span class="s1">)</span>
+
+    <span class="s2">def </span><span class="s1">_on_expiration(self</span><span class="s2">, </span><span class="s1">prev_greenlet</span><span class="s2">, </span><span class="s1">ex):</span>
+        <span class="s2">from </span><span class="s1">gevent.util </span><span class="s2">import </span><span class="s1">format_run_info</span>
+        <span class="s1">loop = gevent.get_hub().loop</span>
+        <span class="s1">debug_info = </span><span class="s4">'N/A'</span>
+        <span class="s2">if </span><span class="s1">hasattr(loop</span><span class="s2">, </span><span class="s4">'debug'</span><span class="s1">):</span>
+            <span class="s1">debug_info = [str(s) </span><span class="s2">for </span><span class="s1">s </span><span class="s2">in </span><span class="s1">loop.debug()]</span>
+        <span class="s1">run_info = format_run_info()</span>
+        <span class="s1">self._expire_info = </span><span class="s4">'Loop Debug:</span><span class="s2">\n</span><span class="s4">%s</span><span class="s2">\n</span><span class="s4">Run Info:</span><span class="s2">\n</span><span class="s4">%s' </span><span class="s1">% (</span>
+            <span class="s4">'</span><span class="s2">\n</span><span class="s4">'</span><span class="s1">.join(debug_info)</span><span class="s2">, </span><span class="s4">'</span><span class="s2">\n</span><span class="s4">'</span><span class="s1">.join(run_info)</span>
+        <span class="s1">)</span>
+        <span class="s1">gevent.Timeout._on_expiration(self</span><span class="s2">, </span><span class="s1">prev_greenlet</span><span class="s2">, </span><span class="s1">ex)</span>
+
+    <span class="s2">def </span><span class="s1">__str__(self):</span>
+        <span class="s1">s = gevent.Timeout.__str__(self)</span>
+        <span class="s1">s += self._expire_info</span>
+        <span class="s2">return </span><span class="s1">s</span>
+
+<span class="s2">def </span><span class="s1">_wrap_timeout(timeout</span><span class="s2">, </span><span class="s1">method):</span>
+    <span class="s2">if </span><span class="s1">timeout </span><span class="s2">is None</span><span class="s1">:</span>
+        <span class="s2">return </span><span class="s1">method</span>
+
+    <span class="s1">@wraps(method)</span>
+    <span class="s2">def </span><span class="s1">timeout_wrapper(self</span><span class="s2">, </span><span class="s1">*args</span><span class="s2">, </span><span class="s1">**kwargs):</span>
+        <span class="s2">with </span><span class="s1">TestTimeout(timeout</span><span class="s2">, </span><span class="s1">method):</span>
+            <span class="s2">return </span><span class="s1">method(self</span><span class="s2">, </span><span class="s1">*args</span><span class="s2">, </span><span class="s1">**kwargs)</span>
+
+    <span class="s2">return </span><span class="s1">timeout_wrapper</span>
+
+<span class="s2">def </span><span class="s1">_get_class_attr(classDict</span><span class="s2">, </span><span class="s1">bases</span><span class="s2">, </span><span class="s1">attr</span><span class="s2">, </span><span class="s1">default=AttributeError):</span>
+    <span class="s1">NONE = object()</span>
+    <span class="s1">value = classDict.get(attr</span><span class="s2">, </span><span class="s1">NONE)</span>
+    <span class="s2">if </span><span class="s1">value </span><span class="s2">is not </span><span class="s1">NONE:</span>
+        <span class="s2">return </span><span class="s1">value</span>
+    <span class="s2">for </span><span class="s1">base </span><span class="s2">in </span><span class="s1">bases:</span>
+        <span class="s1">value = getattr(base</span><span class="s2">, </span><span class="s1">attr</span><span class="s2">, </span><span class="s1">NONE)</span>
+        <span class="s2">if </span><span class="s1">value </span><span class="s2">is not </span><span class="s1">NONE:</span>
+            <span class="s2">return </span><span class="s1">value</span>
+    <span class="s2">if </span><span class="s1">default </span><span class="s2">is </span><span class="s1">AttributeError:</span>
+        <span class="s2">raise </span><span class="s1">AttributeError(</span><span class="s4">'Attribute %r not found</span><span class="s2">\n</span><span class="s4">%s</span><span class="s2">\n</span><span class="s4">%s</span><span class="s2">\n</span><span class="s4">' </span><span class="s1">% (attr</span><span class="s2">, </span><span class="s1">classDict</span><span class="s2">, </span><span class="s1">bases))</span>
+    <span class="s2">return </span><span class="s1">default</span>
+
+
+<span class="s2">class </span><span class="s1">TestCaseMetaClass(type):</span>
+    <span class="s0"># wrap each test method with</span>
+    <span class="s0"># a) timeout check</span>
+    <span class="s0"># b) fatal error check</span>
+    <span class="s0"># c) restore the hub's error handler (see expect_one_error)</span>
+    <span class="s0"># d) totalrefcount check</span>
+    <span class="s2">def </span><span class="s1">__new__(cls</span><span class="s2">, </span><span class="s1">classname</span><span class="s2">, </span><span class="s1">bases</span><span class="s2">, </span><span class="s1">classDict):</span>
+        <span class="s0"># pylint and pep8 fight over what this should be called (mcs or cls).</span>
+        <span class="s0"># pylint gets it right, but we cant scope disable pep8, so we go with</span>
+        <span class="s0"># its convention.</span>
+        <span class="s0"># pylint: disable=bad-mcs-classmethod-argument</span>
+        <span class="s1">timeout = classDict.get(</span><span class="s4">'__timeout__'</span><span class="s2">, </span><span class="s4">'NONE'</span><span class="s1">)</span>
+        <span class="s2">if </span><span class="s1">timeout == </span><span class="s4">'NONE'</span><span class="s1">:</span>
+            <span class="s1">timeout = getattr(bases[</span><span class="s3">0</span><span class="s1">]</span><span class="s2">, </span><span class="s4">'__timeout__'</span><span class="s2">, None</span><span class="s1">)</span>
+            <span class="s2">if </span><span class="s1">sysinfo.RUN_LEAKCHECKS </span><span class="s2">and </span><span class="s1">timeout </span><span class="s2">is not None</span><span class="s1">:</span>
+                <span class="s1">timeout *= </span><span class="s3">6</span>
+        <span class="s1">check_totalrefcount = _get_class_attr(classDict</span><span class="s2">, </span><span class="s1">bases</span><span class="s2">, </span><span class="s4">'check_totalrefcount'</span><span class="s2">, True</span><span class="s1">)</span>
+
+        <span class="s1">error_fatal = _get_class_attr(classDict</span><span class="s2">, </span><span class="s1">bases</span><span class="s2">, </span><span class="s4">'error_fatal'</span><span class="s2">, True</span><span class="s1">)</span>
+        <span class="s1">uses_handle_error = _get_class_attr(classDict</span><span class="s2">, </span><span class="s1">bases</span><span class="s2">, </span><span class="s4">'uses_handle_error'</span><span class="s2">, True</span><span class="s1">)</span>
+        <span class="s0"># Python 3: must copy, we mutate the classDict. Interestingly enough,</span>
+        <span class="s0"># it doesn't actually error out, but under 3.6 we wind up wrapping</span>
+        <span class="s0"># and re-wrapping the same items over and over and over.</span>
+        <span class="s2">for </span><span class="s1">key</span><span class="s2">, </span><span class="s1">value </span><span class="s2">in </span><span class="s1">list(classDict.items()):</span>
+            <span class="s2">if </span><span class="s1">key.startswith(</span><span class="s4">'test'</span><span class="s1">) </span><span class="s2">and </span><span class="s1">callable(value):</span>
+                <span class="s1">classDict.pop(key)</span>
+                <span class="s0"># XXX: When did we stop doing this?</span>
+                <span class="s0">#value = wrap_switch_count_check(value)</span>
+                <span class="s1">value = _wrap_timeout(timeout</span><span class="s2">, </span><span class="s1">value)</span>
+                <span class="s1">error_fatal = getattr(value</span><span class="s2">, </span><span class="s4">'error_fatal'</span><span class="s2">, </span><span class="s1">error_fatal)</span>
+                <span class="s2">if </span><span class="s1">error_fatal:</span>
+                    <span class="s1">value = errorhandler.wrap_error_fatal(value)</span>
+                <span class="s2">if </span><span class="s1">uses_handle_error:</span>
+                    <span class="s1">value = errorhandler.wrap_restore_handle_error(value)</span>
+                <span class="s2">if </span><span class="s1">check_totalrefcount </span><span class="s2">and </span><span class="s1">sysinfo.RUN_LEAKCHECKS:</span>
+                    <span class="s1">value = leakcheck.wrap_refcount(value)</span>
+                <span class="s1">classDict[key] = value</span>
+        <span class="s2">return </span><span class="s1">type.__new__(cls</span><span class="s2">, </span><span class="s1">classname</span><span class="s2">, </span><span class="s1">bases</span><span class="s2">, </span><span class="s1">classDict)</span>
+
+<span class="s2">def </span><span class="s1">_noop():</span>
+    <span class="s2">return</span>
+
+<span class="s2">class </span><span class="s1">SubscriberCleanupMixin(object):</span>
+
+    <span class="s2">def </span><span class="s1">setUp(self):</span>
+        <span class="s1">super(SubscriberCleanupMixin</span><span class="s2">, </span><span class="s1">self).setUp()</span>
+        <span class="s2">from </span><span class="s1">gevent </span><span class="s2">import </span><span class="s1">events</span>
+        <span class="s1">self.__old_subscribers = events.subscribers[:]</span>
+
+    <span class="s2">def </span><span class="s1">addSubscriber(self</span><span class="s2">, </span><span class="s1">sub):</span>
+        <span class="s2">from </span><span class="s1">gevent </span><span class="s2">import </span><span class="s1">events</span>
+        <span class="s1">events.subscribers.append(sub)</span>
+
+    <span class="s2">def </span><span class="s1">tearDown(self):</span>
+        <span class="s2">from </span><span class="s1">gevent </span><span class="s2">import </span><span class="s1">events</span>
+        <span class="s1">events.subscribers[:] = self.__old_subscribers</span>
+        <span class="s1">super(SubscriberCleanupMixin</span><span class="s2">, </span><span class="s1">self).tearDown()</span>
+
+
+<span class="s2">class </span><span class="s1">TestCase(TestCaseMetaClass(</span><span class="s4">&quot;NewBase&quot;</span><span class="s2">,</span>
+                                 <span class="s1">(SubscriberCleanupMixin</span><span class="s2">,</span>
+                                  <span class="s1">TimeAssertMixin</span><span class="s2">,</span>
+                                  <span class="s1">GreenletAssertMixin</span><span class="s2">,</span>
+                                  <span class="s1">StringAssertMixin</span><span class="s2">,</span>
+                                  <span class="s1">BaseTestCase</span><span class="s2">,</span><span class="s1">)</span><span class="s2">,</span>
+                                 <span class="s1">{})):</span>
+    <span class="s1">__timeout__ = params.LOCAL_TIMEOUT </span><span class="s2">if not </span><span class="s1">sysinfo.RUNNING_ON_CI </span><span class="s2">else </span><span class="s1">params.CI_TIMEOUT</span>
+
+    <span class="s1">switch_expected = </span><span class="s4">'default'</span>
+    <span class="s0">#: Set this to true to cause errors that get reported to the hub to</span>
+    <span class="s0">#: always get propagated to the main greenlet. This can be done at the</span>
+    <span class="s0">#: class or method level.</span>
+    <span class="s0">#: .. caution:: This can hide errors and make it look like exceptions</span>
+    <span class="s0">#:    are propagated even if they're not.</span>
+    <span class="s1">error_fatal = </span><span class="s2">True</span>
+    <span class="s1">uses_handle_error = </span><span class="s2">True</span>
+    <span class="s1">close_on_teardown = ()</span>
+    <span class="s0"># This is really used by the SubscriberCleanupMixin</span>
+    <span class="s1">__old_subscribers = () </span><span class="s0"># pylint:disable=unused-private-member</span>
+
+    <span class="s2">def </span><span class="s1">run(self</span><span class="s2">, </span><span class="s1">*args</span><span class="s2">, </span><span class="s1">**kwargs): </span><span class="s0"># pylint:disable=signature-differs</span>
+        <span class="s2">if </span><span class="s1">self.switch_expected == </span><span class="s4">'default'</span><span class="s1">:</span>
+            <span class="s1">self.switch_expected = get_switch_expected(self.fullname)</span>
+        <span class="s2">return </span><span class="s1">super(TestCase</span><span class="s2">, </span><span class="s1">self).run(*args</span><span class="s2">, </span><span class="s1">**kwargs)</span>
+
+    <span class="s2">def </span><span class="s1">setUp(self):</span>
+        <span class="s1">super(TestCase</span><span class="s2">, </span><span class="s1">self).setUp()</span>
+        <span class="s0"># Especially if we're running in leakcheck mode, where</span>
+        <span class="s0"># the same test gets executed repeatedly, we need to update the</span>
+        <span class="s0"># current time. Tests don't always go through the full event loop,</span>
+        <span class="s0"># so that doesn't always happen. test__pool.py:TestPoolYYY.test_async</span>
+        <span class="s0"># tends to show timeouts that are too short if we don't.</span>
+        <span class="s0"># XXX: Should some core part of the loop call this?</span>
+        <span class="s1">hub = get_hub_if_exists()</span>
+        <span class="s2">if </span><span class="s1">hub </span><span class="s2">and </span><span class="s1">hub.loop:</span>
+            <span class="s1">hub.loop.update_now()</span>
+        <span class="s1">self.close_on_teardown = []</span>
+        <span class="s1">self.addCleanup(self._tearDownCloseOnTearDown)</span>
+
+    <span class="s2">def </span><span class="s1">tearDown(self):</span>
+        <span class="s2">if </span><span class="s1">getattr(self</span><span class="s2">, </span><span class="s4">'skipTearDown'</span><span class="s2">, False</span><span class="s1">):</span>
+            <span class="s2">del </span><span class="s1">self.close_on_teardown[:]</span>
+            <span class="s2">return</span>
+
+        <span class="s1">cleanup = getattr(self</span><span class="s2">, </span><span class="s4">'cleanup'</span><span class="s2">, </span><span class="s1">_noop)</span>
+        <span class="s1">cleanup()</span>
+        <span class="s1">self._error = self._none</span>
+        <span class="s1">super(TestCase</span><span class="s2">, </span><span class="s1">self).tearDown()</span>
+
+    <span class="s2">def </span><span class="s1">_tearDownCloseOnTearDown(self):</span>
+        <span class="s2">while </span><span class="s1">self.close_on_teardown:</span>
+            <span class="s1">x = self.close_on_teardown.pop()</span>
+            <span class="s1">close = getattr(x</span><span class="s2">, </span><span class="s4">'close'</span><span class="s2">, </span><span class="s1">x)</span>
+            <span class="s2">try</span><span class="s1">:</span>
+                <span class="s1">close()</span>
+            <span class="s2">except </span><span class="s1">Exception: </span><span class="s0"># pylint:disable=broad-except</span>
+                <span class="s2">pass</span>
+
+    <span class="s2">def </span><span class="s1">_close_on_teardown(self</span><span class="s2">, </span><span class="s1">resource):</span>
+        <span class="s5">&quot;&quot;&quot; 
+        *resource* either has a ``close`` method, or is a 
+        callable. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">self.close_on_teardown.append(resource)</span>
+        <span class="s2">return </span><span class="s1">resource</span>
+
+    <span class="s1">@property</span>
+    <span class="s2">def </span><span class="s1">testname(self):</span>
+        <span class="s2">return </span><span class="s1">getattr(self</span><span class="s2">, </span><span class="s4">'_testMethodName'</span><span class="s2">, </span><span class="s4">''</span><span class="s1">) </span><span class="s2">or </span><span class="s1">getattr(self</span><span class="s2">, </span><span class="s4">'_TestCase__testMethodName'</span><span class="s1">)</span>
+
+    <span class="s1">@property</span>
+    <span class="s2">def </span><span class="s1">testcasename(self):</span>
+        <span class="s2">return </span><span class="s1">self.__class__.__name__ + </span><span class="s4">'.' </span><span class="s1">+ self.testname</span>
+
+    <span class="s1">@property</span>
+    <span class="s2">def </span><span class="s1">modulename(self):</span>
+        <span class="s2">return </span><span class="s1">os.path.basename(sys.modules[self.__class__.__module__].__file__).rsplit(</span><span class="s4">'.'</span><span class="s2">, </span><span class="s3">1</span><span class="s1">)[</span><span class="s3">0</span><span class="s1">]</span>
+
+    <span class="s1">@property</span>
+    <span class="s2">def </span><span class="s1">fullname(self):</span>
+        <span class="s2">return </span><span class="s1">os.path.splitext(os.path.basename(self.modulename))[</span><span class="s3">0</span><span class="s1">] + </span><span class="s4">'.' </span><span class="s1">+ self.testcasename</span>
+
+    <span class="s1">_none = (</span><span class="s2">None, None, None</span><span class="s1">)</span>
+    <span class="s0"># (context, kind, value)</span>
+    <span class="s1">_error = _none</span>
+
+    <span class="s2">def </span><span class="s1">expect_one_error(self):</span>
+        <span class="s1">self.assertEqual(self._error</span><span class="s2">, </span><span class="s1">self._none)</span>
+        <span class="s1">gevent.get_hub().handle_error = self._store_error</span>
+
+    <span class="s2">def </span><span class="s1">_store_error(self</span><span class="s2">, </span><span class="s1">where</span><span class="s2">, </span><span class="s1">t</span><span class="s2">, </span><span class="s1">value</span><span class="s2">, </span><span class="s1">tb):</span>
+        <span class="s2">del </span><span class="s1">tb</span>
+        <span class="s2">if </span><span class="s1">self._error != self._none:</span>
+            <span class="s1">gevent.get_hub().parent.throw(t</span><span class="s2">, </span><span class="s1">value)</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">self._error = (where</span><span class="s2">, </span><span class="s1">t</span><span class="s2">, </span><span class="s1">value)</span>
+
+    <span class="s2">def </span><span class="s1">peek_error(self):</span>
+        <span class="s2">return </span><span class="s1">self._error</span>
+
+    <span class="s2">def </span><span class="s1">get_error(self):</span>
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s2">return </span><span class="s1">self._error</span>
+        <span class="s2">finally</span><span class="s1">:</span>
+            <span class="s1">self._error = self._none</span>
+
+    <span class="s2">def </span><span class="s1">assert_error(self</span><span class="s2">, </span><span class="s1">kind=</span><span class="s2">None, </span><span class="s1">value=</span><span class="s2">None, </span><span class="s1">error=</span><span class="s2">None, </span><span class="s1">where_type=</span><span class="s2">None</span><span class="s1">):</span>
+        <span class="s2">if </span><span class="s1">error </span><span class="s2">is None</span><span class="s1">:</span>
+            <span class="s1">error = self.get_error()</span>
+        <span class="s1">econtext</span><span class="s2">, </span><span class="s1">ekind</span><span class="s2">, </span><span class="s1">evalue = error</span>
+        <span class="s2">if </span><span class="s1">kind </span><span class="s2">is not None</span><span class="s1">:</span>
+            <span class="s1">self.assertIsInstance(kind</span><span class="s2">, </span><span class="s1">type)</span>
+            <span class="s1">self.assertIsNotNone(</span>
+                <span class="s1">ekind</span><span class="s2">,</span>
+                <span class="s4">&quot;Error must not be none %r&quot; </span><span class="s1">% (error</span><span class="s2">,</span><span class="s1">))</span>
+            <span class="s2">assert </span><span class="s1">issubclass(ekind</span><span class="s2">, </span><span class="s1">kind)</span><span class="s2">, </span><span class="s1">error</span>
+        <span class="s2">if </span><span class="s1">value </span><span class="s2">is not None</span><span class="s1">:</span>
+            <span class="s2">if </span><span class="s1">isinstance(value</span><span class="s2">, </span><span class="s1">str):</span>
+                <span class="s1">self.assertEqual(str(evalue)</span><span class="s2">, </span><span class="s1">value)</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s1">self.assertIs(evalue</span><span class="s2">, </span><span class="s1">value)</span>
+        <span class="s2">if </span><span class="s1">where_type </span><span class="s2">is not None</span><span class="s1">:</span>
+            <span class="s1">self.assertIsInstance(econtext</span><span class="s2">, </span><span class="s1">where_type)</span>
+        <span class="s2">return </span><span class="s1">error</span>
+
+    <span class="s2">def </span><span class="s1">assertMonkeyPatchedFuncSignatures(self</span><span class="s2">, </span><span class="s1">mod_name</span><span class="s2">, </span><span class="s1">func_names=()</span><span class="s2">, </span><span class="s1">exclude=()):</span>
+        <span class="s0"># If inspect.getfullargspec is not available,</span>
+        <span class="s0"># We use inspect.getargspec because it's the only thing available</span>
+        <span class="s0"># in Python 2.7, but it is deprecated</span>
+        <span class="s0"># pylint:disable=deprecated-method,too-many-locals</span>
+        <span class="s2">import </span><span class="s1">inspect</span>
+        <span class="s2">import </span><span class="s1">warnings</span>
+        <span class="s2">from </span><span class="s1">gevent.monkey </span><span class="s2">import </span><span class="s1">get_original</span>
+        <span class="s0"># XXX: Very similar to gevent.monkey.patch_module. Should refactor?</span>
+        <span class="s1">gevent_module = getattr(__import__(</span><span class="s4">'gevent.' </span><span class="s1">+ mod_name)</span><span class="s2">, </span><span class="s1">mod_name)</span>
+        <span class="s1">module_name = getattr(gevent_module</span><span class="s2">, </span><span class="s4">'__target__'</span><span class="s2">, </span><span class="s1">mod_name)</span>
+
+        <span class="s1">funcs_given = </span><span class="s2">True</span>
+        <span class="s2">if not </span><span class="s1">func_names:</span>
+            <span class="s1">funcs_given = </span><span class="s2">False</span>
+            <span class="s1">func_names = getattr(gevent_module</span><span class="s2">, </span><span class="s4">'__implements__'</span><span class="s1">)</span>
+
+        <span class="s2">for </span><span class="s1">func_name </span><span class="s2">in </span><span class="s1">func_names:</span>
+            <span class="s2">if </span><span class="s1">func_name </span><span class="s2">in </span><span class="s1">exclude:</span>
+                <span class="s2">continue</span>
+            <span class="s1">gevent_func = getattr(gevent_module</span><span class="s2">, </span><span class="s1">func_name)</span>
+            <span class="s2">if not </span><span class="s1">inspect.isfunction(gevent_func) </span><span class="s2">and not </span><span class="s1">funcs_given:</span>
+                <span class="s2">continue</span>
+
+            <span class="s1">func = get_original(module_name</span><span class="s2">, </span><span class="s1">func_name)</span>
+
+            <span class="s2">try</span><span class="s1">:</span>
+                <span class="s2">with </span><span class="s1">warnings.catch_warnings():</span>
+                    <span class="s2">try</span><span class="s1">:</span>
+                        <span class="s1">getfullargspec = inspect.getfullargspec</span>
+                    <span class="s2">except </span><span class="s1">AttributeError:</span>
+                        <span class="s1">warnings.simplefilter(</span><span class="s4">&quot;ignore&quot;</span><span class="s1">)</span>
+                        <span class="s1">getfullargspec = inspect.getargspec</span>
+                    <span class="s1">gevent_sig = getfullargspec(gevent_func)</span>
+                    <span class="s1">sig = getfullargspec(func)</span>
+            <span class="s2">except </span><span class="s1">TypeError:</span>
+                <span class="s2">if </span><span class="s1">funcs_given:</span>
+                    <span class="s2">raise</span>
+                <span class="s0"># Can't do this one. If they specifically asked for it,</span>
+                <span class="s0"># it's an error, otherwise it's not.</span>
+                <span class="s0"># Python 3 can check a lot more than Python 2 can.</span>
+                <span class="s2">continue</span>
+            <span class="s1">self.assertEqual(sig.args</span><span class="s2">, </span><span class="s1">gevent_sig.args</span><span class="s2">, </span><span class="s1">func_name)</span>
+            <span class="s0"># The next two might not actually matter?</span>
+            <span class="s1">self.assertEqual(sig.varargs</span><span class="s2">, </span><span class="s1">gevent_sig.varargs</span><span class="s2">, </span><span class="s1">func_name)</span>
+            <span class="s1">self.assertEqual(sig.defaults</span><span class="s2">, </span><span class="s1">gevent_sig.defaults</span><span class="s2">, </span><span class="s1">func_name)</span>
+            <span class="s2">if </span><span class="s1">hasattr(sig</span><span class="s2">, </span><span class="s4">'keywords'</span><span class="s1">): </span><span class="s0"># the old version</span>
+                <span class="s1">msg = (func_name</span><span class="s2">, </span><span class="s1">sig.keywords</span><span class="s2">, </span><span class="s1">gevent_sig.keywords)</span>
+                <span class="s2">try</span><span class="s1">:</span>
+                    <span class="s1">self.assertEqual(sig.keywords</span><span class="s2">, </span><span class="s1">gevent_sig.keywords</span><span class="s2">, </span><span class="s1">msg)</span>
+                <span class="s2">except </span><span class="s1">AssertionError:</span>
+                    <span class="s0"># Ok, if we take `kwargs` and the original function doesn't,</span>
+                    <span class="s0"># that's OK. We have to do that as a compatibility hack sometimes to</span>
+                    <span class="s0"># work across multiple python versions.</span>
+                    <span class="s1">self.assertIsNone(sig.keywords</span><span class="s2">, </span><span class="s1">msg)</span>
+                    <span class="s1">self.assertEqual(</span><span class="s4">'kwargs'</span><span class="s2">, </span><span class="s1">gevent_sig.keywords)</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s0"># The new hotness. Unfortunately, we can't actually check these things</span>
+                <span class="s0"># until we drop Python 2 support from the shared code. The only known place</span>
+                <span class="s0"># this is a problem is python 3.11 socket.create_connection(), which we manually</span>
+                <span class="s0"># ignore. So the checks all pass as is.</span>
+                <span class="s1">self.assertEqual(sig.kwonlyargs</span><span class="s2">, </span><span class="s1">gevent_sig.kwonlyargs</span><span class="s2">, </span><span class="s1">func_name)</span>
+                <span class="s1">self.assertEqual(sig.kwonlydefaults</span><span class="s2">, </span><span class="s1">gevent_sig.kwonlydefaults</span><span class="s2">, </span><span class="s1">func_name)</span>
+            <span class="s0"># Should deal with others: https://docs.python.org/3/library/inspect.html#inspect.getfullargspec</span>
+
+    <span class="s2">def </span><span class="s1">assertEqualFlakyRaceCondition(self</span><span class="s2">, </span><span class="s1">a</span><span class="s2">, </span><span class="s1">b):</span>
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s1">self.assertEqual(a</span><span class="s2">, </span><span class="s1">b)</span>
+        <span class="s2">except </span><span class="s1">AssertionError:</span>
+            <span class="s1">flaky.reraiseFlakyTestRaceCondition()</span>
+
+    <span class="s1">assertRaisesRegex = getattr(BaseTestCase</span><span class="s2">, </span><span class="s4">'assertRaisesRegex'</span><span class="s2">,</span>
+                                <span class="s1">getattr(BaseTestCase</span><span class="s2">, </span><span class="s4">'assertRaisesRegexp'</span><span class="s1">))</span>
+
+    <span class="s2">def </span><span class="s1">assertStartsWith(self</span><span class="s2">, </span><span class="s1">it</span><span class="s2">, </span><span class="s1">has_prefix):</span>
+        <span class="s1">self.assertTrue(it.startswith(has_prefix)</span><span class="s2">, </span><span class="s1">(it</span><span class="s2">, </span><span class="s1">has_prefix))</span>
+
+    <span class="s2">def </span><span class="s1">assertNotMonkeyPatched(self):</span>
+        <span class="s2">from </span><span class="s1">gevent </span><span class="s2">import </span><span class="s1">monkey</span>
+        <span class="s1">self.assertFalse(monkey.is_anything_patched())</span>
+</pre>
+</body>
+</html>

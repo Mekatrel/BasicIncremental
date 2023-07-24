@@ -1,0 +1,108 @@
+<html>
+<head>
+<title>test__issue1686.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #629755; font-style: italic;}
+.s3 { color: #cc7832;}
+.s4 { color: #6a8759;}
+.s5 { color: #6897bb;}
+.s6 { color: #a5c261;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+test__issue1686.py</font>
+</center></td></tr></table>
+<pre><span class="s0"># -*- coding: utf-8 -*-</span>
+<span class="s2">&quot;&quot;&quot; 
+Tests for https://github.com/gevent/gevent/issues/1686 
+which is about destroying a hub when there are active 
+callbacks or IO in operation. 
+&quot;&quot;&quot;</span>
+<span class="s3">from </span><span class="s1">__future__ </span><span class="s3">import </span><span class="s1">absolute_import</span>
+<span class="s3">from </span><span class="s1">__future__ </span><span class="s3">import </span><span class="s1">division</span>
+<span class="s3">from </span><span class="s1">__future__ </span><span class="s3">import </span><span class="s1">print_function</span>
+
+<span class="s3">import </span><span class="s1">os</span>
+<span class="s3">import </span><span class="s1">unittest</span>
+
+<span class="s3">from </span><span class="s1">gevent </span><span class="s3">import </span><span class="s1">testing </span><span class="s3">as </span><span class="s1">greentest</span>
+
+<span class="s0"># Don't let the testrunner put us in a process with other</span>
+<span class="s0"># tests; we are strict on the state of the hub and greenlets.</span>
+<span class="s0"># pragma: testrunner-no-combine</span>
+
+<span class="s1">@greentest.skipOnWindows(</span><span class="s4">&quot;Uses os.fork&quot;</span><span class="s1">)</span>
+<span class="s3">class </span><span class="s1">TestDestroyInChildWithActiveSpawn(unittest.TestCase):</span>
+
+    <span class="s3">def </span><span class="s1">test(self): </span><span class="s0"># pylint:disable=too-many-locals</span>
+        <span class="s0"># If this test is broken, there are a few failure modes.</span>
+        <span class="s0"># - In the original examples, the parent process just hangs, because the</span>
+        <span class="s0">#   child has raced ahead, spawned the greenlet and read the data. When the</span>
+        <span class="s0">#   greenlet goes to read in the parent, it blocks, and the hub and loop</span>
+        <span class="s0">#   wait for it.</span>
+        <span class="s0"># - Here, our child detects the greenlet ran when it shouldn't and</span>
+        <span class="s0">#   raises an error, which translates to a non-zero exit status,</span>
+        <span class="s0">#   which the parent checks for and fails by raising an exception before</span>
+        <span class="s0">#   returning control to the hub. We can replicate the hang by removing the</span>
+        <span class="s0">#   assertion in the child.</span>
+        <span class="s3">from </span><span class="s1">time </span><span class="s3">import </span><span class="s1">sleep </span><span class="s3">as </span><span class="s1">hang</span>
+
+        <span class="s3">from </span><span class="s1">gevent </span><span class="s3">import </span><span class="s1">get_hub</span>
+        <span class="s3">from </span><span class="s1">gevent </span><span class="s3">import </span><span class="s1">spawn</span>
+        <span class="s3">from </span><span class="s1">gevent.socket </span><span class="s3">import </span><span class="s1">wait_read</span>
+        <span class="s3">from </span><span class="s1">gevent.os </span><span class="s3">import </span><span class="s1">nb_read</span>
+        <span class="s3">from </span><span class="s1">gevent.os </span><span class="s3">import </span><span class="s1">nb_write</span>
+        <span class="s3">from </span><span class="s1">gevent.os </span><span class="s3">import </span><span class="s1">make_nonblocking</span>
+        <span class="s3">from </span><span class="s1">gevent.os </span><span class="s3">import </span><span class="s1">fork</span>
+        <span class="s3">from </span><span class="s1">gevent.os </span><span class="s3">import </span><span class="s1">waitpid</span>
+
+        <span class="s1">pipe_read_fd</span><span class="s3">, </span><span class="s1">pipe_write_fd = os.pipe()</span>
+        <span class="s1">make_nonblocking(pipe_read_fd)</span>
+        <span class="s1">make_nonblocking(pipe_write_fd)</span>
+
+        <span class="s1">run = []</span>
+
+        <span class="s3">def </span><span class="s1">reader():</span>
+            <span class="s1">run.append(</span><span class="s5">1</span><span class="s1">)</span>
+            <span class="s3">return </span><span class="s1">nb_read(pipe_read_fd</span><span class="s3">, </span><span class="s5">4096</span><span class="s1">)</span>
+
+        <span class="s0"># Put data in the pipe</span>
+        <span class="s1">DATA = </span><span class="s6">b'test'</span>
+        <span class="s1">nb_write(pipe_write_fd</span><span class="s3">, </span><span class="s1">DATA)</span>
+        <span class="s0"># Make sure we're ready to read it</span>
+        <span class="s1">wait_read(pipe_read_fd)</span>
+
+        <span class="s0"># Schedule a greenlet to start</span>
+        <span class="s1">reader = spawn(reader)</span>
+
+        <span class="s1">hub = get_hub()</span>
+        <span class="s1">pid = fork()</span>
+        <span class="s3">if </span><span class="s1">pid == </span><span class="s5">0</span><span class="s1">:</span>
+            <span class="s0"># Child destroys the hub. The reader should not have run.</span>
+            <span class="s1">hub.destroy(destroy_loop=</span><span class="s3">True</span><span class="s1">)</span>
+            <span class="s1">self.assertFalse(run)</span>
+            <span class="s1">os._exit(</span><span class="s5">0</span><span class="s1">)</span>
+            <span class="s3">return</span>
+
+        <span class="s0"># The parent.</span>
+        <span class="s0"># Briefly prevent us from spinning our event loop.</span>
+        <span class="s1">hang(</span><span class="s5">0.5</span><span class="s1">)</span>
+        <span class="s1">wait_child_result = waitpid(pid</span><span class="s3">, </span><span class="s5">0</span><span class="s1">)</span>
+        <span class="s1">self.assertEqual(wait_child_result</span><span class="s3">, </span><span class="s1">(pid</span><span class="s3">, </span><span class="s5">0</span><span class="s1">))</span>
+        <span class="s0"># We should get the data; the greenlet only runs in the parent.</span>
+        <span class="s1">data = reader.get()</span>
+        <span class="s1">self.assertEqual(run</span><span class="s3">, </span><span class="s1">[</span><span class="s5">1</span><span class="s1">])</span>
+        <span class="s1">self.assertEqual(data</span><span class="s3">, </span><span class="s1">DATA)</span>
+
+
+<span class="s3">if </span><span class="s1">__name__ == </span><span class="s4">'__main__'</span><span class="s1">:</span>
+    <span class="s1">greentest.main()</span>
+</pre>
+</body>
+</html>

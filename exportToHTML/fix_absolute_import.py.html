@@ -1,0 +1,113 @@
+<html>
+<head>
+<title>fix_absolute_import.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #629755; font-style: italic;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #cc7832;}
+.s3 { color: #6897bb;}
+.s4 { color: #6a8759;}
+.s5 { color: #808080;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+fix_absolute_import.py</font>
+</center></td></tr></table>
+<pre><span class="s0">&quot;&quot;&quot; 
+Fixer for import statements, with a __future__ import line. 
+ 
+Based on lib2to3/fixes/fix_import.py, but extended slightly so it also 
+supports Cython modules. 
+ 
+If spam is being imported from the local directory, this import: 
+    from spam import eggs 
+becomes: 
+    from __future__ import absolute_import 
+    from .spam import eggs 
+ 
+and this import: 
+    import spam 
+becomes: 
+    from __future__ import absolute_import 
+    from . import spam 
+&quot;&quot;&quot;</span>
+
+<span class="s2">from </span><span class="s1">os.path </span><span class="s2">import </span><span class="s1">dirname</span><span class="s2">, </span><span class="s1">join</span><span class="s2">, </span><span class="s1">exists</span><span class="s2">, </span><span class="s1">sep</span>
+<span class="s2">from </span><span class="s1">lib2to3.fixes.fix_import </span><span class="s2">import </span><span class="s1">FixImport</span>
+<span class="s2">from </span><span class="s1">lib2to3.fixer_util </span><span class="s2">import </span><span class="s1">FromImport</span><span class="s2">, </span><span class="s1">syms</span>
+<span class="s2">from </span><span class="s1">lib2to3.fixes.fix_import </span><span class="s2">import </span><span class="s1">traverse_imports</span>
+
+<span class="s2">from </span><span class="s1">libfuturize.fixer_util </span><span class="s2">import </span><span class="s1">future_import</span>
+
+
+<span class="s2">class </span><span class="s1">FixAbsoluteImport(FixImport):</span>
+    <span class="s1">run_order = </span><span class="s3">9</span>
+
+    <span class="s2">def </span><span class="s1">transform(self</span><span class="s2">, </span><span class="s1">node</span><span class="s2">, </span><span class="s1">results):</span>
+        <span class="s0">&quot;&quot;&quot; 
+        Copied from FixImport.transform(), but with this line added in 
+        any modules that had implicit relative imports changed: 
+ 
+            from __future__ import absolute_import&quot; 
+        &quot;&quot;&quot;</span>
+        <span class="s2">if </span><span class="s1">self.skip:</span>
+            <span class="s2">return</span>
+        <span class="s1">imp = results[</span><span class="s4">'imp'</span><span class="s1">]</span>
+
+        <span class="s2">if </span><span class="s1">node.type == syms.import_from:</span>
+            <span class="s5"># Some imps are top-level (eg: 'import ham')</span>
+            <span class="s5"># some are first level (eg: 'import ham.eggs')</span>
+            <span class="s5"># some are third level (eg: 'import ham.eggs as spam')</span>
+            <span class="s5"># Hence, the loop</span>
+            <span class="s2">while not </span><span class="s1">hasattr(imp</span><span class="s2">, </span><span class="s4">'value'</span><span class="s1">):</span>
+                <span class="s1">imp = imp.children[</span><span class="s3">0</span><span class="s1">]</span>
+            <span class="s2">if </span><span class="s1">self.probably_a_local_import(imp.value):</span>
+                <span class="s1">imp.value = </span><span class="s4">u&quot;.&quot; </span><span class="s1">+ imp.value</span>
+                <span class="s1">imp.changed()</span>
+                <span class="s1">future_import(</span><span class="s4">u&quot;absolute_import&quot;</span><span class="s2">, </span><span class="s1">node)</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">have_local = </span><span class="s2">False</span>
+            <span class="s1">have_absolute = </span><span class="s2">False</span>
+            <span class="s2">for </span><span class="s1">mod_name </span><span class="s2">in </span><span class="s1">traverse_imports(imp):</span>
+                <span class="s2">if </span><span class="s1">self.probably_a_local_import(mod_name):</span>
+                    <span class="s1">have_local = </span><span class="s2">True</span>
+                <span class="s2">else</span><span class="s1">:</span>
+                    <span class="s1">have_absolute = </span><span class="s2">True</span>
+            <span class="s2">if </span><span class="s1">have_absolute:</span>
+                <span class="s2">if </span><span class="s1">have_local:</span>
+                    <span class="s5"># We won't handle both sibling and absolute imports in the</span>
+                    <span class="s5"># same statement at the moment.</span>
+                    <span class="s1">self.warning(node</span><span class="s2">, </span><span class="s4">&quot;absolute and local imports together&quot;</span><span class="s1">)</span>
+                <span class="s2">return</span>
+
+            <span class="s1">new = FromImport(</span><span class="s4">u&quot;.&quot;</span><span class="s2">, </span><span class="s1">[imp])</span>
+            <span class="s1">new.prefix = node.prefix</span>
+            <span class="s1">future_import(</span><span class="s4">u&quot;absolute_import&quot;</span><span class="s2">, </span><span class="s1">node)</span>
+            <span class="s2">return </span><span class="s1">new</span>
+
+    <span class="s2">def </span><span class="s1">probably_a_local_import(self</span><span class="s2">, </span><span class="s1">imp_name):</span>
+        <span class="s0">&quot;&quot;&quot; 
+        Like the corresponding method in the base class, but this also 
+        supports Cython modules. 
+        &quot;&quot;&quot;</span>
+        <span class="s2">if </span><span class="s1">imp_name.startswith(</span><span class="s4">u&quot;.&quot;</span><span class="s1">):</span>
+            <span class="s5"># Relative imports are certainly not local imports.</span>
+            <span class="s2">return False</span>
+        <span class="s1">imp_name = imp_name.split(</span><span class="s4">u&quot;.&quot;</span><span class="s2">, </span><span class="s3">1</span><span class="s1">)[</span><span class="s3">0</span><span class="s1">]</span>
+        <span class="s1">base_path = dirname(self.filename)</span>
+        <span class="s1">base_path = join(base_path</span><span class="s2">, </span><span class="s1">imp_name)</span>
+        <span class="s5"># If there is no __init__.py next to the file its not in a package</span>
+        <span class="s5"># so can't be a relative import.</span>
+        <span class="s2">if not </span><span class="s1">exists(join(dirname(base_path)</span><span class="s2">, </span><span class="s4">&quot;__init__.py&quot;</span><span class="s1">)):</span>
+            <span class="s2">return False</span>
+        <span class="s2">for </span><span class="s1">ext </span><span class="s2">in </span><span class="s1">[</span><span class="s4">&quot;.py&quot;</span><span class="s2">, </span><span class="s1">sep</span><span class="s2">, </span><span class="s4">&quot;.pyc&quot;</span><span class="s2">, </span><span class="s4">&quot;.so&quot;</span><span class="s2">, </span><span class="s4">&quot;.sl&quot;</span><span class="s2">, </span><span class="s4">&quot;.pyd&quot;</span><span class="s2">, </span><span class="s4">&quot;.pyx&quot;</span><span class="s1">]:</span>
+            <span class="s2">if </span><span class="s1">exists(base_path + ext):</span>
+                <span class="s2">return True</span>
+        <span class="s2">return False</span>
+</pre>
+</body>
+</html>

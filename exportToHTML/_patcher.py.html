@@ -1,0 +1,277 @@
+<html>
+<head>
+<title>_patcher.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #cc7832;}
+.s3 { color: #6a8759;}
+.s4 { color: #629755; font-style: italic;}
+.s5 { color: #6897bb;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+_patcher.py</font>
+</center></td></tr></table>
+<pre><span class="s0"># Copyright 2018 gevent. See LICENSE for details.</span>
+
+<span class="s0"># Portions of the following are inspired by code from eventlet. I</span>
+<span class="s0"># believe they are distinct enough that no eventlet copyright would</span>
+<span class="s0"># apply (they are not a copy or substantial portion of the eventlot</span>
+<span class="s0"># code).</span>
+
+<span class="s0"># Added in gevent 1.3a2. Not public in that release.</span>
+
+<span class="s2">from </span><span class="s1">__future__ </span><span class="s2">import </span><span class="s1">absolute_import</span><span class="s2">, </span><span class="s1">print_function</span>
+
+<span class="s2">import </span><span class="s1">importlib</span>
+<span class="s2">import </span><span class="s1">sys</span>
+
+<span class="s2">from </span><span class="s1">gevent._compat </span><span class="s2">import </span><span class="s1">PY3</span>
+<span class="s2">from </span><span class="s1">gevent._compat </span><span class="s2">import </span><span class="s1">iteritems</span>
+<span class="s2">from </span><span class="s1">gevent._compat </span><span class="s2">import </span><span class="s1">imp_acquire_lock</span>
+<span class="s2">from </span><span class="s1">gevent._compat </span><span class="s2">import </span><span class="s1">imp_release_lock</span>
+
+
+<span class="s2">from </span><span class="s1">gevent.builtins </span><span class="s2">import </span><span class="s1">__import__ </span><span class="s2">as </span><span class="s1">g_import</span>
+
+
+<span class="s1">MAPPING = {</span>
+    <span class="s3">'gevent.local'</span><span class="s1">: </span><span class="s3">'_threading_local'</span><span class="s2">,</span>
+    <span class="s3">'gevent.socket'</span><span class="s1">: </span><span class="s3">'socket'</span><span class="s2">,</span>
+    <span class="s3">'gevent.select'</span><span class="s1">: </span><span class="s3">'select'</span><span class="s2">,</span>
+    <span class="s3">'gevent.selectors'</span><span class="s1">: </span><span class="s3">'selectors' </span><span class="s2">if </span><span class="s1">PY3 </span><span class="s2">else </span><span class="s3">'selectors2'</span><span class="s2">,</span>
+    <span class="s3">'gevent.ssl'</span><span class="s1">: </span><span class="s3">'ssl'</span><span class="s2">,</span>
+    <span class="s3">'gevent.thread'</span><span class="s1">: </span><span class="s3">'_thread' </span><span class="s2">if </span><span class="s1">PY3 </span><span class="s2">else </span><span class="s3">'thread'</span><span class="s2">,</span>
+    <span class="s3">'gevent.subprocess'</span><span class="s1">: </span><span class="s3">'subprocess'</span><span class="s2">,</span>
+    <span class="s3">'gevent.os'</span><span class="s1">: </span><span class="s3">'os'</span><span class="s2">,</span>
+    <span class="s3">'gevent.threading'</span><span class="s1">: </span><span class="s3">'threading'</span><span class="s2">,</span>
+    <span class="s3">'gevent.builtins'</span><span class="s1">: </span><span class="s3">'builtins' </span><span class="s2">if </span><span class="s1">PY3 </span><span class="s2">else </span><span class="s3">'__builtin__'</span><span class="s2">,</span>
+    <span class="s3">'gevent.signal'</span><span class="s1">: </span><span class="s3">'signal'</span><span class="s2">,</span>
+    <span class="s3">'gevent.time'</span><span class="s1">: </span><span class="s3">'time'</span><span class="s2">,</span>
+    <span class="s3">'gevent.queue'</span><span class="s1">: </span><span class="s3">'queue' </span><span class="s2">if </span><span class="s1">PY3 </span><span class="s2">else </span><span class="s3">'Queue'</span><span class="s2">,</span>
+    <span class="s3">'gevent.contextvars'</span><span class="s1">: </span><span class="s3">'contextvars'</span><span class="s2">,</span>
+<span class="s1">}</span>
+
+<span class="s1">OPTIONAL_STDLIB_MODULES = frozenset() </span><span class="s2">if </span><span class="s1">PY3 </span><span class="s2">else </span><span class="s1">frozenset([</span>
+    <span class="s3">'selectors2'</span><span class="s2">,</span>
+<span class="s1">])</span>
+
+<span class="s1">_PATCH_PREFIX = </span><span class="s3">'__g_patched_module_'</span>
+
+<span class="s2">def </span><span class="s1">_collect_stdlib_gevent_modules():</span>
+    <span class="s4">&quot;&quot;&quot; 
+    Return a map from standard library name to 
+    imported gevent module that provides the same API. 
+ 
+    Optional modules are skipped if they cannot be imported. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">result = {}</span>
+
+    <span class="s2">for </span><span class="s1">gevent_name</span><span class="s2">, </span><span class="s1">stdlib_name </span><span class="s2">in </span><span class="s1">iteritems(MAPPING):</span>
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s1">result[stdlib_name] = importlib.import_module(gevent_name)</span>
+        <span class="s2">except </span><span class="s1">ImportError:</span>
+            <span class="s2">if </span><span class="s1">stdlib_name </span><span class="s2">in </span><span class="s1">OPTIONAL_STDLIB_MODULES:</span>
+                <span class="s2">continue</span>
+            <span class="s2">raise</span>
+    <span class="s2">return </span><span class="s1">result</span>
+
+
+<span class="s2">class </span><span class="s1">_SysModulesPatcher(object):</span>
+
+    <span class="s2">def </span><span class="s1">__init__(self</span><span class="s2">, </span><span class="s1">importing</span><span class="s2">, </span><span class="s1">extra_all=</span><span class="s2">lambda </span><span class="s1">mod_name: ()):</span>
+        <span class="s0"># Permanent state.</span>
+        <span class="s1">self.extra_all = extra_all</span>
+        <span class="s1">self.importing = importing</span>
+        <span class="s0"># green modules, replacing regularly imported modules.</span>
+        <span class="s0"># This begins as the gevent list of modules, and</span>
+        <span class="s0"># then gets extended with green things from the tree we import.</span>
+        <span class="s1">self._green_modules = _collect_stdlib_gevent_modules()</span>
+
+        <span class="s0">## Transient, reset each time we're called.</span>
+        <span class="s0"># The set of things imported before we began.</span>
+        <span class="s1">self._t_modules_to_restore = {}</span>
+
+    <span class="s2">def </span><span class="s1">_save(self):</span>
+        <span class="s1">self._t_modules_to_restore = {}</span>
+
+        <span class="s0"># Copy all the things we know we are going to overwrite.</span>
+        <span class="s2">for </span><span class="s1">modname </span><span class="s2">in </span><span class="s1">self._green_modules:</span>
+            <span class="s1">self._t_modules_to_restore[modname] = sys.modules.get(modname</span><span class="s2">, None</span><span class="s1">)</span>
+
+        <span class="s0"># Copy anything else in the import tree.</span>
+        <span class="s2">for </span><span class="s1">modname</span><span class="s2">, </span><span class="s1">mod </span><span class="s2">in </span><span class="s1">list(iteritems(sys.modules)):</span>
+            <span class="s2">if </span><span class="s1">modname.startswith(self.importing):</span>
+                <span class="s1">self._t_modules_to_restore[modname] = mod</span>
+                <span class="s0"># And remove it. If it had been imported green, it will</span>
+                <span class="s0"># be put right back. Otherwise, it was imported &quot;manually&quot;</span>
+                <span class="s0"># outside this process and isn't green.</span>
+                <span class="s2">del </span><span class="s1">sys.modules[modname]</span>
+
+        <span class="s0"># Cover the target modules so that when you import the module it</span>
+        <span class="s0"># sees only the patched versions</span>
+        <span class="s2">for </span><span class="s1">name</span><span class="s2">, </span><span class="s1">mod </span><span class="s2">in </span><span class="s1">iteritems(self._green_modules):</span>
+            <span class="s1">sys.modules[name] = mod</span>
+
+    <span class="s2">def </span><span class="s1">_restore(self):</span>
+        <span class="s0"># Anything from the same package tree we imported this time</span>
+        <span class="s0"># needs to be saved so we can restore it later, and so it doesn't</span>
+        <span class="s0"># leak into the namespace.</span>
+
+        <span class="s2">for </span><span class="s1">modname</span><span class="s2">, </span><span class="s1">mod </span><span class="s2">in </span><span class="s1">list(iteritems(sys.modules)):</span>
+            <span class="s2">if </span><span class="s1">modname.startswith(self.importing):</span>
+                <span class="s1">self._green_modules[modname] = mod</span>
+                <span class="s2">del </span><span class="s1">sys.modules[modname]</span>
+
+        <span class="s0"># Now, what we saved at the beginning needs to be restored.</span>
+        <span class="s2">for </span><span class="s1">modname</span><span class="s2">, </span><span class="s1">mod </span><span class="s2">in </span><span class="s1">iteritems(self._t_modules_to_restore):</span>
+            <span class="s2">if </span><span class="s1">mod </span><span class="s2">is not None</span><span class="s1">:</span>
+                <span class="s1">sys.modules[modname] = mod</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s2">try</span><span class="s1">:</span>
+                    <span class="s2">del </span><span class="s1">sys.modules[modname]</span>
+                <span class="s2">except </span><span class="s1">KeyError:</span>
+                    <span class="s2">pass</span>
+
+    <span class="s2">def </span><span class="s1">__exit__(self</span><span class="s2">, </span><span class="s1">t</span><span class="s2">, </span><span class="s1">v</span><span class="s2">, </span><span class="s1">tb):</span>
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s1">self._restore()</span>
+        <span class="s2">finally</span><span class="s1">:</span>
+            <span class="s1">imp_release_lock()</span>
+            <span class="s1">self._t_modules_to_restore = </span><span class="s2">None</span>
+
+
+    <span class="s2">def </span><span class="s1">__enter__(self):</span>
+        <span class="s1">imp_acquire_lock()</span>
+        <span class="s1">self._save()</span>
+        <span class="s2">return </span><span class="s1">self</span>
+
+    <span class="s1">module = </span><span class="s2">None</span>
+
+    <span class="s2">def </span><span class="s1">__call__(self</span><span class="s2">, </span><span class="s1">after_import_hook):</span>
+        <span class="s2">if </span><span class="s1">self.module </span><span class="s2">is None</span><span class="s1">:</span>
+            <span class="s2">with </span><span class="s1">self:</span>
+                <span class="s1">self.module = self.import_one(self.importing</span><span class="s2">, </span><span class="s1">after_import_hook)</span>
+                <span class="s0"># Circular reference. Someone must keep a reference to this module alive</span>
+                <span class="s0"># for it to be visible. We record it in sys.modules to be that someone, and</span>
+                <span class="s0"># to aid debugging. In the past, we worked with multiple completely separate</span>
+                <span class="s0"># invocations of `import_patched`, but we no longer do.</span>
+                <span class="s1">self.module.__gevent_patcher__ = self</span>
+                <span class="s1">sys.modules[_PATCH_PREFIX + self.importing] = self.module</span>
+        <span class="s2">return </span><span class="s1">self</span>
+
+    <span class="s2">def </span><span class="s1">import_one(self</span><span class="s2">, </span><span class="s1">module_name</span><span class="s2">, </span><span class="s1">after_import_hook):</span>
+        <span class="s1">patched_name = _PATCH_PREFIX + module_name</span>
+        <span class="s2">if </span><span class="s1">patched_name </span><span class="s2">in </span><span class="s1">sys.modules:</span>
+            <span class="s2">return </span><span class="s1">sys.modules[patched_name]</span>
+
+        <span class="s2">assert </span><span class="s1">module_name.startswith(self.importing)</span>
+        <span class="s1">sys.modules.pop(module_name</span><span class="s2">, None</span><span class="s1">)</span>
+
+        <span class="s1">module = g_import(module_name</span><span class="s2">, </span><span class="s1">{}</span><span class="s2">, </span><span class="s1">{}</span><span class="s2">, </span><span class="s1">module_name.split(</span><span class="s3">'.'</span><span class="s1">)[:-</span><span class="s5">1</span><span class="s1">])</span>
+        <span class="s1">self.module = module</span>
+        <span class="s0"># On Python 3, we could probably do something much nicer with the</span>
+        <span class="s0"># import machinery? Set the __loader__ or __finder__ or something like that?</span>
+        <span class="s1">self._import_all([module])</span>
+        <span class="s1">after_import_hook(module)</span>
+        <span class="s2">return </span><span class="s1">module</span>
+
+    <span class="s2">def </span><span class="s1">_import_all(self</span><span class="s2">, </span><span class="s1">queue):</span>
+        <span class="s0"># Called while monitoring for patch changes.</span>
+        <span class="s2">while </span><span class="s1">queue:</span>
+            <span class="s1">module = queue.pop(</span><span class="s5">0</span><span class="s1">)</span>
+            <span class="s1">name = module.__name__</span>
+            <span class="s1">mod_all = tuple(getattr(module</span><span class="s2">, </span><span class="s3">'__all__'</span><span class="s2">, </span><span class="s1">())) + self.extra_all(name)</span>
+            <span class="s2">for </span><span class="s1">attr_name </span><span class="s2">in </span><span class="s1">mod_all:</span>
+                <span class="s2">try</span><span class="s1">:</span>
+                    <span class="s1">getattr(module</span><span class="s2">, </span><span class="s1">attr_name)</span>
+                <span class="s2">except </span><span class="s1">AttributeError:</span>
+                    <span class="s1">module_name = module.__name__ + </span><span class="s3">'.' </span><span class="s1">+ attr_name</span>
+                    <span class="s1">new_module = g_import(module_name</span><span class="s2">, </span><span class="s1">{}</span><span class="s2">, </span><span class="s1">{}</span><span class="s2">, </span><span class="s1">attr_name)</span>
+                    <span class="s1">setattr(module</span><span class="s2">, </span><span class="s1">attr_name</span><span class="s2">, </span><span class="s1">new_module)</span>
+                    <span class="s1">queue.append(new_module)</span>
+
+
+<span class="s2">def </span><span class="s1">import_patched(module_name</span><span class="s2">,</span>
+                   <span class="s1">extra_all=</span><span class="s2">lambda </span><span class="s1">mod_name: ()</span><span class="s2">,</span>
+                   <span class="s1">after_import_hook=</span><span class="s2">lambda </span><span class="s1">module: </span><span class="s2">None</span><span class="s1">):</span>
+    <span class="s4">&quot;&quot;&quot; 
+    Import *module_name* with gevent monkey-patches active, 
+    and return an object holding the greened module as *module*. 
+ 
+    Any sub-modules that were imported by the package are also 
+    saved. 
+ 
+    .. versionchanged:: 1.5a4 
+       If the module defines ``__all__``, then each of those 
+       attributes/modules is also imported as part of the same transaction, 
+       recursively. The order of ``__all__`` is respected. Anything passed in 
+       *extra_all* (which must be in the same namespace tree) is also imported. 
+ 
+    .. versionchanged:: 1.5a4 
+       You must now do all patching for a given module tree 
+       with one call to this method, or at least by using the returned 
+       object. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s2">with </span><span class="s1">cached_platform_architecture():</span>
+        <span class="s0"># Save the current module state, and restore on exit,</span>
+        <span class="s0"># capturing desirable changes in the modules package.</span>
+        <span class="s1">patcher = _SysModulesPatcher(module_name</span><span class="s2">, </span><span class="s1">extra_all)</span>
+        <span class="s1">patcher(after_import_hook)</span>
+    <span class="s2">return </span><span class="s1">patcher</span>
+
+
+<span class="s2">class </span><span class="s1">cached_platform_architecture(object):</span>
+    <span class="s4">&quot;&quot;&quot; 
+    Context manager that caches ``platform.architecture``. 
+ 
+    Some things that load shared libraries (like Cryptodome, via 
+    dnspython) invoke ``platform.architecture()`` for each one. That 
+    in turn wants to fork and run commands , which in turn wants to 
+    call ``threading._after_fork`` if the GIL has been initialized. 
+    All of that means that certain imports done early may wind up 
+    wanting to have the hub initialized potentially much earlier than 
+    before. 
+ 
+    Part of the fix is to observe when that happens and delay 
+    initializing parts of gevent until as late as possible (e.g., we 
+    delay importing and creating the resolver until the hub needs it, 
+    unless explicitly configured). 
+ 
+    The rest of the fix is to avoid the ``_after_fork`` issues by 
+    first caching the results of platform.architecture before doing 
+    patched imports. 
+ 
+    (See events.py for similar issues with platform, and 
+    test__threading_2.py for notes about threading._after_fork if the 
+    GIL has been initialized) 
+    &quot;&quot;&quot;</span>
+
+    <span class="s1">_arch_result = </span><span class="s2">None</span>
+    <span class="s1">_orig_arch = </span><span class="s2">None</span>
+    <span class="s1">_platform = </span><span class="s2">None</span>
+
+    <span class="s2">def </span><span class="s1">__enter__(self):</span>
+        <span class="s2">import </span><span class="s1">platform</span>
+        <span class="s1">self._platform = platform</span>
+        <span class="s1">self._arch_result = platform.architecture()</span>
+        <span class="s1">self._orig_arch = platform.architecture</span>
+        <span class="s2">def </span><span class="s1">arch(*args</span><span class="s2">, </span><span class="s1">**kwargs):</span>
+            <span class="s2">if not </span><span class="s1">args </span><span class="s2">and not </span><span class="s1">kwargs:</span>
+                <span class="s2">return </span><span class="s1">self._arch_result</span>
+            <span class="s2">return </span><span class="s1">self._orig_arch(*args</span><span class="s2">, </span><span class="s1">**kwargs)</span>
+        <span class="s1">platform.architecture = arch</span>
+        <span class="s2">return </span><span class="s1">self</span>
+
+    <span class="s2">def </span><span class="s1">__exit__(self</span><span class="s2">, </span><span class="s1">*_args):</span>
+        <span class="s1">self._platform.architecture = self._orig_arch</span>
+        <span class="s1">self._platform = </span><span class="s2">None</span>
+</pre>
+</body>
+</html>

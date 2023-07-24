@@ -1,0 +1,392 @@
+<html>
+<head>
+<title>tm.tcl</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #a9b7c6;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+tm.tcl</font>
+</center></td></tr></table>
+<pre><span class="s0"># -*- tcl -*-</span>
+<span class="s0">#</span>
+<span class="s0"># Searching for Tcl Modules. Defines a procedure, declares it as the primary</span>
+<span class="s0"># command for finding packages, however also uses the former 'package unknown'</span>
+<span class="s0"># command as a fallback.</span>
+<span class="s0">#</span>
+<span class="s0"># Locates all possible packages in a directory via a less restricted glob. The</span>
+<span class="s0"># targeted directory is derived from the name of the requested package, i.e.</span>
+<span class="s0"># the TM scan will look only at directories which can contain the requested</span>
+<span class="s0"># package. It will register all packages it found in the directory so that</span>
+<span class="s0"># future requests have a higher chance of being fulfilled by the ifneeded</span>
+<span class="s0"># database without having to come to us again.</span>
+<span class="s0">#</span>
+<span class="s0"># We do not remember where we have been and simply rescan targeted directories</span>
+<span class="s0"># when invoked again. The reasoning is this:</span>
+<span class="s0">#</span>
+<span class="s0"># - The only way we get back to the same directory is if someone is trying to</span>
+<span class="s0">#   [package require] something that wasn't there on the first scan.</span>
+<span class="s0">#</span>
+<span class="s0">#   Either</span>
+<span class="s0">#   1) It is there now:  If we rescan, you get it; if not you don't.</span>
+<span class="s0">#</span>
+<span class="s0">#      This covers the possibility that the application asked for a package</span>
+<span class="s0">#      late, and the package was actually added to the installation after the</span>
+<span class="s0">#      application was started. It shoukld still be able to find it.</span>
+<span class="s0">#</span>
+<span class="s0">#   2) It still is not there: Either way, you don't get it, but the rescan</span>
+<span class="s0">#      takes time. This is however an error case and we dont't care that much</span>
+<span class="s0">#      about it</span>
+<span class="s0">#</span>
+<span class="s0">#   3) It was there the first time; but for some reason a &quot;package forget&quot; has</span>
+<span class="s0">#      been run, and &quot;package&quot; doesn't know about it anymore.</span>
+<span class="s0">#</span>
+<span class="s0">#      This can be an indication that the application wishes to reload some</span>
+<span class="s0">#      functionality. And should work as well.</span>
+<span class="s0">#</span>
+<span class="s0"># Note that this also strikes a balance between doing a glob targeting a</span>
+<span class="s0"># single package, and thus most likely requiring multiple globs of the same</span>
+<span class="s0"># directory when the application is asking for many packages, and trying to</span>
+<span class="s0"># glob for _everything_ in all subdirectories when looking for a package,</span>
+<span class="s0"># which comes with a heavy startup cost.</span>
+<span class="s0">#</span>
+<span class="s0"># We scan for regular packages only if no satisfying module was found.</span>
+
+<span class="s0">namespace eval ::tcl::tm {</span>
+    <span class="s0"># Default paths. None yet.</span>
+
+    <span class="s0">variable paths {}</span>
+
+    <span class="s0"># The regex pattern a file name has to match to make it a Tcl Module.</span>
+
+    <span class="s0">set pkgpattern {^([_[:alpha:]][:_[:alnum:]]*)-([[:digit:]].*)[.]tm$}</span>
+
+    <span class="s0"># Export the public API</span>
+
+    <span class="s0">namespace export path</span>
+    <span class="s0">namespace ensemble create -command path -subcommands {add remove list}</span>
+<span class="s0">}</span>
+
+<span class="s0"># ::tcl::tm::path implementations --</span>
+<span class="s0">#</span>
+<span class="s0">#	Public API to the module path. See specification.</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments</span>
+<span class="s0">#	cmd -	The subcommand to execute</span>
+<span class="s0">#	args -	The paths to add/remove. Must not appear querying the</span>
+<span class="s0">#		path with 'list'.</span>
+<span class="s0">#</span>
+<span class="s0"># Results</span>
+<span class="s0">#	No result for subcommands 'add' and 'remove'. A list of paths for</span>
+<span class="s0">#	'list'.</span>
+<span class="s0">#</span>
+<span class="s0"># Sideeffects</span>
+<span class="s0">#	The subcommands 'add' and 'remove' manipulate the list of paths to</span>
+<span class="s0">#	search for Tcl Modules. The subcommand 'list' has no sideeffects.</span>
+
+<span class="s0">proc ::tcl::tm::add {args} {</span>
+    <span class="s0"># PART OF THE ::tcl::tm::path ENSEMBLE</span>
+    <span class="s0">#</span>
+    <span class="s0"># The path is added at the head to the list of module paths.</span>
+    <span class="s0">#</span>
+    <span class="s0"># The command enforces the restriction that no path may be an ancestor</span>
+    <span class="s0"># directory of any other path on the list. If the new path violates this</span>
+    <span class="s0"># restriction an error wil be raised.</span>
+    <span class="s0">#</span>
+    <span class="s0"># If the path is already present as is no error will be raised and no</span>
+    <span class="s0"># action will be taken.</span>
+
+    <span class="s0">variable paths</span>
+
+    <span class="s0"># We use a copy of the path as source during validation, and extend it as</span>
+    <span class="s0"># well. Because we not only have to detect if the new paths are bogus with</span>
+    <span class="s0"># respect to the existing paths, but also between themselves. Otherwise we</span>
+    <span class="s0"># can still add bogus paths, by specifying them in a single call. This</span>
+    <span class="s0"># makes the use of the new paths simpler as well, a trivial assignment of</span>
+    <span class="s0"># the collected paths to the official state var.</span>
+
+    <span class="s0">set newpaths $paths</span>
+    <span class="s0">foreach p $args {</span>
+	<span class="s0">if {$p in $newpaths} {</span>
+	    <span class="s0"># Ignore a path already on the list.</span>
+	    <span class="s0">continue</span>
+	<span class="s0">}</span>
+
+	<span class="s0"># Search for paths which are subdirectories of the new one. If there</span>
+	<span class="s0"># are any then the new path violates the restriction about ancestors.</span>
+
+	<span class="s0">set pos [lsearch -glob $newpaths ${p}/*]</span>
+	<span class="s0"># Cannot use &quot;in&quot;, we need the position for the message.</span>
+	<span class="s0">if {$pos &gt;= 0} {</span>
+	    <span class="s0">return -code error \</span>
+		<span class="s0">&quot;$p is ancestor of existing module path [lindex $newpaths $pos].&quot;</span>
+	<span class="s0">}</span>
+
+	<span class="s0"># Now look for existing paths which are ancestors of the new one. This</span>
+	<span class="s0"># reverse question forces us to loop over the existing paths, as each</span>
+	<span class="s0"># element is the pattern, not the new path :(</span>
+
+	<span class="s0">foreach ep $newpaths {</span>
+	    <span class="s0">if {[string match ${ep}/* $p]} {</span>
+		<span class="s0">return -code error \</span>
+		    <span class="s0">&quot;$p is subdirectory of existing module path $ep.&quot;</span>
+	    <span class="s0">}</span>
+	<span class="s0">}</span>
+
+	<span class="s0">set newpaths [linsert $newpaths 0 $p]</span>
+    <span class="s0">}</span>
+
+    <span class="s0"># The validation of the input is complete and successful, and everything</span>
+    <span class="s0"># in newpaths is either an old path, or added. We can now extend the</span>
+    <span class="s0"># official list of paths, a simple assignment is sufficient.</span>
+
+    <span class="s0">set paths $newpaths</span>
+    <span class="s0">return</span>
+<span class="s0">}</span>
+
+<span class="s0">proc ::tcl::tm::remove {args} {</span>
+    <span class="s0"># PART OF THE ::tcl::tm::path ENSEMBLE</span>
+    <span class="s0">#</span>
+    <span class="s0"># Removes the path from the list of module paths. The command is silently</span>
+    <span class="s0"># ignored if the path is not on the list.</span>
+
+    <span class="s0">variable paths</span>
+
+    <span class="s0">foreach p $args {</span>
+	<span class="s0">set pos [lsearch -exact $paths $p]</span>
+	<span class="s0">if {$pos &gt;= 0} {</span>
+	    <span class="s0">set paths [lreplace $paths $pos $pos]</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+
+<span class="s0">proc ::tcl::tm::list {} {</span>
+    <span class="s0"># PART OF THE ::tcl::tm::path ENSEMBLE</span>
+
+    <span class="s0">variable paths</span>
+    <span class="s0">return  $paths</span>
+<span class="s0">}</span>
+
+<span class="s0"># ::tcl::tm::UnknownHandler --</span>
+<span class="s0">#</span>
+<span class="s0">#	Unknown handler for Tcl Modules, i.e. packages in module form.</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments</span>
+<span class="s0">#	original	- Original [package unknown] procedure.</span>
+<span class="s0">#	name		- Name of desired package.</span>
+<span class="s0">#	version		- Version of desired package. Can be the</span>
+<span class="s0">#			  empty string.</span>
+<span class="s0">#	exact		- Either -exact or ommitted.</span>
+<span class="s0">#</span>
+<span class="s0">#	Name, version, and exact are used to determine satisfaction. The</span>
+<span class="s0">#	original is called iff no satisfaction was achieved. The name is also</span>
+<span class="s0">#	used to compute the directory to target in the search.</span>
+<span class="s0">#</span>
+<span class="s0"># Results</span>
+<span class="s0">#	None.</span>
+<span class="s0">#</span>
+<span class="s0"># Sideeffects</span>
+<span class="s0">#	May populate the package ifneeded database with additional provide</span>
+<span class="s0">#	scripts.</span>
+
+<span class="s0">proc ::tcl::tm::UnknownHandler {original name args} {</span>
+    <span class="s0"># Import the list of paths to search for packages in module form.</span>
+    <span class="s0"># Import the pattern used to check package names in detail.</span>
+
+    <span class="s0">variable paths</span>
+    <span class="s0">variable pkgpattern</span>
+
+    <span class="s0"># Without paths to search we can do nothing. (Except falling back to the</span>
+    <span class="s0"># regular search).</span>
+
+    <span class="s0">if {[llength $paths]} {</span>
+	<span class="s0">set pkgpath [string map {:: /} $name]</span>
+	<span class="s0">set pkgroot [file dirname $pkgpath]</span>
+	<span class="s0">if {$pkgroot eq &quot;.&quot;} {</span>
+	    <span class="s0">set pkgroot &quot;&quot;</span>
+	<span class="s0">}</span>
+
+	<span class="s0"># We don't remember a copy of the paths while looping. Tcl Modules are</span>
+	<span class="s0"># unable to change the list while we are searching for them. This also</span>
+	<span class="s0"># simplifies the loop, as we cannot get additional directories while</span>
+	<span class="s0"># iterating over the list. A simple foreach is sufficient.</span>
+
+	<span class="s0">set satisfied 0</span>
+	<span class="s0">foreach path $paths {</span>
+	    <span class="s0">if {![interp issafe] &amp;&amp; ![file exists $path]} {</span>
+		<span class="s0">continue</span>
+	    <span class="s0">}</span>
+	    <span class="s0">set currentsearchpath [file join $path $pkgroot]</span>
+	    <span class="s0">if {![interp issafe] &amp;&amp; ![file exists $currentsearchpath]} {</span>
+		<span class="s0">continue</span>
+	    <span class="s0">}</span>
+	    <span class="s0">set strip [llength [file split $path]]</span>
+
+	    <span class="s0"># We can't use glob in safe interps, so enclose the following in a</span>
+	    <span class="s0"># catch statement, where we get the module files out of the</span>
+	    <span class="s0"># subdirectories. In other words, Tcl Modules are not-functional</span>
+	    <span class="s0"># in such an interpreter. This is the same as for the command</span>
+	    <span class="s0"># &quot;tclPkgUnknown&quot;, i.e. the search for regular packages.</span>
+
+	    <span class="s0">catch {</span>
+		<span class="s0"># We always look for _all_ possible modules in the current</span>
+		<span class="s0"># path, to get the max result out of the glob.</span>
+
+		<span class="s0">foreach file [glob -nocomplain -directory $currentsearchpath *.tm] {</span>
+		    <span class="s0">set pkgfilename [join [lrange [file split $file] $strip end] ::]</span>
+
+		    <span class="s0">if {![regexp -- $pkgpattern $pkgfilename --&gt; pkgname pkgversion]} {</span>
+			<span class="s0"># Ignore everything not matching our pattern for</span>
+			<span class="s0"># package names.</span>
+			<span class="s0">continue</span>
+		    <span class="s0">}</span>
+		    <span class="s0">try {</span>
+			<span class="s0">package vcompare $pkgversion 0</span>
+		    <span class="s0">} on error {} {</span>
+			<span class="s0"># Ignore everything where the version part is not</span>
+			<span class="s0"># acceptable to &quot;package vcompare&quot;.</span>
+			<span class="s0">continue</span>
+		    <span class="s0">}</span>
+
+		    <span class="s0">if {[package ifneeded $pkgname $pkgversion] ne {}} {</span>
+			<span class="s0"># There's already a provide script registered for</span>
+			<span class="s0"># this version of this package.  Since all units of</span>
+			<span class="s0"># code claiming to be the same version of the same</span>
+			<span class="s0"># package ought to be identical, just stick with</span>
+			<span class="s0"># the one we already have.</span>
+			<span class="s0">continue</span>
+		    <span class="s0">}</span>
+
+		    <span class="s0"># We have found a candidate, generate a &quot;provide script&quot;</span>
+		    <span class="s0"># for it, and remember it.  Note that we are using ::list</span>
+		    <span class="s0"># to do this; locally [list] means something else without</span>
+		    <span class="s0"># the namespace specifier.</span>
+
+		    <span class="s0"># NOTE. When making changes to the format of the provide</span>
+		    <span class="s0"># command generated below CHECK that the 'LOCATE'</span>
+		    <span class="s0"># procedure in core file 'platform/shell.tcl' still</span>
+		    <span class="s0"># understands it, or, if not, update its implementation</span>
+		    <span class="s0"># appropriately.</span>
+		    <span class="s0">#</span>
+		    <span class="s0"># Right now LOCATE's implementation assumes that the path</span>
+		    <span class="s0"># of the package file is the last element in the list.</span>
+
+		    <span class="s0">package ifneeded $pkgname $pkgversion \</span>
+			<span class="s0">&quot;[::list package provide $pkgname $pkgversion];[::list source -encoding utf-8 $file]&quot;</span>
+
+		    <span class="s0"># We abort in this unknown handler only if we got a</span>
+		    <span class="s0"># satisfying candidate for the requested package.</span>
+		    <span class="s0"># Otherwise we still have to fallback to the regular</span>
+		    <span class="s0"># package search to complete the processing.</span>
+
+		    <span class="s0">if {($pkgname eq $name)</span>
+			    <span class="s0">&amp;&amp; [package vsatisfies $pkgversion {*}$args]} {</span>
+			<span class="s0">set satisfied 1</span>
+
+			<span class="s0"># We do not abort the loop, and keep adding provide</span>
+			<span class="s0"># scripts for every candidate in the directory, just</span>
+			<span class="s0"># remember to not fall back to the regular search</span>
+			<span class="s0"># anymore.</span>
+		    <span class="s0">}</span>
+		<span class="s0">}</span>
+	    <span class="s0">}</span>
+	<span class="s0">}</span>
+
+	<span class="s0">if {$satisfied} {</span>
+	    <span class="s0">return</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+
+    <span class="s0"># Fallback to previous command, if existing.  See comment above about</span>
+    <span class="s0"># ::list...</span>
+
+    <span class="s0">if {[llength $original]} {</span>
+	<span class="s0">uplevel 1 $original [::linsert $args 0 $name]</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+
+<span class="s0"># ::tcl::tm::Defaults --</span>
+<span class="s0">#</span>
+<span class="s0">#	Determines the default search paths.</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments</span>
+<span class="s0">#	None</span>
+<span class="s0">#</span>
+<span class="s0"># Results</span>
+<span class="s0">#	None.</span>
+<span class="s0">#</span>
+<span class="s0"># Sideeffects</span>
+<span class="s0">#	May add paths to the list of defaults.</span>
+
+<span class="s0">proc ::tcl::tm::Defaults {} {</span>
+    <span class="s0">global env tcl_platform</span>
+
+    <span class="s0">lassign [split [info tclversion] .] major minor</span>
+    <span class="s0">set exe [file normalize [info nameofexecutable]]</span>
+
+    <span class="s0"># Note that we're using [::list], not [list] because [list] means</span>
+    <span class="s0"># something other than [::list] in this namespace.</span>
+    <span class="s0">roots [::list \</span>
+	    <span class="s0">[file dirname [info library]] \</span>
+	    <span class="s0">[file join [file dirname [file dirname $exe]] lib] \</span>
+	    <span class="s0">]</span>
+
+    <span class="s0">if {$tcl_platform(platform) eq &quot;windows&quot;} {</span>
+	<span class="s0">set sep &quot;;&quot;</span>
+    <span class="s0">} else {</span>
+	<span class="s0">set sep &quot;:&quot;</span>
+    <span class="s0">}</span>
+    <span class="s0">for {set n $minor} {$n &gt;= 0} {incr n -1} {</span>
+	<span class="s0">foreach ev [::list \</span>
+			<span class="s0">TCL${major}.${n}_TM_PATH \</span>
+			<span class="s0">TCL${major}_${n}_TM_PATH \</span>
+        <span class="s0">] {</span>
+	    <span class="s0">if {![info exists env($ev)]} continue</span>
+	    <span class="s0">foreach p [split $env($ev) $sep] {</span>
+		<span class="s0">path add $p</span>
+	    <span class="s0">}</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+    <span class="s0">return</span>
+<span class="s0">}</span>
+
+<span class="s0"># ::tcl::tm::roots --</span>
+<span class="s0">#</span>
+<span class="s0">#	Public API to the module path. See specification.</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments</span>
+<span class="s0">#	paths -	List of 'root' paths to derive search paths from.</span>
+<span class="s0">#</span>
+<span class="s0"># Results</span>
+<span class="s0">#	No result.</span>
+<span class="s0">#</span>
+<span class="s0"># Sideeffects</span>
+<span class="s0">#	Calls 'path add' to paths to the list of module search paths.</span>
+
+<span class="s0">proc ::tcl::tm::roots {paths} {</span>
+    <span class="s0">regexp {^(\d+)\.(\d+)} [package present Tcl] - major minor</span>
+    <span class="s0">foreach pa $paths {</span>
+	<span class="s0">set p [file join $pa tcl$major]</span>
+	<span class="s0">for {set n $minor} {$n &gt;= 0} {incr n -1} {</span>
+	    <span class="s0">set px [file join $p ${major}.${n}]</span>
+	    <span class="s0">if {![interp issafe]} {set px [file normalize $px]}</span>
+	    <span class="s0">path add $px</span>
+	<span class="s0">}</span>
+	<span class="s0">set px [file join $p site-tcl]</span>
+	<span class="s0">if {![interp issafe]} {set px [file normalize $px]}</span>
+	<span class="s0">path add $px</span>
+    <span class="s0">}</span>
+    <span class="s0">return</span>
+<span class="s0">}</span>
+
+<span class="s0"># Initialization. Set up the default paths, then insert the new handler into</span>
+<span class="s0"># the chain.</span>
+
+<span class="s0">if {![interp issafe]} {::tcl::tm::Defaults}</span>
+</pre>
+</body>
+</html>

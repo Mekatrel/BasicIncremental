@@ -1,0 +1,100 @@
+<html>
+<head>
+<title>fix_metaclass.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #629755; font-style: italic;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #cc7832;}
+.s3 { color: #808080;}
+.s4 { color: #6897bb;}
+.s5 { color: #6a8759;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+fix_metaclass.py</font>
+</center></td></tr></table>
+<pre><span class="s0">u&quot;&quot;&quot; 
+Fixer for (metaclass=X) -&gt; __metaclass__ = X 
+Some semantics (see PEP 3115) may be altered in the translation.&quot;&quot;&quot;</span>
+
+<span class="s2">from </span><span class="s1">lib2to3 </span><span class="s2">import </span><span class="s1">fixer_base</span>
+<span class="s2">from </span><span class="s1">lib2to3.fixer_util </span><span class="s2">import </span><span class="s1">Name</span><span class="s2">, </span><span class="s1">syms</span><span class="s2">, </span><span class="s1">Node</span><span class="s2">, </span><span class="s1">Leaf</span><span class="s2">, </span><span class="s1">Newline</span><span class="s2">, </span><span class="s1">find_root</span>
+<span class="s2">from </span><span class="s1">lib2to3.pygram </span><span class="s2">import </span><span class="s1">token</span>
+<span class="s2">from </span><span class="s1">libfuturize.fixer_util </span><span class="s2">import </span><span class="s1">indentation</span><span class="s2">, </span><span class="s1">suitify</span>
+<span class="s3"># from ..fixer_util import Name, syms, Node, Leaf, Newline, find_root, indentation, suitify</span>
+
+<span class="s2">def </span><span class="s1">has_metaclass(parent):</span>
+    <span class="s1">results = </span><span class="s2">None</span>
+    <span class="s2">for </span><span class="s1">node </span><span class="s2">in </span><span class="s1">parent.children:</span>
+        <span class="s1">kids = node.children</span>
+        <span class="s2">if </span><span class="s1">node.type == syms.argument:</span>
+            <span class="s2">if </span><span class="s1">kids[</span><span class="s4">0</span><span class="s1">] == Leaf(token.NAME</span><span class="s2">, </span><span class="s5">u&quot;metaclass&quot;</span><span class="s1">) </span><span class="s2">and </span><span class="s1">\</span>
+                <span class="s1">kids[</span><span class="s4">1</span><span class="s1">] == Leaf(token.EQUAL</span><span class="s2">, </span><span class="s5">u&quot;=&quot;</span><span class="s1">) </span><span class="s2">and </span><span class="s1">\</span>
+                <span class="s1">kids[</span><span class="s4">2</span><span class="s1">]:</span>
+                <span class="s3">#Hack to avoid &quot;class X(=):&quot; with this case.</span>
+                <span class="s1">results = [node] + kids</span>
+                <span class="s2">break</span>
+        <span class="s2">elif </span><span class="s1">node.type == syms.arglist:</span>
+            <span class="s3"># Argument list... loop through it looking for:</span>
+            <span class="s3"># Node(*, [*, Leaf(token.NAME, u&quot;metaclass&quot;), Leaf(token.EQUAL, u&quot;=&quot;), Leaf(*, *)]</span>
+            <span class="s2">for </span><span class="s1">child </span><span class="s2">in </span><span class="s1">node.children:</span>
+                <span class="s2">if </span><span class="s1">results: </span><span class="s2">break</span>
+                <span class="s2">if </span><span class="s1">child.type == token.COMMA:</span>
+                    <span class="s3">#Store the last comma, which precedes the metaclass</span>
+                    <span class="s1">comma = child</span>
+                <span class="s2">elif </span><span class="s1">type(child) == Node:</span>
+                    <span class="s1">meta = equal = name = </span><span class="s2">None</span>
+                    <span class="s2">for </span><span class="s1">arg </span><span class="s2">in </span><span class="s1">child.children:</span>
+                        <span class="s2">if </span><span class="s1">arg == Leaf(token.NAME</span><span class="s2">, </span><span class="s5">u&quot;metaclass&quot;</span><span class="s1">):</span>
+                            <span class="s3">#We have the (metaclass) part</span>
+                            <span class="s1">meta = arg</span>
+                        <span class="s2">elif </span><span class="s1">meta </span><span class="s2">and </span><span class="s1">arg == Leaf(token.EQUAL</span><span class="s2">, </span><span class="s5">u&quot;=&quot;</span><span class="s1">):</span>
+                            <span class="s3">#We have the (metaclass=) part</span>
+                            <span class="s1">equal = arg</span>
+                        <span class="s2">elif </span><span class="s1">meta </span><span class="s2">and </span><span class="s1">equal:</span>
+                            <span class="s3">#Here we go, we have (metaclass=X)</span>
+                            <span class="s1">name = arg</span>
+                            <span class="s1">results = (comma</span><span class="s2">, </span><span class="s1">meta</span><span class="s2">, </span><span class="s1">equal</span><span class="s2">, </span><span class="s1">name)</span>
+                            <span class="s2">break</span>
+    <span class="s2">return </span><span class="s1">results</span>
+
+
+<span class="s2">class </span><span class="s1">FixMetaclass(fixer_base.BaseFix):</span>
+
+    <span class="s1">PATTERN = </span><span class="s5">u&quot;&quot;&quot; 
+    classdef&lt;any*&gt; 
+    &quot;&quot;&quot;</span>
+
+    <span class="s2">def </span><span class="s1">transform(self</span><span class="s2">, </span><span class="s1">node</span><span class="s2">, </span><span class="s1">results):</span>
+        <span class="s1">meta_results = has_metaclass(node)</span>
+        <span class="s2">if not </span><span class="s1">meta_results: </span><span class="s2">return</span>
+        <span class="s2">for </span><span class="s1">meta </span><span class="s2">in </span><span class="s1">meta_results:</span>
+            <span class="s1">meta.remove()</span>
+        <span class="s1">target = Leaf(token.NAME</span><span class="s2">, </span><span class="s5">u&quot;__metaclass__&quot;</span><span class="s1">)</span>
+        <span class="s1">equal = Leaf(token.EQUAL</span><span class="s2">, </span><span class="s5">u&quot;=&quot;</span><span class="s2">, </span><span class="s1">prefix=</span><span class="s5">u&quot; &quot;</span><span class="s1">)</span>
+        <span class="s3"># meta is the last item in what was returned by has_metaclass(): name</span>
+        <span class="s1">name = meta</span>
+        <span class="s1">name.prefix = </span><span class="s5">u&quot; &quot;</span>
+        <span class="s1">stmt_node = Node(syms.atom</span><span class="s2">, </span><span class="s1">[target</span><span class="s2">, </span><span class="s1">equal</span><span class="s2">, </span><span class="s1">name])</span>
+
+        <span class="s1">suitify(node)</span>
+        <span class="s2">for </span><span class="s1">item </span><span class="s2">in </span><span class="s1">node.children:</span>
+            <span class="s2">if </span><span class="s1">item.type == syms.suite:</span>
+                <span class="s2">for </span><span class="s1">stmt </span><span class="s2">in </span><span class="s1">item.children:</span>
+                    <span class="s2">if </span><span class="s1">stmt.type == token.INDENT:</span>
+                        <span class="s3"># Insert, in reverse order, the statement, a newline,</span>
+                        <span class="s3"># and an indent right after the first indented line</span>
+                        <span class="s1">loc = item.children.index(stmt) + </span><span class="s4">1</span>
+                        <span class="s3"># Keep consistent indentation form</span>
+                        <span class="s1">ident = Leaf(token.INDENT</span><span class="s2">, </span><span class="s1">stmt.value)</span>
+                        <span class="s1">item.insert_child(loc</span><span class="s2">, </span><span class="s1">ident)</span>
+                        <span class="s1">item.insert_child(loc</span><span class="s2">, </span><span class="s1">Newline())</span>
+                        <span class="s1">item.insert_child(loc</span><span class="s2">, </span><span class="s1">stmt_node)</span>
+                        <span class="s2">break</span>
+</pre>
+</body>
+</html>

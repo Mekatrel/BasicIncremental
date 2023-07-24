@@ -1,0 +1,568 @@
+<html>
+<head>
+<title>_abstract_linkable.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #629755; font-style: italic;}
+.s3 { color: #cc7832;}
+.s4 { color: #6a8759;}
+.s5 { color: #6897bb;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+_abstract_linkable.py</font>
+</center></td></tr></table>
+<pre><span class="s0"># -*- coding: utf-8 -*-</span>
+<span class="s0"># cython: auto_pickle=False,embedsignature=True,always_allow_keywords=False</span>
+<span class="s2">&quot;&quot;&quot; 
+Internal module, support for the linkable protocol for &quot;event&quot; like objects. 
+ 
+&quot;&quot;&quot;</span>
+<span class="s3">from </span><span class="s1">__future__ </span><span class="s3">import </span><span class="s1">absolute_import</span>
+<span class="s3">from </span><span class="s1">__future__ </span><span class="s3">import </span><span class="s1">division</span>
+<span class="s3">from </span><span class="s1">__future__ </span><span class="s3">import </span><span class="s1">print_function</span>
+
+<span class="s3">import </span><span class="s1">sys</span>
+<span class="s3">from </span><span class="s1">gc </span><span class="s3">import </span><span class="s1">get_objects</span>
+
+<span class="s3">from </span><span class="s1">greenlet </span><span class="s3">import </span><span class="s1">greenlet</span>
+<span class="s3">from </span><span class="s1">greenlet </span><span class="s3">import </span><span class="s1">error </span><span class="s3">as </span><span class="s1">greenlet_error</span>
+
+<span class="s3">from </span><span class="s1">gevent._compat </span><span class="s3">import </span><span class="s1">thread_mod_name</span>
+<span class="s3">from </span><span class="s1">gevent._hub_local </span><span class="s3">import </span><span class="s1">get_hub_noargs </span><span class="s3">as </span><span class="s1">get_hub</span>
+<span class="s3">from </span><span class="s1">gevent._hub_local </span><span class="s3">import </span><span class="s1">get_hub_if_exists</span>
+
+<span class="s3">from </span><span class="s1">gevent.exceptions </span><span class="s3">import </span><span class="s1">InvalidSwitchError</span>
+<span class="s3">from </span><span class="s1">gevent.exceptions </span><span class="s3">import </span><span class="s1">InvalidThreadUseError</span>
+<span class="s3">from </span><span class="s1">gevent.timeout </span><span class="s3">import </span><span class="s1">Timeout</span>
+
+<span class="s1">locals()[</span><span class="s4">'getcurrent'</span><span class="s1">] = __import__(</span><span class="s4">'greenlet'</span><span class="s1">).getcurrent</span>
+<span class="s1">locals()[</span><span class="s4">'greenlet_init'</span><span class="s1">] = </span><span class="s3">lambda</span><span class="s1">: </span><span class="s3">None</span>
+
+<span class="s1">__all__ = [</span>
+    <span class="s4">'AbstractLinkable'</span><span class="s3">,</span>
+<span class="s1">]</span>
+
+<span class="s0"># Need the real get_ident. We're imported early enough during monkey-patching</span>
+<span class="s0"># that we can be sure nothing is monkey patched yet.</span>
+<span class="s1">_get_thread_ident = __import__(thread_mod_name).get_ident</span>
+<span class="s1">_allocate_thread_lock = __import__(thread_mod_name).allocate_lock</span>
+
+<span class="s3">class </span><span class="s1">_FakeNotifier(object):</span>
+    <span class="s1">__slots__ = (</span>
+        <span class="s4">'pending'</span><span class="s3">,</span>
+    <span class="s1">)</span>
+
+    <span class="s3">def </span><span class="s1">__init__(self):</span>
+        <span class="s1">self.pending = </span><span class="s3">False</span>
+
+<span class="s3">def </span><span class="s1">get_roots_and_hubs():</span>
+    <span class="s3">from </span><span class="s1">gevent.hub </span><span class="s3">import </span><span class="s1">Hub </span><span class="s0"># delay import</span>
+    <span class="s3">return </span><span class="s1">{</span>
+        <span class="s1">x.parent: x</span>
+        <span class="s3">for </span><span class="s1">x </span><span class="s3">in </span><span class="s1">get_objects()</span>
+        <span class="s0"># Make sure to only find hubs that have a loop</span>
+        <span class="s0"># and aren't destroyed. If we don't do that, we can</span>
+        <span class="s0"># get an old hub that no longer works leading to issues in</span>
+        <span class="s0"># combined test cases.</span>
+        <span class="s3">if </span><span class="s1">isinstance(x</span><span class="s3">, </span><span class="s1">Hub) </span><span class="s3">and </span><span class="s1">x.loop </span><span class="s3">is not None</span>
+    <span class="s1">}</span>
+
+
+<span class="s3">class </span><span class="s1">AbstractLinkable(object):</span>
+    <span class="s0"># Encapsulates the standard parts of the linking and notifying</span>
+    <span class="s0"># protocol common to both repeatable events (Event, Semaphore) and</span>
+    <span class="s0"># one-time events (AsyncResult).</span>
+    <span class="s0">#</span>
+    <span class="s0"># With a few careful exceptions, instances of this object can only</span>
+    <span class="s0"># be used from a single thread. The exception is that certain methods</span>
+    <span class="s0"># may be used from multiple threads IFF:</span>
+    <span class="s0">#</span>
+    <span class="s0"># 1.  They are documented as safe for that purpose; AND</span>
+    <span class="s0"># 2a. This object is compiled with Cython and thus is holding the GIL</span>
+    <span class="s0">#     for the entire duration of the method; OR</span>
+    <span class="s0"># 2b. A subclass ensures that a Python-level native thread lock is held</span>
+    <span class="s0">#     for the duration of the method; this is necessary in pure-Python mode.</span>
+    <span class="s0">#     The only known implementation of such</span>
+    <span class="s0">#     a subclass is for Semaphore. AND</span>
+    <span class="s0"># 3. The subclass that calls ``capture_hub`` catches</span>
+    <span class="s0">#    and handles ``InvalidThreadUseError``</span>
+    <span class="s0">#</span>
+    <span class="s0"># TODO: As of gevent 1.5, we use the same datastructures and almost</span>
+    <span class="s0"># the same algorithm as Greenlet. See about unifying them more.</span>
+
+    <span class="s1">__slots__ = (</span>
+        <span class="s4">'hub'</span><span class="s3">,</span>
+        <span class="s4">'_links'</span><span class="s3">,</span>
+        <span class="s4">'_notifier'</span><span class="s3">,</span>
+        <span class="s4">'_notify_all'</span><span class="s3">,</span>
+        <span class="s4">'__weakref__'</span>
+    <span class="s1">)</span>
+
+    <span class="s3">def </span><span class="s1">__init__(self</span><span class="s3">, </span><span class="s1">hub=</span><span class="s3">None</span><span class="s1">):</span>
+        <span class="s0"># Before this implementation, AsyncResult and Semaphore</span>
+        <span class="s0"># maintained the order of notifications, but Event did not.</span>
+
+        <span class="s0"># In gevent 1.3, before Semaphore extended this class, that</span>
+        <span class="s0"># was changed to not maintain the order. It was done because</span>
+        <span class="s0"># Event guaranteed to only call callbacks once (a set) but</span>
+        <span class="s0"># AsyncResult had no such guarantees. When Semaphore was</span>
+        <span class="s0"># changed to extend this class, it lost its ordering</span>
+        <span class="s0"># guarantees. Unfortunately, that made it unfair. There are</span>
+        <span class="s0"># rare cases that this can starve a greenlet</span>
+        <span class="s0"># (https://github.com/gevent/gevent/issues/1487) and maybe</span>
+        <span class="s0"># even lead to deadlock (not tested).</span>
+
+        <span class="s0"># So in gevent 1.5 we go back to maintaining order. But it's</span>
+        <span class="s0"># still important not to make duplicate calls, and it's also</span>
+        <span class="s0"># important to avoid O(n^2) behaviour that can result from</span>
+        <span class="s0"># naive use of a simple list due to the need to handle removed</span>
+        <span class="s0"># links in the _notify_links loop. Cython has special support for</span>
+        <span class="s0"># built-in sets, lists, and dicts, but not ordereddict. Rather than</span>
+        <span class="s0"># use two data structures, or a dict({link: order}), we simply use a</span>
+        <span class="s0"># list and remove objects as we go, keeping track of them so as not to</span>
+        <span class="s0"># have duplicates called. This makes `unlink` O(n), but we can avoid</span>
+        <span class="s0"># calling it in the common case in _wait_core (even so, the number of</span>
+        <span class="s0"># waiters should usually be pretty small)</span>
+        <span class="s1">self._links = []</span>
+        <span class="s1">self._notifier = </span><span class="s3">None</span>
+        <span class="s0"># This is conceptually a class attribute, defined here for ease of access in</span>
+        <span class="s0"># cython. If it's true, when notifiers fire, all existing callbacks are called.</span>
+        <span class="s0"># If its false, we only call callbacks as long as ready() returns true.</span>
+        <span class="s1">self._notify_all = </span><span class="s3">True</span>
+        <span class="s0"># we don't want to do get_hub() here to allow defining module-level objects</span>
+        <span class="s0"># without initializing the hub. However, for multiple-thread safety, as soon</span>
+        <span class="s0"># as a waiting method is entered, even if it won't have to wait, we</span>
+        <span class="s0"># need to grab the hub and assign ownership. But we don't want to grab one prematurely.</span>
+        <span class="s0"># The example is three threads, the main thread and two worker threads; if we create</span>
+        <span class="s0"># a Semaphore in the main thread but only use it in the two threads, if we had grabbed</span>
+        <span class="s0"># the main thread's hub, the two worker threads would have a dependency on it, meaning that</span>
+        <span class="s0"># if the main event loop is blocked, the worker threads might get blocked too.</span>
+        <span class="s1">self.hub = hub</span>
+
+    <span class="s3">def </span><span class="s1">linkcount(self):</span>
+        <span class="s0"># For testing: how many objects are linked to this one?</span>
+        <span class="s3">return </span><span class="s1">len(self._links)</span>
+
+    <span class="s3">def </span><span class="s1">ready(self):</span>
+        <span class="s0"># Instances must define this</span>
+        <span class="s3">raise </span><span class="s1">NotImplementedError</span>
+
+    <span class="s3">def </span><span class="s1">rawlink(self</span><span class="s3">, </span><span class="s1">callback):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Register a callback to call when this object is ready. 
+ 
+        *callback* will be called in the :class:`Hub 
+        &lt;gevent.hub.Hub&gt;`, so it must not use blocking gevent API. 
+        *callback* will be passed one argument: this instance. 
+        &quot;&quot;&quot;</span>
+        <span class="s3">if not </span><span class="s1">callable(callback):</span>
+            <span class="s3">raise </span><span class="s1">TypeError(</span><span class="s4">'Expected callable: %r' </span><span class="s1">% (callback</span><span class="s3">, </span><span class="s1">))</span>
+        <span class="s1">self._links.append(callback)</span>
+        <span class="s1">self._check_and_notify()</span>
+
+    <span class="s3">def </span><span class="s1">unlink(self</span><span class="s3">, </span><span class="s1">callback):</span>
+        <span class="s2">&quot;&quot;&quot;Remove the callback set by :meth:`rawlink`&quot;&quot;&quot;</span>
+        <span class="s3">try</span><span class="s1">:</span>
+            <span class="s1">self._links.remove(callback)</span>
+        <span class="s3">except </span><span class="s1">ValueError:</span>
+            <span class="s3">pass</span>
+
+        <span class="s3">if not </span><span class="s1">self._links </span><span class="s3">and </span><span class="s1">self._notifier </span><span class="s3">is not None and </span><span class="s1">self._notifier.pending:</span>
+            <span class="s0"># If we currently have one queued, but not running, de-queue it.</span>
+            <span class="s0"># This will break a reference cycle.</span>
+            <span class="s0"># (self._notifier -&gt; self._notify_links -&gt; self)</span>
+            <span class="s0"># If it's actually running, though, (and we're here as a result of callbacks)</span>
+            <span class="s0"># we don't want to change it; it needs to finish what its doing</span>
+            <span class="s0"># so we don't attempt to start a fresh one or swap it out from underneath the</span>
+            <span class="s0"># _notify_links method.</span>
+            <span class="s1">self._notifier.stop()</span>
+
+    <span class="s3">def </span><span class="s1">_allocate_lock(self):</span>
+        <span class="s3">return </span><span class="s1">_allocate_thread_lock()</span>
+
+    <span class="s3">def </span><span class="s1">_getcurrent(self):</span>
+        <span class="s3">return </span><span class="s1">getcurrent() </span><span class="s0"># pylint:disable=undefined-variable</span>
+
+    <span class="s3">def </span><span class="s1">_get_thread_ident(self):</span>
+        <span class="s3">return </span><span class="s1">_get_thread_ident()</span>
+
+    <span class="s3">def </span><span class="s1">_capture_hub(self</span><span class="s3">, </span><span class="s1">create):</span>
+        <span class="s0"># Subclasses should call this as the first action from any</span>
+        <span class="s0"># public method that could, in theory, block and switch</span>
+        <span class="s0"># to the hub. This may release the GIL. It may</span>
+        <span class="s0"># raise InvalidThreadUseError if the result would</span>
+
+        <span class="s0"># First, detect a dead hub and drop it.</span>
+        <span class="s3">while </span><span class="s5">1</span><span class="s1">:</span>
+            <span class="s1">my_hub = self.hub</span>
+            <span class="s3">if </span><span class="s1">my_hub </span><span class="s3">is None</span><span class="s1">:</span>
+                <span class="s3">break</span>
+            <span class="s3">if </span><span class="s1">my_hub.dead: </span><span class="s0"># dead is a property, could release GIL</span>
+                <span class="s0"># back, holding GIL</span>
+                <span class="s3">if </span><span class="s1">self.hub </span><span class="s3">is </span><span class="s1">my_hub:</span>
+                    <span class="s1">self.hub = </span><span class="s3">None</span>
+                    <span class="s1">my_hub = </span><span class="s3">None</span>
+                    <span class="s3">break</span>
+            <span class="s3">else</span><span class="s1">:</span>
+                <span class="s3">break</span>
+
+        <span class="s3">if </span><span class="s1">self.hub </span><span class="s3">is None</span><span class="s1">:</span>
+            <span class="s0"># This next line might release the GIL.</span>
+            <span class="s1">current_hub = get_hub() </span><span class="s3">if </span><span class="s1">create </span><span class="s3">else </span><span class="s1">get_hub_if_exists()</span>
+
+            <span class="s0"># We have the GIL again. Did anything change? If so,</span>
+            <span class="s0"># we lost the race.</span>
+            <span class="s3">if </span><span class="s1">self.hub </span><span class="s3">is None</span><span class="s1">:</span>
+                <span class="s1">self.hub = current_hub</span>
+
+        <span class="s3">if </span><span class="s1">self.hub </span><span class="s3">is not None and </span><span class="s1">self.hub.thread_ident != _get_thread_ident():</span>
+            <span class="s3">raise </span><span class="s1">InvalidThreadUseError(</span>
+                <span class="s1">self.hub</span><span class="s3">,</span>
+                <span class="s1">get_hub_if_exists()</span><span class="s3">,</span>
+                <span class="s1">getcurrent() </span><span class="s0"># pylint:disable=undefined-variable</span>
+            <span class="s1">)</span>
+        <span class="s3">return </span><span class="s1">self.hub</span>
+
+    <span class="s3">def </span><span class="s1">_check_and_notify(self):</span>
+        <span class="s0"># If this object is ready to be notified, begin the process.</span>
+        <span class="s3">if </span><span class="s1">self.ready() </span><span class="s3">and </span><span class="s1">self._links </span><span class="s3">and not </span><span class="s1">self._notifier:</span>
+            <span class="s1">hub = </span><span class="s3">None</span>
+            <span class="s3">try</span><span class="s1">:</span>
+                <span class="s1">hub = self._capture_hub(</span><span class="s3">False</span><span class="s1">) </span><span class="s0"># Must create, we need it.</span>
+            <span class="s3">except </span><span class="s1">InvalidThreadUseError:</span>
+                <span class="s0"># The current hub doesn't match self.hub. That's OK,</span>
+                <span class="s0"># we still want to start the notifier in the thread running</span>
+                <span class="s0"># self.hub (because the links probably contains greenlet.switch</span>
+                <span class="s0"># calls valid only in that hub)</span>
+                <span class="s3">pass</span>
+            <span class="s3">if </span><span class="s1">hub </span><span class="s3">is not None</span><span class="s1">:</span>
+                <span class="s1">self._notifier = hub.loop.run_callback(self._notify_links</span><span class="s3">, </span><span class="s1">[])</span>
+            <span class="s3">else</span><span class="s1">:</span>
+                <span class="s0"># Hmm, no hub. We must be the only thing running. Then its OK</span>
+                <span class="s0"># to just directly call the callbacks.</span>
+                <span class="s1">self._notifier = </span><span class="s5">1</span>
+                <span class="s3">try</span><span class="s1">:</span>
+                    <span class="s1">self._notify_links([])</span>
+                <span class="s3">finally</span><span class="s1">:</span>
+                    <span class="s1">self._notifier = </span><span class="s3">None</span>
+
+    <span class="s3">def </span><span class="s1">_notify_link_list(self</span><span class="s3">, </span><span class="s1">links):</span>
+        <span class="s0"># The core of the _notify_links method to notify</span>
+        <span class="s0"># links in order. Lets the ``links`` list be mutated,</span>
+        <span class="s0"># and only notifies up to the last item in the list, in case</span>
+        <span class="s0"># objects are added to it.</span>
+        <span class="s3">if not </span><span class="s1">links:</span>
+            <span class="s0"># HMM. How did we get here? Running two threads at once?</span>
+            <span class="s0"># Seen once on Py27/Win/Appveyor</span>
+            <span class="s0"># https://ci.appveyor.com/project/jamadden/gevent/builds/36875645/job/9wahj9ft4h4qa170</span>
+            <span class="s3">return </span><span class="s1">[]</span>
+
+        <span class="s1">only_while_ready = </span><span class="s3">not </span><span class="s1">self._notify_all</span>
+        <span class="s1">final_link = links[-</span><span class="s5">1</span><span class="s1">]</span>
+        <span class="s1">done = set() </span><span class="s0"># of ids</span>
+        <span class="s1">hub = self.hub </span><span class="s3">if </span><span class="s1">self.hub </span><span class="s3">is not None else </span><span class="s1">get_hub_if_exists()</span>
+        <span class="s1">unswitched = []</span>
+        <span class="s3">while </span><span class="s1">links: </span><span class="s0"># remember this can be mutated</span>
+            <span class="s3">if </span><span class="s1">only_while_ready </span><span class="s3">and not </span><span class="s1">self.ready():</span>
+                <span class="s3">break</span>
+
+            <span class="s1">link = links.pop(</span><span class="s5">0</span><span class="s1">) </span><span class="s0"># Cython optimizes using list internals</span>
+            <span class="s1">id_link = id(link)</span>
+            <span class="s3">if </span><span class="s1">id_link </span><span class="s3">not in </span><span class="s1">done:</span>
+                <span class="s0"># XXX: JAM: What was I thinking? This doesn't make much sense,</span>
+                <span class="s0"># there's a good chance `link` will be deallocated, and its id() will</span>
+                <span class="s0"># be free to be reused. This also makes looping difficult, you have to</span>
+                <span class="s0"># create new functions inside a loop rather than just once outside the loop.</span>
+                <span class="s1">done.add(id_link)</span>
+                <span class="s3">try</span><span class="s1">:</span>
+                    <span class="s1">self._drop_lock_for_switch_out()</span>
+                    <span class="s3">try</span><span class="s1">:</span>
+                        <span class="s1">link(self)</span>
+                    <span class="s3">except </span><span class="s1">greenlet_error:</span>
+                        <span class="s0"># couldn't switch to a greenlet, we must be</span>
+                        <span class="s0"># running in a different thread. back on the list it goes for next time.</span>
+                        <span class="s1">unswitched.append(link)</span>
+                    <span class="s3">finally</span><span class="s1">:</span>
+                        <span class="s1">self._acquire_lock_for_switch_in()</span>
+
+                <span class="s3">except</span><span class="s1">: </span><span class="s0"># pylint:disable=bare-except</span>
+                    <span class="s0"># We're running in the hub, errors must not escape.</span>
+                    <span class="s3">if </span><span class="s1">hub </span><span class="s3">is not None</span><span class="s1">:</span>
+                        <span class="s1">hub.handle_error((link</span><span class="s3">, </span><span class="s1">self)</span><span class="s3">, </span><span class="s1">*sys.exc_info())</span>
+                    <span class="s3">else</span><span class="s1">:</span>
+                        <span class="s3">import </span><span class="s1">traceback</span>
+                        <span class="s1">traceback.print_exc()</span>
+
+            <span class="s3">if </span><span class="s1">link </span><span class="s3">is </span><span class="s1">final_link:</span>
+                <span class="s3">break</span>
+        <span class="s3">return </span><span class="s1">unswitched</span>
+
+    <span class="s3">def </span><span class="s1">_notify_links(self</span><span class="s3">, </span><span class="s1">arrived_while_waiting):</span>
+        <span class="s0"># This method must hold the GIL, or be guarded with the lock that guards</span>
+        <span class="s0"># this object. Thus, while we are notifying objects, an object from another</span>
+        <span class="s0"># thread simply cannot arrive and mutate ``_links`` or ``arrived_while_waiting``</span>
+
+        <span class="s0"># ``arrived_while_waiting`` is a list of greenlet.switch methods</span>
+        <span class="s0"># to call. These were objects that called wait() while we were processing,</span>
+        <span class="s0"># and which would have run *before* those that had actually waited</span>
+        <span class="s0"># and blocked. Instead of returning True immediately, we add them to this</span>
+        <span class="s0"># list so they wait their turn.</span>
+
+        <span class="s0"># We release self._notifier here when done invoking links.</span>
+        <span class="s0"># The object itself becomes false in a boolean way as soon</span>
+        <span class="s0"># as this method returns.</span>
+        <span class="s1">notifier = self._notifier</span>
+        <span class="s3">if </span><span class="s1">notifier </span><span class="s3">is None</span><span class="s1">:</span>
+            <span class="s0"># XXX: How did we get here?</span>
+            <span class="s1">self._check_and_notify()</span>
+            <span class="s3">return</span>
+        <span class="s0"># Early links are allowed to remove later links, and links</span>
+        <span class="s0"># are allowed to add more links, thus we must not</span>
+        <span class="s0"># make a copy of our the ``_links`` list, we must traverse it and</span>
+        <span class="s0"># mutate in place.</span>
+        <span class="s0">#</span>
+        <span class="s0"># We were ready() at the time this callback was scheduled; we</span>
+        <span class="s0"># may not be anymore, and that status may change during</span>
+        <span class="s0"># callback processing. Some of our subclasses (Event) will</span>
+        <span class="s0"># want to notify everyone who was registered when the status</span>
+        <span class="s0"># became true that it was once true, even though it may not be</span>
+        <span class="s0"># any more. In that case, we must not keep notifying anyone that's</span>
+        <span class="s0"># newly added after that, even if we go ready again.</span>
+        <span class="s3">try</span><span class="s1">:</span>
+            <span class="s1">unswitched = self._notify_link_list(self._links)</span>
+            <span class="s0"># Now, those that arrived after we had begun the notification</span>
+            <span class="s0"># process. Follow the same rules, stop with those that are</span>
+            <span class="s0"># added so far to prevent starvation.</span>
+            <span class="s3">if </span><span class="s1">arrived_while_waiting:</span>
+                <span class="s1">un2 = self._notify_link_list(arrived_while_waiting)</span>
+                <span class="s1">unswitched.extend(un2)</span>
+
+                <span class="s0"># Anything left needs to go back on the main list.</span>
+                <span class="s1">self._links.extend(arrived_while_waiting)</span>
+        <span class="s3">finally</span><span class="s1">:</span>
+            <span class="s0"># We should not have created a new notifier even if callbacks</span>
+            <span class="s0"># released us because we loop through *all* of our links on the</span>
+            <span class="s0"># same callback while self._notifier is still true.</span>
+            <span class="s3">assert </span><span class="s1">self._notifier </span><span class="s3">is </span><span class="s1">notifier</span><span class="s3">, </span><span class="s1">(self._notifier</span><span class="s3">, </span><span class="s1">notifier)</span>
+            <span class="s1">self._notifier = </span><span class="s3">None</span>
+            <span class="s0"># TODO: Maybe we should intelligently reset self.hub to</span>
+            <span class="s0"># free up thread affinity? In case of a pathological situation where</span>
+            <span class="s0"># one object was used from one thread once &amp; first,  but usually is</span>
+            <span class="s0"># used by another thread.</span>
+            <span class="s0">#</span>
+            <span class="s0"># BoundedSemaphore does this.</span>
+        <span class="s0"># Now we may be ready or not ready. If we're ready, which</span>
+        <span class="s0"># could have happened during the last link we called, then we</span>
+        <span class="s0"># must have more links than we started with. We need to schedule the</span>
+        <span class="s0"># wakeup.</span>
+        <span class="s1">self._check_and_notify()</span>
+        <span class="s3">if </span><span class="s1">unswitched:</span>
+            <span class="s1">self._handle_unswitched_notifications(unswitched)</span>
+
+
+    <span class="s3">def </span><span class="s1">_handle_unswitched_notifications(self</span><span class="s3">, </span><span class="s1">unswitched):</span>
+        <span class="s0"># Given a list of callable objects that raised</span>
+        <span class="s0"># ``greenlet.error`` when we called them: If we can determine</span>
+        <span class="s0"># that it is a parked greenlet (the callablle is a</span>
+        <span class="s0"># ``greenlet.switch`` method) and we can determine the hub</span>
+        <span class="s0"># that the greenlet belongs to (either its parent, or, in the</span>
+        <span class="s0"># case of a main greenlet, find a hub with the same parent as</span>
+        <span class="s0"># this greenlet object) then:</span>
+
+        <span class="s0"># Move this to be a callback in that thread.</span>
+        <span class="s0"># (This relies on holding the GIL *or* ``Hub.loop.run_callback`` being</span>
+        <span class="s0"># thread-safe! Note that the CFFI implementations are definitely</span>
+        <span class="s0"># NOT thread-safe. TODO: Make them? Or an alternative?)</span>
+        <span class="s0">#</span>
+        <span class="s0"># Otherwise, print some error messages.</span>
+
+        <span class="s0"># TODO: Inline this for individual links. That handles the</span>
+        <span class="s0"># &quot;only while ready&quot; case automatically. Be careful about locking in that case.</span>
+        <span class="s0">#</span>
+        <span class="s0"># TODO: Add a 'strict' mode that prevents doing this dance, since it's</span>
+        <span class="s0"># inherently not safe.</span>
+        <span class="s1">root_greenlets = </span><span class="s3">None</span>
+        <span class="s1">printed_tb = </span><span class="s3">False</span>
+        <span class="s1">only_while_ready = </span><span class="s3">not </span><span class="s1">self._notify_all</span>
+
+        <span class="s3">while </span><span class="s1">unswitched:</span>
+            <span class="s3">if </span><span class="s1">only_while_ready </span><span class="s3">and not </span><span class="s1">self.ready():</span>
+                <span class="s1">self.__print_unswitched_warning(unswitched</span><span class="s3">, </span><span class="s1">printed_tb)</span>
+                <span class="s3">break</span>
+
+            <span class="s1">link = unswitched.pop(</span><span class="s5">0</span><span class="s1">)</span>
+
+            <span class="s1">hub = </span><span class="s3">None </span><span class="s0"># Also serves as a &quot;handled?&quot; flag</span>
+            <span class="s0"># Is it a greenlet.switch method?</span>
+            <span class="s3">if </span><span class="s1">(getattr(link</span><span class="s3">, </span><span class="s4">'__name__'</span><span class="s3">, None</span><span class="s1">) == </span><span class="s4">'switch'</span>
+                <span class="s3">and </span><span class="s1">isinstance(getattr(link</span><span class="s3">, </span><span class="s4">'__self__'</span><span class="s3">, None</span><span class="s1">)</span><span class="s3">, </span><span class="s1">greenlet)):</span>
+                <span class="s1">glet = link.__self__</span>
+                <span class="s1">parent = glet.parent</span>
+
+                <span class="s3">while </span><span class="s1">parent </span><span class="s3">is not None</span><span class="s1">:</span>
+                    <span class="s3">if </span><span class="s1">hasattr(parent</span><span class="s3">, </span><span class="s4">'loop'</span><span class="s1">): </span><span class="s0"># Assuming the hub.</span>
+                        <span class="s1">hub = glet.parent</span>
+                        <span class="s3">break</span>
+                    <span class="s1">parent = glet.parent</span>
+
+                <span class="s3">if </span><span class="s1">hub </span><span class="s3">is None</span><span class="s1">:</span>
+                    <span class="s3">if </span><span class="s1">root_greenlets </span><span class="s3">is None</span><span class="s1">:</span>
+                        <span class="s1">root_greenlets = get_roots_and_hubs()</span>
+                    <span class="s1">hub = root_greenlets.get(glet)</span>
+
+                <span class="s3">if </span><span class="s1">hub </span><span class="s3">is not None and </span><span class="s1">hub.loop </span><span class="s3">is not None</span><span class="s1">:</span>
+                    <span class="s1">hub.loop.run_callback_threadsafe(link</span><span class="s3">, </span><span class="s1">self)</span>
+            <span class="s3">if </span><span class="s1">hub </span><span class="s3">is None or </span><span class="s1">hub.loop </span><span class="s3">is None</span><span class="s1">:</span>
+                <span class="s0"># We couldn't handle it</span>
+                <span class="s1">self.__print_unswitched_warning(link</span><span class="s3">, </span><span class="s1">printed_tb)</span>
+                <span class="s1">printed_tb = </span><span class="s3">True</span>
+
+
+    <span class="s3">def </span><span class="s1">__print_unswitched_warning(self</span><span class="s3">, </span><span class="s1">link</span><span class="s3">, </span><span class="s1">printed_tb):</span>
+        <span class="s1">print(</span><span class="s4">'gevent: error: Unable to switch to greenlet'</span><span class="s3">, </span><span class="s1">link</span><span class="s3">,</span>
+              <span class="s4">'from'</span><span class="s3">, </span><span class="s1">self</span><span class="s3">, </span><span class="s4">'; crossing thread boundaries is not allowed.'</span><span class="s3">,</span>
+              <span class="s1">file=sys.stderr)</span>
+
+        <span class="s3">if not </span><span class="s1">printed_tb:</span>
+            <span class="s1">printed_tb = </span><span class="s3">True</span>
+            <span class="s1">print(</span>
+                <span class="s4">'gevent: error: '</span>
+                <span class="s4">'This is a result of using gevent objects from multiple threads,'</span><span class="s3">,</span>
+                <span class="s4">'and is a bug in the calling code.'</span><span class="s3">, </span><span class="s1">file=sys.stderr)</span>
+
+            <span class="s3">import </span><span class="s1">traceback</span>
+            <span class="s1">traceback.print_stack()</span>
+
+    <span class="s3">def </span><span class="s1">_quiet_unlink_all(self</span><span class="s3">, </span><span class="s1">obj):</span>
+        <span class="s3">if </span><span class="s1">obj </span><span class="s3">is None</span><span class="s1">:</span>
+            <span class="s3">return</span>
+
+        <span class="s1">self.unlink(obj)</span>
+        <span class="s3">if </span><span class="s1">self._notifier </span><span class="s3">is not None and </span><span class="s1">self._notifier.args:</span>
+            <span class="s3">try</span><span class="s1">:</span>
+                <span class="s1">self._notifier.args[</span><span class="s5">0</span><span class="s1">].remove(obj)</span>
+            <span class="s3">except </span><span class="s1">ValueError:</span>
+                <span class="s3">pass</span>
+
+    <span class="s3">def </span><span class="s1">__wait_to_be_notified(self</span><span class="s3">, </span><span class="s1">rawlink): </span><span class="s0"># pylint:disable=too-many-branches</span>
+        <span class="s1">resume_this_greenlet = getcurrent().switch </span><span class="s0"># pylint:disable=undefined-variable</span>
+        <span class="s3">if </span><span class="s1">rawlink:</span>
+            <span class="s1">self.rawlink(resume_this_greenlet)</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s1">self._notifier.args[</span><span class="s5">0</span><span class="s1">].append(resume_this_greenlet)</span>
+
+        <span class="s3">try</span><span class="s1">:</span>
+            <span class="s1">self._switch_to_hub(self.hub)</span>
+            <span class="s0"># If we got here, we were automatically unlinked already.</span>
+            <span class="s1">resume_this_greenlet = </span><span class="s3">None</span>
+        <span class="s3">finally</span><span class="s1">:</span>
+            <span class="s1">self._quiet_unlink_all(resume_this_greenlet)</span>
+
+    <span class="s3">def </span><span class="s1">_switch_to_hub(self</span><span class="s3">, </span><span class="s1">the_hub):</span>
+        <span class="s1">self._drop_lock_for_switch_out()</span>
+        <span class="s3">try</span><span class="s1">:</span>
+            <span class="s1">result = the_hub.switch()</span>
+        <span class="s3">finally</span><span class="s1">:</span>
+            <span class="s1">self._acquire_lock_for_switch_in()</span>
+        <span class="s3">if </span><span class="s1">result </span><span class="s3">is not </span><span class="s1">self: </span><span class="s0"># pragma: no cover</span>
+            <span class="s3">raise </span><span class="s1">InvalidSwitchError(</span>
+                <span class="s4">'Invalid switch into %s.wait(): %r' </span><span class="s1">% (</span>
+                    <span class="s1">self.__class__.__name__</span><span class="s3">,</span>
+                    <span class="s1">result</span><span class="s3">,</span>
+                <span class="s1">)</span>
+            <span class="s1">)</span>
+
+    <span class="s3">def </span><span class="s1">_acquire_lock_for_switch_in(self):</span>
+        <span class="s3">return</span>
+
+    <span class="s3">def </span><span class="s1">_drop_lock_for_switch_out(self):</span>
+        <span class="s3">return</span>
+
+    <span class="s3">def </span><span class="s1">_wait_core(self</span><span class="s3">, </span><span class="s1">timeout</span><span class="s3">, </span><span class="s1">catch=Timeout):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        The core of the wait implementation, handling switching and 
+        linking. 
+ 
+        This method is NOT safe to call from multiple threads. 
+ 
+        ``self.hub`` must be initialized before entering this method. 
+        The hub that is set is considered the owner and cannot be changed 
+        while this method is running. It must only be called from the thread 
+        where ``self.hub`` is the current hub. 
+ 
+        If *catch* is set to ``()``, a timeout that elapses will be 
+        allowed to be raised. 
+ 
+        :return: A true value if the wait succeeded without timing out. 
+          That is, a true return value means we were notified and control 
+          resumed in this greenlet. 
+        &quot;&quot;&quot;</span>
+        <span class="s3">with </span><span class="s1">Timeout._start_new_or_dummy(timeout) </span><span class="s3">as </span><span class="s1">timer: </span><span class="s0"># Might release</span>
+            <span class="s0"># We already checked above (_wait()) if we're ready()</span>
+            <span class="s3">try</span><span class="s1">:</span>
+                <span class="s1">self.__wait_to_be_notified(</span>
+                    <span class="s3">True,</span><span class="s0"># Use rawlink()</span>
+                <span class="s1">)</span>
+                <span class="s3">return True</span>
+            <span class="s3">except </span><span class="s1">catch </span><span class="s3">as </span><span class="s1">ex:</span>
+                <span class="s3">if </span><span class="s1">ex </span><span class="s3">is not </span><span class="s1">timer:</span>
+                    <span class="s3">raise</span>
+                <span class="s0"># test_set_and_clear and test_timeout in test_threading</span>
+                <span class="s0"># rely on the exact return values, not just truthish-ness</span>
+                <span class="s3">return False</span>
+
+    <span class="s3">def </span><span class="s1">_wait_return_value(self</span><span class="s3">, </span><span class="s1">waited</span><span class="s3">, </span><span class="s1">wait_success):</span>
+        <span class="s0"># pylint:disable=unused-argument</span>
+        <span class="s0"># Subclasses should override this to return a value from _wait.</span>
+        <span class="s0"># By default we return None.</span>
+        <span class="s3">return None </span><span class="s0"># pragma: no cover all extent subclasses override</span>
+
+    <span class="s3">def </span><span class="s1">_wait(self</span><span class="s3">, </span><span class="s1">timeout=</span><span class="s3">None</span><span class="s1">):</span>
+        <span class="s0"># Watch where we could potentially release the GIL.</span>
+        <span class="s1">self._capture_hub(</span><span class="s3">True</span><span class="s1">) </span><span class="s0"># Must create, we must have an owner. Might release</span>
+
+        <span class="s3">if </span><span class="s1">self.ready(): </span><span class="s0"># *might* release, if overridden in Python.</span>
+            <span class="s1">result = self._wait_return_value(</span><span class="s3">False, False</span><span class="s1">) </span><span class="s0"># pylint:disable=assignment-from-none</span>
+            <span class="s3">if </span><span class="s1">self._notifier:</span>
+                <span class="s0"># We're already notifying waiters; one of them must have run</span>
+                <span class="s0"># and switched to this greenlet, which arrived here. Alternately,</span>
+                <span class="s0"># we could be in a separate thread (but we're holding the GIL/object lock)</span>
+                <span class="s1">self.__wait_to_be_notified(</span><span class="s3">False</span><span class="s1">) </span><span class="s0"># Use self._notifier.args[0] instead of self.rawlink</span>
+
+            <span class="s3">return </span><span class="s1">result</span>
+
+        <span class="s1">gotit = self._wait_core(timeout)</span>
+        <span class="s3">return </span><span class="s1">self._wait_return_value(</span><span class="s3">True, </span><span class="s1">gotit)</span>
+
+    <span class="s3">def </span><span class="s1">_at_fork_reinit(self):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        This method was added in Python 3.9 and is called by logging.py 
+        ``_after_at_fork_child_reinit_locks`` on Lock objects. 
+ 
+        It is also called from threading.py, ``_after_fork`` in 
+        ``_reset_internal_locks``, and that can hit ``Event`` objects. 
+ 
+        Subclasses should reset themselves to an initial state. This 
+        includes unlocking/releasing, if possible. This method detaches from the 
+        previous hub and drops any existing notifier. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">self.hub = </span><span class="s3">None</span>
+        <span class="s1">self._notifier = </span><span class="s3">None</span>
+
+<span class="s3">def </span><span class="s1">_init():</span>
+    <span class="s1">greenlet_init() </span><span class="s0"># pylint:disable=undefined-variable</span>
+
+<span class="s1">_init()</span>
+
+
+<span class="s3">from </span><span class="s1">gevent._util </span><span class="s3">import </span><span class="s1">import_c_accel</span>
+<span class="s1">import_c_accel(globals()</span><span class="s3">, </span><span class="s4">'gevent.__abstract_linkable'</span><span class="s1">)</span>
+</pre>
+</body>
+</html>

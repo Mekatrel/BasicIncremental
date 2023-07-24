@@ -1,0 +1,126 @@
+<html>
+<head>
+<title>fix_next_call.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #629755; font-style: italic;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #808080;}
+.s3 { color: #cc7832;}
+.s4 { color: #6a8759;}
+.s5 { color: #6897bb;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+fix_next_call.py</font>
+</center></td></tr></table>
+<pre><span class="s0">&quot;&quot;&quot; 
+Based on fix_next.py by Collin Winter. 
+ 
+Replaces it.next() -&gt; next(it), per PEP 3114. 
+ 
+Unlike fix_next.py, this fixer doesn't replace the name of a next method with __next__, 
+which would break Python 2 compatibility without further help from fixers in 
+stage 2. 
+&quot;&quot;&quot;</span>
+
+<span class="s2"># Local imports</span>
+<span class="s3">from </span><span class="s1">lib2to3.pgen2 </span><span class="s3">import </span><span class="s1">token</span>
+<span class="s3">from </span><span class="s1">lib2to3.pygram </span><span class="s3">import </span><span class="s1">python_symbols </span><span class="s3">as </span><span class="s1">syms</span>
+<span class="s3">from </span><span class="s1">lib2to3 </span><span class="s3">import </span><span class="s1">fixer_base</span>
+<span class="s3">from </span><span class="s1">lib2to3.fixer_util </span><span class="s3">import </span><span class="s1">Name</span><span class="s3">, </span><span class="s1">Call</span><span class="s3">, </span><span class="s1">find_binding</span>
+
+<span class="s1">bind_warning = </span><span class="s4">&quot;Calls to builtin next() possibly shadowed by global binding&quot;</span>
+
+
+<span class="s3">class </span><span class="s1">FixNextCall(fixer_base.BaseFix):</span>
+    <span class="s1">BM_compatible = </span><span class="s3">True</span>
+    <span class="s1">PATTERN = </span><span class="s4">&quot;&quot;&quot; 
+    power&lt; base=any+ trailer&lt; '.' attr='next' &gt; trailer&lt; '(' ')' &gt; &gt; 
+    | 
+    power&lt; head=any+ trailer&lt; '.' attr='next' &gt; not trailer&lt; '(' ')' &gt; &gt; 
+    | 
+    global=global_stmt&lt; 'global' any* 'next' any* &gt; 
+    &quot;&quot;&quot;</span>
+
+    <span class="s1">order = </span><span class="s4">&quot;pre&quot; </span><span class="s2"># Pre-order tree traversal</span>
+
+    <span class="s3">def </span><span class="s1">start_tree(self</span><span class="s3">, </span><span class="s1">tree</span><span class="s3">, </span><span class="s1">filename):</span>
+        <span class="s1">super(FixNextCall</span><span class="s3">, </span><span class="s1">self).start_tree(tree</span><span class="s3">, </span><span class="s1">filename)</span>
+
+        <span class="s1">n = find_binding(</span><span class="s4">'next'</span><span class="s3">, </span><span class="s1">tree)</span>
+        <span class="s3">if </span><span class="s1">n:</span>
+            <span class="s1">self.warning(n</span><span class="s3">, </span><span class="s1">bind_warning)</span>
+            <span class="s1">self.shadowed_next = </span><span class="s3">True</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s1">self.shadowed_next = </span><span class="s3">False</span>
+
+    <span class="s3">def </span><span class="s1">transform(self</span><span class="s3">, </span><span class="s1">node</span><span class="s3">, </span><span class="s1">results):</span>
+        <span class="s3">assert </span><span class="s1">results</span>
+
+        <span class="s1">base = results.get(</span><span class="s4">&quot;base&quot;</span><span class="s1">)</span>
+        <span class="s1">attr = results.get(</span><span class="s4">&quot;attr&quot;</span><span class="s1">)</span>
+        <span class="s1">name = results.get(</span><span class="s4">&quot;name&quot;</span><span class="s1">)</span>
+
+        <span class="s3">if </span><span class="s1">base:</span>
+            <span class="s3">if </span><span class="s1">self.shadowed_next:</span>
+                <span class="s2"># Omit this:</span>
+                <span class="s2"># attr.replace(Name(&quot;__next__&quot;, prefix=attr.prefix))</span>
+                <span class="s3">pass</span>
+            <span class="s3">else</span><span class="s1">:</span>
+                <span class="s1">base = [n.clone() </span><span class="s3">for </span><span class="s1">n </span><span class="s3">in </span><span class="s1">base]</span>
+                <span class="s1">base[</span><span class="s5">0</span><span class="s1">].prefix = </span><span class="s4">&quot;&quot;</span>
+                <span class="s1">node.replace(Call(Name(</span><span class="s4">&quot;next&quot;</span><span class="s3">, </span><span class="s1">prefix=node.prefix)</span><span class="s3">, </span><span class="s1">base))</span>
+        <span class="s3">elif </span><span class="s1">name:</span>
+            <span class="s2"># Omit this:</span>
+            <span class="s2"># n = Name(&quot;__next__&quot;, prefix=name.prefix)</span>
+            <span class="s2"># name.replace(n)</span>
+            <span class="s3">pass</span>
+        <span class="s3">elif </span><span class="s1">attr:</span>
+            <span class="s2"># We don't do this transformation if we're assigning to &quot;x.next&quot;.</span>
+            <span class="s2"># Unfortunately, it doesn't seem possible to do this in PATTERN,</span>
+            <span class="s2">#  so it's being done here.</span>
+            <span class="s3">if </span><span class="s1">is_assign_target(node):</span>
+                <span class="s1">head = results[</span><span class="s4">&quot;head&quot;</span><span class="s1">]</span>
+                <span class="s3">if </span><span class="s4">&quot;&quot;</span><span class="s1">.join([str(n) </span><span class="s3">for </span><span class="s1">n </span><span class="s3">in </span><span class="s1">head]).strip() == </span><span class="s4">'__builtin__'</span><span class="s1">:</span>
+                    <span class="s1">self.warning(node</span><span class="s3">, </span><span class="s1">bind_warning)</span>
+                <span class="s3">return</span>
+            <span class="s2"># Omit this:</span>
+            <span class="s2"># attr.replace(Name(&quot;__next__&quot;))</span>
+        <span class="s3">elif </span><span class="s4">&quot;global&quot; </span><span class="s3">in </span><span class="s1">results:</span>
+            <span class="s1">self.warning(node</span><span class="s3">, </span><span class="s1">bind_warning)</span>
+            <span class="s1">self.shadowed_next = </span><span class="s3">True</span>
+
+
+<span class="s2">### The following functions help test if node is part of an assignment</span>
+<span class="s2">###  target.</span>
+
+<span class="s3">def </span><span class="s1">is_assign_target(node):</span>
+    <span class="s1">assign = find_assign(node)</span>
+    <span class="s3">if </span><span class="s1">assign </span><span class="s3">is None</span><span class="s1">:</span>
+        <span class="s3">return False</span>
+
+    <span class="s3">for </span><span class="s1">child </span><span class="s3">in </span><span class="s1">assign.children:</span>
+        <span class="s3">if </span><span class="s1">child.type == token.EQUAL:</span>
+            <span class="s3">return False</span>
+        <span class="s3">elif </span><span class="s1">is_subtree(child</span><span class="s3">, </span><span class="s1">node):</span>
+            <span class="s3">return True</span>
+    <span class="s3">return False</span>
+
+<span class="s3">def </span><span class="s1">find_assign(node):</span>
+    <span class="s3">if </span><span class="s1">node.type == syms.expr_stmt:</span>
+        <span class="s3">return </span><span class="s1">node</span>
+    <span class="s3">if </span><span class="s1">node.type == syms.simple_stmt </span><span class="s3">or </span><span class="s1">node.parent </span><span class="s3">is None</span><span class="s1">:</span>
+        <span class="s3">return None</span>
+    <span class="s3">return </span><span class="s1">find_assign(node.parent)</span>
+
+<span class="s3">def </span><span class="s1">is_subtree(root</span><span class="s3">, </span><span class="s1">node):</span>
+    <span class="s3">if </span><span class="s1">root == node:</span>
+        <span class="s3">return True</span>
+    <span class="s3">return </span><span class="s1">any(is_subtree(c</span><span class="s3">, </span><span class="s1">node) </span><span class="s3">for </span><span class="s1">c </span><span class="s3">in </span><span class="s1">root.children)</span>
+</pre>
+</body>
+</html>

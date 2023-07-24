@@ -1,0 +1,229 @@
+<html>
+<head>
+<title>ssl_servers.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #cc7832;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #6a8759;}
+.s3 { color: #808080;}
+.s4 { color: #6897bb;}
+.s5 { color: #629755; font-style: italic;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+ssl_servers.py</font>
+</center></td></tr></table>
+<pre><span class="s0">from </span><span class="s1">__future__ </span><span class="s0">import </span><span class="s1">absolute_import</span><span class="s0">, </span><span class="s1">division</span><span class="s0">, </span><span class="s1">print_function</span><span class="s0">, </span><span class="s1">unicode_literals</span>
+<span class="s0">from </span><span class="s1">future.builtins </span><span class="s0">import </span><span class="s1">filter</span><span class="s0">, </span><span class="s1">str</span>
+<span class="s0">from </span><span class="s1">future </span><span class="s0">import </span><span class="s1">utils</span>
+<span class="s0">import </span><span class="s1">os</span>
+<span class="s0">import </span><span class="s1">sys</span>
+<span class="s0">import </span><span class="s1">ssl</span>
+<span class="s0">import </span><span class="s1">pprint</span>
+<span class="s0">import </span><span class="s1">socket</span>
+<span class="s0">from </span><span class="s1">future.backports.urllib </span><span class="s0">import </span><span class="s1">parse </span><span class="s0">as </span><span class="s1">urllib_parse</span>
+<span class="s0">from </span><span class="s1">future.backports.http.server </span><span class="s0">import </span><span class="s1">(HTTPServer </span><span class="s0">as </span><span class="s1">_HTTPServer</span><span class="s0">,</span>
+    <span class="s1">SimpleHTTPRequestHandler</span><span class="s0">, </span><span class="s1">BaseHTTPRequestHandler)</span>
+<span class="s0">from </span><span class="s1">future.backports.test </span><span class="s0">import </span><span class="s1">support</span>
+<span class="s1">threading = support.import_module(</span><span class="s2">&quot;threading&quot;</span><span class="s1">)</span>
+
+<span class="s1">here = os.path.dirname(__file__)</span>
+
+<span class="s1">HOST = support.HOST</span>
+<span class="s1">CERTFILE = os.path.join(here</span><span class="s0">, </span><span class="s2">'keycert.pem'</span><span class="s1">)</span>
+
+<span class="s3"># This one's based on HTTPServer, which is based on SocketServer</span>
+
+<span class="s0">class </span><span class="s1">HTTPSServer(_HTTPServer):</span>
+
+    <span class="s0">def </span><span class="s1">__init__(self</span><span class="s0">, </span><span class="s1">server_address</span><span class="s0">, </span><span class="s1">handler_class</span><span class="s0">, </span><span class="s1">context):</span>
+        <span class="s1">_HTTPServer.__init__(self</span><span class="s0">, </span><span class="s1">server_address</span><span class="s0">, </span><span class="s1">handler_class)</span>
+        <span class="s1">self.context = context</span>
+
+    <span class="s0">def </span><span class="s1">__str__(self):</span>
+        <span class="s0">return </span><span class="s1">(</span><span class="s2">'&lt;%s %s:%s&gt;' </span><span class="s1">%</span>
+                <span class="s1">(self.__class__.__name__</span><span class="s0">,</span>
+                 <span class="s1">self.server_name</span><span class="s0">,</span>
+                 <span class="s1">self.server_port))</span>
+
+    <span class="s0">def </span><span class="s1">get_request(self):</span>
+        <span class="s3"># override this to wrap socket with SSL</span>
+        <span class="s0">try</span><span class="s1">:</span>
+            <span class="s1">sock</span><span class="s0">, </span><span class="s1">addr = self.socket.accept()</span>
+            <span class="s1">sslconn = self.context.wrap_socket(sock</span><span class="s0">, </span><span class="s1">server_side=</span><span class="s0">True</span><span class="s1">)</span>
+        <span class="s0">except </span><span class="s1">socket.error </span><span class="s0">as </span><span class="s1">e:</span>
+            <span class="s3"># socket errors are silenced by the caller, print them here</span>
+            <span class="s0">if </span><span class="s1">support.verbose:</span>
+                <span class="s1">sys.stderr.write(</span><span class="s2">&quot;Got an error:</span><span class="s0">\n</span><span class="s2">%s</span><span class="s0">\n</span><span class="s2">&quot; </span><span class="s1">% e)</span>
+            <span class="s0">raise</span>
+        <span class="s0">return </span><span class="s1">sslconn</span><span class="s0">, </span><span class="s1">addr</span>
+
+<span class="s0">class </span><span class="s1">RootedHTTPRequestHandler(SimpleHTTPRequestHandler):</span>
+    <span class="s3"># need to override translate_path to get a known root,</span>
+    <span class="s3"># instead of using os.curdir, since the test could be</span>
+    <span class="s3"># run from anywhere</span>
+
+    <span class="s1">server_version = </span><span class="s2">&quot;TestHTTPS/1.0&quot;</span>
+    <span class="s1">root = here</span>
+    <span class="s3"># Avoid hanging when a request gets interrupted by the client</span>
+    <span class="s1">timeout = </span><span class="s4">5</span>
+
+    <span class="s0">def </span><span class="s1">translate_path(self</span><span class="s0">, </span><span class="s1">path):</span>
+        <span class="s5">&quot;&quot;&quot;Translate a /-separated PATH to the local filename syntax. 
+ 
+        Components that mean special things to the local file system 
+        (e.g. drive or directory names) are ignored.  (XXX They should 
+        probably be diagnosed.) 
+ 
+        &quot;&quot;&quot;</span>
+        <span class="s3"># abandon query parameters</span>
+        <span class="s1">path = urllib.parse.urlparse(path)[</span><span class="s4">2</span><span class="s1">]</span>
+        <span class="s1">path = os.path.normpath(urllib.parse.unquote(path))</span>
+        <span class="s1">words = path.split(</span><span class="s2">'/'</span><span class="s1">)</span>
+        <span class="s1">words = filter(</span><span class="s0">None, </span><span class="s1">words)</span>
+        <span class="s1">path = self.root</span>
+        <span class="s0">for </span><span class="s1">word </span><span class="s0">in </span><span class="s1">words:</span>
+            <span class="s1">drive</span><span class="s0">, </span><span class="s1">word = os.path.splitdrive(word)</span>
+            <span class="s1">head</span><span class="s0">, </span><span class="s1">word = os.path.split(word)</span>
+            <span class="s1">path = os.path.join(path</span><span class="s0">, </span><span class="s1">word)</span>
+        <span class="s0">return </span><span class="s1">path</span>
+
+    <span class="s0">def </span><span class="s1">log_message(self</span><span class="s0">, </span><span class="s1">format</span><span class="s0">, </span><span class="s1">*args):</span>
+        <span class="s3"># we override this to suppress logging unless &quot;verbose&quot;</span>
+        <span class="s0">if </span><span class="s1">support.verbose:</span>
+            <span class="s1">sys.stdout.write(</span><span class="s2">&quot; server (%s:%d %s):</span><span class="s0">\n   </span><span class="s2">[%s] %s</span><span class="s0">\n</span><span class="s2">&quot; </span><span class="s1">%</span>
+                             <span class="s1">(self.server.server_address</span><span class="s0">,</span>
+                              <span class="s1">self.server.server_port</span><span class="s0">,</span>
+                              <span class="s1">self.request.cipher()</span><span class="s0">,</span>
+                              <span class="s1">self.log_date_time_string()</span><span class="s0">,</span>
+                              <span class="s1">format%args))</span>
+
+
+<span class="s0">class </span><span class="s1">StatsRequestHandler(BaseHTTPRequestHandler):</span>
+    <span class="s5">&quot;&quot;&quot;Example HTTP request handler which returns SSL statistics on GET 
+    requests. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s1">server_version = </span><span class="s2">&quot;StatsHTTPS/1.0&quot;</span>
+
+    <span class="s0">def </span><span class="s1">do_GET(self</span><span class="s0">, </span><span class="s1">send_body=</span><span class="s0">True</span><span class="s1">):</span>
+        <span class="s5">&quot;&quot;&quot;Serve a GET request.&quot;&quot;&quot;</span>
+        <span class="s1">sock = self.rfile.raw._sock</span>
+        <span class="s1">context = sock.context</span>
+        <span class="s1">stats = {</span>
+            <span class="s2">'session_cache'</span><span class="s1">: context.session_stats()</span><span class="s0">,</span>
+            <span class="s2">'cipher'</span><span class="s1">: sock.cipher()</span><span class="s0">,</span>
+            <span class="s2">'compression'</span><span class="s1">: sock.compression()</span><span class="s0">,</span>
+            <span class="s1">}</span>
+        <span class="s1">body = pprint.pformat(stats)</span>
+        <span class="s1">body = body.encode(</span><span class="s2">'utf-8'</span><span class="s1">)</span>
+        <span class="s1">self.send_response(</span><span class="s4">200</span><span class="s1">)</span>
+        <span class="s1">self.send_header(</span><span class="s2">&quot;Content-type&quot;</span><span class="s0">, </span><span class="s2">&quot;text/plain; charset=utf-8&quot;</span><span class="s1">)</span>
+        <span class="s1">self.send_header(</span><span class="s2">&quot;Content-Length&quot;</span><span class="s0">, </span><span class="s1">str(len(body)))</span>
+        <span class="s1">self.end_headers()</span>
+        <span class="s0">if </span><span class="s1">send_body:</span>
+            <span class="s1">self.wfile.write(body)</span>
+
+    <span class="s0">def </span><span class="s1">do_HEAD(self):</span>
+        <span class="s5">&quot;&quot;&quot;Serve a HEAD request.&quot;&quot;&quot;</span>
+        <span class="s1">self.do_GET(send_body=</span><span class="s0">False</span><span class="s1">)</span>
+
+    <span class="s0">def </span><span class="s1">log_request(self</span><span class="s0">, </span><span class="s1">format</span><span class="s0">, </span><span class="s1">*args):</span>
+        <span class="s0">if </span><span class="s1">support.verbose:</span>
+            <span class="s1">BaseHTTPRequestHandler.log_request(self</span><span class="s0">, </span><span class="s1">format</span><span class="s0">, </span><span class="s1">*args)</span>
+
+
+<span class="s0">class </span><span class="s1">HTTPSServerThread(threading.Thread):</span>
+
+    <span class="s0">def </span><span class="s1">__init__(self</span><span class="s0">, </span><span class="s1">context</span><span class="s0">, </span><span class="s1">host=HOST</span><span class="s0">, </span><span class="s1">handler_class=</span><span class="s0">None</span><span class="s1">):</span>
+        <span class="s1">self.flag = </span><span class="s0">None</span>
+        <span class="s1">self.server = HTTPSServer((host</span><span class="s0">, </span><span class="s4">0</span><span class="s1">)</span><span class="s0">,</span>
+                                  <span class="s1">handler_class </span><span class="s0">or </span><span class="s1">RootedHTTPRequestHandler</span><span class="s0">,</span>
+                                  <span class="s1">context)</span>
+        <span class="s1">self.port = self.server.server_port</span>
+        <span class="s1">threading.Thread.__init__(self)</span>
+        <span class="s1">self.daemon = </span><span class="s0">True</span>
+
+    <span class="s0">def </span><span class="s1">__str__(self):</span>
+        <span class="s0">return </span><span class="s2">&quot;&lt;%s %s&gt;&quot; </span><span class="s1">% (self.__class__.__name__</span><span class="s0">, </span><span class="s1">self.server)</span>
+
+    <span class="s0">def </span><span class="s1">start(self</span><span class="s0">, </span><span class="s1">flag=</span><span class="s0">None</span><span class="s1">):</span>
+        <span class="s1">self.flag = flag</span>
+        <span class="s1">threading.Thread.start(self)</span>
+
+    <span class="s0">def </span><span class="s1">run(self):</span>
+        <span class="s0">if </span><span class="s1">self.flag:</span>
+            <span class="s1">self.flag.set()</span>
+        <span class="s0">try</span><span class="s1">:</span>
+            <span class="s1">self.server.serve_forever(</span><span class="s4">0.05</span><span class="s1">)</span>
+        <span class="s0">finally</span><span class="s1">:</span>
+            <span class="s1">self.server.server_close()</span>
+
+    <span class="s0">def </span><span class="s1">stop(self):</span>
+        <span class="s1">self.server.shutdown()</span>
+
+
+<span class="s0">def </span><span class="s1">make_https_server(case</span><span class="s0">, </span><span class="s1">certfile=CERTFILE</span><span class="s0">, </span><span class="s1">host=HOST</span><span class="s0">, </span><span class="s1">handler_class=</span><span class="s0">None</span><span class="s1">):</span>
+    <span class="s3"># we assume the certfile contains both private key and certificate</span>
+    <span class="s1">context = ssl.SSLContext(ssl.PROTOCOL_SSLv23)</span>
+    <span class="s1">context.load_cert_chain(certfile)</span>
+    <span class="s1">server = HTTPSServerThread(context</span><span class="s0">, </span><span class="s1">host</span><span class="s0">, </span><span class="s1">handler_class)</span>
+    <span class="s1">flag = threading.Event()</span>
+    <span class="s1">server.start(flag)</span>
+    <span class="s1">flag.wait()</span>
+    <span class="s0">def </span><span class="s1">cleanup():</span>
+        <span class="s0">if </span><span class="s1">support.verbose:</span>
+            <span class="s1">sys.stdout.write(</span><span class="s2">'stopping HTTPS server</span><span class="s0">\n</span><span class="s2">'</span><span class="s1">)</span>
+        <span class="s1">server.stop()</span>
+        <span class="s0">if </span><span class="s1">support.verbose:</span>
+            <span class="s1">sys.stdout.write(</span><span class="s2">'joining HTTPS thread</span><span class="s0">\n</span><span class="s2">'</span><span class="s1">)</span>
+        <span class="s1">server.join()</span>
+    <span class="s1">case.addCleanup(cleanup)</span>
+    <span class="s0">return </span><span class="s1">server</span>
+
+
+<span class="s0">if </span><span class="s1">__name__ == </span><span class="s2">&quot;__main__&quot;</span><span class="s1">:</span>
+    <span class="s0">import </span><span class="s1">argparse</span>
+    <span class="s1">parser = argparse.ArgumentParser(</span>
+        <span class="s1">description=</span><span class="s2">'Run a test HTTPS server. '</span>
+                    <span class="s2">'By default, the current directory is served.'</span><span class="s1">)</span>
+    <span class="s1">parser.add_argument(</span><span class="s2">'-p'</span><span class="s0">, </span><span class="s2">'--port'</span><span class="s0">, </span><span class="s1">type=int</span><span class="s0">, </span><span class="s1">default=</span><span class="s4">4433</span><span class="s0">,</span>
+                        <span class="s1">help=</span><span class="s2">'port to listen on (default: %(default)s)'</span><span class="s1">)</span>
+    <span class="s1">parser.add_argument(</span><span class="s2">'-q'</span><span class="s0">, </span><span class="s2">'--quiet'</span><span class="s0">, </span><span class="s1">dest=</span><span class="s2">'verbose'</span><span class="s0">, </span><span class="s1">default=</span><span class="s0">True,</span>
+                        <span class="s1">action=</span><span class="s2">'store_false'</span><span class="s0">, </span><span class="s1">help=</span><span class="s2">'be less verbose'</span><span class="s1">)</span>
+    <span class="s1">parser.add_argument(</span><span class="s2">'-s'</span><span class="s0">, </span><span class="s2">'--stats'</span><span class="s0">, </span><span class="s1">dest=</span><span class="s2">'use_stats_handler'</span><span class="s0">, </span><span class="s1">default=</span><span class="s0">False,</span>
+                        <span class="s1">action=</span><span class="s2">'store_true'</span><span class="s0">, </span><span class="s1">help=</span><span class="s2">'always return stats page'</span><span class="s1">)</span>
+    <span class="s1">parser.add_argument(</span><span class="s2">'--curve-name'</span><span class="s0">, </span><span class="s1">dest=</span><span class="s2">'curve_name'</span><span class="s0">, </span><span class="s1">type=str</span><span class="s0">,</span>
+                        <span class="s1">action=</span><span class="s2">'store'</span><span class="s0">,</span>
+                        <span class="s1">help=</span><span class="s2">'curve name for EC-based Diffie-Hellman'</span><span class="s1">)</span>
+    <span class="s1">parser.add_argument(</span><span class="s2">'--dh'</span><span class="s0">, </span><span class="s1">dest=</span><span class="s2">'dh_file'</span><span class="s0">, </span><span class="s1">type=str</span><span class="s0">, </span><span class="s1">action=</span><span class="s2">'store'</span><span class="s0">,</span>
+                        <span class="s1">help=</span><span class="s2">'PEM file containing DH parameters'</span><span class="s1">)</span>
+    <span class="s1">args = parser.parse_args()</span>
+
+    <span class="s1">support.verbose = args.verbose</span>
+    <span class="s0">if </span><span class="s1">args.use_stats_handler:</span>
+        <span class="s1">handler_class = StatsRequestHandler</span>
+    <span class="s0">else</span><span class="s1">:</span>
+        <span class="s1">handler_class = RootedHTTPRequestHandler</span>
+        <span class="s0">if </span><span class="s1">utils.PY2:</span>
+            <span class="s1">handler_class.root = os.getcwdu()</span>
+        <span class="s0">else</span><span class="s1">:</span>
+            <span class="s1">handler_class.root = os.getcwd()</span>
+    <span class="s1">context = ssl.SSLContext(ssl.PROTOCOL_TLSv1)</span>
+    <span class="s1">context.load_cert_chain(CERTFILE)</span>
+    <span class="s0">if </span><span class="s1">args.curve_name:</span>
+        <span class="s1">context.set_ecdh_curve(args.curve_name)</span>
+    <span class="s0">if </span><span class="s1">args.dh_file:</span>
+        <span class="s1">context.load_dh_params(args.dh_file)</span>
+
+    <span class="s1">server = HTTPSServer((</span><span class="s2">&quot;&quot;</span><span class="s0">, </span><span class="s1">args.port)</span><span class="s0">, </span><span class="s1">handler_class</span><span class="s0">, </span><span class="s1">context)</span>
+    <span class="s0">if </span><span class="s1">args.verbose:</span>
+        <span class="s1">print(</span><span class="s2">&quot;Listening on https://localhost:{0.port}&quot;</span><span class="s1">.format(args))</span>
+    <span class="s1">server.serve_forever(</span><span class="s4">0.1</span><span class="s1">)</span>
+</pre>
+</body>
+</html>

@@ -1,0 +1,1227 @@
+<html>
+<head>
+<title>msgcat-1.6.0.tm</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #a9b7c6;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+msgcat-1.6.0.tm</font>
+</center></td></tr></table>
+<pre><span class="s0"># msgcat.tcl --</span>
+<span class="s0">#</span>
+<span class="s0">#	This file defines various procedures which implement a</span>
+<span class="s0">#	message catalog facility for Tcl programs.  It should be</span>
+<span class="s0">#	loaded with the command &quot;package require msgcat&quot;.</span>
+<span class="s0">#</span>
+<span class="s0"># Copyright (c) 2010-2015 by Harald Oehlmann.</span>
+<span class="s0"># Copyright (c) 1998-2000 by Ajuba Solutions.</span>
+<span class="s0"># Copyright (c) 1998 by Mark Harrison.</span>
+<span class="s0">#</span>
+<span class="s0"># See the file &quot;license.terms&quot; for information on usage and redistribution</span>
+<span class="s0"># of this file, and for a DISCLAIMER OF ALL WARRANTIES.</span>
+
+<span class="s0">package require Tcl 8.5</span>
+<span class="s0"># When the version number changes, be sure to update the pkgIndex.tcl file,</span>
+<span class="s0"># and the installation directory in the Makefiles.</span>
+<span class="s0">package provide msgcat 1.6.0</span>
+
+<span class="s0">namespace eval msgcat {</span>
+    <span class="s0">namespace export mc mcexists mcload mclocale mcmax mcmset mcpreferences mcset\</span>
+            <span class="s0">mcunknown mcflset mcflmset mcloadedlocales mcforgetpackage\</span>
+	    <span class="s0">mcpackageconfig mcpackagelocale</span>
+
+    <span class="s0"># Records the list of locales to search</span>
+    <span class="s0">variable Loclist {}</span>
+
+    <span class="s0"># List of currently loaded locales</span>
+    <span class="s0">variable LoadedLocales {}</span>
+
+    <span class="s0"># Records the locale of the currently sourced message catalogue file</span>
+    <span class="s0">variable FileLocale</span>
+
+    <span class="s0"># Configuration values per Package (e.g. client namespace).</span>
+    <span class="s0"># The dict key is of the form &quot;&lt;option&gt; &lt;namespace&gt;&quot; and the value is the</span>
+    <span class="s0"># configuration option. A nonexisting key is an unset option.</span>
+    <span class="s0">variable PackageConfig [dict create mcfolder {} loadcmd {} changecmd {}\</span>
+	    <span class="s0">unknowncmd {} loadedlocales {} loclist {}]</span>
+
+    <span class="s0"># Records the mapping between source strings and translated strings.  The</span>
+    <span class="s0"># dict key is of the form &quot;&lt;namespace&gt; &lt;locale&gt; &lt;src&gt;&quot;, where locale and</span>
+    <span class="s0"># namespace should be themselves dict values and the value is</span>
+    <span class="s0"># the translated string.</span>
+    <span class="s0">variable Msgs [dict create]</span>
+
+    <span class="s0"># Map of language codes used in Windows registry to those of ISO-639</span>
+    <span class="s0">if {[info sharedlibextension] eq &quot;.dll&quot;} {</span>
+	<span class="s0">variable WinRegToISO639 [dict create  {*}{</span>
+	    <span class="s0">01 ar 0401 ar_SA 0801 ar_IQ 0c01 ar_EG 1001 ar_LY 1401 ar_DZ</span>
+		  <span class="s0">1801 ar_MA 1c01 ar_TN 2001 ar_OM 2401 ar_YE 2801 ar_SY</span>
+		  <span class="s0">2c01 ar_JO 3001 ar_LB 3401 ar_KW 3801 ar_AE 3c01 ar_BH</span>
+		  <span class="s0">4001 ar_QA</span>
+	    <span class="s0">02 bg 0402 bg_BG</span>
+	    <span class="s0">03 ca 0403 ca_ES</span>
+	    <span class="s0">04 zh 0404 zh_TW 0804 zh_CN 0c04 zh_HK 1004 zh_SG 1404 zh_MO</span>
+	    <span class="s0">05 cs 0405 cs_CZ</span>
+	    <span class="s0">06 da 0406 da_DK</span>
+	    <span class="s0">07 de 0407 de_DE 0807 de_CH 0c07 de_AT 1007 de_LU 1407 de_LI</span>
+	    <span class="s0">08 el 0408 el_GR</span>
+	    <span class="s0">09 en 0409 en_US 0809 en_GB 0c09 en_AU 1009 en_CA 1409 en_NZ</span>
+		  <span class="s0">1809 en_IE 1c09 en_ZA 2009 en_JM 2409 en_GD 2809 en_BZ</span>
+		  <span class="s0">2c09 en_TT 3009 en_ZW 3409 en_PH</span>
+	    <span class="s0">0a es 040a es_ES 080a es_MX 0c0a es_ES@modern 100a es_GT 140a es_CR</span>
+		  <span class="s0">180a es_PA 1c0a es_DO 200a es_VE 240a es_CO 280a es_PE</span>
+		  <span class="s0">2c0a es_AR 300a es_EC 340a es_CL 380a es_UY 3c0a es_PY</span>
+		  <span class="s0">400a es_BO 440a es_SV 480a es_HN 4c0a es_NI 500a es_PR</span>
+	    <span class="s0">0b fi 040b fi_FI</span>
+	    <span class="s0">0c fr 040c fr_FR 080c fr_BE 0c0c fr_CA 100c fr_CH 140c fr_LU</span>
+		  <span class="s0">180c fr_MC</span>
+	    <span class="s0">0d he 040d he_IL</span>
+	    <span class="s0">0e hu 040e hu_HU</span>
+	    <span class="s0">0f is 040f is_IS</span>
+	    <span class="s0">10 it 0410 it_IT 0810 it_CH</span>
+	    <span class="s0">11 ja 0411 ja_JP</span>
+	    <span class="s0">12 ko 0412 ko_KR</span>
+	    <span class="s0">13 nl 0413 nl_NL 0813 nl_BE</span>
+	    <span class="s0">14 no 0414 no_NO 0814 nn_NO</span>
+	    <span class="s0">15 pl 0415 pl_PL</span>
+	    <span class="s0">16 pt 0416 pt_BR 0816 pt_PT</span>
+	    <span class="s0">17 rm 0417 rm_CH</span>
+	    <span class="s0">18 ro 0418 ro_RO 0818 ro_MO</span>
+	    <span class="s0">19 ru 0819 ru_MO</span>
+	    <span class="s0">1a hr 041a hr_HR 081a sr_YU 0c1a sr_YU@cyrillic</span>
+	    <span class="s0">1b sk 041b sk_SK</span>
+	    <span class="s0">1c sq 041c sq_AL</span>
+	    <span class="s0">1d sv 041d sv_SE 081d sv_FI</span>
+	    <span class="s0">1e th 041e th_TH</span>
+	    <span class="s0">1f tr 041f tr_TR</span>
+	    <span class="s0">20 ur 0420 ur_PK 0820 ur_IN</span>
+	    <span class="s0">21 id 0421 id_ID</span>
+	    <span class="s0">22 uk 0422 uk_UA</span>
+	    <span class="s0">23 be 0423 be_BY</span>
+	    <span class="s0">24 sl 0424 sl_SI</span>
+	    <span class="s0">25 et 0425 et_EE</span>
+	    <span class="s0">26 lv 0426 lv_LV</span>
+	    <span class="s0">27 lt 0427 lt_LT</span>
+	    <span class="s0">28 tg 0428 tg_TJ</span>
+	    <span class="s0">29 fa 0429 fa_IR</span>
+	    <span class="s0">2a vi 042a vi_VN</span>
+	    <span class="s0">2b hy 042b hy_AM</span>
+	    <span class="s0">2c az 042c az_AZ@latin 082c az_AZ@cyrillic</span>
+	    <span class="s0">2d eu</span>
+	    <span class="s0">2e wen 042e wen_DE</span>
+	    <span class="s0">2f mk 042f mk_MK</span>
+	    <span class="s0">30 bnt 0430 bnt_TZ</span>
+	    <span class="s0">31 ts 0431 ts_ZA</span>
+	    <span class="s0">32 tn</span>
+	    <span class="s0">33 ven 0433 ven_ZA</span>
+	    <span class="s0">34 xh 0434 xh_ZA</span>
+	    <span class="s0">35 zu 0435 zu_ZA</span>
+	    <span class="s0">36 af 0436 af_ZA</span>
+	    <span class="s0">37 ka 0437 ka_GE</span>
+	    <span class="s0">38 fo 0438 fo_FO</span>
+	    <span class="s0">39 hi 0439 hi_IN</span>
+	    <span class="s0">3a mt 043a mt_MT</span>
+	    <span class="s0">3b se 043b se_NO</span>
+	    <span class="s0">043c gd_UK 083c ga_IE</span>
+	    <span class="s0">3d yi 043d yi_IL</span>
+	    <span class="s0">3e ms 043e ms_MY 083e ms_BN</span>
+	    <span class="s0">3f kk 043f kk_KZ</span>
+	    <span class="s0">40 ky 0440 ky_KG</span>
+	    <span class="s0">41 sw 0441 sw_KE</span>
+	    <span class="s0">42 tk 0442 tk_TM</span>
+	    <span class="s0">43 uz 0443 uz_UZ@latin 0843 uz_UZ@cyrillic</span>
+	    <span class="s0">44 tt 0444 tt_RU</span>
+	    <span class="s0">45 bn 0445 bn_IN</span>
+	    <span class="s0">46 pa 0446 pa_IN</span>
+	    <span class="s0">47 gu 0447 gu_IN</span>
+	    <span class="s0">48 or 0448 or_IN</span>
+	    <span class="s0">49 ta</span>
+	    <span class="s0">4a te 044a te_IN</span>
+	    <span class="s0">4b kn 044b kn_IN</span>
+	    <span class="s0">4c ml 044c ml_IN</span>
+	    <span class="s0">4d as 044d as_IN</span>
+	    <span class="s0">4e mr 044e mr_IN</span>
+	    <span class="s0">4f sa 044f sa_IN</span>
+	    <span class="s0">50 mn</span>
+	    <span class="s0">51 bo 0451 bo_CN</span>
+	    <span class="s0">52 cy 0452 cy_GB</span>
+	    <span class="s0">53 km 0453 km_KH</span>
+	    <span class="s0">54 lo 0454 lo_LA</span>
+	    <span class="s0">55 my 0455 my_MM</span>
+	    <span class="s0">56 gl 0456 gl_ES</span>
+	    <span class="s0">57 kok 0457 kok_IN</span>
+	    <span class="s0">58 mni 0458 mni_IN</span>
+	    <span class="s0">59 sd</span>
+	    <span class="s0">5a syr 045a syr_TR</span>
+	    <span class="s0">5b si 045b si_LK</span>
+	    <span class="s0">5c chr 045c chr_US</span>
+	    <span class="s0">5d iu 045d iu_CA</span>
+	    <span class="s0">5e am 045e am_ET</span>
+	    <span class="s0">5f ber 045f ber_MA</span>
+	    <span class="s0">60 ks 0460 ks_PK 0860 ks_IN</span>
+	    <span class="s0">61 ne 0461 ne_NP 0861 ne_IN</span>
+	    <span class="s0">62 fy 0462 fy_NL</span>
+	    <span class="s0">63 ps</span>
+	    <span class="s0">64 tl 0464 tl_PH</span>
+	    <span class="s0">65 div 0465 div_MV</span>
+	    <span class="s0">66 bin 0466 bin_NG</span>
+	    <span class="s0">67 ful 0467 ful_NG</span>
+	    <span class="s0">68 ha 0468 ha_NG</span>
+	    <span class="s0">69 nic 0469 nic_NG</span>
+	    <span class="s0">6a yo 046a yo_NG</span>
+	    <span class="s0">70 ibo 0470 ibo_NG</span>
+	    <span class="s0">71 kau 0471 kau_NG</span>
+	    <span class="s0">72 om 0472 om_ET</span>
+	    <span class="s0">73 ti 0473 ti_ET</span>
+	    <span class="s0">74 gn 0474 gn_PY</span>
+	    <span class="s0">75 cpe 0475 cpe_US</span>
+	    <span class="s0">76 la 0476 la_VA</span>
+	    <span class="s0">77 so 0477 so_SO</span>
+	    <span class="s0">78 sit 0478 sit_CN</span>
+	    <span class="s0">79 pap 0479 pap_AN</span>
+	<span class="s0">}]</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+
+<span class="s0"># msgcat::mc --</span>
+<span class="s0">#</span>
+<span class="s0">#	Find the translation for the given string based on the current</span>
+<span class="s0">#	locale setting. Check the local namespace first, then look in each</span>
+<span class="s0">#	parent namespace until the source is found.  If additional args are</span>
+<span class="s0">#	specified, use the format command to work them into the traslated</span>
+<span class="s0">#	string.</span>
+<span class="s0">#	If no catalog item is found, mcunknown is called in the caller frame</span>
+<span class="s0">#	and its result is returned.</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0">#	src	The string to translate.</span>
+<span class="s0">#	args	Args to pass to the format command</span>
+<span class="s0">#</span>
+<span class="s0"># Results:</span>
+<span class="s0">#	Returns the translated string.  Propagates errors thrown by the</span>
+<span class="s0">#	format command.</span>
+
+<span class="s0">proc msgcat::mc {src args} {</span>
+    <span class="s0"># this may be replaced by:</span>
+    <span class="s0"># return [mcget -namespace [uplevel 1 [list ::namespace current]] --\</span>
+    <span class="s0">#	    $src {*}$args]</span>
+
+    <span class="s0"># Check for the src in each namespace starting from the local and</span>
+    <span class="s0"># ending in the global.</span>
+
+    <span class="s0">variable Msgs</span>
+    <span class="s0">variable Loclist</span>
+
+    <span class="s0">set ns [uplevel 1 [list ::namespace current]]</span>
+    <span class="s0">set loclist [PackagePreferences $ns]</span>
+
+    <span class="s0">set nscur $ns</span>
+    <span class="s0">while {$nscur != &quot;&quot;} {</span>
+	<span class="s0">foreach loc $loclist {</span>
+	    <span class="s0">if {[dict exists $Msgs $nscur $loc $src]} {</span>
+		<span class="s0">return [DefaultUnknown &quot;&quot; [dict get $Msgs $nscur $loc $src]\</span>
+			<span class="s0">{*}$args]</span>
+	    <span class="s0">}</span>
+	<span class="s0">}</span>
+	<span class="s0">set nscur [namespace parent $nscur]</span>
+    <span class="s0">}</span>
+    <span class="s0"># call package local or default unknown command</span>
+    <span class="s0">set args [linsert $args 0 [lindex $loclist 0] $src]</span>
+    <span class="s0">switch -exact -- [Invoke unknowncmd $args $ns result 1] {</span>
+	<span class="s0">0 { return [uplevel 1 [linsert $args 0 [namespace origin mcunknown]]] }</span>
+	<span class="s0">1 { return [DefaultUnknown {*}$args] }</span>
+	<span class="s0">default { return $result }</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+
+<span class="s0"># msgcat::mcexists --</span>
+<span class="s0">#</span>
+<span class="s0">#	Check if a catalog item is set or if mc would invoke mcunknown.</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0">#	-exactnamespace		Only check the exact namespace and no</span>
+<span class="s0">#				parent namespaces</span>
+<span class="s0">#	-exactlocale		Only check the exact locale and not all members</span>
+<span class="s0">#				of the preferences list</span>
+<span class="s0">#	src			Message catalog key</span>
+<span class="s0">#</span>
+<span class="s0"># Results:</span>
+<span class="s0">#	true if an adequate catalog key was found</span>
+
+<span class="s0">proc msgcat::mcexists {args} {</span>
+
+    <span class="s0">variable Msgs</span>
+    <span class="s0">variable Loclist</span>
+    <span class="s0">variable PackageConfig</span>
+
+    <span class="s0">set ns [uplevel 1 [list ::namespace current]]</span>
+    <span class="s0">set loclist [PackagePreferences $ns]</span>
+
+    <span class="s0">while {[llength $args] != 1} {</span>
+	<span class="s0">set args [lassign $args option]</span>
+	<span class="s0">switch -glob -- $option {</span>
+	    <span class="s0">-exactnamespace { set exactnamespace 1 }</span>
+	    <span class="s0">-exactlocale { set loclist [lrange $loclist 0 0] }</span>
+	    <span class="s0">-* { return -code error &quot;unknown option \&quot;$option\&quot;&quot; }</span>
+	    <span class="s0">default {</span>
+		<span class="s0">return -code error &quot;wrong # args: should be\</span>
+			<span class="s0">\&quot;[lindex [info level 0] 0] ?-exactnamespace?\</span>
+			<span class="s0">?-exactlocale? src\&quot;&quot;</span>
+	    <span class="s0">}</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+    <span class="s0">set src [lindex $args 0]</span>
+
+    <span class="s0">while {$ns ne &quot;&quot;} {</span>
+	<span class="s0">foreach loc $loclist {</span>
+	    <span class="s0">if {[dict exists $Msgs $ns $loc $src]} {</span>
+		<span class="s0">return 1</span>
+	    <span class="s0">}</span>
+	<span class="s0">}</span>
+	<span class="s0">if {[info exists exactnamespace]} {return 0}</span>
+	<span class="s0">set ns [namespace parent $ns]</span>
+    <span class="s0">}</span>
+    <span class="s0">return 0</span>
+<span class="s0">}</span>
+
+<span class="s0"># msgcat::mclocale --</span>
+<span class="s0">#</span>
+<span class="s0">#	Query or set the current locale.</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0">#	newLocale	(Optional) The new locale string. Locale strings</span>
+<span class="s0">#			should be composed of one or more sublocale parts</span>
+<span class="s0">#			separated by underscores (e.g. en_US).</span>
+<span class="s0">#</span>
+<span class="s0"># Results:</span>
+<span class="s0">#	Returns the normalized set locale.</span>
+
+<span class="s0">proc msgcat::mclocale {args} {</span>
+    <span class="s0">variable Loclist</span>
+    <span class="s0">variable LoadedLocales</span>
+    <span class="s0">set len [llength $args]</span>
+
+    <span class="s0">if {$len &gt; 1} {</span>
+	<span class="s0">return -code error &quot;wrong # args: should be\</span>
+		<span class="s0">\&quot;[lindex [info level 0] 0] ?newLocale?\&quot;&quot;</span>
+    <span class="s0">}</span>
+
+    <span class="s0">if {$len == 1} {</span>
+	<span class="s0">set newLocale [string tolower [lindex $args 0]]</span>
+	<span class="s0">if {$newLocale ne [file tail $newLocale]} {</span>
+	    <span class="s0">return -code error &quot;invalid newLocale value \&quot;$newLocale\&quot;:\</span>
+		    <span class="s0">could be path to unsafe code.&quot;</span>
+	<span class="s0">}</span>
+	<span class="s0">if {[lindex $Loclist 0] ne $newLocale} {</span>
+	    <span class="s0">set Loclist [GetPreferences $newLocale]</span>
+
+	    <span class="s0"># locale not loaded jet</span>
+	    <span class="s0">LoadAll $Loclist</span>
+	    <span class="s0"># Invoke callback</span>
+	    <span class="s0">Invoke changecmd $Loclist</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+    <span class="s0">return [lindex $Loclist 0]</span>
+<span class="s0">}</span>
+
+<span class="s0"># msgcat::GetPreferences --</span>
+<span class="s0">#</span>
+<span class="s0">#	Get list of locales from a locale.</span>
+<span class="s0">#	The first element is always the lowercase locale.</span>
+<span class="s0">#	Other elements have one component separated by &quot;_&quot; less.</span>
+<span class="s0">#	Multiple &quot;_&quot; are seen as one separator: de__ch_spec de__ch de {}</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0">#	Locale.</span>
+<span class="s0">#</span>
+<span class="s0"># Results:</span>
+<span class="s0">#	Locale list</span>
+
+<span class="s0">proc msgcat::GetPreferences {locale} {</span>
+    <span class="s0">set locale [string tolower $locale]</span>
+    <span class="s0">set loclist [list $locale]</span>
+    <span class="s0">while {-1 !=[set pos [string last &quot;_&quot; $locale]]} {</span>
+	<span class="s0">set locale [string range $locale 0 $pos-1]</span>
+	<span class="s0">if { &quot;_&quot; ne [string index $locale end] } {</span>
+	    <span class="s0">lappend loclist $locale</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+    <span class="s0">if {&quot;&quot; ne [lindex $loclist end]} {</span>
+	<span class="s0">lappend loclist {}</span>
+    <span class="s0">}</span>
+    <span class="s0">return $loclist</span>
+<span class="s0">}</span>
+
+<span class="s0"># msgcat::mcpreferences --</span>
+<span class="s0">#</span>
+<span class="s0">#	Fetch the list of locales used to look up strings, ordered from</span>
+<span class="s0">#	most preferred to least preferred.</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0">#	None.</span>
+<span class="s0">#</span>
+<span class="s0"># Results:</span>
+<span class="s0">#	Returns an ordered list of the locales preferred by the user.</span>
+
+<span class="s0">proc msgcat::mcpreferences {} {</span>
+    <span class="s0">variable Loclist</span>
+    <span class="s0">return $Loclist</span>
+<span class="s0">}</span>
+
+<span class="s0"># msgcat::mcloadedlocales --</span>
+<span class="s0">#</span>
+<span class="s0">#	Get or change the list of currently loaded default locales</span>
+<span class="s0">#</span>
+<span class="s0">#	The following subcommands are available:</span>
+<span class="s0">#	loaded</span>
+<span class="s0">#	    Get the current list of loaded locales</span>
+<span class="s0">#	clear</span>
+<span class="s0">#	    Remove all loaded locales not present in mcpreferences.</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0">#	subcommand		One of loaded or clear</span>
+<span class="s0">#</span>
+<span class="s0"># Results:</span>
+<span class="s0">#	Empty string, if not stated differently for the subcommand</span>
+
+<span class="s0">proc msgcat::mcloadedlocales {subcommand} {</span>
+    <span class="s0">variable Loclist</span>
+    <span class="s0">variable LoadedLocales</span>
+    <span class="s0">variable Msgs</span>
+    <span class="s0">variable PackageConfig</span>
+    <span class="s0">switch -exact -- $subcommand {</span>
+	<span class="s0">clear {</span>
+	    <span class="s0"># Remove all locales not contained in Loclist</span>
+	    <span class="s0"># skip any packages with package locale</span>
+	    <span class="s0">set LoadedLocales $Loclist</span>
+	    <span class="s0">foreach ns [dict keys $Msgs] {</span>
+		<span class="s0">if {![dict exists $PackageConfig loclist $ns]} {</span>
+		    <span class="s0">foreach locale [dict keys [dict get $Msgs $ns]] {</span>
+			<span class="s0">if {$locale ni $Loclist} {</span>
+			    <span class="s0">dict unset Msgs $ns $locale</span>
+			<span class="s0">}</span>
+		    <span class="s0">}</span>
+		<span class="s0">}</span>
+	    <span class="s0">}</span>
+	<span class="s0">}</span>
+	<span class="s0">loaded { return $LoadedLocales }</span>
+	<span class="s0">default {</span>
+	    <span class="s0">return -code error &quot;unknown subcommand \&quot;$subcommand\&quot;: must be\</span>
+		    <span class="s0">clear, or loaded&quot;</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+    <span class="s0">return</span>
+<span class="s0">}</span>
+
+<span class="s0"># msgcat::mcpackagelocale --</span>
+<span class="s0">#</span>
+<span class="s0">#	Get or change the package locale of the calling package.</span>
+<span class="s0">#</span>
+<span class="s0">#	The following subcommands are available:</span>
+<span class="s0">#	set</span>
+<span class="s0">#	    Set a package locale.</span>
+<span class="s0">#	    This may load message catalog files and may clear message catalog</span>
+<span class="s0">#	    items, if the former locale was the default locale.</span>
+<span class="s0">#	    Returns the normalized set locale.</span>
+<span class="s0">#	    The default locale is taken, if locale is not given.</span>
+<span class="s0">#	get</span>
+<span class="s0">#	    Get the locale valid for this package.</span>
+<span class="s0">#	isset</span>
+<span class="s0">#	    Returns true, if a package locale is set</span>
+<span class="s0">#	unset</span>
+<span class="s0">#	    Unset the package locale and activate the default locale.</span>
+<span class="s0">#	    This loads message catalog file which where missing in the package</span>
+<span class="s0">#	    locale.</span>
+<span class="s0">#	preferences</span>
+<span class="s0">#	    Return locale preference list valid for the package.</span>
+<span class="s0">#	loaded</span>
+<span class="s0">#	    Return loaded locale list valid for the current package.</span>
+<span class="s0">#	clear</span>
+<span class="s0">#	    If the current package has a package locale, remove all package</span>
+<span class="s0">#	    locales not containes in package mcpreferences.</span>
+<span class="s0">#	    It is an error to call this without a package locale set.</span>
+<span class="s0">#</span>
+<span class="s0">#	The subcommands get, preferences and loaded return the corresponding</span>
+<span class="s0">#	default data, if no package locale is set.</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0">#	subcommand		see list above</span>
+<span class="s0">#	locale			package locale (only set subcommand)</span>
+<span class="s0">#</span>
+<span class="s0"># Results:</span>
+<span class="s0">#	Empty string, if not stated differently for the subcommand</span>
+
+<span class="s0">proc msgcat::mcpackagelocale {subcommand {locale &quot;&quot;}} {</span>
+    <span class="s0"># todo: implement using an ensemble</span>
+    <span class="s0">variable Loclist</span>
+    <span class="s0">variable LoadedLocales</span>
+    <span class="s0">variable Msgs</span>
+    <span class="s0">variable PackageConfig</span>
+    <span class="s0"># Check option</span>
+    <span class="s0"># check if required item is exactly provided</span>
+    <span class="s0">if {[llength [info level 0]] == 2} {</span>
+	<span class="s0"># locale not given</span>
+	<span class="s0">unset locale</span>
+    <span class="s0">} else {</span>
+	<span class="s0"># locale given</span>
+	<span class="s0">if {$subcommand in</span>
+		<span class="s0">{&quot;get&quot; &quot;isset&quot; &quot;unset&quot; &quot;preferences&quot; &quot;loaded&quot; &quot;clear&quot;} } {</span>
+	    <span class="s0">return -code error &quot;wrong # args: should be\</span>
+		    <span class="s0">\&quot;[lrange [info level 0] 0 1]\&quot;&quot;</span>
+	<span class="s0">}</span>
+        <span class="s0">set locale [string tolower $locale]</span>
+    <span class="s0">}</span>
+    <span class="s0">set ns [uplevel 1 {::namespace current}]</span>
+
+    <span class="s0">switch -exact -- $subcommand {</span>
+	<span class="s0">get { return [lindex [PackagePreferences $ns] 0] }</span>
+	<span class="s0">preferences { return [PackagePreferences $ns] }</span>
+	<span class="s0">loaded { return [PackageLocales $ns] }</span>
+	<span class="s0">present { return [expr {$locale in [PackageLocales $ns]} ]}</span>
+	<span class="s0">isset { return [dict exists $PackageConfig loclist $ns] }</span>
+	<span class="s0">set { # set a package locale or add a package locale</span>
+
+	    <span class="s0"># Copy the default locale if no package locale set so far</span>
+	    <span class="s0">if {![dict exists $PackageConfig loclist $ns]} {</span>
+		<span class="s0">dict set PackageConfig loclist $ns $Loclist</span>
+		<span class="s0">dict set PackageConfig loadedlocales $ns $LoadedLocales</span>
+	    <span class="s0">}</span>
+
+	    <span class="s0"># Check if changed</span>
+	    <span class="s0">set loclist [dict get $PackageConfig loclist $ns]</span>
+	    <span class="s0">if {! [info exists locale] || $locale eq [lindex $loclist 0] } {</span>
+		<span class="s0">return [lindex $loclist 0]</span>
+	    <span class="s0">}</span>
+
+	    <span class="s0"># Change loclist</span>
+	    <span class="s0">set loclist [GetPreferences $locale]</span>
+	    <span class="s0">set locale [lindex $loclist 0]</span>
+	    <span class="s0">dict set PackageConfig loclist $ns $loclist</span>
+
+	    <span class="s0"># load eventual missing locales</span>
+	    <span class="s0">set loadedLocales [dict get $PackageConfig loadedlocales $ns]</span>
+	    <span class="s0">if {$locale in $loadedLocales} { return $locale }</span>
+	    <span class="s0">set loadLocales [ListComplement $loadedLocales $loclist]</span>
+	    <span class="s0">dict set PackageConfig loadedlocales $ns\</span>
+		    <span class="s0">[concat $loadedLocales $loadLocales]</span>
+	    <span class="s0">Load $ns $loadLocales</span>
+	    <span class="s0">return $locale</span>
+	<span class="s0">}</span>
+	<span class="s0">clear { # Remove all locales not contained in Loclist</span>
+	    <span class="s0">if {![dict exists $PackageConfig loclist $ns]} {</span>
+		<span class="s0">return -code error &quot;clear only when package locale set&quot;</span>
+	    <span class="s0">}</span>
+	    <span class="s0">set loclist [dict get $PackageConfig loclist $ns]</span>
+	    <span class="s0">dict set PackageConfig loadedlocales $ns $loclist</span>
+	    <span class="s0">if {[dict exists $Msgs $ns]} {</span>
+		<span class="s0">foreach locale [dict keys [dict get $Msgs $ns]] {</span>
+		    <span class="s0">if {$locale ni $loclist} {</span>
+			<span class="s0">dict unset Msgs $ns $locale</span>
+		    <span class="s0">}</span>
+		<span class="s0">}</span>
+	    <span class="s0">}</span>
+	<span class="s0">}</span>
+	<span class="s0">unset {	# unset package locale and restore default locales</span>
+
+	    <span class="s0">if { ![dict exists $PackageConfig loclist $ns] } { return }</span>
+
+	    <span class="s0"># unset package locale</span>
+	    <span class="s0">set loadLocales [ListComplement\</span>
+		    <span class="s0">[dict get $PackageConfig loadedlocales $ns] $LoadedLocales]</span>
+	    <span class="s0">dict unset PackageConfig loadedlocales $ns</span>
+	    <span class="s0">dict unset PackageConfig loclist $ns</span>
+
+	    <span class="s0"># unset keys not in global loaded locales</span>
+	    <span class="s0">if {[dict exists $Msgs $ns]} {</span>
+		<span class="s0">foreach locale [dict keys [dict get $Msgs $ns]] {</span>
+		    <span class="s0">if {$locale ni $LoadedLocales} {</span>
+			<span class="s0">dict unset Msgs $ns $locale</span>
+		    <span class="s0">}</span>
+		<span class="s0">}</span>
+	    <span class="s0">}</span>
+
+	    <span class="s0"># Add missing locales</span>
+	    <span class="s0">Load $ns $loadLocales</span>
+	<span class="s0">}</span>
+	<span class="s0">default {</span>
+	    <span class="s0">return -code error &quot;unknown subcommand \&quot;$subcommand\&quot;: must be\</span>
+		    <span class="s0">clear, get, isset, loaded, present, set, or unset&quot;</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+    <span class="s0">return</span>
+<span class="s0">}</span>
+
+<span class="s0"># msgcat::mcforgetpackage --</span>
+<span class="s0">#</span>
+<span class="s0">#	Remove any data of the calling package from msgcat</span>
+<span class="s0">#</span>
+
+<span class="s0">proc msgcat::mcforgetpackage {} {</span>
+    <span class="s0"># todo: this may be implemented using an ensemble</span>
+    <span class="s0">variable PackageConfig</span>
+    <span class="s0">variable Msgs</span>
+    <span class="s0">set ns [uplevel 1 {::namespace current}]</span>
+    <span class="s0"># Remove MC items</span>
+    <span class="s0">dict unset Msgs $ns</span>
+    <span class="s0"># Remove config items</span>
+    <span class="s0">foreach key [dict keys $PackageConfig] {</span>
+	<span class="s0">dict unset PackageConfig $key $ns</span>
+    <span class="s0">}</span>
+    <span class="s0">return</span>
+<span class="s0">}</span>
+
+<span class="s0"># msgcat::mcpackageconfig --</span>
+<span class="s0">#</span>
+<span class="s0">#	Get or modify the per caller namespace (e.g. packages) config options.</span>
+<span class="s0">#</span>
+<span class="s0">#	Available subcommands are:</span>
+<span class="s0">#</span>
+<span class="s0">#	    get		get the current value or an error if not set.</span>
+<span class="s0">#	    isset	return true, if the option is set</span>
+<span class="s0">#	    set		set the value (see also distinct option).</span>
+<span class="s0">#			Returns the number of loaded message files.</span>
+<span class="s0">#	    unset	Clear option. return &quot;&quot;.</span>
+<span class="s0">#</span>
+<span class="s0">#	Available options are:</span>
+<span class="s0">#</span>
+<span class="s0">#	mcfolder</span>
+<span class="s0">#	    The message catalog folder of the package.</span>
+<span class="s0">#	    This is automatically set by mcload.</span>
+<span class="s0">#	    If the value is changed using the set subcommand, an evntual</span>
+<span class="s0">#	    loadcmd is invoked and all message files of the package locale are</span>
+<span class="s0">#	    loaded.</span>
+<span class="s0">#</span>
+<span class="s0">#	loadcmd</span>
+<span class="s0">#	    The command gets executed before a message file would be</span>
+<span class="s0">#	    sourced for this module.</span>
+<span class="s0">#	    The command is invoked with the expanded locale list to load.</span>
+<span class="s0">#	    The command is not invoked if the registering package namespace</span>
+<span class="s0">#	    is not present.</span>
+<span class="s0">#	    This callback might also be used as an alternative to message</span>
+<span class="s0">#	    files.</span>
+<span class="s0">#	    If the value is changed using the set subcommand, the callback is</span>
+<span class="s0">#	    directly invoked with the current file locale list. No file load is</span>
+<span class="s0">#	    executed.</span>
+<span class="s0">#</span>
+<span class="s0">#	changecmd</span>
+<span class="s0">#	    The command is invoked, after an executed locale change.</span>
+<span class="s0">#	    Appended argument is expanded mcpreferences.</span>
+<span class="s0">#</span>
+<span class="s0">#	unknowncmd</span>
+<span class="s0">#	    Use a package locale mcunknown procedure instead the global one.</span>
+<span class="s0">#	    The appended arguments are identical to mcunknown.</span>
+<span class="s0">#	    A default unknown handler is used if set to the empty string.</span>
+<span class="s0">#	    This consists in returning the key if no arguments are given.</span>
+<span class="s0">#	    With given arguments, format is used to process the arguments.</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0">#	subcommand		Operation on the package</span>
+<span class="s0">#	option			The package option to get or set.</span>
+<span class="s0">#	?value?			Eventual value for the subcommand</span>
+<span class="s0">#</span>
+<span class="s0"># Results:</span>
+<span class="s0">#	Depends on the subcommand and option and is described there</span>
+
+<span class="s0">proc msgcat::mcpackageconfig {subcommand option {value &quot;&quot;}} {</span>
+    <span class="s0">variable PackageConfig</span>
+    <span class="s0"># get namespace</span>
+    <span class="s0">set ns [uplevel 1 {::namespace current}]</span>
+
+    <span class="s0">if {$option ni {&quot;mcfolder&quot; &quot;loadcmd&quot; &quot;changecmd&quot; &quot;unknowncmd&quot;}} {</span>
+	<span class="s0">return -code error &quot;bad option \&quot;$option\&quot;: must be mcfolder, loadcmd,\</span>
+		<span class="s0">changecmd, or unknowncmd&quot;</span>
+    <span class="s0">}</span>
+
+    <span class="s0"># check if value argument is exactly provided</span>
+    <span class="s0">if {[llength [info level 0]] == 4 } {</span>
+	<span class="s0"># value provided</span>
+	<span class="s0">if {$subcommand in {&quot;get&quot; &quot;isset&quot; &quot;unset&quot;}} {</span>
+	    <span class="s0">return -code error &quot;wrong # args: should be\</span>
+		    <span class="s0">\&quot;[lrange [info level 0] 0 2] value\&quot;&quot;</span>
+	<span class="s0">}</span>
+    <span class="s0">} elseif {$subcommand eq &quot;set&quot;} {</span>
+        <span class="s0">return -code error\</span>
+		<span class="s0">&quot;wrong # args: should be \&quot;[lrange [info level 0] 0 2]\&quot;&quot;</span>
+    <span class="s0">}</span>
+
+    <span class="s0"># Execute subcommands</span>
+    <span class="s0">switch -exact -- $subcommand {</span>
+	<span class="s0">get {	# Operation get return current value</span>
+	    <span class="s0">if {![dict exists $PackageConfig $option $ns]} {</span>
+		<span class="s0">return -code error &quot;package option \&quot;$option\&quot; not set&quot;</span>
+	    <span class="s0">}</span>
+	    <span class="s0">return [dict get $PackageConfig $option $ns]</span>
+	<span class="s0">}</span>
+	<span class="s0">isset {	return [dict exists $PackageConfig $option $ns] }</span>
+	<span class="s0">unset {	dict unset PackageConfig $option $ns }</span>
+	<span class="s0">set {	# Set option</span>
+
+	    <span class="s0">if {$option eq &quot;mcfolder&quot;} {</span>
+		<span class="s0">set value [file normalize $value]</span>
+	    <span class="s0">}</span>
+	    <span class="s0"># Check if changed</span>
+	    <span class="s0">if { [dict exists $PackageConfig $option $ns]</span>
+		    <span class="s0">&amp;&amp; $value eq [dict get $PackageConfig $option $ns] } {</span>
+		<span class="s0">return 0</span>
+	    <span class="s0">}</span>
+
+	    <span class="s0"># set new value</span>
+	    <span class="s0">dict set PackageConfig $option $ns $value</span>
+
+	    <span class="s0"># Reload pending message catalogs</span>
+	    <span class="s0">switch -exact -- $option {</span>
+		<span class="s0">mcfolder { return [Load $ns [PackageLocales $ns]] }</span>
+		<span class="s0">loadcmd { return [Load $ns [PackageLocales $ns] 1] }</span>
+	    <span class="s0">}</span>
+	    <span class="s0">return 0</span>
+	<span class="s0">}</span>
+	<span class="s0">default {</span>
+	    <span class="s0">return -code error &quot;unknown subcommand \&quot;$subcommand\&quot;:\</span>
+		    <span class="s0">must be get, isset, set, or unset&quot;</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+    <span class="s0">return</span>
+<span class="s0">}</span>
+
+<span class="s0"># msgcat::PackagePreferences --</span>
+<span class="s0">#</span>
+<span class="s0">#	Return eventual present package preferences or the default list if not</span>
+<span class="s0">#	present.</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0">#	ns		Package namespace</span>
+<span class="s0">#</span>
+<span class="s0"># Results:</span>
+<span class="s0">#	locale list</span>
+
+<span class="s0">proc msgcat::PackagePreferences {ns} {</span>
+    <span class="s0">variable PackageConfig</span>
+    <span class="s0">if {[dict exists $PackageConfig loclist $ns]} {</span>
+	<span class="s0">return [dict get $PackageConfig loclist $ns]</span>
+    <span class="s0">}</span>
+    <span class="s0">variable Loclist</span>
+    <span class="s0">return $Loclist</span>
+<span class="s0">}</span>
+
+<span class="s0"># msgcat::PackageLocales --</span>
+<span class="s0">#</span>
+<span class="s0">#	Return eventual present package locales or the default list if not</span>
+<span class="s0">#	present.</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0">#	ns		Package namespace</span>
+<span class="s0">#</span>
+<span class="s0"># Results:</span>
+<span class="s0">#	locale list</span>
+
+<span class="s0">proc msgcat::PackageLocales {ns} {</span>
+    <span class="s0">variable PackageConfig</span>
+    <span class="s0">if {[dict exists $PackageConfig loadedlocales $ns]} {</span>
+	<span class="s0">return [dict get $PackageConfig loadedlocales $ns]</span>
+    <span class="s0">}</span>
+    <span class="s0">variable LoadedLocales</span>
+    <span class="s0">return $LoadedLocales</span>
+<span class="s0">}</span>
+
+<span class="s0"># msgcat::ListComplement --</span>
+<span class="s0">#</span>
+<span class="s0">#	Build the complement of two lists.</span>
+<span class="s0">#	Return a list with all elements in list2 but not in list1.</span>
+<span class="s0">#	Optionally return the intersection.</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0">#	list1		excluded list</span>
+<span class="s0">#	list2		included list</span>
+<span class="s0">#	inlistname	If not &quot;&quot;, write in this variable the intersection list</span>
+<span class="s0">#</span>
+<span class="s0"># Results:</span>
+<span class="s0">#	list with all elements in list2 but not in list1</span>
+
+<span class="s0">proc msgcat::ListComplement {list1 list2 {inlistname &quot;&quot;}} {</span>
+    <span class="s0">if {&quot;&quot; ne $inlistname} {</span>
+	<span class="s0">upvar 1 $inlistname inlist</span>
+    <span class="s0">}</span>
+    <span class="s0">set inlist {}</span>
+    <span class="s0">set outlist {}</span>
+    <span class="s0">foreach item $list2 {</span>
+	<span class="s0">if {$item in $list1} {</span>
+	    <span class="s0">lappend inlist $item</span>
+	<span class="s0">} else {</span>
+	    <span class="s0">lappend outlist $item</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+    <span class="s0">return $outlist</span>
+<span class="s0">}</span>
+
+<span class="s0"># msgcat::mcload --</span>
+<span class="s0">#</span>
+<span class="s0">#	Attempt to load message catalogs for each locale in the</span>
+<span class="s0">#	preference list from the specified directory.</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0">#	langdir		The directory to search.</span>
+<span class="s0">#</span>
+<span class="s0"># Results:</span>
+<span class="s0">#	Returns the number of message catalogs that were loaded.</span>
+
+<span class="s0">proc msgcat::mcload {langdir} {</span>
+    <span class="s0">return [uplevel 1 [list\</span>
+	    <span class="s0">[namespace origin mcpackageconfig] set mcfolder $langdir]]</span>
+<span class="s0">}</span>
+
+<span class="s0"># msgcat::LoadAll --</span>
+<span class="s0">#</span>
+<span class="s0">#	Load a list of locales for all packages not having a package locale</span>
+<span class="s0">#	list.</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0">#	langdir		The directory to search.</span>
+<span class="s0">#</span>
+<span class="s0"># Results:</span>
+<span class="s0">#	Returns the number of message catalogs that were loaded.</span>
+
+<span class="s0">proc msgcat::LoadAll {locales} {</span>
+    <span class="s0">variable PackageConfig</span>
+    <span class="s0">variable LoadedLocales</span>
+    <span class="s0">if {0 == [llength $locales]} { return {} }</span>
+    <span class="s0"># filter jet unloaded locales</span>
+    <span class="s0">set locales [ListComplement $LoadedLocales $locales]</span>
+    <span class="s0">if {0 == [llength $locales]} { return {} }</span>
+    <span class="s0">lappend LoadedLocales {*}$locales</span>
+
+    <span class="s0">set packages [lsort -unique [concat\</span>
+	    <span class="s0">[dict keys [dict get $PackageConfig loadcmd]]\</span>
+	    <span class="s0">[dict keys [dict get $PackageConfig mcfolder]]]]</span>
+    <span class="s0">foreach ns $packages {</span>
+	<span class="s0">if {! [dict exists $PackageConfig loclist $ns] } {</span>
+	    <span class="s0">Load $ns $locales</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+    <span class="s0">return $locales</span>
+<span class="s0">}</span>
+
+<span class="s0"># msgcat::Load --</span>
+<span class="s0">#</span>
+<span class="s0">#	Invoke message load callback and load message catalog files.</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0">#	ns		Namespace (equal package) to load the message catalog.</span>
+<span class="s0">#	locales		List of locales to load.</span>
+<span class="s0">#	callbackonly	true if only callback should be invoked</span>
+<span class="s0">#</span>
+<span class="s0"># Results:</span>
+<span class="s0">#	Returns the number of message catalogs that were loaded.</span>
+
+<span class="s0">proc msgcat::Load {ns locales {callbackonly 0}} {</span>
+    <span class="s0">variable FileLocale</span>
+    <span class="s0">variable PackageConfig</span>
+    <span class="s0">variable LoadedLocals</span>
+
+    <span class="s0">if {0 == [llength $locales]} { return 0 }</span>
+
+    <span class="s0"># Invoke callback</span>
+    <span class="s0">Invoke loadcmd $locales $ns</span>
+
+    <span class="s0">if {$callbackonly || ![dict exists $PackageConfig mcfolder $ns]} {</span>
+	<span class="s0">return 0</span>
+    <span class="s0">}</span>
+
+    <span class="s0"># Invoke file load</span>
+    <span class="s0">set langdir [dict get $PackageConfig mcfolder $ns]</span>
+
+    <span class="s0"># Save the file locale if we are recursively called</span>
+    <span class="s0">if {[info exists FileLocale]} {</span>
+	<span class="s0">set nestedFileLocale $FileLocale</span>
+    <span class="s0">}</span>
+    <span class="s0">set x 0</span>
+    <span class="s0">foreach p $locales {</span>
+	<span class="s0">if {$p eq {}} {</span>
+	    <span class="s0">set p ROOT</span>
+	<span class="s0">}</span>
+	<span class="s0">set langfile [file join $langdir $p.msg]</span>
+	<span class="s0">if {[file exists $langfile]} {</span>
+	    <span class="s0">incr x</span>
+	    <span class="s0">set FileLocale [string tolower\</span>
+		    <span class="s0">[file tail [file rootname $langfile]]]</span>
+	    <span class="s0">if {&quot;root&quot; eq $FileLocale} {</span>
+		<span class="s0">set FileLocale &quot;&quot;</span>
+	    <span class="s0">}</span>
+	    <span class="s0">namespace inscope $ns [list ::source -encoding utf-8 $langfile]</span>
+	    <span class="s0">unset FileLocale</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+    <span class="s0">if {[info exists nestedFileLocale]} {</span>
+	<span class="s0">set FileLocale $nestedFileLocale</span>
+    <span class="s0">}</span>
+    <span class="s0">return $x</span>
+<span class="s0">}</span>
+
+<span class="s0"># msgcat::Invoke --</span>
+<span class="s0">#</span>
+<span class="s0">#	Invoke a set of registered callbacks.</span>
+<span class="s0">#	The callback is only invoked, if its registered namespace exists.</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0">#	index		Index into PackageConfig to get callback command</span>
+<span class="s0">#	arglist		parameters to the callback invocation</span>
+<span class="s0">#	ns		(Optional) package to call.</span>
+<span class="s0">#			If not given or empty, check all registered packages.</span>
+<span class="s0">#	resultname	Variable to save the callback result of the last called</span>
+<span class="s0">#			callback to. May be set to &quot;&quot; to discard the result.</span>
+<span class="s0">#	failerror (0)	Fail on error if true. Otherwise call bgerror.</span>
+<span class="s0">#</span>
+<span class="s0"># Results:</span>
+<span class="s0">#	Possible values:</span>
+<span class="s0">#	- 0: no valid command registered</span>
+<span class="s0">#	- 1: registered command was the empty string</span>
+<span class="s0">#	- 2: registered command called, resultname is set</span>
+<span class="s0">#	- 3: registered command failed</span>
+<span class="s0">#	If multiple commands are called, the maximum of all results is returned.</span>
+
+<span class="s0">proc msgcat::Invoke {index arglist {ns &quot;&quot;} {resultname &quot;&quot;} {failerror 0}} {</span>
+    <span class="s0">variable PackageConfig</span>
+    <span class="s0">variable Config</span>
+    <span class="s0">if {&quot;&quot; ne $resultname} {</span>
+	<span class="s0">upvar 1 $resultname result</span>
+    <span class="s0">}</span>
+    <span class="s0">if {&quot;&quot; eq $ns} {</span>
+	<span class="s0">set packageList [dict keys [dict get $PackageConfig $index]]</span>
+    <span class="s0">} else {</span>
+	<span class="s0">set packageList [list $ns]</span>
+    <span class="s0">}</span>
+    <span class="s0">set ret 0</span>
+    <span class="s0">foreach ns $packageList {</span>
+	<span class="s0">if {[dict exists $PackageConfig $index $ns] &amp;&amp; [namespace exists $ns]} {</span>
+	    <span class="s0">set cmd [dict get $PackageConfig $index $ns]</span>
+	    <span class="s0">if {&quot;&quot; eq $cmd} {</span>
+		<span class="s0">if {$ret == 0} {set ret 1}</span>
+	    <span class="s0">} else {</span>
+		<span class="s0">if {$failerror} {</span>
+		    <span class="s0">set result [namespace inscope $ns $cmd {*}$arglist]</span>
+		    <span class="s0">set ret 2</span>
+		<span class="s0">} elseif {1 == [catch {</span>
+		    <span class="s0">set result [namespace inscope $ns $cmd {*}$arglist]</span>
+		    <span class="s0">if {$ret &lt; 2} {set ret 2}</span>
+		<span class="s0">} err derr]} {</span>
+		    <span class="s0">after idle [concat [::interp bgerror &quot;&quot;]\</span>
+			    <span class="s0">[list $err $derr]]</span>
+		    <span class="s0">set ret 3</span>
+		<span class="s0">}</span>
+	    <span class="s0">}</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+    <span class="s0">return $ret</span>
+<span class="s0">}</span>
+
+<span class="s0"># msgcat::mcset --</span>
+<span class="s0">#</span>
+<span class="s0">#	Set the translation for a given string in a specified locale.</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0">#	locale		The locale to use.</span>
+<span class="s0">#	src		The source string.</span>
+<span class="s0">#	dest		(Optional) The translated string.  If omitted,</span>
+<span class="s0">#			the source string is used.</span>
+<span class="s0">#</span>
+<span class="s0"># Results:</span>
+<span class="s0">#	Returns the new locale.</span>
+
+<span class="s0">proc msgcat::mcset {locale src {dest &quot;&quot;}} {</span>
+    <span class="s0">variable Msgs</span>
+    <span class="s0">if {[llength [info level 0]] == 3} { ;# dest not specified</span>
+	<span class="s0">set dest $src</span>
+    <span class="s0">}</span>
+
+    <span class="s0">set ns [uplevel 1 [list ::namespace current]]</span>
+
+    <span class="s0">set locale [string tolower $locale]</span>
+
+    <span class="s0">dict set Msgs $ns $locale $src $dest</span>
+    <span class="s0">return $dest</span>
+<span class="s0">}</span>
+
+<span class="s0"># msgcat::mcflset --</span>
+<span class="s0">#</span>
+<span class="s0">#	Set the translation for a given string in the current file locale.</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0">#	src		The source string.</span>
+<span class="s0">#	dest		(Optional) The translated string.  If omitted,</span>
+<span class="s0">#			the source string is used.</span>
+<span class="s0">#</span>
+<span class="s0"># Results:</span>
+<span class="s0">#	Returns the new locale.</span>
+
+<span class="s0">proc msgcat::mcflset {src {dest &quot;&quot;}} {</span>
+    <span class="s0">variable FileLocale</span>
+    <span class="s0">variable Msgs</span>
+
+    <span class="s0">if {![info exists FileLocale]} {</span>
+	<span class="s0">return -code error &quot;must only be used inside a message catalog loaded\</span>
+		<span class="s0">with ::msgcat::mcload&quot;</span>
+    <span class="s0">}</span>
+    <span class="s0">return [uplevel 1 [list [namespace origin mcset] $FileLocale $src $dest]]</span>
+<span class="s0">}</span>
+
+<span class="s0"># msgcat::mcmset --</span>
+<span class="s0">#</span>
+<span class="s0">#	Set the translation for multiple strings in a specified locale.</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0">#	locale		The locale to use.</span>
+<span class="s0">#	pairs		One or more src/dest pairs (must be even length)</span>
+<span class="s0">#</span>
+<span class="s0"># Results:</span>
+<span class="s0">#	Returns the number of pairs processed</span>
+
+<span class="s0">proc msgcat::mcmset {locale pairs} {</span>
+    <span class="s0">variable Msgs</span>
+
+    <span class="s0">set length [llength $pairs]</span>
+    <span class="s0">if {$length % 2} {</span>
+	<span class="s0">return -code error &quot;bad translation list:\</span>
+		<span class="s0">should be \&quot;[lindex [info level 0] 0] locale {src dest ...}\&quot;&quot;</span>
+    <span class="s0">}</span>
+
+    <span class="s0">set locale [string tolower $locale]</span>
+    <span class="s0">set ns [uplevel 1 [list ::namespace current]]</span>
+
+    <span class="s0">foreach {src dest} $pairs {</span>
+	<span class="s0">dict set Msgs $ns $locale $src $dest</span>
+    <span class="s0">}</span>
+
+    <span class="s0">return [expr {$length / 2}]</span>
+<span class="s0">}</span>
+
+<span class="s0"># msgcat::mcflmset --</span>
+<span class="s0">#</span>
+<span class="s0">#	Set the translation for multiple strings in the mc file locale.</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0">#	pairs		One or more src/dest pairs (must be even length)</span>
+<span class="s0">#</span>
+<span class="s0"># Results:</span>
+<span class="s0">#	Returns the number of pairs processed</span>
+
+<span class="s0">proc msgcat::mcflmset {pairs} {</span>
+    <span class="s0">variable FileLocale</span>
+    <span class="s0">variable Msgs</span>
+
+    <span class="s0">if {![info exists FileLocale]} {</span>
+	<span class="s0">return -code error &quot;must only be used inside a message catalog loaded\</span>
+		<span class="s0">with ::msgcat::mcload&quot;</span>
+    <span class="s0">}</span>
+    <span class="s0">return [uplevel 1 [list [namespace origin mcmset] $FileLocale $pairs]]</span>
+<span class="s0">}</span>
+
+<span class="s0"># msgcat::mcunknown --</span>
+<span class="s0">#</span>
+<span class="s0">#	This routine is called by msgcat::mc if a translation cannot</span>
+<span class="s0">#	be found for a string and no unknowncmd is set for the current</span>
+<span class="s0">#	package. This routine is intended to be replaced</span>
+<span class="s0">#	by an application specific routine for error reporting</span>
+<span class="s0">#	purposes.  The default behavior is to return the source string.</span>
+<span class="s0">#	If additional args are specified, the format command will be used</span>
+<span class="s0">#	to work them into the traslated string.</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0">#	locale		The current locale.</span>
+<span class="s0">#	src		The string to be translated.</span>
+<span class="s0">#	args		Args to pass to the format command</span>
+<span class="s0">#</span>
+<span class="s0"># Results:</span>
+<span class="s0">#	Returns the translated value.</span>
+
+<span class="s0">proc msgcat::mcunknown {args} {</span>
+    <span class="s0">return [uplevel 1 [list [namespace origin DefaultUnknown] {*}$args]]</span>
+<span class="s0">}</span>
+
+<span class="s0"># msgcat::DefaultUnknown --</span>
+<span class="s0">#</span>
+<span class="s0">#	This routine is called by msgcat::mc if a translation cannot</span>
+<span class="s0">#	be found for a string in the following circumstances:</span>
+<span class="s0">#	- Default global handler, if mcunknown is not redefined.</span>
+<span class="s0">#	- Per package handler, if the package sets unknowncmd to the empty</span>
+<span class="s0">#	  string.</span>
+<span class="s0">#	It returna the source string if the argument list is empty.</span>
+<span class="s0">#	If additional args are specified, the format command will be used</span>
+<span class="s0">#	to work them into the traslated string.</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0">#	locale		(unused) The current locale.</span>
+<span class="s0">#	src		The string to be translated.</span>
+<span class="s0">#	args		Args to pass to the format command</span>
+<span class="s0">#</span>
+<span class="s0"># Results:</span>
+<span class="s0">#	Returns the translated value.</span>
+
+<span class="s0">proc msgcat::DefaultUnknown {locale src args} {</span>
+    <span class="s0">if {[llength $args]} {</span>
+	<span class="s0">return [format $src {*}$args]</span>
+    <span class="s0">} else {</span>
+	<span class="s0">return $src</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+
+<span class="s0"># msgcat::mcmax --</span>
+<span class="s0">#</span>
+<span class="s0">#	Calculates the maximum length of the translated strings of the given</span>
+<span class="s0">#	list.</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0">#	args	strings to translate.</span>
+<span class="s0">#</span>
+<span class="s0"># Results:</span>
+<span class="s0">#	Returns the length of the longest translated string.</span>
+
+<span class="s0">proc msgcat::mcmax {args} {</span>
+    <span class="s0">set max 0</span>
+    <span class="s0">foreach string $args {</span>
+	<span class="s0">set translated [uplevel 1 [list [namespace origin mc] $string]]</span>
+	<span class="s0">set len [string length $translated]</span>
+	<span class="s0">if {$len&gt;$max} {</span>
+	    <span class="s0">set max $len</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+    <span class="s0">return $max</span>
+<span class="s0">}</span>
+
+<span class="s0"># Convert the locale values stored in environment variables to a form</span>
+<span class="s0"># suitable for passing to [mclocale]</span>
+<span class="s0">proc msgcat::ConvertLocale {value} {</span>
+    <span class="s0"># Assume $value is of form: $language[_$territory][.$codeset][@modifier]</span>
+    <span class="s0"># Convert to form: $language[_$territory][_$modifier]</span>
+    <span class="s0">#</span>
+    <span class="s0"># Comment out expanded RE version -- bugs alleged</span>
+    <span class="s0"># regexp -expanded {</span>
+    <span class="s0">#	^		# Match all the way to the beginning</span>
+    <span class="s0">#	([^_.@]*)	# Match &quot;lanugage&quot;; ends with _, ., or @</span>
+    <span class="s0">#	(_([^.@]*))?	# Match (optional) &quot;territory&quot;; starts with _</span>
+    <span class="s0">#	([.]([^@]*))?	# Match (optional) &quot;codeset&quot;; starts with .</span>
+    <span class="s0">#	(@(.*))?	# Match (optional) &quot;modifier&quot;; starts with @</span>
+    <span class="s0">#	$		# Match all the way to the end</span>
+    <span class="s0"># } $value -&gt; language _ territory _ codeset _ modifier</span>
+    <span class="s0">if {![regexp {^([^_.@]+)(_([^.@]*))?([.]([^@]*))?(@(.*))?$} $value \</span>
+	    <span class="s0">-&gt; language _ territory _ codeset _ modifier]} {</span>
+	<span class="s0">return -code error &quot;invalid locale '$value': empty language part&quot;</span>
+    <span class="s0">}</span>
+    <span class="s0">set ret $language</span>
+    <span class="s0">if {[string length $territory]} {</span>
+	<span class="s0">append ret _$territory</span>
+    <span class="s0">}</span>
+    <span class="s0">if {[string length $modifier]} {</span>
+	<span class="s0">append ret _$modifier</span>
+    <span class="s0">}</span>
+    <span class="s0">return $ret</span>
+<span class="s0">}</span>
+
+<span class="s0"># Initialize the default locale</span>
+<span class="s0">proc msgcat::Init {} {</span>
+    <span class="s0">global env</span>
+
+    <span class="s0">#</span>
+    <span class="s0"># set default locale, try to get from environment</span>
+    <span class="s0">#</span>
+    <span class="s0">foreach varName {LC_ALL LC_MESSAGES LANG} {</span>
+	<span class="s0">if {[info exists env($varName)] &amp;&amp; (&quot;&quot; ne $env($varName))} {</span>
+	    <span class="s0">if {![catch {</span>
+		<span class="s0">mclocale [ConvertLocale $env($varName)]</span>
+	    <span class="s0">}]} {</span>
+		<span class="s0">return</span>
+	    <span class="s0">}</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+    <span class="s0">#</span>
+    <span class="s0"># On Darwin, fallback to current CFLocale identifier if available.</span>
+    <span class="s0">#</span>
+    <span class="s0">if {[info exists ::tcl::mac::locale] &amp;&amp; $::tcl::mac::locale ne &quot;&quot;} {</span>
+	<span class="s0">if {![catch {</span>
+	    <span class="s0">mclocale [ConvertLocale $::tcl::mac::locale]</span>
+	<span class="s0">}]} {</span>
+	    <span class="s0">return</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+    <span class="s0">#</span>
+    <span class="s0"># The rest of this routine is special processing for Windows or</span>
+    <span class="s0"># Cygwin. All other platforms, get out now.</span>
+    <span class="s0">#</span>
+    <span class="s0">if {([info sharedlibextension] ne &quot;.dll&quot;)</span>
+	    <span class="s0">|| [catch {package require registry}]} {</span>
+	<span class="s0">mclocale C</span>
+	<span class="s0">return</span>
+    <span class="s0">}</span>
+    <span class="s0">#</span>
+    <span class="s0"># On Windows or Cygwin, try to set locale depending on registry</span>
+    <span class="s0"># settings, or fall back on locale of &quot;C&quot;.</span>
+    <span class="s0">#</span>
+
+    <span class="s0"># On Vista and later:</span>
+    <span class="s0"># HCU/Control Panel/Desktop : PreferredUILanguages is for language packs,</span>
+    <span class="s0"># HCU/Control Pannel/International : localName is the default locale.</span>
+    <span class="s0">#</span>
+    <span class="s0"># They contain the local string as RFC5646, composed of:</span>
+    <span class="s0"># [a-z]{2,3} : language</span>
+    <span class="s0"># -[a-z]{4}  : script (optional, translated by table Latn-&gt;latin)</span>
+    <span class="s0"># -[a-z]{2}|[0-9]{3} : territory (optional, numerical region codes not used)</span>
+    <span class="s0"># (-.*)* : variant, extension, private use (optional, not used)</span>
+    <span class="s0"># Those are translated to local strings.</span>
+    <span class="s0"># Examples: de-CH -&gt; de_ch, sr-Latn-CS -&gt; sr_cs@latin, es-419 -&gt; es</span>
+    <span class="s0">#</span>
+    <span class="s0">foreach key {{HKEY_CURRENT_USER\Control Panel\Desktop} {HKEY_CURRENT_USER\Control Panel\International}}\</span>
+	    <span class="s0">value {PreferredUILanguages localeName} {</span>
+	<span class="s0">if {![catch {registry get $key $value} localeName]</span>
+		<span class="s0">&amp;&amp; [regexp {^([a-z]{2,3})(?:-([a-z]{4}))?(?:-([a-z]{2}))?(?:-.+)?$}\</span>
+		    <span class="s0">[string tolower $localeName] match locale script territory]} {</span>
+	    <span class="s0">if {&quot;&quot; ne $territory} {</span>
+		<span class="s0">append locale _ $territory</span>
+	    <span class="s0">}</span>
+	    <span class="s0">set modifierDict [dict create latn latin cyrl cyrillic]</span>
+	    <span class="s0">if {[dict exists $modifierDict $script]} {</span>
+		<span class="s0">append locale @ [dict get $modifierDict $script]</span>
+	    <span class="s0">}</span>
+	    <span class="s0">if {![catch {mclocale [ConvertLocale $locale]}]} {</span>
+		<span class="s0">return</span>
+	    <span class="s0">}</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+
+    <span class="s0"># then check value locale which contains a numerical language ID</span>
+    <span class="s0">if {[catch {</span>
+	<span class="s0">set locale [registry get $key &quot;locale&quot;]</span>
+    <span class="s0">}]} {</span>
+	<span class="s0">mclocale C</span>
+	<span class="s0">return</span>
+    <span class="s0">}</span>
+    <span class="s0">#</span>
+    <span class="s0"># Keep trying to match against smaller and smaller suffixes</span>
+    <span class="s0"># of the registry value, since the latter hexadigits appear</span>
+    <span class="s0"># to determine general language and earlier hexadigits determine</span>
+    <span class="s0"># more precise information, such as territory.  For example,</span>
+    <span class="s0">#     0409 - English - United States</span>
+    <span class="s0">#     0809 - English - United Kingdom</span>
+    <span class="s0"># Add more translations to the WinRegToISO639 array above.</span>
+    <span class="s0">#</span>
+    <span class="s0">variable WinRegToISO639</span>
+    <span class="s0">set locale [string tolower $locale]</span>
+    <span class="s0">while {[string length $locale]} {</span>
+	<span class="s0">if {![catch {</span>
+	    <span class="s0">mclocale [ConvertLocale [dict get $WinRegToISO639 $locale]]</span>
+	<span class="s0">}]} {</span>
+	    <span class="s0">return</span>
+	<span class="s0">}</span>
+	<span class="s0">set locale [string range $locale 1 end]</span>
+    <span class="s0">}</span>
+    <span class="s0">#</span>
+    <span class="s0"># No translation known.  Fall back on &quot;C&quot; locale</span>
+    <span class="s0">#</span>
+    <span class="s0">mclocale C</span>
+<span class="s0">}</span>
+<span class="s0">msgcat::Init</span>
+</pre>
+</body>
+</html>

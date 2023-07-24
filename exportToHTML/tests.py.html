@@ -1,0 +1,176 @@
+<html>
+<head>
+<title>tests.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #629755; font-style: italic;}
+.s3 { color: #cc7832;}
+.s4 { color: #6a8759;}
+.s5 { color: #6897bb;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+tests.py</font>
+</center></td></tr></table>
+<pre><span class="s0">#-----------------------------------------------------------------------------</span>
+<span class="s0"># Copyright (c) 2005-2021, PyInstaller Development Team.</span>
+<span class="s0">#</span>
+<span class="s0"># Distributed under the terms of the GNU General Public License (version 2</span>
+<span class="s0"># or later) with exception for distributing the bootloader.</span>
+<span class="s0">#</span>
+<span class="s0"># The full license is in the file COPYING.txt, distributed with this software.</span>
+<span class="s0">#</span>
+<span class="s0"># SPDX-License-Identifier: (GPL-2.0-or-later WITH Bootloader-exception)</span>
+<span class="s0">#-----------------------------------------------------------------------------</span>
+<span class="s2">&quot;&quot;&quot; 
+Decorators for skipping PyInstaller tests when specific requirements are not met. 
+&quot;&quot;&quot;</span>
+
+<span class="s3">import </span><span class="s1">distutils.ccompiler</span>
+<span class="s3">import </span><span class="s1">inspect</span>
+<span class="s3">import </span><span class="s1">os</span>
+<span class="s3">import </span><span class="s1">shutil</span>
+<span class="s3">import </span><span class="s1">textwrap</span>
+
+<span class="s3">import </span><span class="s1">pytest</span>
+<span class="s3">import </span><span class="s1">sys</span>
+
+<span class="s3">from </span><span class="s1">PyInstaller.compat </span><span class="s3">import </span><span class="s1">is_win</span>
+
+<span class="s0"># Wrap some pytest decorators to be consistent in tests.</span>
+<span class="s1">parametrize = pytest.mark.parametrize</span>
+<span class="s1">skipif = pytest.mark.skipif</span>
+<span class="s1">xfail = pytest.mark.xfail</span>
+
+
+<span class="s3">def </span><span class="s1">_check_for_compiler():</span>
+    <span class="s3">import </span><span class="s1">tempfile</span>
+
+    <span class="s0"># Change to some tempdir since cc.has_function() would compile into the current directory, leaving garbage.</span>
+    <span class="s1">old_wd = os.getcwd()</span>
+    <span class="s1">tmp = tempfile.mkdtemp()</span>
+    <span class="s1">os.chdir(tmp)</span>
+    <span class="s1">cc = distutils.ccompiler.new_compiler()</span>
+    <span class="s3">if </span><span class="s1">is_win:</span>
+        <span class="s3">try</span><span class="s1">:</span>
+            <span class="s1">cc.initialize()</span>
+            <span class="s1">has_compiler = </span><span class="s3">True</span>
+        <span class="s0"># This error is raised on Windows if a compiler can't be found.</span>
+        <span class="s3">except </span><span class="s1">distutils.errors.DistutilsPlatformError:</span>
+            <span class="s1">has_compiler = </span><span class="s3">False</span>
+    <span class="s3">else</span><span class="s1">:</span>
+        <span class="s0"># The C standard library contains the ``clock`` function. Use that to determine if a compiler is installed. This</span>
+        <span class="s0"># does not work on Windows::</span>
+        <span class="s0">#</span>
+        <span class="s0">#   Users\bjones\AppData\Local\Temp\a.out.exe.manifest : general error</span>
+        <span class="s0">#   c1010070: Failed to load and parse the manifest. The system cannot</span>
+        <span class="s0">#   find the file specified.</span>
+        <span class="s1">has_compiler = cc.has_function(</span><span class="s4">'clock'</span><span class="s3">, </span><span class="s1">includes=[</span><span class="s4">'time.h'</span><span class="s1">])</span>
+    <span class="s1">os.chdir(old_wd)</span>
+    <span class="s0"># TODO: Find a way to remove the generated clockXXXX.c file, too</span>
+    <span class="s1">shutil.rmtree(tmp)</span>
+    <span class="s3">return </span><span class="s1">has_compiler</span>
+
+
+<span class="s0"># A decorator to skip tests if a C compiler is not detected.</span>
+<span class="s1">has_compiler = _check_for_compiler()</span>
+<span class="s1">skipif_no_compiler = skipif(</span><span class="s3">not </span><span class="s1">has_compiler</span><span class="s3">, </span><span class="s1">reason=</span><span class="s4">&quot;Requires a C compiler&quot;</span><span class="s1">)</span>
+
+<span class="s1">skip = pytest.mark.skip</span>
+
+
+<span class="s3">def </span><span class="s1">importorskip(package: str):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Skip a decorated test if **package** is not importable. 
+ 
+    Arguments: 
+        package: 
+            The name of the module. May be anything that is allowed after the ``import`` keyword. e.g. 'numpy' or 
+            'PIL.Image'. 
+    Returns: 
+        A pytest marker which either skips the test or does nothing. 
+ 
+    This function intentionally does not import the module. Doing so can lead to `sys.path` and `PATH` being 
+    polluted, which then breaks later builds. 
+    &quot;&quot;&quot;</span>
+    <span class="s3">if not </span><span class="s1">importable(package):</span>
+        <span class="s3">return </span><span class="s1">pytest.mark.skip(</span><span class="s4">f&quot;Can't import '</span><span class="s3">{</span><span class="s1">package</span><span class="s3">}</span><span class="s4">'.&quot;</span><span class="s1">)</span>
+    <span class="s3">return </span><span class="s1">pytest.mark.skipif(</span><span class="s3">False, </span><span class="s1">reason=</span><span class="s4">f&quot;Don't skip: '</span><span class="s3">{</span><span class="s1">package</span><span class="s3">}</span><span class="s4">' is importable.&quot;</span><span class="s1">)</span>
+
+
+<span class="s3">def </span><span class="s1">importable(package: str):</span>
+    <span class="s3">from </span><span class="s1">importlib.util </span><span class="s3">import </span><span class="s1">find_spec</span>
+
+    <span class="s0"># The find_spec() function is used by the importlib machinery to locate a module to import. Using it finds the</span>
+    <span class="s0"># module but does not run it. Unfortunately, it does import parent modules to check submodules.</span>
+    <span class="s3">if </span><span class="s4">&quot;.&quot; </span><span class="s3">in </span><span class="s1">package:</span>
+        <span class="s0"># Using subprocesses is slow. If the top level module doesn't exist then we can skip it.</span>
+        <span class="s3">if not </span><span class="s1">importable(package.split(</span><span class="s4">&quot;.&quot;</span><span class="s1">)[</span><span class="s5">0</span><span class="s1">]):</span>
+            <span class="s3">return False</span>
+        <span class="s0"># This is a submodule, import it in isolation.</span>
+        <span class="s3">from </span><span class="s1">subprocess </span><span class="s3">import </span><span class="s1">DEVNULL</span><span class="s3">, </span><span class="s1">run</span>
+        <span class="s3">return </span><span class="s1">run([sys.executable</span><span class="s3">, </span><span class="s4">&quot;-c&quot;</span><span class="s3">, </span><span class="s4">&quot;import &quot; </span><span class="s1">+ package]</span><span class="s3">, </span><span class="s1">stdout=DEVNULL</span><span class="s3">, </span><span class="s1">stderr=DEVNULL).returncode == </span><span class="s5">0</span>
+
+    <span class="s3">return </span><span class="s1">find_spec(package) </span><span class="s3">is not None</span>
+
+
+<span class="s3">def </span><span class="s1">requires(requirement: str):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Mark a test to be skipped if **requirement** is not satisfied. 
+ 
+    Args: 
+        requirement: 
+            A distribution name and optionally a version. See :func:`pkg_resources.require` which this argument is 
+            forwarded to. 
+    Returns: 
+        Either a skip marker or a dummy marker. 
+ 
+    This function intentionally does not import the module. Doing so can lead to `sys.path` and `PATH` being 
+    polluted, which then breaks later builds. 
+    &quot;&quot;&quot;</span>
+    <span class="s3">import </span><span class="s1">pkg_resources</span>
+    <span class="s3">try</span><span class="s1">:</span>
+        <span class="s1">pkg_resources.require(requirement)</span>
+        <span class="s3">return </span><span class="s1">pytest.mark.skipif(</span><span class="s3">False, </span><span class="s1">reason=</span><span class="s4">f&quot;Don't skip: '</span><span class="s3">{</span><span class="s1">requirement</span><span class="s3">}</span><span class="s4">' is satisfied.&quot;</span><span class="s1">)</span>
+    <span class="s3">except </span><span class="s1">pkg_resources.ResolutionError:</span>
+        <span class="s3">return </span><span class="s1">pytest.mark.skip(</span><span class="s4">&quot;Requires &quot; </span><span class="s1">+ requirement)</span>
+
+
+<span class="s3">def </span><span class="s1">gen_sourcefile(tmpdir</span><span class="s3">, </span><span class="s1">source</span><span class="s3">, </span><span class="s1">test_id=</span><span class="s3">None</span><span class="s1">):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Generate a source file for testing. 
+ 
+    The source will be written into a file named like the test-function. This file will then be passed to 
+    `test_script`. If you need other related file, e.g. as `.toc`-file for testing the content, put it at at the 
+    normal place. Just mind to take the basnename from the test-function's name. 
+ 
+    :param script: Source code to create executable from. This will be saved into a temporary file which is then 
+                   passed on to `test_script`. 
+ 
+    :param test_id: Test-id for parametrized tests. If given, it will be appended to the script filename, 
+                    separated by two underscores. 
+ 
+    Ensure that the caller of `test_source` is in a UTF-8 encoded file with the correct '# -*- coding: utf-8 -*-' 
+    marker. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">testname = inspect.stack()[</span><span class="s5">1</span><span class="s1">][</span><span class="s5">3</span><span class="s1">]</span>
+    <span class="s3">if </span><span class="s1">test_id:</span>
+        <span class="s0"># For parametrized test append the test-id.</span>
+        <span class="s1">testname = testname + </span><span class="s4">'__' </span><span class="s1">+ test_id</span>
+
+    <span class="s0"># Periods are not allowed in Python module names.</span>
+    <span class="s1">testname = testname.replace(</span><span class="s4">'.'</span><span class="s3">, </span><span class="s4">'_'</span><span class="s1">)</span>
+    <span class="s1">scriptfile = tmpdir / (testname + </span><span class="s4">'.py'</span><span class="s1">)</span>
+    <span class="s1">source = textwrap.dedent(source)</span>
+    <span class="s3">with </span><span class="s1">scriptfile.open(</span><span class="s4">'w'</span><span class="s3">, </span><span class="s1">encoding=</span><span class="s4">'utf-8'</span><span class="s1">) </span><span class="s3">as </span><span class="s1">ofh:</span>
+        <span class="s1">print(</span><span class="s4">'# -*- coding: utf-8 -*-'</span><span class="s3">, </span><span class="s1">file=ofh)</span>
+        <span class="s1">print(source</span><span class="s3">, </span><span class="s1">file=ofh)</span>
+    <span class="s3">return </span><span class="s1">scriptfile</span>
+</pre>
+</body>
+</html>

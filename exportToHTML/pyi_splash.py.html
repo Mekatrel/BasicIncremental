@@ -1,0 +1,246 @@
+<html>
+<head>
+<title>pyi_splash.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #629755; font-style: italic;}
+.s3 { color: #cc7832;}
+.s4 { color: #6a8759;}
+.s5 { color: #a5c261;}
+.s6 { color: #6897bb;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+pyi_splash.py</font>
+</center></td></tr></table>
+<pre><span class="s0"># -----------------------------------------------------------------------------</span>
+<span class="s0"># Copyright (c) 2005-2021, PyInstaller Development Team.</span>
+<span class="s0">#</span>
+<span class="s0"># Distributed under the terms of the GNU General Public License (version 2</span>
+<span class="s0"># or later) with exception for distributing the bootloader.</span>
+<span class="s0">#</span>
+<span class="s0"># The full license is in the file COPYING.txt, distributed with this software.</span>
+<span class="s0">#</span>
+<span class="s0"># SPDX-License-Identifier: (GPL-2.0-or-later WITH Bootloader-exception)</span>
+<span class="s0"># -----------------------------------------------------------------------------</span>
+
+<span class="s0"># This module is not a &quot;fake module&quot; in the classical sense, but a real module that can be imported. It acts as an RPC</span>
+<span class="s0"># interface for the functions of the bootloader.</span>
+<span class="s2">&quot;&quot;&quot; 
+This module connects to the bootloader to send messages to the splash screen. 
+ 
+It is intended to act as a RPC interface for the functions provided by the bootloader, such as displaying text or 
+closing. This makes the users python program independent of how the communication with the bootloader is implemented, 
+since a consistent API is provided. 
+ 
+To connect to the bootloader, it connects to a local tcp socket whose port is passed through the environment variable 
+'_PYIBoot_SPLASH'. The bootloader creates a server socket and accepts every connection request. Since the os-module, 
+which is needed to request the environment variable, is not available at boot time, the module does not establish the 
+connection until initialization. 
+ 
+The protocol by which the Python interpreter communicates with the bootloader is implemented in this module. 
+ 
+This module does not support reloads while the splash screen is displayed, i.e. it cannot be reloaded (such as by 
+importlib.reload), because the splash screen closes automatically when the connection to this instance of the module 
+is lost. 
+&quot;&quot;&quot;</span>
+
+<span class="s3">import </span><span class="s1">atexit</span>
+<span class="s3">import </span><span class="s1">os</span>
+
+<span class="s0"># Import the _socket module instead of the socket module. All used functions to connect to the ipc system are</span>
+<span class="s0"># provided by the C module and the users program does not necessarily need to include the socket module and all</span>
+<span class="s0"># required modules it uses.</span>
+<span class="s3">import </span><span class="s1">_socket</span>
+
+<span class="s1">__all__ = [</span><span class="s4">&quot;CLOSE_CONNECTION&quot;</span><span class="s3">, </span><span class="s4">&quot;FLUSH_CHARACTER&quot;</span><span class="s3">, </span><span class="s4">&quot;is_alive&quot;</span><span class="s3">, </span><span class="s4">&quot;close&quot;</span><span class="s3">, </span><span class="s4">&quot;update_text&quot;</span><span class="s1">]</span>
+
+<span class="s3">try</span><span class="s1">:</span>
+    <span class="s0"># The user might have excluded logging from imports.</span>
+    <span class="s3">import </span><span class="s1">logging </span><span class="s3">as </span><span class="s1">_logging</span>
+<span class="s3">except </span><span class="s1">ImportError:</span>
+    <span class="s1">_logging = </span><span class="s3">None</span>
+
+<span class="s3">try</span><span class="s1">:</span>
+    <span class="s0"># The user might have excluded functools from imports.</span>
+    <span class="s3">from </span><span class="s1">functools </span><span class="s3">import </span><span class="s1">update_wrapper</span>
+<span class="s3">except </span><span class="s1">ImportError:</span>
+    <span class="s1">update_wrapper = </span><span class="s3">None</span>
+
+
+<span class="s0"># Utility</span>
+<span class="s3">def </span><span class="s1">_log(level</span><span class="s3">, </span><span class="s1">msg</span><span class="s3">, </span><span class="s1">*args</span><span class="s3">, </span><span class="s1">**kwargs):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Conditional wrapper around logging module. If the user excluded logging from the imports or it was not imported, 
+    this function should handle it and avoid using the logger. 
+    &quot;&quot;&quot;</span>
+    <span class="s3">if </span><span class="s1">_logging:</span>
+        <span class="s1">logger = _logging.getLogger(__name__)</span>
+        <span class="s1">logger.log(level</span><span class="s3">, </span><span class="s1">msg</span><span class="s3">, </span><span class="s1">*args</span><span class="s3">, </span><span class="s1">**kwargs)</span>
+
+
+<span class="s0"># These constants define single characters which are needed to send commands to the bootloader. Those constants are</span>
+<span class="s0"># also set in the tcl script.</span>
+<span class="s1">CLOSE_CONNECTION = </span><span class="s5">b'</span><span class="s3">\x04</span><span class="s5">'  </span><span class="s0"># ASCII End-of-Transmission character</span>
+<span class="s1">FLUSH_CHARACTER = </span><span class="s5">b'</span><span class="s3">\x0D</span><span class="s5">'  </span><span class="s0"># ASCII Carriage Return character</span>
+
+<span class="s0"># Module internal variables</span>
+<span class="s1">_initialized = </span><span class="s3">False</span>
+<span class="s0"># Keep these variables always synchronized</span>
+<span class="s1">_ipc_socket_closed = </span><span class="s3">True</span>
+<span class="s1">_ipc_socket = _socket.socket(_socket.AF_INET</span><span class="s3">, </span><span class="s1">_socket.SOCK_STREAM)</span>
+
+
+<span class="s3">def </span><span class="s1">_initialize():</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Initialize this module 
+ 
+    :return: 
+    &quot;&quot;&quot;</span>
+    <span class="s3">global </span><span class="s1">_initialized</span><span class="s3">, </span><span class="s1">_ipc_socket</span><span class="s3">, </span><span class="s1">_ipc_socket_closed</span>
+    <span class="s3">try</span><span class="s1">:</span>
+        <span class="s1">_ipc_socket.connect((</span><span class="s4">&quot;localhost&quot;</span><span class="s3">, </span><span class="s1">_ipc_port))</span>
+        <span class="s1">_ipc_socket_closed = </span><span class="s3">False</span>
+
+        <span class="s1">_initialized = </span><span class="s3">True</span>
+        <span class="s1">_log(</span><span class="s6">20</span><span class="s3">, </span><span class="s4">&quot;A connection to the splash screen was successfully established.&quot;</span><span class="s1">)  </span><span class="s0"># log-level: info</span>
+    <span class="s3">except </span><span class="s1">OSError </span><span class="s3">as </span><span class="s1">err:</span>
+        <span class="s3">raise </span><span class="s1">ConnectionError(</span><span class="s4">&quot;Unable to connect to the tcp server socket on port %d&quot; </span><span class="s1">% _ipc_port) </span><span class="s3">from </span><span class="s1">err</span>
+
+
+<span class="s0"># We expect a splash screen from the bootloader, but if _PYIBoot_SPLASH is not set, the module cannot connect to it.</span>
+<span class="s3">try</span><span class="s1">:</span>
+    <span class="s1">_ipc_port = int(os.environ[</span><span class="s4">'_PYIBoot_SPLASH'</span><span class="s1">])</span>
+    <span class="s3">del </span><span class="s1">os.environ[</span><span class="s4">'_PYIBoot_SPLASH'</span><span class="s1">]</span>
+    <span class="s0"># Initialize the connection upon importing this module. This will establish a connection to the bootloader's TCP</span>
+    <span class="s0"># server socket.</span>
+    <span class="s1">_initialize()</span>
+<span class="s3">except </span><span class="s1">(KeyError</span><span class="s3">, </span><span class="s1">ValueError) </span><span class="s3">as </span><span class="s1">_err:</span>
+    <span class="s0"># log-level: warning</span>
+    <span class="s1">_log(</span>
+        <span class="s6">30</span><span class="s3">, </span><span class="s4">&quot;The environment does not allow connecting to the splash screen. Are the splash resources attached to the &quot;</span>
+        <span class="s4">&quot;bootloader or did an error occur?&quot;</span><span class="s3">,</span>
+        <span class="s1">exc_info=_err</span>
+    <span class="s1">)</span>
+<span class="s3">except </span><span class="s1">ConnectionError </span><span class="s3">as </span><span class="s1">_err:</span>
+    <span class="s0"># log-level: error</span>
+    <span class="s1">_log(</span><span class="s6">40</span><span class="s3">, </span><span class="s4">&quot;Cannot connect to the bootloaders ipc server socket&quot;</span><span class="s3">, </span><span class="s1">exc_info=_err)</span>
+
+
+<span class="s3">def </span><span class="s1">_check_connection(func):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Utility decorator for checking whether the function should be executed. 
+ 
+    The wrapped function may raise a ConnectionError if the module was not initialized correctly. 
+    &quot;&quot;&quot;</span>
+    <span class="s3">def </span><span class="s1">wrapper(*args</span><span class="s3">, </span><span class="s1">**kwargs):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Executes the wrapped function if the environment allows it. 
+ 
+        That is, if the connection to to bootloader has not been closed and the module is initialized. 
+ 
+        :raises RuntimeError: if the module was not initialized correctly. 
+        &quot;&quot;&quot;</span>
+        <span class="s3">if </span><span class="s1">_initialized </span><span class="s3">and </span><span class="s1">_ipc_socket_closed:</span>
+            <span class="s1">_log(</span>
+                <span class="s6">20</span><span class="s3">, </span><span class="s4">&quot;The module has been disabled, so the use of the splash screen is no longer supported.&quot;</span>
+            <span class="s1">)  </span><span class="s0"># log-level: info</span>
+            <span class="s3">return</span>
+        <span class="s3">elif not </span><span class="s1">_initialized:</span>
+            <span class="s3">raise </span><span class="s1">RuntimeError(</span><span class="s4">&quot;This module is not initialized; did it fail to load?&quot;</span><span class="s1">)</span>
+
+        <span class="s3">return </span><span class="s1">func(*args</span><span class="s3">, </span><span class="s1">**kwargs)</span>
+
+    <span class="s3">if </span><span class="s1">update_wrapper:</span>
+        <span class="s0"># For runtime introspection</span>
+        <span class="s1">update_wrapper(wrapper</span><span class="s3">, </span><span class="s1">func)</span>
+
+    <span class="s3">return </span><span class="s1">wrapper</span>
+
+
+<span class="s1">@_check_connection</span>
+<span class="s3">def </span><span class="s1">_send_command(cmd</span><span class="s3">, </span><span class="s1">args=</span><span class="s3">None</span><span class="s1">):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Send the command followed by args to the splash screen. 
+ 
+    :param str cmd: The command to send. All command have to be defined as procedures in the tcl splash screen script. 
+    :param list[str] args: All arguments to send to the receiving function 
+    &quot;&quot;&quot;</span>
+    <span class="s3">if </span><span class="s1">args </span><span class="s3">is None</span><span class="s1">:</span>
+        <span class="s1">args = []</span>
+
+    <span class="s1">full_cmd = </span><span class="s4">&quot;%s(%s)&quot; </span><span class="s1">% (cmd</span><span class="s3">, </span><span class="s4">&quot; &quot;</span><span class="s1">.join(args))</span>
+    <span class="s3">try</span><span class="s1">:</span>
+        <span class="s1">_ipc_socket.sendall(full_cmd.encode(</span><span class="s4">&quot;utf-8&quot;</span><span class="s1">) + FLUSH_CHARACTER)</span>
+    <span class="s3">except </span><span class="s1">OSError </span><span class="s3">as </span><span class="s1">err:</span>
+        <span class="s3">raise </span><span class="s1">ConnectionError(</span><span class="s4">&quot;Unable to send '%s' to the bootloader&quot; </span><span class="s1">% full_cmd) </span><span class="s3">from </span><span class="s1">err</span>
+
+
+<span class="s3">def </span><span class="s1">is_alive():</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Indicates whether the module can be used. 
+ 
+    Returns False if the module is either not initialized or was disabled by closing the splash screen. Otherwise, 
+    the module should be usable. 
+    &quot;&quot;&quot;</span>
+    <span class="s3">return </span><span class="s1">_initialized </span><span class="s3">and not </span><span class="s1">_ipc_socket_closed</span>
+
+
+<span class="s1">@_check_connection</span>
+<span class="s3">def </span><span class="s1">update_text(msg):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Updates the text on the splash screen window. 
+ 
+    :param str msg: the text to be displayed 
+    :raises ConnectionError: If the OS fails to write to the socket. 
+    :raises RuntimeError: If the module is not initialized. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">_send_command(</span><span class="s4">&quot;update_text&quot;</span><span class="s3">, </span><span class="s1">[msg])</span>
+
+
+<span class="s3">def </span><span class="s1">close():</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Close the connection to the ipc tcp server socket. 
+ 
+    This will close the splash screen and renders this module unusable. After this function is called, no connection 
+    can be opened to the splash screen again and all functions in this module become unusable. 
+    &quot;&quot;&quot;</span>
+    <span class="s3">global </span><span class="s1">_ipc_socket_closed</span>
+    <span class="s3">if </span><span class="s1">_initialized </span><span class="s3">and not </span><span class="s1">_ipc_socket_closed:</span>
+        <span class="s1">_ipc_socket.sendall(CLOSE_CONNECTION)</span>
+        <span class="s1">_ipc_socket.close()</span>
+        <span class="s1">_ipc_socket_closed = </span><span class="s3">True</span>
+
+
+<span class="s1">@atexit.register</span>
+<span class="s3">def </span><span class="s1">_exit():</span>
+    <span class="s1">close()</span>
+
+
+<span class="s0"># Discarded idea:</span>
+<span class="s0"># Problem:</span>
+<span class="s0"># There was a race condition between the tcl (splash screen) and python interpreter. Initially the tcl was started as a</span>
+<span class="s0"># separate thread next to the bootloader thread, which starts python. Tcl sets the environment variable</span>
+<span class="s0"># '_PYIBoot_SPLASH' with a port to connect to. If the python interpreter is faster initialized than the tcl interpreter</span>
+<span class="s0"># (sometimes the case in onedir mode) the environment variable does not yet exist. Since python caches the environment</span>
+<span class="s0"># variables at startup, updating the environ from tcl does not update the python environ.</span>
+<span class="s0">#</span>
+<span class="s0"># Considered Solution:</span>
+<span class="s0"># Dont rely on python itself to look up the environment variables. We could implement via ctypes functions to look up</span>
+<span class="s0"># the latest environ. See https://stackoverflow.com/a/33642551/5869139 for a possible implementation.</span>
+<span class="s0">#</span>
+<span class="s0"># Discarded because:</span>
+<span class="s0"># This module would need to implement for every supported OS a dll hook to link to the environ variable, technically</span>
+<span class="s0"># reimplementing the C function 'convertenviron' from posixmodule.c_ in python. The implemented solution now waits for</span>
+<span class="s0"># the tcl interpreter to finish before starting python.</span>
+<span class="s0">#</span>
+<span class="s0"># .. _posixmodule.c:</span>
+<span class="s0">#  https://github.com/python/cpython/blob/3.7/Modules/posixmodule.c#L1315-L1393</span>
+</pre>
+</body>
+</html>

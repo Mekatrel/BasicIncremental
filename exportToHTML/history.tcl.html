@@ -1,0 +1,328 @@
+<html>
+<head>
+<title>history.tcl</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #a9b7c6;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+history.tcl</font>
+</center></td></tr></table>
+<pre><span class="s0"># history.tcl --</span>
+<span class="s0">#</span>
+<span class="s0"># Implementation of the history command.</span>
+<span class="s0">#</span>
+<span class="s0"># Copyright (c) 1997 Sun Microsystems, Inc.</span>
+<span class="s0">#</span>
+<span class="s0"># See the file &quot;license.terms&quot; for information on usage and redistribution of</span>
+<span class="s0"># this file, and for a DISCLAIMER OF ALL WARRANTIES.</span>
+<span class="s0">#</span>
+
+<span class="s0"># The tcl::history array holds the history list and some additional</span>
+<span class="s0"># bookkeeping variables.</span>
+<span class="s0">#</span>
+<span class="s0"># nextid	the index used for the next history list item.</span>
+<span class="s0"># keep		the max size of the history list</span>
+<span class="s0"># oldest	the index of the oldest item in the history.</span>
+
+<span class="s0">namespace eval ::tcl {</span>
+    <span class="s0">variable history</span>
+    <span class="s0">if {![info exists history]} {</span>
+	<span class="s0">array set history {</span>
+	    <span class="s0">nextid	0</span>
+	    <span class="s0">keep	20</span>
+	    <span class="s0">oldest	-20</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+
+    <span class="s0">namespace ensemble create -command ::tcl::history -map {</span>
+	<span class="s0">add	::tcl::HistAdd</span>
+	<span class="s0">change	::tcl::HistChange</span>
+	<span class="s0">clear	::tcl::HistClear</span>
+	<span class="s0">event	::tcl::HistEvent</span>
+	<span class="s0">info	::tcl::HistInfo</span>
+	<span class="s0">keep	::tcl::HistKeep</span>
+	<span class="s0">nextid	::tcl::HistNextID</span>
+	<span class="s0">redo	::tcl::HistRedo</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+
+<span class="s0"># history --</span>
+<span class="s0">#</span>
+<span class="s0">#	This is the main history command.  See the man page for its interface.</span>
+<span class="s0">#	This does some argument checking and calls the helper ensemble in the</span>
+<span class="s0">#	tcl namespace.</span>
+
+<span class="s0">proc ::history {args} {</span>
+    <span class="s0"># If no command given, we're doing 'history info'. Can't be done with an</span>
+    <span class="s0"># ensemble unknown handler, as those don't fire when no subcommand is</span>
+    <span class="s0"># given at all.</span>
+
+    <span class="s0">if {![llength $args]} {</span>
+	<span class="s0">set args info</span>
+    <span class="s0">}</span>
+
+    <span class="s0"># Tricky stuff needed to make stack and errors come out right!</span>
+    <span class="s0">tailcall apply {arglist {tailcall history {*}$arglist} ::tcl} $args</span>
+<span class="s0">}</span>
+
+<span class="s0"># tcl::HistAdd --</span>
+<span class="s0">#</span>
+<span class="s0">#	Add an item to the history, and optionally eval it at the global scope</span>
+<span class="s0">#</span>
+<span class="s0"># Parameters:</span>
+<span class="s0">#	event		the command to add</span>
+<span class="s0">#	exec		(optional) a substring of &quot;exec&quot; causes the command to</span>
+<span class="s0">#			be evaled.</span>
+<span class="s0"># Results:</span>
+<span class="s0"># 	If executing, then the results of the command are returned</span>
+<span class="s0">#</span>
+<span class="s0"># Side Effects:</span>
+<span class="s0">#	Adds to the history list</span>
+
+<span class="s0">proc ::tcl::HistAdd {event {exec {}}} {</span>
+    <span class="s0">variable history</span>
+
+    <span class="s0">if {</span>
+	<span class="s0">[prefix longest {exec {}} $exec] eq &quot;&quot;</span>
+	<span class="s0">&amp;&amp; [llength [info level 0]] == 3</span>
+    <span class="s0">} then {</span>
+	<span class="s0">return -code error &quot;bad argument \&quot;$exec\&quot;: should be \&quot;exec\&quot;&quot;</span>
+    <span class="s0">}</span>
+
+    <span class="s0"># Do not add empty commands to the history</span>
+    <span class="s0">if {[string trim $event] eq &quot;&quot;} {</span>
+	<span class="s0">return &quot;&quot;</span>
+    <span class="s0">}</span>
+
+    <span class="s0"># Maintain the history</span>
+    <span class="s0">set history([incr history(nextid)]) $event</span>
+    <span class="s0">unset -nocomplain history([incr history(oldest)])</span>
+
+    <span class="s0"># Only execute if 'exec' (or non-empty prefix of it) given</span>
+    <span class="s0">if {$exec eq &quot;&quot;} {</span>
+	<span class="s0">return &quot;&quot;</span>
+    <span class="s0">}</span>
+    <span class="s0">tailcall eval $event</span>
+<span class="s0">}</span>
+
+<span class="s0"># tcl::HistKeep --</span>
+<span class="s0">#</span>
+<span class="s0">#	Set or query the limit on the length of the history list</span>
+<span class="s0">#</span>
+<span class="s0"># Parameters:</span>
+<span class="s0">#	limit	(optional) the length of the history list</span>
+<span class="s0">#</span>
+<span class="s0"># Results:</span>
+<span class="s0">#	If no limit is specified, the current limit is returned</span>
+<span class="s0">#</span>
+<span class="s0"># Side Effects:</span>
+<span class="s0">#	Updates history(keep) if a limit is specified</span>
+
+<span class="s0">proc ::tcl::HistKeep {{count {}}} {</span>
+    <span class="s0">variable history</span>
+    <span class="s0">if {[llength [info level 0]] == 1} {</span>
+	<span class="s0">return $history(keep)</span>
+    <span class="s0">}</span>
+    <span class="s0">if {![string is integer -strict $count] || ($count &lt; 0)} {</span>
+	<span class="s0">return -code error &quot;illegal keep count \&quot;$count\&quot;&quot;</span>
+    <span class="s0">}</span>
+    <span class="s0">set oldold $history(oldest)</span>
+    <span class="s0">set history(oldest) [expr {$history(nextid) - $count}]</span>
+    <span class="s0">for {} {$oldold &lt;= $history(oldest)} {incr oldold} {</span>
+	<span class="s0">unset -nocomplain history($oldold)</span>
+    <span class="s0">}</span>
+    <span class="s0">set history(keep) $count</span>
+<span class="s0">}</span>
+
+<span class="s0"># tcl::HistClear --</span>
+<span class="s0">#</span>
+<span class="s0">#	Erase the history list</span>
+<span class="s0">#</span>
+<span class="s0"># Parameters:</span>
+<span class="s0">#	none</span>
+<span class="s0">#</span>
+<span class="s0"># Results:</span>
+<span class="s0">#	none</span>
+<span class="s0">#</span>
+<span class="s0"># Side Effects:</span>
+<span class="s0">#	Resets the history array, except for the keep limit</span>
+
+<span class="s0">proc ::tcl::HistClear {} {</span>
+    <span class="s0">variable history</span>
+    <span class="s0">set keep $history(keep)</span>
+    <span class="s0">unset history</span>
+    <span class="s0">array set history [list \</span>
+	<span class="s0">nextid	0	\</span>
+	<span class="s0">keep	$keep	\</span>
+	<span class="s0">oldest	-$keep	\</span>
+    <span class="s0">]</span>
+<span class="s0">}</span>
+
+<span class="s0"># tcl::HistInfo --</span>
+<span class="s0">#</span>
+<span class="s0">#	Return a pretty-printed version of the history list</span>
+<span class="s0">#</span>
+<span class="s0"># Parameters:</span>
+<span class="s0">#	num	(optional) the length of the history list to return</span>
+<span class="s0">#</span>
+<span class="s0"># Results:</span>
+<span class="s0">#	A formatted history list</span>
+
+<span class="s0">proc ::tcl::HistInfo {{count {}}} {</span>
+    <span class="s0">variable history</span>
+    <span class="s0">if {[llength [info level 0]] == 1} {</span>
+	<span class="s0">set count [expr {$history(keep) + 1}]</span>
+    <span class="s0">} elseif {![string is integer -strict $count]} {</span>
+	<span class="s0">return -code error &quot;bad integer \&quot;$count\&quot;&quot;</span>
+    <span class="s0">}</span>
+    <span class="s0">set result {}</span>
+    <span class="s0">set newline &quot;&quot;</span>
+    <span class="s0">for {set i [expr {$history(nextid) - $count + 1}]} \</span>
+	    <span class="s0">{$i &lt;= $history(nextid)} {incr i} {</span>
+	<span class="s0">if {![info exists history($i)]} {</span>
+	    <span class="s0">continue</span>
+	<span class="s0">}</span>
+        <span class="s0">set cmd [string map [list \n \n\t] [string trimright $history($i) \ \n]]</span>
+	<span class="s0">append result $newline[format &quot;%6d  %s&quot; $i $cmd]</span>
+	<span class="s0">set newline \n</span>
+    <span class="s0">}</span>
+    <span class="s0">return $result</span>
+<span class="s0">}</span>
+
+<span class="s0"># tcl::HistRedo --</span>
+<span class="s0">#</span>
+<span class="s0">#	Fetch the previous or specified event, execute it, and then replace</span>
+<span class="s0">#	the current history item with that event.</span>
+<span class="s0">#</span>
+<span class="s0"># Parameters:</span>
+<span class="s0">#	event	(optional) index of history item to redo.  Defaults to -1,</span>
+<span class="s0">#		which means the previous event.</span>
+<span class="s0">#</span>
+<span class="s0"># Results:</span>
+<span class="s0">#	Those of the command being redone.</span>
+<span class="s0">#</span>
+<span class="s0"># Side Effects:</span>
+<span class="s0">#	Replaces the current history list item with the one being redone.</span>
+
+<span class="s0">proc ::tcl::HistRedo {{event -1}} {</span>
+    <span class="s0">variable history</span>
+
+    <span class="s0">set i [HistIndex $event]</span>
+    <span class="s0">if {$i == $history(nextid)} {</span>
+	<span class="s0">return -code error &quot;cannot redo the current event&quot;</span>
+    <span class="s0">}</span>
+    <span class="s0">set cmd $history($i)</span>
+    <span class="s0">HistChange $cmd 0</span>
+    <span class="s0">tailcall eval $cmd</span>
+<span class="s0">}</span>
+
+<span class="s0"># tcl::HistIndex --</span>
+<span class="s0">#</span>
+<span class="s0">#	Map from an event specifier to an index in the history list.</span>
+<span class="s0">#</span>
+<span class="s0"># Parameters:</span>
+<span class="s0">#	event	index of history item to redo.</span>
+<span class="s0">#		If this is a positive number, it is used directly.</span>
+<span class="s0">#		If it is a negative number, then it counts back to a previous</span>
+<span class="s0">#		event, where -1 is the most recent event.</span>
+<span class="s0">#		A string can be matched, either by being the prefix of a</span>
+<span class="s0">#		command or by matching a command with string match.</span>
+<span class="s0">#</span>
+<span class="s0"># Results:</span>
+<span class="s0">#	The index into history, or an error if the index didn't match.</span>
+
+<span class="s0">proc ::tcl::HistIndex {event} {</span>
+    <span class="s0">variable history</span>
+    <span class="s0">if {![string is integer -strict $event]} {</span>
+	<span class="s0">for {set i [expr {$history(nextid)-1}]} {[info exists history($i)]} \</span>
+		<span class="s0">{incr i -1} {</span>
+	    <span class="s0">if {[string match $event* $history($i)]} {</span>
+		<span class="s0">return $i</span>
+	    <span class="s0">}</span>
+	    <span class="s0">if {[string match $event $history($i)]} {</span>
+		<span class="s0">return $i</span>
+	    <span class="s0">}</span>
+	<span class="s0">}</span>
+	<span class="s0">return -code error &quot;no event matches \&quot;$event\&quot;&quot;</span>
+    <span class="s0">} elseif {$event &lt;= 0} {</span>
+	<span class="s0">set i [expr {$history(nextid) + $event}]</span>
+    <span class="s0">} else {</span>
+	<span class="s0">set i $event</span>
+    <span class="s0">}</span>
+    <span class="s0">if {$i &lt;= $history(oldest)} {</span>
+	<span class="s0">return -code error &quot;event \&quot;$event\&quot; is too far in the past&quot;</span>
+    <span class="s0">}</span>
+    <span class="s0">if {$i &gt; $history(nextid)} {</span>
+	<span class="s0">return -code error &quot;event \&quot;$event\&quot; hasn't occured yet&quot;</span>
+    <span class="s0">}</span>
+    <span class="s0">return $i</span>
+<span class="s0">}</span>
+
+<span class="s0"># tcl::HistEvent --</span>
+<span class="s0">#</span>
+<span class="s0">#	Map from an event specifier to the value in the history list.</span>
+<span class="s0">#</span>
+<span class="s0"># Parameters:</span>
+<span class="s0">#	event	index of history item to redo.  See index for a description of</span>
+<span class="s0">#		possible event patterns.</span>
+<span class="s0">#</span>
+<span class="s0"># Results:</span>
+<span class="s0">#	The value from the history list.</span>
+
+<span class="s0">proc ::tcl::HistEvent {{event -1}} {</span>
+    <span class="s0">variable history</span>
+    <span class="s0">set i [HistIndex $event]</span>
+    <span class="s0">if {![info exists history($i)]} {</span>
+	<span class="s0">return &quot;&quot;</span>
+    <span class="s0">}</span>
+    <span class="s0">return [string trimright $history($i) \ \n]</span>
+<span class="s0">}</span>
+
+<span class="s0"># tcl::HistChange --</span>
+<span class="s0">#</span>
+<span class="s0">#	Replace a value in the history list.</span>
+<span class="s0">#</span>
+<span class="s0"># Parameters:</span>
+<span class="s0">#	newValue  The new value to put into the history list.</span>
+<span class="s0">#	event	  (optional) index of history item to redo.  See index for a</span>
+<span class="s0">#		  description of possible event patterns.  This defaults to 0,</span>
+<span class="s0">#		  which specifies the current event.</span>
+<span class="s0">#</span>
+<span class="s0"># Side Effects:</span>
+<span class="s0">#	Changes the history list.</span>
+
+<span class="s0">proc ::tcl::HistChange {newValue {event 0}} {</span>
+    <span class="s0">variable history</span>
+    <span class="s0">set i [HistIndex $event]</span>
+    <span class="s0">set history($i) $newValue</span>
+<span class="s0">}</span>
+
+<span class="s0"># tcl::HistNextID --</span>
+<span class="s0">#</span>
+<span class="s0">#	Returns the number of the next history event.</span>
+<span class="s0">#</span>
+<span class="s0"># Parameters:</span>
+<span class="s0">#	None.</span>
+<span class="s0">#</span>
+<span class="s0"># Side Effects:</span>
+<span class="s0">#	None.</span>
+
+<span class="s0">proc ::tcl::HistNextID {} {</span>
+    <span class="s0">variable history</span>
+    <span class="s0">return [expr {$history(nextid) + 1}]</span>
+<span class="s0">}</span>
+
+<span class="s0">return</span>
+
+<span class="s0"># Local Variables:</span>
+<span class="s0"># mode: tcl</span>
+<span class="s0"># fill-column: 78</span>
+<span class="s0"># End:</span>
+</pre>
+</body>
+</html>

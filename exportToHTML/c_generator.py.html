@@ -1,0 +1,524 @@
+<html>
+<head>
+<title>c_generator.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #cc7832;}
+.s3 { color: #629755; font-style: italic;}
+.s4 { color: #6897bb;}
+.s5 { color: #6a8759;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+c_generator.py</font>
+</center></td></tr></table>
+<pre><span class="s0">#------------------------------------------------------------------------------</span>
+<span class="s0"># pycparser: c_generator.py</span>
+<span class="s0">#</span>
+<span class="s0"># C code generator from pycparser AST nodes.</span>
+<span class="s0">#</span>
+<span class="s0"># Eli Bendersky [https://eli.thegreenplace.net/]</span>
+<span class="s0"># License: BSD</span>
+<span class="s0">#------------------------------------------------------------------------------</span>
+<span class="s2">from </span><span class="s1">. </span><span class="s2">import </span><span class="s1">c_ast</span>
+
+
+<span class="s2">class </span><span class="s1">CGenerator(object):</span>
+    <span class="s3">&quot;&quot;&quot; Uses the same visitor pattern as c_ast.NodeVisitor, but modified to 
+        return a value from each visit method, using string accumulation in 
+        generic_visit. 
+    &quot;&quot;&quot;</span>
+    <span class="s2">def </span><span class="s1">__init__(self</span><span class="s2">, </span><span class="s1">reduce_parentheses=</span><span class="s2">False</span><span class="s1">):</span>
+        <span class="s3">&quot;&quot;&quot; Constructs C-code generator 
+ 
+            reduce_parentheses: 
+                if True, eliminates needless parentheses on binary operators 
+        &quot;&quot;&quot;</span>
+        <span class="s0"># Statements start with indentation of self.indent_level spaces, using</span>
+        <span class="s0"># the _make_indent method.</span>
+        <span class="s1">self.indent_level = </span><span class="s4">0</span>
+        <span class="s1">self.reduce_parentheses = reduce_parentheses</span>
+
+    <span class="s2">def </span><span class="s1">_make_indent(self):</span>
+        <span class="s2">return </span><span class="s5">' ' </span><span class="s1">* self.indent_level</span>
+
+    <span class="s2">def </span><span class="s1">visit(self</span><span class="s2">, </span><span class="s1">node):</span>
+        <span class="s1">method = </span><span class="s5">'visit_' </span><span class="s1">+ node.__class__.__name__</span>
+        <span class="s2">return </span><span class="s1">getattr(self</span><span class="s2">, </span><span class="s1">method</span><span class="s2">, </span><span class="s1">self.generic_visit)(node)</span>
+
+    <span class="s2">def </span><span class="s1">generic_visit(self</span><span class="s2">, </span><span class="s1">node):</span>
+        <span class="s2">if </span><span class="s1">node </span><span class="s2">is None</span><span class="s1">:</span>
+            <span class="s2">return </span><span class="s5">''</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s2">return </span><span class="s5">''</span><span class="s1">.join(self.visit(c) </span><span class="s2">for </span><span class="s1">c_name</span><span class="s2">, </span><span class="s1">c </span><span class="s2">in </span><span class="s1">node.children())</span>
+
+    <span class="s2">def </span><span class="s1">visit_Constant(self</span><span class="s2">, </span><span class="s1">n):</span>
+        <span class="s2">return </span><span class="s1">n.value</span>
+
+    <span class="s2">def </span><span class="s1">visit_ID(self</span><span class="s2">, </span><span class="s1">n):</span>
+        <span class="s2">return </span><span class="s1">n.name</span>
+
+    <span class="s2">def </span><span class="s1">visit_Pragma(self</span><span class="s2">, </span><span class="s1">n):</span>
+        <span class="s1">ret = </span><span class="s5">'#pragma'</span>
+        <span class="s2">if </span><span class="s1">n.string:</span>
+            <span class="s1">ret += </span><span class="s5">' ' </span><span class="s1">+ n.string</span>
+        <span class="s2">return </span><span class="s1">ret</span>
+
+    <span class="s2">def </span><span class="s1">visit_ArrayRef(self</span><span class="s2">, </span><span class="s1">n):</span>
+        <span class="s1">arrref = self._parenthesize_unless_simple(n.name)</span>
+        <span class="s2">return </span><span class="s1">arrref + </span><span class="s5">'[' </span><span class="s1">+ self.visit(n.subscript) + </span><span class="s5">']'</span>
+
+    <span class="s2">def </span><span class="s1">visit_StructRef(self</span><span class="s2">, </span><span class="s1">n):</span>
+        <span class="s1">sref = self._parenthesize_unless_simple(n.name)</span>
+        <span class="s2">return </span><span class="s1">sref + n.type + self.visit(n.field)</span>
+
+    <span class="s2">def </span><span class="s1">visit_FuncCall(self</span><span class="s2">, </span><span class="s1">n):</span>
+        <span class="s1">fref = self._parenthesize_unless_simple(n.name)</span>
+        <span class="s2">return </span><span class="s1">fref + </span><span class="s5">'(' </span><span class="s1">+ self.visit(n.args) + </span><span class="s5">')'</span>
+
+    <span class="s2">def </span><span class="s1">visit_UnaryOp(self</span><span class="s2">, </span><span class="s1">n):</span>
+        <span class="s2">if </span><span class="s1">n.op == </span><span class="s5">'sizeof'</span><span class="s1">:</span>
+            <span class="s0"># Always parenthesize the argument of sizeof since it can be</span>
+            <span class="s0"># a name.</span>
+            <span class="s2">return </span><span class="s5">'sizeof(%s)' </span><span class="s1">% self.visit(n.expr)</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">operand = self._parenthesize_unless_simple(n.expr)</span>
+            <span class="s2">if </span><span class="s1">n.op == </span><span class="s5">'p++'</span><span class="s1">:</span>
+                <span class="s2">return </span><span class="s5">'%s++' </span><span class="s1">% operand</span>
+            <span class="s2">elif </span><span class="s1">n.op == </span><span class="s5">'p--'</span><span class="s1">:</span>
+                <span class="s2">return </span><span class="s5">'%s--' </span><span class="s1">% operand</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s2">return </span><span class="s5">'%s%s' </span><span class="s1">% (n.op</span><span class="s2">, </span><span class="s1">operand)</span>
+
+    <span class="s0"># Precedence map of binary operators:</span>
+    <span class="s1">precedence_map = {</span>
+        <span class="s0"># Should be in sync with c_parser.CParser.precedence</span>
+        <span class="s0"># Higher numbers are stronger binding</span>
+        <span class="s5">'||'</span><span class="s1">: </span><span class="s4">0</span><span class="s2">,  </span><span class="s0"># weakest binding</span>
+        <span class="s5">'&amp;&amp;'</span><span class="s1">: </span><span class="s4">1</span><span class="s2">,</span>
+        <span class="s5">'|'</span><span class="s1">: </span><span class="s4">2</span><span class="s2">,</span>
+        <span class="s5">'^'</span><span class="s1">: </span><span class="s4">3</span><span class="s2">,</span>
+        <span class="s5">'&amp;'</span><span class="s1">: </span><span class="s4">4</span><span class="s2">,</span>
+        <span class="s5">'=='</span><span class="s1">: </span><span class="s4">5</span><span class="s2">, </span><span class="s5">'!='</span><span class="s1">: </span><span class="s4">5</span><span class="s2">,</span>
+        <span class="s5">'&gt;'</span><span class="s1">: </span><span class="s4">6</span><span class="s2">, </span><span class="s5">'&gt;='</span><span class="s1">: </span><span class="s4">6</span><span class="s2">, </span><span class="s5">'&lt;'</span><span class="s1">: </span><span class="s4">6</span><span class="s2">, </span><span class="s5">'&lt;='</span><span class="s1">: </span><span class="s4">6</span><span class="s2">,</span>
+        <span class="s5">'&gt;&gt;'</span><span class="s1">: </span><span class="s4">7</span><span class="s2">, </span><span class="s5">'&lt;&lt;'</span><span class="s1">: </span><span class="s4">7</span><span class="s2">,</span>
+        <span class="s5">'+'</span><span class="s1">: </span><span class="s4">8</span><span class="s2">, </span><span class="s5">'-'</span><span class="s1">: </span><span class="s4">8</span><span class="s2">,</span>
+        <span class="s5">'*'</span><span class="s1">: </span><span class="s4">9</span><span class="s2">, </span><span class="s5">'/'</span><span class="s1">: </span><span class="s4">9</span><span class="s2">, </span><span class="s5">'%'</span><span class="s1">: </span><span class="s4">9  </span><span class="s0"># strongest binding</span>
+    <span class="s1">}</span>
+
+    <span class="s2">def </span><span class="s1">visit_BinaryOp(self</span><span class="s2">, </span><span class="s1">n):</span>
+        <span class="s0"># Note: all binary operators are left-to-right associative</span>
+        <span class="s0">#</span>
+        <span class="s0"># If `n.left.op` has a stronger or equally binding precedence in</span>
+        <span class="s0"># comparison to `n.op`, no parenthesis are needed for the left:</span>
+        <span class="s0"># e.g., `(a*b) + c` is equivalent to `a*b + c`, as well as</span>
+        <span class="s0">#       `(a+b) - c` is equivalent to `a+b - c` (same precedence).</span>
+        <span class="s0"># If the left operator is weaker binding than the current, then</span>
+        <span class="s0"># parentheses are necessary:</span>
+        <span class="s0"># e.g., `(a+b) * c` is NOT equivalent to `a+b * c`.</span>
+        <span class="s1">lval_str = self._parenthesize_if(</span>
+            <span class="s1">n.left</span><span class="s2">,</span>
+            <span class="s2">lambda </span><span class="s1">d: </span><span class="s2">not </span><span class="s1">(self._is_simple_node(d) </span><span class="s2">or</span>
+                      <span class="s1">self.reduce_parentheses </span><span class="s2">and </span><span class="s1">isinstance(d</span><span class="s2">, </span><span class="s1">c_ast.BinaryOp) </span><span class="s2">and</span>
+                      <span class="s1">self.precedence_map[d.op] &gt;= self.precedence_map[n.op]))</span>
+        <span class="s0"># If `n.right.op` has a stronger -but not equal- binding precedence,</span>
+        <span class="s0"># parenthesis can be omitted on the right:</span>
+        <span class="s0"># e.g., `a + (b*c)` is equivalent to `a + b*c`.</span>
+        <span class="s0"># If the right operator is weaker or equally binding, then parentheses</span>
+        <span class="s0"># are necessary:</span>
+        <span class="s0"># e.g., `a * (b+c)` is NOT equivalent to `a * b+c` and</span>
+        <span class="s0">#       `a - (b+c)` is NOT equivalent to `a - b+c` (same precedence).</span>
+        <span class="s1">rval_str = self._parenthesize_if(</span>
+            <span class="s1">n.right</span><span class="s2">,</span>
+            <span class="s2">lambda </span><span class="s1">d: </span><span class="s2">not </span><span class="s1">(self._is_simple_node(d) </span><span class="s2">or</span>
+                      <span class="s1">self.reduce_parentheses </span><span class="s2">and </span><span class="s1">isinstance(d</span><span class="s2">, </span><span class="s1">c_ast.BinaryOp) </span><span class="s2">and</span>
+                      <span class="s1">self.precedence_map[d.op] &gt; self.precedence_map[n.op]))</span>
+        <span class="s2">return </span><span class="s5">'%s %s %s' </span><span class="s1">% (lval_str</span><span class="s2">, </span><span class="s1">n.op</span><span class="s2">, </span><span class="s1">rval_str)</span>
+
+    <span class="s2">def </span><span class="s1">visit_Assignment(self</span><span class="s2">, </span><span class="s1">n):</span>
+        <span class="s1">rval_str = self._parenthesize_if(</span>
+                            <span class="s1">n.rvalue</span><span class="s2">,</span>
+                            <span class="s2">lambda </span><span class="s1">n: isinstance(n</span><span class="s2">, </span><span class="s1">c_ast.Assignment))</span>
+        <span class="s2">return </span><span class="s5">'%s %s %s' </span><span class="s1">% (self.visit(n.lvalue)</span><span class="s2">, </span><span class="s1">n.op</span><span class="s2">, </span><span class="s1">rval_str)</span>
+
+    <span class="s2">def </span><span class="s1">visit_IdentifierType(self</span><span class="s2">, </span><span class="s1">n):</span>
+        <span class="s2">return </span><span class="s5">' '</span><span class="s1">.join(n.names)</span>
+
+    <span class="s2">def </span><span class="s1">_visit_expr(self</span><span class="s2">, </span><span class="s1">n):</span>
+        <span class="s2">if </span><span class="s1">isinstance(n</span><span class="s2">, </span><span class="s1">c_ast.InitList):</span>
+            <span class="s2">return </span><span class="s5">'{' </span><span class="s1">+ self.visit(n) + </span><span class="s5">'}'</span>
+        <span class="s2">elif </span><span class="s1">isinstance(n</span><span class="s2">, </span><span class="s1">c_ast.ExprList):</span>
+            <span class="s2">return </span><span class="s5">'(' </span><span class="s1">+ self.visit(n) + </span><span class="s5">')'</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s2">return </span><span class="s1">self.visit(n)</span>
+
+    <span class="s2">def </span><span class="s1">visit_Decl(self</span><span class="s2">, </span><span class="s1">n</span><span class="s2">, </span><span class="s1">no_type=</span><span class="s2">False</span><span class="s1">):</span>
+        <span class="s0"># no_type is used when a Decl is part of a DeclList, where the type is</span>
+        <span class="s0"># explicitly only for the first declaration in a list.</span>
+        <span class="s0">#</span>
+        <span class="s1">s = n.name </span><span class="s2">if </span><span class="s1">no_type </span><span class="s2">else </span><span class="s1">self._generate_decl(n)</span>
+        <span class="s2">if </span><span class="s1">n.bitsize: s += </span><span class="s5">' : ' </span><span class="s1">+ self.visit(n.bitsize)</span>
+        <span class="s2">if </span><span class="s1">n.init:</span>
+            <span class="s1">s += </span><span class="s5">' = ' </span><span class="s1">+ self._visit_expr(n.init)</span>
+        <span class="s2">return </span><span class="s1">s</span>
+
+    <span class="s2">def </span><span class="s1">visit_DeclList(self</span><span class="s2">, </span><span class="s1">n):</span>
+        <span class="s1">s = self.visit(n.decls[</span><span class="s4">0</span><span class="s1">])</span>
+        <span class="s2">if </span><span class="s1">len(n.decls) &gt; </span><span class="s4">1</span><span class="s1">:</span>
+            <span class="s1">s += </span><span class="s5">', ' </span><span class="s1">+ </span><span class="s5">', '</span><span class="s1">.join(self.visit_Decl(decl</span><span class="s2">, </span><span class="s1">no_type=</span><span class="s2">True</span><span class="s1">)</span>
+                                    <span class="s2">for </span><span class="s1">decl </span><span class="s2">in </span><span class="s1">n.decls[</span><span class="s4">1</span><span class="s1">:])</span>
+        <span class="s2">return </span><span class="s1">s</span>
+
+    <span class="s2">def </span><span class="s1">visit_Typedef(self</span><span class="s2">, </span><span class="s1">n):</span>
+        <span class="s1">s = </span><span class="s5">''</span>
+        <span class="s2">if </span><span class="s1">n.storage: s += </span><span class="s5">' '</span><span class="s1">.join(n.storage) + </span><span class="s5">' '</span>
+        <span class="s1">s += self._generate_type(n.type)</span>
+        <span class="s2">return </span><span class="s1">s</span>
+
+    <span class="s2">def </span><span class="s1">visit_Cast(self</span><span class="s2">, </span><span class="s1">n):</span>
+        <span class="s1">s = </span><span class="s5">'(' </span><span class="s1">+ self._generate_type(n.to_type</span><span class="s2">, </span><span class="s1">emit_declname=</span><span class="s2">False</span><span class="s1">) + </span><span class="s5">')'</span>
+        <span class="s2">return </span><span class="s1">s + </span><span class="s5">' ' </span><span class="s1">+ self._parenthesize_unless_simple(n.expr)</span>
+
+    <span class="s2">def </span><span class="s1">visit_ExprList(self</span><span class="s2">, </span><span class="s1">n):</span>
+        <span class="s1">visited_subexprs = []</span>
+        <span class="s2">for </span><span class="s1">expr </span><span class="s2">in </span><span class="s1">n.exprs:</span>
+            <span class="s1">visited_subexprs.append(self._visit_expr(expr))</span>
+        <span class="s2">return </span><span class="s5">', '</span><span class="s1">.join(visited_subexprs)</span>
+
+    <span class="s2">def </span><span class="s1">visit_InitList(self</span><span class="s2">, </span><span class="s1">n):</span>
+        <span class="s1">visited_subexprs = []</span>
+        <span class="s2">for </span><span class="s1">expr </span><span class="s2">in </span><span class="s1">n.exprs:</span>
+            <span class="s1">visited_subexprs.append(self._visit_expr(expr))</span>
+        <span class="s2">return </span><span class="s5">', '</span><span class="s1">.join(visited_subexprs)</span>
+
+    <span class="s2">def </span><span class="s1">visit_Enum(self</span><span class="s2">, </span><span class="s1">n):</span>
+        <span class="s2">return </span><span class="s1">self._generate_struct_union_enum(n</span><span class="s2">, </span><span class="s1">name=</span><span class="s5">'enum'</span><span class="s1">)</span>
+
+    <span class="s2">def </span><span class="s1">visit_Alignas(self</span><span class="s2">, </span><span class="s1">n):</span>
+        <span class="s2">return </span><span class="s5">'_Alignas({})'</span><span class="s1">.format(self.visit(n.alignment))</span>
+
+    <span class="s2">def </span><span class="s1">visit_Enumerator(self</span><span class="s2">, </span><span class="s1">n):</span>
+        <span class="s2">if not </span><span class="s1">n.value:</span>
+            <span class="s2">return </span><span class="s5">'{indent}{name},</span><span class="s2">\n</span><span class="s5">'</span><span class="s1">.format(</span>
+                <span class="s1">indent=self._make_indent()</span><span class="s2">,</span>
+                <span class="s1">name=n.name</span><span class="s2">,</span>
+            <span class="s1">)</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s2">return </span><span class="s5">'{indent}{name} = {value},</span><span class="s2">\n</span><span class="s5">'</span><span class="s1">.format(</span>
+                <span class="s1">indent=self._make_indent()</span><span class="s2">,</span>
+                <span class="s1">name=n.name</span><span class="s2">,</span>
+                <span class="s1">value=self.visit(n.value)</span><span class="s2">,</span>
+            <span class="s1">)</span>
+
+    <span class="s2">def </span><span class="s1">visit_FuncDef(self</span><span class="s2">, </span><span class="s1">n):</span>
+        <span class="s1">decl = self.visit(n.decl)</span>
+        <span class="s1">self.indent_level = </span><span class="s4">0</span>
+        <span class="s1">body = self.visit(n.body)</span>
+        <span class="s2">if </span><span class="s1">n.param_decls:</span>
+            <span class="s1">knrdecls = </span><span class="s5">';</span><span class="s2">\n</span><span class="s5">'</span><span class="s1">.join(self.visit(p) </span><span class="s2">for </span><span class="s1">p </span><span class="s2">in </span><span class="s1">n.param_decls)</span>
+            <span class="s2">return </span><span class="s1">decl + </span><span class="s5">'</span><span class="s2">\n</span><span class="s5">' </span><span class="s1">+ knrdecls + </span><span class="s5">';</span><span class="s2">\n</span><span class="s5">' </span><span class="s1">+ body + </span><span class="s5">'</span><span class="s2">\n</span><span class="s5">'</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s2">return </span><span class="s1">decl + </span><span class="s5">'</span><span class="s2">\n</span><span class="s5">' </span><span class="s1">+ body + </span><span class="s5">'</span><span class="s2">\n</span><span class="s5">'</span>
+
+    <span class="s2">def </span><span class="s1">visit_FileAST(self</span><span class="s2">, </span><span class="s1">n):</span>
+        <span class="s1">s = </span><span class="s5">''</span>
+        <span class="s2">for </span><span class="s1">ext </span><span class="s2">in </span><span class="s1">n.ext:</span>
+            <span class="s2">if </span><span class="s1">isinstance(ext</span><span class="s2">, </span><span class="s1">c_ast.FuncDef):</span>
+                <span class="s1">s += self.visit(ext)</span>
+            <span class="s2">elif </span><span class="s1">isinstance(ext</span><span class="s2">, </span><span class="s1">c_ast.Pragma):</span>
+                <span class="s1">s += self.visit(ext) + </span><span class="s5">'</span><span class="s2">\n</span><span class="s5">'</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s1">s += self.visit(ext) + </span><span class="s5">';</span><span class="s2">\n</span><span class="s5">'</span>
+        <span class="s2">return </span><span class="s1">s</span>
+
+    <span class="s2">def </span><span class="s1">visit_Compound(self</span><span class="s2">, </span><span class="s1">n):</span>
+        <span class="s1">s = self._make_indent() + </span><span class="s5">'{</span><span class="s2">\n</span><span class="s5">'</span>
+        <span class="s1">self.indent_level += </span><span class="s4">2</span>
+        <span class="s2">if </span><span class="s1">n.block_items:</span>
+            <span class="s1">s += </span><span class="s5">''</span><span class="s1">.join(self._generate_stmt(stmt) </span><span class="s2">for </span><span class="s1">stmt </span><span class="s2">in </span><span class="s1">n.block_items)</span>
+        <span class="s1">self.indent_level -= </span><span class="s4">2</span>
+        <span class="s1">s += self._make_indent() + </span><span class="s5">'}</span><span class="s2">\n</span><span class="s5">'</span>
+        <span class="s2">return </span><span class="s1">s</span>
+
+    <span class="s2">def </span><span class="s1">visit_CompoundLiteral(self</span><span class="s2">, </span><span class="s1">n):</span>
+        <span class="s2">return </span><span class="s5">'(' </span><span class="s1">+ self.visit(n.type) + </span><span class="s5">'){' </span><span class="s1">+ self.visit(n.init) + </span><span class="s5">'}'</span>
+
+
+    <span class="s2">def </span><span class="s1">visit_EmptyStatement(self</span><span class="s2">, </span><span class="s1">n):</span>
+        <span class="s2">return </span><span class="s5">';'</span>
+
+    <span class="s2">def </span><span class="s1">visit_ParamList(self</span><span class="s2">, </span><span class="s1">n):</span>
+        <span class="s2">return </span><span class="s5">', '</span><span class="s1">.join(self.visit(param) </span><span class="s2">for </span><span class="s1">param </span><span class="s2">in </span><span class="s1">n.params)</span>
+
+    <span class="s2">def </span><span class="s1">visit_Return(self</span><span class="s2">, </span><span class="s1">n):</span>
+        <span class="s1">s = </span><span class="s5">'return'</span>
+        <span class="s2">if </span><span class="s1">n.expr: s += </span><span class="s5">' ' </span><span class="s1">+ self.visit(n.expr)</span>
+        <span class="s2">return </span><span class="s1">s + </span><span class="s5">';'</span>
+
+    <span class="s2">def </span><span class="s1">visit_Break(self</span><span class="s2">, </span><span class="s1">n):</span>
+        <span class="s2">return </span><span class="s5">'break;'</span>
+
+    <span class="s2">def </span><span class="s1">visit_Continue(self</span><span class="s2">, </span><span class="s1">n):</span>
+        <span class="s2">return </span><span class="s5">'continue;'</span>
+
+    <span class="s2">def </span><span class="s1">visit_TernaryOp(self</span><span class="s2">, </span><span class="s1">n):</span>
+        <span class="s1">s  = </span><span class="s5">'(' </span><span class="s1">+ self._visit_expr(n.cond) + </span><span class="s5">') ? '</span>
+        <span class="s1">s += </span><span class="s5">'(' </span><span class="s1">+ self._visit_expr(n.iftrue) + </span><span class="s5">') : '</span>
+        <span class="s1">s += </span><span class="s5">'(' </span><span class="s1">+ self._visit_expr(n.iffalse) + </span><span class="s5">')'</span>
+        <span class="s2">return </span><span class="s1">s</span>
+
+    <span class="s2">def </span><span class="s1">visit_If(self</span><span class="s2">, </span><span class="s1">n):</span>
+        <span class="s1">s = </span><span class="s5">'if ('</span>
+        <span class="s2">if </span><span class="s1">n.cond: s += self.visit(n.cond)</span>
+        <span class="s1">s += </span><span class="s5">')</span><span class="s2">\n</span><span class="s5">'</span>
+        <span class="s1">s += self._generate_stmt(n.iftrue</span><span class="s2">, </span><span class="s1">add_indent=</span><span class="s2">True</span><span class="s1">)</span>
+        <span class="s2">if </span><span class="s1">n.iffalse:</span>
+            <span class="s1">s += self._make_indent() + </span><span class="s5">'else</span><span class="s2">\n</span><span class="s5">'</span>
+            <span class="s1">s += self._generate_stmt(n.iffalse</span><span class="s2">, </span><span class="s1">add_indent=</span><span class="s2">True</span><span class="s1">)</span>
+        <span class="s2">return </span><span class="s1">s</span>
+
+    <span class="s2">def </span><span class="s1">visit_For(self</span><span class="s2">, </span><span class="s1">n):</span>
+        <span class="s1">s = </span><span class="s5">'for ('</span>
+        <span class="s2">if </span><span class="s1">n.init: s += self.visit(n.init)</span>
+        <span class="s1">s += </span><span class="s5">';'</span>
+        <span class="s2">if </span><span class="s1">n.cond: s += </span><span class="s5">' ' </span><span class="s1">+ self.visit(n.cond)</span>
+        <span class="s1">s += </span><span class="s5">';'</span>
+        <span class="s2">if </span><span class="s1">n.next: s += </span><span class="s5">' ' </span><span class="s1">+ self.visit(n.next)</span>
+        <span class="s1">s += </span><span class="s5">')</span><span class="s2">\n</span><span class="s5">'</span>
+        <span class="s1">s += self._generate_stmt(n.stmt</span><span class="s2">, </span><span class="s1">add_indent=</span><span class="s2">True</span><span class="s1">)</span>
+        <span class="s2">return </span><span class="s1">s</span>
+
+    <span class="s2">def </span><span class="s1">visit_While(self</span><span class="s2">, </span><span class="s1">n):</span>
+        <span class="s1">s = </span><span class="s5">'while ('</span>
+        <span class="s2">if </span><span class="s1">n.cond: s += self.visit(n.cond)</span>
+        <span class="s1">s += </span><span class="s5">')</span><span class="s2">\n</span><span class="s5">'</span>
+        <span class="s1">s += self._generate_stmt(n.stmt</span><span class="s2">, </span><span class="s1">add_indent=</span><span class="s2">True</span><span class="s1">)</span>
+        <span class="s2">return </span><span class="s1">s</span>
+
+    <span class="s2">def </span><span class="s1">visit_DoWhile(self</span><span class="s2">, </span><span class="s1">n):</span>
+        <span class="s1">s = </span><span class="s5">'do</span><span class="s2">\n</span><span class="s5">'</span>
+        <span class="s1">s += self._generate_stmt(n.stmt</span><span class="s2">, </span><span class="s1">add_indent=</span><span class="s2">True</span><span class="s1">)</span>
+        <span class="s1">s += self._make_indent() + </span><span class="s5">'while ('</span>
+        <span class="s2">if </span><span class="s1">n.cond: s += self.visit(n.cond)</span>
+        <span class="s1">s += </span><span class="s5">');'</span>
+        <span class="s2">return </span><span class="s1">s</span>
+
+    <span class="s2">def </span><span class="s1">visit_StaticAssert(self</span><span class="s2">, </span><span class="s1">n):</span>
+        <span class="s1">s = </span><span class="s5">'_Static_assert('</span>
+        <span class="s1">s += self.visit(n.cond)</span>
+        <span class="s2">if </span><span class="s1">n.message:</span>
+            <span class="s1">s += </span><span class="s5">','</span>
+            <span class="s1">s += self.visit(n.message)</span>
+        <span class="s1">s += </span><span class="s5">')'</span>
+        <span class="s2">return </span><span class="s1">s</span>
+
+    <span class="s2">def </span><span class="s1">visit_Switch(self</span><span class="s2">, </span><span class="s1">n):</span>
+        <span class="s1">s = </span><span class="s5">'switch (' </span><span class="s1">+ self.visit(n.cond) + </span><span class="s5">')</span><span class="s2">\n</span><span class="s5">'</span>
+        <span class="s1">s += self._generate_stmt(n.stmt</span><span class="s2">, </span><span class="s1">add_indent=</span><span class="s2">True</span><span class="s1">)</span>
+        <span class="s2">return </span><span class="s1">s</span>
+
+    <span class="s2">def </span><span class="s1">visit_Case(self</span><span class="s2">, </span><span class="s1">n):</span>
+        <span class="s1">s = </span><span class="s5">'case ' </span><span class="s1">+ self.visit(n.expr) + </span><span class="s5">':</span><span class="s2">\n</span><span class="s5">'</span>
+        <span class="s2">for </span><span class="s1">stmt </span><span class="s2">in </span><span class="s1">n.stmts:</span>
+            <span class="s1">s += self._generate_stmt(stmt</span><span class="s2">, </span><span class="s1">add_indent=</span><span class="s2">True</span><span class="s1">)</span>
+        <span class="s2">return </span><span class="s1">s</span>
+
+    <span class="s2">def </span><span class="s1">visit_Default(self</span><span class="s2">, </span><span class="s1">n):</span>
+        <span class="s1">s = </span><span class="s5">'default:</span><span class="s2">\n</span><span class="s5">'</span>
+        <span class="s2">for </span><span class="s1">stmt </span><span class="s2">in </span><span class="s1">n.stmts:</span>
+            <span class="s1">s += self._generate_stmt(stmt</span><span class="s2">, </span><span class="s1">add_indent=</span><span class="s2">True</span><span class="s1">)</span>
+        <span class="s2">return </span><span class="s1">s</span>
+
+    <span class="s2">def </span><span class="s1">visit_Label(self</span><span class="s2">, </span><span class="s1">n):</span>
+        <span class="s2">return </span><span class="s1">n.name + </span><span class="s5">':</span><span class="s2">\n</span><span class="s5">' </span><span class="s1">+ self._generate_stmt(n.stmt)</span>
+
+    <span class="s2">def </span><span class="s1">visit_Goto(self</span><span class="s2">, </span><span class="s1">n):</span>
+        <span class="s2">return </span><span class="s5">'goto ' </span><span class="s1">+ n.name + </span><span class="s5">';'</span>
+
+    <span class="s2">def </span><span class="s1">visit_EllipsisParam(self</span><span class="s2">, </span><span class="s1">n):</span>
+        <span class="s2">return </span><span class="s5">'...'</span>
+
+    <span class="s2">def </span><span class="s1">visit_Struct(self</span><span class="s2">, </span><span class="s1">n):</span>
+        <span class="s2">return </span><span class="s1">self._generate_struct_union_enum(n</span><span class="s2">, </span><span class="s5">'struct'</span><span class="s1">)</span>
+
+    <span class="s2">def </span><span class="s1">visit_Typename(self</span><span class="s2">, </span><span class="s1">n):</span>
+        <span class="s2">return </span><span class="s1">self._generate_type(n.type)</span>
+
+    <span class="s2">def </span><span class="s1">visit_Union(self</span><span class="s2">, </span><span class="s1">n):</span>
+        <span class="s2">return </span><span class="s1">self._generate_struct_union_enum(n</span><span class="s2">, </span><span class="s5">'union'</span><span class="s1">)</span>
+
+    <span class="s2">def </span><span class="s1">visit_NamedInitializer(self</span><span class="s2">, </span><span class="s1">n):</span>
+        <span class="s1">s = </span><span class="s5">''</span>
+        <span class="s2">for </span><span class="s1">name </span><span class="s2">in </span><span class="s1">n.name:</span>
+            <span class="s2">if </span><span class="s1">isinstance(name</span><span class="s2">, </span><span class="s1">c_ast.ID):</span>
+                <span class="s1">s += </span><span class="s5">'.' </span><span class="s1">+ name.name</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s1">s += </span><span class="s5">'[' </span><span class="s1">+ self.visit(name) + </span><span class="s5">']'</span>
+        <span class="s1">s += </span><span class="s5">' = ' </span><span class="s1">+ self._visit_expr(n.expr)</span>
+        <span class="s2">return </span><span class="s1">s</span>
+
+    <span class="s2">def </span><span class="s1">visit_FuncDecl(self</span><span class="s2">, </span><span class="s1">n):</span>
+        <span class="s2">return </span><span class="s1">self._generate_type(n)</span>
+
+    <span class="s2">def </span><span class="s1">visit_ArrayDecl(self</span><span class="s2">, </span><span class="s1">n):</span>
+        <span class="s2">return </span><span class="s1">self._generate_type(n</span><span class="s2">, </span><span class="s1">emit_declname=</span><span class="s2">False</span><span class="s1">)</span>
+
+    <span class="s2">def </span><span class="s1">visit_TypeDecl(self</span><span class="s2">, </span><span class="s1">n):</span>
+        <span class="s2">return </span><span class="s1">self._generate_type(n</span><span class="s2">, </span><span class="s1">emit_declname=</span><span class="s2">False</span><span class="s1">)</span>
+
+    <span class="s2">def </span><span class="s1">visit_PtrDecl(self</span><span class="s2">, </span><span class="s1">n):</span>
+        <span class="s2">return </span><span class="s1">self._generate_type(n</span><span class="s2">, </span><span class="s1">emit_declname=</span><span class="s2">False</span><span class="s1">)</span>
+
+    <span class="s2">def </span><span class="s1">_generate_struct_union_enum(self</span><span class="s2">, </span><span class="s1">n</span><span class="s2">, </span><span class="s1">name):</span>
+        <span class="s3">&quot;&quot;&quot; Generates code for structs, unions, and enums. name should be 
+            'struct', 'union', or 'enum'. 
+        &quot;&quot;&quot;</span>
+        <span class="s2">if </span><span class="s1">name </span><span class="s2">in </span><span class="s1">(</span><span class="s5">'struct'</span><span class="s2">, </span><span class="s5">'union'</span><span class="s1">):</span>
+            <span class="s1">members = n.decls</span>
+            <span class="s1">body_function = self._generate_struct_union_body</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s2">assert </span><span class="s1">name == </span><span class="s5">'enum'</span>
+            <span class="s1">members = </span><span class="s2">None if </span><span class="s1">n.values </span><span class="s2">is None else </span><span class="s1">n.values.enumerators</span>
+            <span class="s1">body_function = self._generate_enum_body</span>
+        <span class="s1">s = name + </span><span class="s5">' ' </span><span class="s1">+ (n.name </span><span class="s2">or </span><span class="s5">''</span><span class="s1">)</span>
+        <span class="s2">if </span><span class="s1">members </span><span class="s2">is not None</span><span class="s1">:</span>
+            <span class="s0"># None means no members</span>
+            <span class="s0"># Empty sequence means an empty list of members</span>
+            <span class="s1">s += </span><span class="s5">'</span><span class="s2">\n</span><span class="s5">'</span>
+            <span class="s1">s += self._make_indent()</span>
+            <span class="s1">self.indent_level += </span><span class="s4">2</span>
+            <span class="s1">s += </span><span class="s5">'{</span><span class="s2">\n</span><span class="s5">'</span>
+            <span class="s1">s += body_function(members)</span>
+            <span class="s1">self.indent_level -= </span><span class="s4">2</span>
+            <span class="s1">s += self._make_indent() + </span><span class="s5">'}'</span>
+        <span class="s2">return </span><span class="s1">s</span>
+
+    <span class="s2">def </span><span class="s1">_generate_struct_union_body(self</span><span class="s2">, </span><span class="s1">members):</span>
+        <span class="s2">return </span><span class="s5">''</span><span class="s1">.join(self._generate_stmt(decl) </span><span class="s2">for </span><span class="s1">decl </span><span class="s2">in </span><span class="s1">members)</span>
+
+    <span class="s2">def </span><span class="s1">_generate_enum_body(self</span><span class="s2">, </span><span class="s1">members):</span>
+        <span class="s0"># `[:-2] + '\n'` removes the final `,` from the enumerator list</span>
+        <span class="s2">return </span><span class="s5">''</span><span class="s1">.join(self.visit(value) </span><span class="s2">for </span><span class="s1">value </span><span class="s2">in </span><span class="s1">members)[:-</span><span class="s4">2</span><span class="s1">] + </span><span class="s5">'</span><span class="s2">\n</span><span class="s5">'</span>
+
+    <span class="s2">def </span><span class="s1">_generate_stmt(self</span><span class="s2">, </span><span class="s1">n</span><span class="s2">, </span><span class="s1">add_indent=</span><span class="s2">False</span><span class="s1">):</span>
+        <span class="s3">&quot;&quot;&quot; Generation from a statement node. This method exists as a wrapper 
+            for individual visit_* methods to handle different treatment of 
+            some statements in this context. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">typ = type(n)</span>
+        <span class="s2">if </span><span class="s1">add_indent: self.indent_level += </span><span class="s4">2</span>
+        <span class="s1">indent = self._make_indent()</span>
+        <span class="s2">if </span><span class="s1">add_indent: self.indent_level -= </span><span class="s4">2</span>
+
+        <span class="s2">if </span><span class="s1">typ </span><span class="s2">in </span><span class="s1">(</span>
+                <span class="s1">c_ast.Decl</span><span class="s2">, </span><span class="s1">c_ast.Assignment</span><span class="s2">, </span><span class="s1">c_ast.Cast</span><span class="s2">, </span><span class="s1">c_ast.UnaryOp</span><span class="s2">,</span>
+                <span class="s1">c_ast.BinaryOp</span><span class="s2">, </span><span class="s1">c_ast.TernaryOp</span><span class="s2">, </span><span class="s1">c_ast.FuncCall</span><span class="s2">, </span><span class="s1">c_ast.ArrayRef</span><span class="s2">,</span>
+                <span class="s1">c_ast.StructRef</span><span class="s2">, </span><span class="s1">c_ast.Constant</span><span class="s2">, </span><span class="s1">c_ast.ID</span><span class="s2">, </span><span class="s1">c_ast.Typedef</span><span class="s2">,</span>
+                <span class="s1">c_ast.ExprList):</span>
+            <span class="s0"># These can also appear in an expression context so no semicolon</span>
+            <span class="s0"># is added to them automatically</span>
+            <span class="s0">#</span>
+            <span class="s2">return </span><span class="s1">indent + self.visit(n) + </span><span class="s5">';</span><span class="s2">\n</span><span class="s5">'</span>
+        <span class="s2">elif </span><span class="s1">typ </span><span class="s2">in </span><span class="s1">(c_ast.Compound</span><span class="s2">,</span><span class="s1">):</span>
+            <span class="s0"># No extra indentation required before the opening brace of a</span>
+            <span class="s0"># compound - because it consists of multiple lines it has to</span>
+            <span class="s0"># compute its own indentation.</span>
+            <span class="s0">#</span>
+            <span class="s2">return </span><span class="s1">self.visit(n)</span>
+        <span class="s2">elif </span><span class="s1">typ </span><span class="s2">in </span><span class="s1">(c_ast.If</span><span class="s2">,</span><span class="s1">):</span>
+            <span class="s2">return </span><span class="s1">indent + self.visit(n)</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s2">return </span><span class="s1">indent + self.visit(n) + </span><span class="s5">'</span><span class="s2">\n</span><span class="s5">'</span>
+
+    <span class="s2">def </span><span class="s1">_generate_decl(self</span><span class="s2">, </span><span class="s1">n):</span>
+        <span class="s3">&quot;&quot;&quot; Generation from a Decl node. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">s = </span><span class="s5">''</span>
+        <span class="s2">if </span><span class="s1">n.funcspec: s = </span><span class="s5">' '</span><span class="s1">.join(n.funcspec) + </span><span class="s5">' '</span>
+        <span class="s2">if </span><span class="s1">n.storage: s += </span><span class="s5">' '</span><span class="s1">.join(n.storage) + </span><span class="s5">' '</span>
+        <span class="s2">if </span><span class="s1">n.align: s += self.visit(n.align[</span><span class="s4">0</span><span class="s1">]) + </span><span class="s5">' '</span>
+        <span class="s1">s += self._generate_type(n.type)</span>
+        <span class="s2">return </span><span class="s1">s</span>
+
+    <span class="s2">def </span><span class="s1">_generate_type(self</span><span class="s2">, </span><span class="s1">n</span><span class="s2">, </span><span class="s1">modifiers=[]</span><span class="s2">, </span><span class="s1">emit_declname = </span><span class="s2">True</span><span class="s1">):</span>
+        <span class="s3">&quot;&quot;&quot; Recursive generation from a type node. n is the type node. 
+            modifiers collects the PtrDecl, ArrayDecl and FuncDecl modifiers 
+            encountered on the way down to a TypeDecl, to allow proper 
+            generation from it. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">typ = type(n)</span>
+        <span class="s0">#~ print(n, modifiers)</span>
+
+        <span class="s2">if </span><span class="s1">typ == c_ast.TypeDecl:</span>
+            <span class="s1">s = </span><span class="s5">''</span>
+            <span class="s2">if </span><span class="s1">n.quals: s += </span><span class="s5">' '</span><span class="s1">.join(n.quals) + </span><span class="s5">' '</span>
+            <span class="s1">s += self.visit(n.type)</span>
+
+            <span class="s1">nstr = n.declname </span><span class="s2">if </span><span class="s1">n.declname </span><span class="s2">and </span><span class="s1">emit_declname </span><span class="s2">else </span><span class="s5">''</span>
+            <span class="s0"># Resolve modifiers.</span>
+            <span class="s0"># Wrap in parens to distinguish pointer to array and pointer to</span>
+            <span class="s0"># function syntax.</span>
+            <span class="s0">#</span>
+            <span class="s2">for </span><span class="s1">i</span><span class="s2">, </span><span class="s1">modifier </span><span class="s2">in </span><span class="s1">enumerate(modifiers):</span>
+                <span class="s2">if </span><span class="s1">isinstance(modifier</span><span class="s2">, </span><span class="s1">c_ast.ArrayDecl):</span>
+                    <span class="s2">if </span><span class="s1">(i != </span><span class="s4">0 </span><span class="s2">and</span>
+                        <span class="s1">isinstance(modifiers[i - </span><span class="s4">1</span><span class="s1">]</span><span class="s2">, </span><span class="s1">c_ast.PtrDecl)):</span>
+                            <span class="s1">nstr = </span><span class="s5">'(' </span><span class="s1">+ nstr + </span><span class="s5">')'</span>
+                    <span class="s1">nstr += </span><span class="s5">'['</span>
+                    <span class="s2">if </span><span class="s1">modifier.dim_quals:</span>
+                        <span class="s1">nstr += </span><span class="s5">' '</span><span class="s1">.join(modifier.dim_quals) + </span><span class="s5">' '</span>
+                    <span class="s1">nstr += self.visit(modifier.dim) + </span><span class="s5">']'</span>
+                <span class="s2">elif </span><span class="s1">isinstance(modifier</span><span class="s2">, </span><span class="s1">c_ast.FuncDecl):</span>
+                    <span class="s2">if </span><span class="s1">(i != </span><span class="s4">0 </span><span class="s2">and</span>
+                        <span class="s1">isinstance(modifiers[i - </span><span class="s4">1</span><span class="s1">]</span><span class="s2">, </span><span class="s1">c_ast.PtrDecl)):</span>
+                            <span class="s1">nstr = </span><span class="s5">'(' </span><span class="s1">+ nstr + </span><span class="s5">')'</span>
+                    <span class="s1">nstr += </span><span class="s5">'(' </span><span class="s1">+ self.visit(modifier.args) + </span><span class="s5">')'</span>
+                <span class="s2">elif </span><span class="s1">isinstance(modifier</span><span class="s2">, </span><span class="s1">c_ast.PtrDecl):</span>
+                    <span class="s2">if </span><span class="s1">modifier.quals:</span>
+                        <span class="s1">nstr = </span><span class="s5">'* %s%s' </span><span class="s1">% (</span><span class="s5">' '</span><span class="s1">.join(modifier.quals)</span><span class="s2">,</span>
+                                           <span class="s5">' ' </span><span class="s1">+ nstr </span><span class="s2">if </span><span class="s1">nstr </span><span class="s2">else </span><span class="s5">''</span><span class="s1">)</span>
+                    <span class="s2">else</span><span class="s1">:</span>
+                        <span class="s1">nstr = </span><span class="s5">'*' </span><span class="s1">+ nstr</span>
+            <span class="s2">if </span><span class="s1">nstr: s += </span><span class="s5">' ' </span><span class="s1">+ nstr</span>
+            <span class="s2">return </span><span class="s1">s</span>
+        <span class="s2">elif </span><span class="s1">typ == c_ast.Decl:</span>
+            <span class="s2">return </span><span class="s1">self._generate_decl(n.type)</span>
+        <span class="s2">elif </span><span class="s1">typ == c_ast.Typename:</span>
+            <span class="s2">return </span><span class="s1">self._generate_type(n.type</span><span class="s2">, </span><span class="s1">emit_declname = emit_declname)</span>
+        <span class="s2">elif </span><span class="s1">typ == c_ast.IdentifierType:</span>
+            <span class="s2">return </span><span class="s5">' '</span><span class="s1">.join(n.names) + </span><span class="s5">' '</span>
+        <span class="s2">elif </span><span class="s1">typ </span><span class="s2">in </span><span class="s1">(c_ast.ArrayDecl</span><span class="s2">, </span><span class="s1">c_ast.PtrDecl</span><span class="s2">, </span><span class="s1">c_ast.FuncDecl):</span>
+            <span class="s2">return </span><span class="s1">self._generate_type(n.type</span><span class="s2">, </span><span class="s1">modifiers + [n]</span><span class="s2">,</span>
+                                       <span class="s1">emit_declname = emit_declname)</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s2">return </span><span class="s1">self.visit(n)</span>
+
+    <span class="s2">def </span><span class="s1">_parenthesize_if(self</span><span class="s2">, </span><span class="s1">n</span><span class="s2">, </span><span class="s1">condition):</span>
+        <span class="s3">&quot;&quot;&quot; Visits 'n' and returns its string representation, parenthesized 
+            if the condition function applied to the node returns True. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">s = self._visit_expr(n)</span>
+        <span class="s2">if </span><span class="s1">condition(n):</span>
+            <span class="s2">return </span><span class="s5">'(' </span><span class="s1">+ s + </span><span class="s5">')'</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s2">return </span><span class="s1">s</span>
+
+    <span class="s2">def </span><span class="s1">_parenthesize_unless_simple(self</span><span class="s2">, </span><span class="s1">n):</span>
+        <span class="s3">&quot;&quot;&quot; Common use case for _parenthesize_if 
+        &quot;&quot;&quot;</span>
+        <span class="s2">return </span><span class="s1">self._parenthesize_if(n</span><span class="s2">, lambda </span><span class="s1">d: </span><span class="s2">not </span><span class="s1">self._is_simple_node(d))</span>
+
+    <span class="s2">def </span><span class="s1">_is_simple_node(self</span><span class="s2">, </span><span class="s1">n):</span>
+        <span class="s3">&quot;&quot;&quot; Returns True for nodes that are &quot;simple&quot; - i.e. nodes that always 
+            have higher precedence than operators. 
+        &quot;&quot;&quot;</span>
+        <span class="s2">return </span><span class="s1">isinstance(n</span><span class="s2">, </span><span class="s1">(c_ast.Constant</span><span class="s2">, </span><span class="s1">c_ast.ID</span><span class="s2">, </span><span class="s1">c_ast.ArrayRef</span><span class="s2">,</span>
+                              <span class="s1">c_ast.StructRef</span><span class="s2">, </span><span class="s1">c_ast.FuncCall))</span>
+</pre>
+</body>
+</html>

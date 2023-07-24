@@ -1,0 +1,547 @@
+<html>
+<head>
+<title>feedparser.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #629755; font-style: italic;}
+.s3 { color: #cc7832;}
+.s4 { color: #6a8759;}
+.s5 { color: #6897bb;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+feedparser.py</font>
+</center></td></tr></table>
+<pre><span class="s0"># Copyright (C) 2004-2006 Python Software Foundation</span>
+<span class="s0"># Authors: Baxter, Wouters and Warsaw</span>
+<span class="s0"># Contact: email-sig@python.org</span>
+
+<span class="s2">&quot;&quot;&quot;FeedParser - An email feed parser. 
+ 
+The feed parser implements an interface for incrementally parsing an email 
+message, line by line.  This has advantages for certain applications, such as 
+those reading email messages off a socket. 
+ 
+FeedParser.feed() is the primary interface for pushing new data into the 
+parser.  It returns when there's nothing more it can do with the available 
+data.  When you have no more data to push into the parser, call .close(). 
+This completes the parsing and returns the root message object. 
+ 
+The other advantage of this parser is that it will never raise a parsing 
+exception.  Instead, when it finds something unexpected, it adds a 'defect' to 
+the current message.  Defects are just instances that live on the message 
+object's .defects attribute. 
+&quot;&quot;&quot;</span>
+<span class="s3">from </span><span class="s1">__future__ </span><span class="s3">import </span><span class="s1">unicode_literals</span>
+<span class="s3">from </span><span class="s1">__future__ </span><span class="s3">import </span><span class="s1">division</span>
+<span class="s3">from </span><span class="s1">__future__ </span><span class="s3">import </span><span class="s1">absolute_import</span>
+<span class="s3">from </span><span class="s1">future.builtins </span><span class="s3">import </span><span class="s1">object</span><span class="s3">, </span><span class="s1">range</span><span class="s3">, </span><span class="s1">super</span>
+<span class="s3">from </span><span class="s1">future.utils </span><span class="s3">import </span><span class="s1">implements_iterator</span><span class="s3">, </span><span class="s1">PY3</span>
+
+<span class="s1">__all__ = [</span><span class="s4">'FeedParser'</span><span class="s3">, </span><span class="s4">'BytesFeedParser'</span><span class="s1">]</span>
+
+<span class="s3">import </span><span class="s1">re</span>
+
+<span class="s3">from </span><span class="s1">future.backports.email </span><span class="s3">import </span><span class="s1">errors</span>
+<span class="s3">from </span><span class="s1">future.backports.email </span><span class="s3">import </span><span class="s1">message</span>
+<span class="s3">from </span><span class="s1">future.backports.email._policybase </span><span class="s3">import </span><span class="s1">compat32</span>
+
+<span class="s1">NLCRE = re.compile(</span><span class="s4">'</span><span class="s3">\r\n</span><span class="s4">|</span><span class="s3">\r</span><span class="s4">|</span><span class="s3">\n</span><span class="s4">'</span><span class="s1">)</span>
+<span class="s1">NLCRE_bol = re.compile(</span><span class="s4">'(</span><span class="s3">\r\n</span><span class="s4">|</span><span class="s3">\r</span><span class="s4">|</span><span class="s3">\n</span><span class="s4">)'</span><span class="s1">)</span>
+<span class="s1">NLCRE_eol = re.compile(</span><span class="s4">'(</span><span class="s3">\r\n</span><span class="s4">|</span><span class="s3">\r</span><span class="s4">|</span><span class="s3">\n</span><span class="s4">)\Z'</span><span class="s1">)</span>
+<span class="s1">NLCRE_crack = re.compile(</span><span class="s4">'(</span><span class="s3">\r\n</span><span class="s4">|</span><span class="s3">\r</span><span class="s4">|</span><span class="s3">\n</span><span class="s4">)'</span><span class="s1">)</span>
+<span class="s0"># RFC 2822 $3.6.8 Optional fields.  ftext is %d33-57 / %d59-126, Any character</span>
+<span class="s0"># except controls, SP, and &quot;:&quot;.</span>
+<span class="s1">headerRE = re.compile(</span><span class="s4">r'^(From |[\041-\071\073-\176]{1,}:|[\t ])'</span><span class="s1">)</span>
+<span class="s1">EMPTYSTRING = </span><span class="s4">''</span>
+<span class="s1">NL = </span><span class="s4">'</span><span class="s3">\n</span><span class="s4">'</span>
+
+<span class="s1">NeedMoreData = object()</span>
+
+
+<span class="s0"># @implements_iterator</span>
+<span class="s3">class </span><span class="s1">BufferedSubFile(object):</span>
+    <span class="s2">&quot;&quot;&quot;A file-ish object that can have new data loaded into it. 
+ 
+    You can also push and pop line-matching predicates onto a stack.  When the 
+    current predicate matches the current line, a false EOF response 
+    (i.e. empty string) is returned instead.  This lets the parser adhere to a 
+    simple abstraction -- it parses until EOF closes the current message. 
+    &quot;&quot;&quot;</span>
+    <span class="s3">def </span><span class="s1">__init__(self):</span>
+        <span class="s0"># The last partial line pushed into this object.</span>
+        <span class="s1">self._partial = </span><span class="s4">''</span>
+        <span class="s0"># The list of full, pushed lines, in reverse order</span>
+        <span class="s1">self._lines = []</span>
+        <span class="s0"># The stack of false-EOF checking predicates.</span>
+        <span class="s1">self._eofstack = []</span>
+        <span class="s0"># A flag indicating whether the file has been closed or not.</span>
+        <span class="s1">self._closed = </span><span class="s3">False</span>
+
+    <span class="s3">def </span><span class="s1">push_eof_matcher(self</span><span class="s3">, </span><span class="s1">pred):</span>
+        <span class="s1">self._eofstack.append(pred)</span>
+
+    <span class="s3">def </span><span class="s1">pop_eof_matcher(self):</span>
+        <span class="s3">return </span><span class="s1">self._eofstack.pop()</span>
+
+    <span class="s3">def </span><span class="s1">close(self):</span>
+        <span class="s0"># Don't forget any trailing partial line.</span>
+        <span class="s1">self._lines.append(self._partial)</span>
+        <span class="s1">self._partial = </span><span class="s4">''</span>
+        <span class="s1">self._closed = </span><span class="s3">True</span>
+
+    <span class="s3">def </span><span class="s1">readline(self):</span>
+        <span class="s3">if not </span><span class="s1">self._lines:</span>
+            <span class="s3">if </span><span class="s1">self._closed:</span>
+                <span class="s3">return </span><span class="s4">''</span>
+            <span class="s3">return </span><span class="s1">NeedMoreData</span>
+        <span class="s0"># Pop the line off the stack and see if it matches the current</span>
+        <span class="s0"># false-EOF predicate.</span>
+        <span class="s1">line = self._lines.pop()</span>
+        <span class="s0"># RFC 2046, section 5.1.2 requires us to recognize outer level</span>
+        <span class="s0"># boundaries at any level of inner nesting.  Do this, but be sure it's</span>
+        <span class="s0"># in the order of most to least nested.</span>
+        <span class="s3">for </span><span class="s1">ateof </span><span class="s3">in </span><span class="s1">self._eofstack[::-</span><span class="s5">1</span><span class="s1">]:</span>
+            <span class="s3">if </span><span class="s1">ateof(line):</span>
+                <span class="s0"># We're at the false EOF.  But push the last line back first.</span>
+                <span class="s1">self._lines.append(line)</span>
+                <span class="s3">return </span><span class="s4">''</span>
+        <span class="s3">return </span><span class="s1">line</span>
+
+    <span class="s3">def </span><span class="s1">unreadline(self</span><span class="s3">, </span><span class="s1">line):</span>
+        <span class="s0"># Let the consumer push a line back into the buffer.</span>
+        <span class="s3">assert </span><span class="s1">line </span><span class="s3">is not </span><span class="s1">NeedMoreData</span>
+        <span class="s1">self._lines.append(line)</span>
+
+    <span class="s3">def </span><span class="s1">push(self</span><span class="s3">, </span><span class="s1">data):</span>
+        <span class="s2">&quot;&quot;&quot;Push some new data into this object.&quot;&quot;&quot;</span>
+        <span class="s0"># Handle any previous leftovers</span>
+        <span class="s1">data</span><span class="s3">, </span><span class="s1">self._partial = self._partial + data</span><span class="s3">, </span><span class="s4">''</span>
+        <span class="s0"># Crack into lines, but preserve the newlines on the end of each</span>
+        <span class="s1">parts = NLCRE_crack.split(data)</span>
+        <span class="s0"># The *ahem* interesting behaviour of re.split when supplied grouping</span>
+        <span class="s0"># parentheses is that the last element of the resulting list is the</span>
+        <span class="s0"># data after the final RE.  In the case of a NL/CR terminated string,</span>
+        <span class="s0"># this is the empty string.</span>
+        <span class="s1">self._partial = parts.pop()</span>
+        <span class="s0">#GAN 29Mar09  bugs 1555570, 1721862  Confusion at 8K boundary ending with \r:</span>
+        <span class="s0"># is there a \n to follow later?</span>
+        <span class="s3">if not </span><span class="s1">self._partial </span><span class="s3">and </span><span class="s1">parts </span><span class="s3">and </span><span class="s1">parts[-</span><span class="s5">1</span><span class="s1">].endswith(</span><span class="s4">'</span><span class="s3">\r</span><span class="s4">'</span><span class="s1">):</span>
+            <span class="s1">self._partial = parts.pop(-</span><span class="s5">2</span><span class="s1">)+parts.pop()</span>
+        <span class="s0"># parts is a list of strings, alternating between the line contents</span>
+        <span class="s0"># and the eol character(s).  Gather up a list of lines after</span>
+        <span class="s0"># re-attaching the newlines.</span>
+        <span class="s1">lines = []</span>
+        <span class="s3">for </span><span class="s1">i </span><span class="s3">in </span><span class="s1">range(len(parts) // </span><span class="s5">2</span><span class="s1">):</span>
+            <span class="s1">lines.append(parts[i*</span><span class="s5">2</span><span class="s1">] + parts[i*</span><span class="s5">2</span><span class="s1">+</span><span class="s5">1</span><span class="s1">])</span>
+        <span class="s1">self.pushlines(lines)</span>
+
+    <span class="s3">def </span><span class="s1">pushlines(self</span><span class="s3">, </span><span class="s1">lines):</span>
+        <span class="s0"># Reverse and insert at the front of the lines.</span>
+        <span class="s1">self._lines[:</span><span class="s5">0</span><span class="s1">] = lines[::-</span><span class="s5">1</span><span class="s1">]</span>
+
+    <span class="s3">def </span><span class="s1">__iter__(self):</span>
+        <span class="s3">return </span><span class="s1">self</span>
+
+    <span class="s3">def </span><span class="s1">__next__(self):</span>
+        <span class="s1">line = self.readline()</span>
+        <span class="s3">if </span><span class="s1">line == </span><span class="s4">''</span><span class="s1">:</span>
+            <span class="s3">raise </span><span class="s1">StopIteration</span>
+        <span class="s3">return </span><span class="s1">line</span>
+
+
+<span class="s3">class </span><span class="s1">FeedParser(object):</span>
+    <span class="s2">&quot;&quot;&quot;A feed-style parser of email.&quot;&quot;&quot;</span>
+
+    <span class="s3">def </span><span class="s1">__init__(self</span><span class="s3">, </span><span class="s1">_factory=message.Message</span><span class="s3">, </span><span class="s1">**_3to2kwargs):</span>
+        <span class="s3">if </span><span class="s4">'policy' </span><span class="s3">in </span><span class="s1">_3to2kwargs: policy = _3to2kwargs[</span><span class="s4">'policy'</span><span class="s1">]; </span><span class="s3">del </span><span class="s1">_3to2kwargs[</span><span class="s4">'policy'</span><span class="s1">]</span>
+        <span class="s3">else</span><span class="s1">: policy = compat32</span>
+        <span class="s4">&quot;&quot;&quot;_factory is called with no arguments to create a new message obj 
+ 
+        The policy keyword specifies a policy object that controls a number of 
+        aspects of the parser's operation.  The default policy maintains 
+        backward compatibility. 
+ 
+        &quot;&quot;&quot;</span>
+        <span class="s1">self._factory = _factory</span>
+        <span class="s1">self.policy = policy</span>
+        <span class="s3">try</span><span class="s1">:</span>
+            <span class="s1">_factory(policy=self.policy)</span>
+            <span class="s1">self._factory_kwds = </span><span class="s3">lambda</span><span class="s1">: {</span><span class="s4">'policy'</span><span class="s1">: self.policy}</span>
+        <span class="s3">except </span><span class="s1">TypeError:</span>
+            <span class="s0"># Assume this is an old-style factory</span>
+            <span class="s1">self._factory_kwds = </span><span class="s3">lambda</span><span class="s1">: {}</span>
+        <span class="s1">self._input = BufferedSubFile()</span>
+        <span class="s1">self._msgstack = []</span>
+        <span class="s3">if </span><span class="s1">PY3:</span>
+            <span class="s1">self._parse = self._parsegen().__next__</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s1">self._parse = self._parsegen().next</span>
+        <span class="s1">self._cur = </span><span class="s3">None</span>
+        <span class="s1">self._last = </span><span class="s3">None</span>
+        <span class="s1">self._headersonly = </span><span class="s3">False</span>
+
+    <span class="s0"># Non-public interface for supporting Parser's headersonly flag</span>
+    <span class="s3">def </span><span class="s1">_set_headersonly(self):</span>
+        <span class="s1">self._headersonly = </span><span class="s3">True</span>
+
+    <span class="s3">def </span><span class="s1">feed(self</span><span class="s3">, </span><span class="s1">data):</span>
+        <span class="s2">&quot;&quot;&quot;Push more data into the parser.&quot;&quot;&quot;</span>
+        <span class="s1">self._input.push(data)</span>
+        <span class="s1">self._call_parse()</span>
+
+    <span class="s3">def </span><span class="s1">_call_parse(self):</span>
+        <span class="s3">try</span><span class="s1">:</span>
+            <span class="s1">self._parse()</span>
+        <span class="s3">except </span><span class="s1">StopIteration:</span>
+            <span class="s3">pass</span>
+
+    <span class="s3">def </span><span class="s1">close(self):</span>
+        <span class="s2">&quot;&quot;&quot;Parse all remaining data and return the root message object.&quot;&quot;&quot;</span>
+        <span class="s1">self._input.close()</span>
+        <span class="s1">self._call_parse()</span>
+        <span class="s1">root = self._pop_message()</span>
+        <span class="s3">assert not </span><span class="s1">self._msgstack</span>
+        <span class="s0"># Look for final set of defects</span>
+        <span class="s3">if </span><span class="s1">root.get_content_maintype() == </span><span class="s4">'multipart' </span><span class="s1">\</span>
+               <span class="s3">and not </span><span class="s1">root.is_multipart():</span>
+            <span class="s1">defect = errors.MultipartInvariantViolationDefect()</span>
+            <span class="s1">self.policy.handle_defect(root</span><span class="s3">, </span><span class="s1">defect)</span>
+        <span class="s3">return </span><span class="s1">root</span>
+
+    <span class="s3">def </span><span class="s1">_new_message(self):</span>
+        <span class="s1">msg = self._factory(**self._factory_kwds())</span>
+        <span class="s3">if </span><span class="s1">self._cur </span><span class="s3">and </span><span class="s1">self._cur.get_content_type() == </span><span class="s4">'multipart/digest'</span><span class="s1">:</span>
+            <span class="s1">msg.set_default_type(</span><span class="s4">'message/rfc822'</span><span class="s1">)</span>
+        <span class="s3">if </span><span class="s1">self._msgstack:</span>
+            <span class="s1">self._msgstack[-</span><span class="s5">1</span><span class="s1">].attach(msg)</span>
+        <span class="s1">self._msgstack.append(msg)</span>
+        <span class="s1">self._cur = msg</span>
+        <span class="s1">self._last = msg</span>
+
+    <span class="s3">def </span><span class="s1">_pop_message(self):</span>
+        <span class="s1">retval = self._msgstack.pop()</span>
+        <span class="s3">if </span><span class="s1">self._msgstack:</span>
+            <span class="s1">self._cur = self._msgstack[-</span><span class="s5">1</span><span class="s1">]</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s1">self._cur = </span><span class="s3">None</span>
+        <span class="s3">return </span><span class="s1">retval</span>
+
+    <span class="s3">def </span><span class="s1">_parsegen(self):</span>
+        <span class="s0"># Create a new message and start by parsing headers.</span>
+        <span class="s1">self._new_message()</span>
+        <span class="s1">headers = []</span>
+        <span class="s0"># Collect the headers, searching for a line that doesn't match the RFC</span>
+        <span class="s0"># 2822 header or continuation pattern (including an empty line).</span>
+        <span class="s3">for </span><span class="s1">line </span><span class="s3">in </span><span class="s1">self._input:</span>
+            <span class="s3">if </span><span class="s1">line </span><span class="s3">is </span><span class="s1">NeedMoreData:</span>
+                <span class="s3">yield </span><span class="s1">NeedMoreData</span>
+                <span class="s3">continue</span>
+            <span class="s3">if not </span><span class="s1">headerRE.match(line):</span>
+                <span class="s0"># If we saw the RFC defined header/body separator</span>
+                <span class="s0"># (i.e. newline), just throw it away. Otherwise the line is</span>
+                <span class="s0"># part of the body so push it back.</span>
+                <span class="s3">if not </span><span class="s1">NLCRE.match(line):</span>
+                    <span class="s1">defect = errors.MissingHeaderBodySeparatorDefect()</span>
+                    <span class="s1">self.policy.handle_defect(self._cur</span><span class="s3">, </span><span class="s1">defect)</span>
+                    <span class="s1">self._input.unreadline(line)</span>
+                <span class="s3">break</span>
+            <span class="s1">headers.append(line)</span>
+        <span class="s0"># Done with the headers, so parse them and figure out what we're</span>
+        <span class="s0"># supposed to see in the body of the message.</span>
+        <span class="s1">self._parse_headers(headers)</span>
+        <span class="s0"># Headers-only parsing is a backwards compatibility hack, which was</span>
+        <span class="s0"># necessary in the older parser, which could raise errors.  All</span>
+        <span class="s0"># remaining lines in the input are thrown into the message body.</span>
+        <span class="s3">if </span><span class="s1">self._headersonly:</span>
+            <span class="s1">lines = []</span>
+            <span class="s3">while True</span><span class="s1">:</span>
+                <span class="s1">line = self._input.readline()</span>
+                <span class="s3">if </span><span class="s1">line </span><span class="s3">is </span><span class="s1">NeedMoreData:</span>
+                    <span class="s3">yield </span><span class="s1">NeedMoreData</span>
+                    <span class="s3">continue</span>
+                <span class="s3">if </span><span class="s1">line == </span><span class="s4">''</span><span class="s1">:</span>
+                    <span class="s3">break</span>
+                <span class="s1">lines.append(line)</span>
+            <span class="s1">self._cur.set_payload(EMPTYSTRING.join(lines))</span>
+            <span class="s3">return</span>
+        <span class="s3">if </span><span class="s1">self._cur.get_content_type() == </span><span class="s4">'message/delivery-status'</span><span class="s1">:</span>
+            <span class="s0"># message/delivery-status contains blocks of headers separated by</span>
+            <span class="s0"># a blank line.  We'll represent each header block as a separate</span>
+            <span class="s0"># nested message object, but the processing is a bit different</span>
+            <span class="s0"># than standard message/* types because there is no body for the</span>
+            <span class="s0"># nested messages.  A blank line separates the subparts.</span>
+            <span class="s3">while True</span><span class="s1">:</span>
+                <span class="s1">self._input.push_eof_matcher(NLCRE.match)</span>
+                <span class="s3">for </span><span class="s1">retval </span><span class="s3">in </span><span class="s1">self._parsegen():</span>
+                    <span class="s3">if </span><span class="s1">retval </span><span class="s3">is </span><span class="s1">NeedMoreData:</span>
+                        <span class="s3">yield </span><span class="s1">NeedMoreData</span>
+                        <span class="s3">continue</span>
+                    <span class="s3">break</span>
+                <span class="s1">msg = self._pop_message()</span>
+                <span class="s0"># We need to pop the EOF matcher in order to tell if we're at</span>
+                <span class="s0"># the end of the current file, not the end of the last block</span>
+                <span class="s0"># of message headers.</span>
+                <span class="s1">self._input.pop_eof_matcher()</span>
+                <span class="s0"># The input stream must be sitting at the newline or at the</span>
+                <span class="s0"># EOF.  We want to see if we're at the end of this subpart, so</span>
+                <span class="s0"># first consume the blank line, then test the next line to see</span>
+                <span class="s0"># if we're at this subpart's EOF.</span>
+                <span class="s3">while True</span><span class="s1">:</span>
+                    <span class="s1">line = self._input.readline()</span>
+                    <span class="s3">if </span><span class="s1">line </span><span class="s3">is </span><span class="s1">NeedMoreData:</span>
+                        <span class="s3">yield </span><span class="s1">NeedMoreData</span>
+                        <span class="s3">continue</span>
+                    <span class="s3">break</span>
+                <span class="s3">while True</span><span class="s1">:</span>
+                    <span class="s1">line = self._input.readline()</span>
+                    <span class="s3">if </span><span class="s1">line </span><span class="s3">is </span><span class="s1">NeedMoreData:</span>
+                        <span class="s3">yield </span><span class="s1">NeedMoreData</span>
+                        <span class="s3">continue</span>
+                    <span class="s3">break</span>
+                <span class="s3">if </span><span class="s1">line == </span><span class="s4">''</span><span class="s1">:</span>
+                    <span class="s3">break</span>
+                <span class="s0"># Not at EOF so this is a line we're going to need.</span>
+                <span class="s1">self._input.unreadline(line)</span>
+            <span class="s3">return</span>
+        <span class="s3">if </span><span class="s1">self._cur.get_content_maintype() == </span><span class="s4">'message'</span><span class="s1">:</span>
+            <span class="s0"># The message claims to be a message/* type, then what follows is</span>
+            <span class="s0"># another RFC 2822 message.</span>
+            <span class="s3">for </span><span class="s1">retval </span><span class="s3">in </span><span class="s1">self._parsegen():</span>
+                <span class="s3">if </span><span class="s1">retval </span><span class="s3">is </span><span class="s1">NeedMoreData:</span>
+                    <span class="s3">yield </span><span class="s1">NeedMoreData</span>
+                    <span class="s3">continue</span>
+                <span class="s3">break</span>
+            <span class="s1">self._pop_message()</span>
+            <span class="s3">return</span>
+        <span class="s3">if </span><span class="s1">self._cur.get_content_maintype() == </span><span class="s4">'multipart'</span><span class="s1">:</span>
+            <span class="s1">boundary = self._cur.get_boundary()</span>
+            <span class="s3">if </span><span class="s1">boundary </span><span class="s3">is None</span><span class="s1">:</span>
+                <span class="s0"># The message /claims/ to be a multipart but it has not</span>
+                <span class="s0"># defined a boundary.  That's a problem which we'll handle by</span>
+                <span class="s0"># reading everything until the EOF and marking the message as</span>
+                <span class="s0"># defective.</span>
+                <span class="s1">defect = errors.NoBoundaryInMultipartDefect()</span>
+                <span class="s1">self.policy.handle_defect(self._cur</span><span class="s3">, </span><span class="s1">defect)</span>
+                <span class="s1">lines = []</span>
+                <span class="s3">for </span><span class="s1">line </span><span class="s3">in </span><span class="s1">self._input:</span>
+                    <span class="s3">if </span><span class="s1">line </span><span class="s3">is </span><span class="s1">NeedMoreData:</span>
+                        <span class="s3">yield </span><span class="s1">NeedMoreData</span>
+                        <span class="s3">continue</span>
+                    <span class="s1">lines.append(line)</span>
+                <span class="s1">self._cur.set_payload(EMPTYSTRING.join(lines))</span>
+                <span class="s3">return</span>
+            <span class="s0"># Make sure a valid content type was specified per RFC 2045:6.4.</span>
+            <span class="s3">if </span><span class="s1">(self._cur.get(</span><span class="s4">'content-transfer-encoding'</span><span class="s3">, </span><span class="s4">'8bit'</span><span class="s1">).lower()</span>
+                    <span class="s3">not in </span><span class="s1">(</span><span class="s4">'7bit'</span><span class="s3">, </span><span class="s4">'8bit'</span><span class="s3">, </span><span class="s4">'binary'</span><span class="s1">)):</span>
+                <span class="s1">defect = errors.InvalidMultipartContentTransferEncodingDefect()</span>
+                <span class="s1">self.policy.handle_defect(self._cur</span><span class="s3">, </span><span class="s1">defect)</span>
+            <span class="s0"># Create a line match predicate which matches the inter-part</span>
+            <span class="s0"># boundary as well as the end-of-multipart boundary.  Don't push</span>
+            <span class="s0"># this onto the input stream until we've scanned past the</span>
+            <span class="s0"># preamble.</span>
+            <span class="s1">separator = </span><span class="s4">'--' </span><span class="s1">+ boundary</span>
+            <span class="s1">boundaryre = re.compile(</span>
+                <span class="s4">'(?P&lt;sep&gt;' </span><span class="s1">+ re.escape(separator) +</span>
+                <span class="s4">r')(?P&lt;end&gt;--)?(?P&lt;ws&gt;[ \t]*)(?P&lt;linesep&gt;\r\n|\r|\n)?$'</span><span class="s1">)</span>
+            <span class="s1">capturing_preamble = </span><span class="s3">True</span>
+            <span class="s1">preamble = []</span>
+            <span class="s1">linesep = </span><span class="s3">False</span>
+            <span class="s1">close_boundary_seen = </span><span class="s3">False</span>
+            <span class="s3">while True</span><span class="s1">:</span>
+                <span class="s1">line = self._input.readline()</span>
+                <span class="s3">if </span><span class="s1">line </span><span class="s3">is </span><span class="s1">NeedMoreData:</span>
+                    <span class="s3">yield </span><span class="s1">NeedMoreData</span>
+                    <span class="s3">continue</span>
+                <span class="s3">if </span><span class="s1">line == </span><span class="s4">''</span><span class="s1">:</span>
+                    <span class="s3">break</span>
+                <span class="s1">mo = boundaryre.match(line)</span>
+                <span class="s3">if </span><span class="s1">mo:</span>
+                    <span class="s0"># If we're looking at the end boundary, we're done with</span>
+                    <span class="s0"># this multipart.  If there was a newline at the end of</span>
+                    <span class="s0"># the closing boundary, then we need to initialize the</span>
+                    <span class="s0"># epilogue with the empty string (see below).</span>
+                    <span class="s3">if </span><span class="s1">mo.group(</span><span class="s4">'end'</span><span class="s1">):</span>
+                        <span class="s1">close_boundary_seen = </span><span class="s3">True</span>
+                        <span class="s1">linesep = mo.group(</span><span class="s4">'linesep'</span><span class="s1">)</span>
+                        <span class="s3">break</span>
+                    <span class="s0"># We saw an inter-part boundary.  Were we in the preamble?</span>
+                    <span class="s3">if </span><span class="s1">capturing_preamble:</span>
+                        <span class="s3">if </span><span class="s1">preamble:</span>
+                            <span class="s0"># According to RFC 2046, the last newline belongs</span>
+                            <span class="s0"># to the boundary.</span>
+                            <span class="s1">lastline = preamble[-</span><span class="s5">1</span><span class="s1">]</span>
+                            <span class="s1">eolmo = NLCRE_eol.search(lastline)</span>
+                            <span class="s3">if </span><span class="s1">eolmo:</span>
+                                <span class="s1">preamble[-</span><span class="s5">1</span><span class="s1">] = lastline[:-len(eolmo.group(</span><span class="s5">0</span><span class="s1">))]</span>
+                            <span class="s1">self._cur.preamble = EMPTYSTRING.join(preamble)</span>
+                        <span class="s1">capturing_preamble = </span><span class="s3">False</span>
+                        <span class="s1">self._input.unreadline(line)</span>
+                        <span class="s3">continue</span>
+                    <span class="s0"># We saw a boundary separating two parts.  Consume any</span>
+                    <span class="s0"># multiple boundary lines that may be following.  Our</span>
+                    <span class="s0"># interpretation of RFC 2046 BNF grammar does not produce</span>
+                    <span class="s0"># body parts within such double boundaries.</span>
+                    <span class="s3">while True</span><span class="s1">:</span>
+                        <span class="s1">line = self._input.readline()</span>
+                        <span class="s3">if </span><span class="s1">line </span><span class="s3">is </span><span class="s1">NeedMoreData:</span>
+                            <span class="s3">yield </span><span class="s1">NeedMoreData</span>
+                            <span class="s3">continue</span>
+                        <span class="s1">mo = boundaryre.match(line)</span>
+                        <span class="s3">if not </span><span class="s1">mo:</span>
+                            <span class="s1">self._input.unreadline(line)</span>
+                            <span class="s3">break</span>
+                    <span class="s0"># Recurse to parse this subpart; the input stream points</span>
+                    <span class="s0"># at the subpart's first line.</span>
+                    <span class="s1">self._input.push_eof_matcher(boundaryre.match)</span>
+                    <span class="s3">for </span><span class="s1">retval </span><span class="s3">in </span><span class="s1">self._parsegen():</span>
+                        <span class="s3">if </span><span class="s1">retval </span><span class="s3">is </span><span class="s1">NeedMoreData:</span>
+                            <span class="s3">yield </span><span class="s1">NeedMoreData</span>
+                            <span class="s3">continue</span>
+                        <span class="s3">break</span>
+                    <span class="s0"># Because of RFC 2046, the newline preceding the boundary</span>
+                    <span class="s0"># separator actually belongs to the boundary, not the</span>
+                    <span class="s0"># previous subpart's payload (or epilogue if the previous</span>
+                    <span class="s0"># part is a multipart).</span>
+                    <span class="s3">if </span><span class="s1">self._last.get_content_maintype() == </span><span class="s4">'multipart'</span><span class="s1">:</span>
+                        <span class="s1">epilogue = self._last.epilogue</span>
+                        <span class="s3">if </span><span class="s1">epilogue == </span><span class="s4">''</span><span class="s1">:</span>
+                            <span class="s1">self._last.epilogue = </span><span class="s3">None</span>
+                        <span class="s3">elif </span><span class="s1">epilogue </span><span class="s3">is not None</span><span class="s1">:</span>
+                            <span class="s1">mo = NLCRE_eol.search(epilogue)</span>
+                            <span class="s3">if </span><span class="s1">mo:</span>
+                                <span class="s1">end = len(mo.group(</span><span class="s5">0</span><span class="s1">))</span>
+                                <span class="s1">self._last.epilogue = epilogue[:-end]</span>
+                    <span class="s3">else</span><span class="s1">:</span>
+                        <span class="s1">payload = self._last._payload</span>
+                        <span class="s3">if </span><span class="s1">isinstance(payload</span><span class="s3">, </span><span class="s1">str):</span>
+                            <span class="s1">mo = NLCRE_eol.search(payload)</span>
+                            <span class="s3">if </span><span class="s1">mo:</span>
+                                <span class="s1">payload = payload[:-len(mo.group(</span><span class="s5">0</span><span class="s1">))]</span>
+                                <span class="s1">self._last._payload = payload</span>
+                    <span class="s1">self._input.pop_eof_matcher()</span>
+                    <span class="s1">self._pop_message()</span>
+                    <span class="s0"># Set the multipart up for newline cleansing, which will</span>
+                    <span class="s0"># happen if we're in a nested multipart.</span>
+                    <span class="s1">self._last = self._cur</span>
+                <span class="s3">else</span><span class="s1">:</span>
+                    <span class="s0"># I think we must be in the preamble</span>
+                    <span class="s3">assert </span><span class="s1">capturing_preamble</span>
+                    <span class="s1">preamble.append(line)</span>
+            <span class="s0"># We've seen either the EOF or the end boundary.  If we're still</span>
+            <span class="s0"># capturing the preamble, we never saw the start boundary.  Note</span>
+            <span class="s0"># that as a defect and store the captured text as the payload.</span>
+            <span class="s3">if </span><span class="s1">capturing_preamble:</span>
+                <span class="s1">defect = errors.StartBoundaryNotFoundDefect()</span>
+                <span class="s1">self.policy.handle_defect(self._cur</span><span class="s3">, </span><span class="s1">defect)</span>
+                <span class="s1">self._cur.set_payload(EMPTYSTRING.join(preamble))</span>
+                <span class="s1">epilogue = []</span>
+                <span class="s3">for </span><span class="s1">line </span><span class="s3">in </span><span class="s1">self._input:</span>
+                    <span class="s3">if </span><span class="s1">line </span><span class="s3">is </span><span class="s1">NeedMoreData:</span>
+                        <span class="s3">yield </span><span class="s1">NeedMoreData</span>
+                        <span class="s3">continue</span>
+                <span class="s1">self._cur.epilogue = EMPTYSTRING.join(epilogue)</span>
+                <span class="s3">return</span>
+            <span class="s0"># If we're not processing the preamble, then we might have seen</span>
+            <span class="s0"># EOF without seeing that end boundary...that is also a defect.</span>
+            <span class="s3">if not </span><span class="s1">close_boundary_seen:</span>
+                <span class="s1">defect = errors.CloseBoundaryNotFoundDefect()</span>
+                <span class="s1">self.policy.handle_defect(self._cur</span><span class="s3">, </span><span class="s1">defect)</span>
+                <span class="s3">return</span>
+            <span class="s0"># Everything from here to the EOF is epilogue.  If the end boundary</span>
+            <span class="s0"># ended in a newline, we'll need to make sure the epilogue isn't</span>
+            <span class="s0"># None</span>
+            <span class="s3">if </span><span class="s1">linesep:</span>
+                <span class="s1">epilogue = [</span><span class="s4">''</span><span class="s1">]</span>
+            <span class="s3">else</span><span class="s1">:</span>
+                <span class="s1">epilogue = []</span>
+            <span class="s3">for </span><span class="s1">line </span><span class="s3">in </span><span class="s1">self._input:</span>
+                <span class="s3">if </span><span class="s1">line </span><span class="s3">is </span><span class="s1">NeedMoreData:</span>
+                    <span class="s3">yield </span><span class="s1">NeedMoreData</span>
+                    <span class="s3">continue</span>
+                <span class="s1">epilogue.append(line)</span>
+            <span class="s0"># Any CRLF at the front of the epilogue is not technically part of</span>
+            <span class="s0"># the epilogue.  Also, watch out for an empty string epilogue,</span>
+            <span class="s0"># which means a single newline.</span>
+            <span class="s3">if </span><span class="s1">epilogue:</span>
+                <span class="s1">firstline = epilogue[</span><span class="s5">0</span><span class="s1">]</span>
+                <span class="s1">bolmo = NLCRE_bol.match(firstline)</span>
+                <span class="s3">if </span><span class="s1">bolmo:</span>
+                    <span class="s1">epilogue[</span><span class="s5">0</span><span class="s1">] = firstline[len(bolmo.group(</span><span class="s5">0</span><span class="s1">)):]</span>
+            <span class="s1">self._cur.epilogue = EMPTYSTRING.join(epilogue)</span>
+            <span class="s3">return</span>
+        <span class="s0"># Otherwise, it's some non-multipart type, so the entire rest of the</span>
+        <span class="s0"># file contents becomes the payload.</span>
+        <span class="s1">lines = []</span>
+        <span class="s3">for </span><span class="s1">line </span><span class="s3">in </span><span class="s1">self._input:</span>
+            <span class="s3">if </span><span class="s1">line </span><span class="s3">is </span><span class="s1">NeedMoreData:</span>
+                <span class="s3">yield </span><span class="s1">NeedMoreData</span>
+                <span class="s3">continue</span>
+            <span class="s1">lines.append(line)</span>
+        <span class="s1">self._cur.set_payload(EMPTYSTRING.join(lines))</span>
+
+    <span class="s3">def </span><span class="s1">_parse_headers(self</span><span class="s3">, </span><span class="s1">lines):</span>
+        <span class="s0"># Passed a list of lines that make up the headers for the current msg</span>
+        <span class="s1">lastheader = </span><span class="s4">''</span>
+        <span class="s1">lastvalue = []</span>
+        <span class="s3">for </span><span class="s1">lineno</span><span class="s3">, </span><span class="s1">line </span><span class="s3">in </span><span class="s1">enumerate(lines):</span>
+            <span class="s0"># Check for continuation</span>
+            <span class="s3">if </span><span class="s1">line[</span><span class="s5">0</span><span class="s1">] </span><span class="s3">in </span><span class="s4">' </span><span class="s3">\t</span><span class="s4">'</span><span class="s1">:</span>
+                <span class="s3">if not </span><span class="s1">lastheader:</span>
+                    <span class="s0"># The first line of the headers was a continuation.  This</span>
+                    <span class="s0"># is illegal, so let's note the defect, store the illegal</span>
+                    <span class="s0"># line, and ignore it for purposes of headers.</span>
+                    <span class="s1">defect = errors.FirstHeaderLineIsContinuationDefect(line)</span>
+                    <span class="s1">self.policy.handle_defect(self._cur</span><span class="s3">, </span><span class="s1">defect)</span>
+                    <span class="s3">continue</span>
+                <span class="s1">lastvalue.append(line)</span>
+                <span class="s3">continue</span>
+            <span class="s3">if </span><span class="s1">lastheader:</span>
+                <span class="s1">self._cur.set_raw(*self.policy.header_source_parse(lastvalue))</span>
+                <span class="s1">lastheader</span><span class="s3">, </span><span class="s1">lastvalue = </span><span class="s4">''</span><span class="s3">, </span><span class="s1">[]</span>
+            <span class="s0"># Check for envelope header, i.e. unix-from</span>
+            <span class="s3">if </span><span class="s1">line.startswith(</span><span class="s4">'From '</span><span class="s1">):</span>
+                <span class="s3">if </span><span class="s1">lineno == </span><span class="s5">0</span><span class="s1">:</span>
+                    <span class="s0"># Strip off the trailing newline</span>
+                    <span class="s1">mo = NLCRE_eol.search(line)</span>
+                    <span class="s3">if </span><span class="s1">mo:</span>
+                        <span class="s1">line = line[:-len(mo.group(</span><span class="s5">0</span><span class="s1">))]</span>
+                    <span class="s1">self._cur.set_unixfrom(line)</span>
+                    <span class="s3">continue</span>
+                <span class="s3">elif </span><span class="s1">lineno == len(lines) - </span><span class="s5">1</span><span class="s1">:</span>
+                    <span class="s0"># Something looking like a unix-from at the end - it's</span>
+                    <span class="s0"># probably the first line of the body, so push back the</span>
+                    <span class="s0"># line and stop.</span>
+                    <span class="s1">self._input.unreadline(line)</span>
+                    <span class="s3">return</span>
+                <span class="s3">else</span><span class="s1">:</span>
+                    <span class="s0"># Weirdly placed unix-from line.  Note this as a defect</span>
+                    <span class="s0"># and ignore it.</span>
+                    <span class="s1">defect = errors.MisplacedEnvelopeHeaderDefect(line)</span>
+                    <span class="s1">self._cur.defects.append(defect)</span>
+                    <span class="s3">continue</span>
+            <span class="s0"># Split the line on the colon separating field name from value.</span>
+            <span class="s0"># There will always be a colon, because if there wasn't the part of</span>
+            <span class="s0"># the parser that calls us would have started parsing the body.</span>
+            <span class="s1">i = line.find(</span><span class="s4">':'</span><span class="s1">)</span>
+            <span class="s3">assert </span><span class="s1">i&gt;</span><span class="s5">0</span><span class="s3">, </span><span class="s4">&quot;_parse_headers fed line with no : and no leading WS&quot;</span>
+            <span class="s1">lastheader = line[:i]</span>
+            <span class="s1">lastvalue = [line]</span>
+        <span class="s0"># Done with all the lines, so handle the last header.</span>
+        <span class="s3">if </span><span class="s1">lastheader:</span>
+            <span class="s1">self._cur.set_raw(*self.policy.header_source_parse(lastvalue))</span>
+
+
+<span class="s3">class </span><span class="s1">BytesFeedParser(FeedParser):</span>
+    <span class="s2">&quot;&quot;&quot;Like FeedParser, but feed accepts bytes.&quot;&quot;&quot;</span>
+
+    <span class="s3">def </span><span class="s1">feed(self</span><span class="s3">, </span><span class="s1">data):</span>
+        <span class="s1">super().feed(data.decode(</span><span class="s4">'ascii'</span><span class="s3">, </span><span class="s4">'surrogateescape'</span><span class="s1">))</span>
+</pre>
+</body>
+</html>

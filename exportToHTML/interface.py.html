@@ -1,0 +1,1175 @@
+<html>
+<head>
+<title>interface.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #629755; font-style: italic;}
+.s3 { color: #cc7832;}
+.s4 { color: #6a8759;}
+.s5 { color: #6897bb;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+interface.py</font>
+</center></td></tr></table>
+<pre><span class="s0">##############################################################################</span>
+<span class="s0">#</span>
+<span class="s0"># Copyright (c) 2001, 2002 Zope Foundation and Contributors.</span>
+<span class="s0"># All Rights Reserved.</span>
+<span class="s0">#</span>
+<span class="s0"># This software is subject to the provisions of the Zope Public License,</span>
+<span class="s0"># Version 2.1 (ZPL).  A copy of the ZPL should accompany this distribution.</span>
+<span class="s0"># THIS SOFTWARE IS PROVIDED &quot;AS IS&quot; AND ANY AND ALL EXPRESS OR IMPLIED</span>
+<span class="s0"># WARRANTIES ARE DISCLAIMED, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED</span>
+<span class="s0"># WARRANTIES OF TITLE, MERCHANTABILITY, AGAINST INFRINGEMENT, AND FITNESS</span>
+<span class="s0"># FOR A PARTICULAR PURPOSE.</span>
+<span class="s0">#</span>
+<span class="s0">##############################################################################</span>
+<span class="s2">&quot;&quot;&quot;Interface object implementation 
+&quot;&quot;&quot;</span>
+<span class="s0"># pylint:disable=protected-access</span>
+<span class="s3">import </span><span class="s1">sys</span>
+<span class="s3">from </span><span class="s1">types </span><span class="s3">import </span><span class="s1">MethodType</span>
+<span class="s3">from </span><span class="s1">types </span><span class="s3">import </span><span class="s1">FunctionType</span>
+<span class="s3">import </span><span class="s1">weakref</span>
+
+<span class="s3">from </span><span class="s1">zope.interface._compat </span><span class="s3">import </span><span class="s1">_use_c_impl</span>
+<span class="s3">from </span><span class="s1">zope.interface._compat </span><span class="s3">import </span><span class="s1">PYTHON2 </span><span class="s3">as </span><span class="s1">PY2</span>
+<span class="s3">from </span><span class="s1">zope.interface.exceptions </span><span class="s3">import </span><span class="s1">Invalid</span>
+<span class="s3">from </span><span class="s1">zope.interface.ro </span><span class="s3">import </span><span class="s1">ro </span><span class="s3">as </span><span class="s1">calculate_ro</span>
+<span class="s3">from </span><span class="s1">zope.interface </span><span class="s3">import </span><span class="s1">ro</span>
+
+<span class="s1">__all__ = [</span>
+    <span class="s0"># Most of the public API from this module is directly exported</span>
+    <span class="s0"># from zope.interface. The only remaining public API intended to</span>
+    <span class="s0"># be imported from here should be those few things documented as</span>
+    <span class="s0"># such.</span>
+    <span class="s4">'InterfaceClass'</span><span class="s3">,</span>
+    <span class="s4">'Specification'</span><span class="s3">,</span>
+    <span class="s4">'adapter_hooks'</span><span class="s3">,</span>
+<span class="s1">]</span>
+
+<span class="s1">CO_VARARGS = </span><span class="s5">4</span>
+<span class="s1">CO_VARKEYWORDS = </span><span class="s5">8</span>
+<span class="s0"># Put in the attrs dict of an interface by ``taggedValue`` and ``invariants``</span>
+<span class="s1">TAGGED_DATA = </span><span class="s4">'__interface_tagged_values__'</span>
+<span class="s0"># Put in the attrs dict of an interface by ``interfacemethod``</span>
+<span class="s1">INTERFACE_METHODS = </span><span class="s4">'__interface_methods__'</span>
+
+<span class="s1">_decorator_non_return = object()</span>
+<span class="s1">_marker = object()</span>
+
+
+
+<span class="s3">def </span><span class="s1">invariant(call):</span>
+    <span class="s1">f_locals = sys._getframe(</span><span class="s5">1</span><span class="s1">).f_locals</span>
+    <span class="s1">tags = f_locals.setdefault(TAGGED_DATA</span><span class="s3">, </span><span class="s1">{})</span>
+    <span class="s1">invariants = tags.setdefault(</span><span class="s4">'invariants'</span><span class="s3">, </span><span class="s1">[])</span>
+    <span class="s1">invariants.append(call)</span>
+    <span class="s3">return </span><span class="s1">_decorator_non_return</span>
+
+
+<span class="s3">def </span><span class="s1">taggedValue(key</span><span class="s3">, </span><span class="s1">value):</span>
+    <span class="s2">&quot;&quot;&quot;Attaches a tagged value to an interface at definition time.&quot;&quot;&quot;</span>
+    <span class="s1">f_locals = sys._getframe(</span><span class="s5">1</span><span class="s1">).f_locals</span>
+    <span class="s1">tagged_values = f_locals.setdefault(TAGGED_DATA</span><span class="s3">, </span><span class="s1">{})</span>
+    <span class="s1">tagged_values[key] = value</span>
+    <span class="s3">return </span><span class="s1">_decorator_non_return</span>
+
+
+<span class="s3">class </span><span class="s1">Element(object):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Default implementation of `zope.interface.interfaces.IElement`. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s0"># We can't say this yet because we don't have enough</span>
+    <span class="s0"># infrastructure in place.</span>
+    <span class="s0">#</span>
+    <span class="s0">#implements(IElement)</span>
+
+    <span class="s3">def </span><span class="s1">__init__(self</span><span class="s3">, </span><span class="s1">__name__</span><span class="s3">, </span><span class="s1">__doc__=</span><span class="s4">''</span><span class="s1">): </span><span class="s0"># pylint:disable=redefined-builtin</span>
+        <span class="s3">if not </span><span class="s1">__doc__ </span><span class="s3">and </span><span class="s1">__name__.find(</span><span class="s4">' '</span><span class="s1">) &gt;= </span><span class="s5">0</span><span class="s1">:</span>
+            <span class="s1">__doc__ = __name__</span>
+            <span class="s1">__name__ = </span><span class="s3">None</span>
+
+        <span class="s1">self.__name__ = __name__</span>
+        <span class="s1">self.__doc__ = __doc__</span>
+        <span class="s0"># Tagged values are rare, especially on methods or attributes.</span>
+        <span class="s0"># Deferring the allocation can save substantial memory.</span>
+        <span class="s1">self.__tagged_values = </span><span class="s3">None</span>
+
+    <span class="s3">def </span><span class="s1">getName(self):</span>
+        <span class="s2">&quot;&quot;&quot; Returns the name of the object. &quot;&quot;&quot;</span>
+        <span class="s3">return </span><span class="s1">self.__name__</span>
+
+    <span class="s3">def </span><span class="s1">getDoc(self):</span>
+        <span class="s2">&quot;&quot;&quot; Returns the documentation for the object. &quot;&quot;&quot;</span>
+        <span class="s3">return </span><span class="s1">self.__doc__</span>
+
+    <span class="s0">###</span>
+    <span class="s0"># Tagged values.</span>
+    <span class="s0">#</span>
+    <span class="s0"># Direct tagged values are set only in this instance. Others</span>
+    <span class="s0"># may be inherited (for those subclasses that have that concept).</span>
+    <span class="s0">###</span>
+
+    <span class="s3">def </span><span class="s1">getTaggedValue(self</span><span class="s3">, </span><span class="s1">tag):</span>
+        <span class="s2">&quot;&quot;&quot; Returns the value associated with 'tag'. &quot;&quot;&quot;</span>
+        <span class="s3">if not </span><span class="s1">self.__tagged_values:</span>
+            <span class="s3">raise </span><span class="s1">KeyError(tag)</span>
+        <span class="s3">return </span><span class="s1">self.__tagged_values[tag]</span>
+
+    <span class="s3">def </span><span class="s1">queryTaggedValue(self</span><span class="s3">, </span><span class="s1">tag</span><span class="s3">, </span><span class="s1">default=</span><span class="s3">None</span><span class="s1">):</span>
+        <span class="s2">&quot;&quot;&quot; Returns the value associated with 'tag'. &quot;&quot;&quot;</span>
+        <span class="s3">return </span><span class="s1">self.__tagged_values.get(tag</span><span class="s3">, </span><span class="s1">default) </span><span class="s3">if </span><span class="s1">self.__tagged_values </span><span class="s3">else </span><span class="s1">default</span>
+
+    <span class="s3">def </span><span class="s1">getTaggedValueTags(self):</span>
+        <span class="s2">&quot;&quot;&quot; Returns a collection of all tags. &quot;&quot;&quot;</span>
+        <span class="s3">return </span><span class="s1">self.__tagged_values.keys() </span><span class="s3">if </span><span class="s1">self.__tagged_values </span><span class="s3">else </span><span class="s1">()</span>
+
+    <span class="s3">def </span><span class="s1">setTaggedValue(self</span><span class="s3">, </span><span class="s1">tag</span><span class="s3">, </span><span class="s1">value):</span>
+        <span class="s2">&quot;&quot;&quot; Associates 'value' with 'key'. &quot;&quot;&quot;</span>
+        <span class="s3">if </span><span class="s1">self.__tagged_values </span><span class="s3">is None</span><span class="s1">:</span>
+            <span class="s1">self.__tagged_values = {}</span>
+        <span class="s1">self.__tagged_values[tag] = value</span>
+
+    <span class="s1">queryDirectTaggedValue = queryTaggedValue</span>
+    <span class="s1">getDirectTaggedValue = getTaggedValue</span>
+    <span class="s1">getDirectTaggedValueTags = getTaggedValueTags</span>
+
+
+<span class="s1">SpecificationBasePy = object </span><span class="s0"># filled by _use_c_impl.</span>
+
+
+<span class="s1">@_use_c_impl</span>
+<span class="s3">class </span><span class="s1">SpecificationBase(object):</span>
+    <span class="s0"># This object is the base of the inheritance hierarchy for ClassProvides:</span>
+    <span class="s0">#</span>
+    <span class="s0"># ClassProvides &lt; ClassProvidesBase, Declaration</span>
+    <span class="s0"># Declaration &lt; Specification &lt; SpecificationBase</span>
+    <span class="s0"># ClassProvidesBase &lt; SpecificationBase</span>
+    <span class="s0">#</span>
+    <span class="s0"># In order to have compatible instance layouts, we need to declare</span>
+    <span class="s0"># the storage used by Specification and Declaration here (and</span>
+    <span class="s0"># those classes must have ``__slots__ = ()``); fortunately this is</span>
+    <span class="s0"># not a waste of space because those are the only two inheritance</span>
+    <span class="s0"># trees. These all translate into tp_members in C.</span>
+    <span class="s1">__slots__ = (</span>
+        <span class="s0"># Things used here.</span>
+        <span class="s4">'_implied'</span><span class="s3">,</span>
+        <span class="s0"># Things used in Specification.</span>
+        <span class="s4">'_dependents'</span><span class="s3">,</span>
+        <span class="s4">'_bases'</span><span class="s3">,</span>
+        <span class="s4">'_v_attrs'</span><span class="s3">,</span>
+        <span class="s4">'__iro__'</span><span class="s3">,</span>
+        <span class="s4">'__sro__'</span><span class="s3">,</span>
+        <span class="s4">'__weakref__'</span><span class="s3">,</span>
+    <span class="s1">)</span>
+
+    <span class="s3">def </span><span class="s1">providedBy(self</span><span class="s3">, </span><span class="s1">ob):</span>
+        <span class="s2">&quot;&quot;&quot;Is the interface implemented by an object 
+        &quot;&quot;&quot;</span>
+        <span class="s1">spec = providedBy(ob)</span>
+        <span class="s3">return </span><span class="s1">self </span><span class="s3">in </span><span class="s1">spec._implied</span>
+
+    <span class="s3">def </span><span class="s1">implementedBy(self</span><span class="s3">, </span><span class="s1">cls):</span>
+        <span class="s2">&quot;&quot;&quot;Test whether the specification is implemented by a class or factory. 
+ 
+        Raise TypeError if argument is neither a class nor a callable. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">spec = implementedBy(cls)</span>
+        <span class="s3">return </span><span class="s1">self </span><span class="s3">in </span><span class="s1">spec._implied</span>
+
+    <span class="s3">def </span><span class="s1">isOrExtends(self</span><span class="s3">, </span><span class="s1">interface):</span>
+        <span class="s2">&quot;&quot;&quot;Is the interface the same as or extend the given interface 
+        &quot;&quot;&quot;</span>
+        <span class="s3">return </span><span class="s1">interface </span><span class="s3">in </span><span class="s1">self._implied </span><span class="s0"># pylint:disable=no-member</span>
+
+    <span class="s1">__call__ = isOrExtends</span>
+
+
+<span class="s3">class </span><span class="s1">NameAndModuleComparisonMixin(object):</span>
+    <span class="s0"># Internal use. Implement the basic sorting operators (but not (in)equality</span>
+    <span class="s0"># or hashing). Subclasses must provide ``__name__`` and ``__module__``</span>
+    <span class="s0"># attributes. Subclasses will be mutually comparable; but because equality</span>
+    <span class="s0"># and hashing semantics are missing from this class, take care in how</span>
+    <span class="s0"># you define those two attributes: If you stick with the default equality</span>
+    <span class="s0"># and hashing (identity based) you should make sure that all possible ``__name__``</span>
+    <span class="s0"># and ``__module__`` pairs are unique ACROSS ALL SUBCLASSES. (Actually, pretty</span>
+    <span class="s0"># much the same thing goes if you define equality and hashing to be based on</span>
+    <span class="s0"># those two attributes: they must still be consistent ACROSS ALL SUBCLASSES.)</span>
+
+    <span class="s0"># pylint:disable=assigning-non-slot</span>
+    <span class="s1">__slots__ = ()</span>
+
+    <span class="s3">def </span><span class="s1">_compare(self</span><span class="s3">, </span><span class="s1">other):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Compare *self* to *other* based on ``__name__`` and ``__module__``. 
+ 
+        Return 0 if they are equal, return 1 if *self* is 
+        greater than *other*, and return -1 if *self* is less than 
+        *other*. 
+ 
+        If *other* does not have ``__name__`` or ``__module__``, then 
+        return ``NotImplemented``. 
+ 
+        .. caution:: 
+           This allows comparison to things well outside the type hierarchy, 
+           perhaps not symmetrically. 
+ 
+           For example, ``class Foo(object)`` and ``class Foo(Interface)`` 
+           in the same file would compare equal, depending on the order of 
+           operands. Writing code like this by hand would be unusual, but it could 
+           happen with dynamic creation of types and interfaces. 
+ 
+        None is treated as a pseudo interface that implies the loosest 
+        contact possible, no contract. For that reason, all interfaces 
+        sort before None. 
+        &quot;&quot;&quot;</span>
+        <span class="s3">if </span><span class="s1">other </span><span class="s3">is </span><span class="s1">self:</span>
+            <span class="s3">return </span><span class="s5">0</span>
+
+        <span class="s3">if </span><span class="s1">other </span><span class="s3">is None</span><span class="s1">:</span>
+            <span class="s3">return </span><span class="s1">-</span><span class="s5">1</span>
+
+        <span class="s1">n1 = (self.__name__</span><span class="s3">, </span><span class="s1">self.__module__)</span>
+        <span class="s3">try</span><span class="s1">:</span>
+            <span class="s1">n2 = (other.__name__</span><span class="s3">, </span><span class="s1">other.__module__)</span>
+        <span class="s3">except </span><span class="s1">AttributeError:</span>
+            <span class="s3">return </span><span class="s1">NotImplemented</span>
+
+        <span class="s0"># This spelling works under Python3, which doesn't have cmp().</span>
+        <span class="s3">return </span><span class="s1">(n1 &gt; n2) - (n1 &lt; n2)</span>
+
+    <span class="s3">def </span><span class="s1">__lt__(self</span><span class="s3">, </span><span class="s1">other):</span>
+        <span class="s1">c = self._compare(other)</span>
+        <span class="s3">if </span><span class="s1">c </span><span class="s3">is </span><span class="s1">NotImplemented:</span>
+            <span class="s3">return </span><span class="s1">c</span>
+        <span class="s3">return </span><span class="s1">c &lt; </span><span class="s5">0</span>
+
+    <span class="s3">def </span><span class="s1">__le__(self</span><span class="s3">, </span><span class="s1">other):</span>
+        <span class="s1">c = self._compare(other)</span>
+        <span class="s3">if </span><span class="s1">c </span><span class="s3">is </span><span class="s1">NotImplemented:</span>
+            <span class="s3">return </span><span class="s1">c</span>
+        <span class="s3">return </span><span class="s1">c &lt;= </span><span class="s5">0</span>
+
+    <span class="s3">def </span><span class="s1">__gt__(self</span><span class="s3">, </span><span class="s1">other):</span>
+        <span class="s1">c = self._compare(other)</span>
+        <span class="s3">if </span><span class="s1">c </span><span class="s3">is </span><span class="s1">NotImplemented:</span>
+            <span class="s3">return </span><span class="s1">c</span>
+        <span class="s3">return </span><span class="s1">c &gt; </span><span class="s5">0</span>
+
+    <span class="s3">def </span><span class="s1">__ge__(self</span><span class="s3">, </span><span class="s1">other):</span>
+        <span class="s1">c = self._compare(other)</span>
+        <span class="s3">if </span><span class="s1">c </span><span class="s3">is </span><span class="s1">NotImplemented:</span>
+            <span class="s3">return </span><span class="s1">c</span>
+        <span class="s3">return </span><span class="s1">c &gt;= </span><span class="s5">0</span>
+
+
+<span class="s1">@_use_c_impl</span>
+<span class="s3">class </span><span class="s1">InterfaceBase(NameAndModuleComparisonMixin</span><span class="s3">, </span><span class="s1">SpecificationBasePy):</span>
+    <span class="s2">&quot;&quot;&quot;Base class that wants to be replaced with a C base :) 
+    &quot;&quot;&quot;</span>
+
+    <span class="s1">__slots__ = (</span>
+        <span class="s4">'__name__'</span><span class="s3">,</span>
+        <span class="s4">'__ibmodule__'</span><span class="s3">,</span>
+        <span class="s4">'_v_cached_hash'</span><span class="s3">,</span>
+    <span class="s1">)</span>
+
+    <span class="s3">def </span><span class="s1">__init__(self</span><span class="s3">, </span><span class="s1">name=</span><span class="s3">None, </span><span class="s1">module=</span><span class="s3">None</span><span class="s1">):</span>
+        <span class="s1">self.__name__ = name</span>
+        <span class="s1">self.__ibmodule__ = module</span>
+
+    <span class="s3">def </span><span class="s1">_call_conform(self</span><span class="s3">, </span><span class="s1">conform):</span>
+        <span class="s3">raise </span><span class="s1">NotImplementedError</span>
+
+    <span class="s1">@property</span>
+    <span class="s3">def </span><span class="s1">__module_property__(self):</span>
+        <span class="s0"># This is for _InterfaceMetaClass</span>
+        <span class="s3">return </span><span class="s1">self.__ibmodule__</span>
+
+    <span class="s3">def </span><span class="s1">__call__(self</span><span class="s3">, </span><span class="s1">obj</span><span class="s3">, </span><span class="s1">alternate=_marker):</span>
+        <span class="s2">&quot;&quot;&quot;Adapt an object to the interface 
+        &quot;&quot;&quot;</span>
+        <span class="s3">try</span><span class="s1">:</span>
+            <span class="s1">conform = obj.__conform__</span>
+        <span class="s3">except </span><span class="s1">AttributeError:</span>
+            <span class="s1">conform = </span><span class="s3">None</span>
+
+        <span class="s3">if </span><span class="s1">conform </span><span class="s3">is not None</span><span class="s1">:</span>
+            <span class="s1">adapter = self._call_conform(conform)</span>
+            <span class="s3">if </span><span class="s1">adapter </span><span class="s3">is not None</span><span class="s1">:</span>
+                <span class="s3">return </span><span class="s1">adapter</span>
+
+        <span class="s1">adapter = self.__adapt__(obj)</span>
+
+        <span class="s3">if </span><span class="s1">adapter </span><span class="s3">is not None</span><span class="s1">:</span>
+            <span class="s3">return </span><span class="s1">adapter</span>
+        <span class="s3">if </span><span class="s1">alternate </span><span class="s3">is not </span><span class="s1">_marker:</span>
+            <span class="s3">return </span><span class="s1">alternate</span>
+        <span class="s3">raise </span><span class="s1">TypeError(</span><span class="s4">&quot;Could not adapt&quot;</span><span class="s3">, </span><span class="s1">obj</span><span class="s3">, </span><span class="s1">self)</span>
+
+    <span class="s3">def </span><span class="s1">__adapt__(self</span><span class="s3">, </span><span class="s1">obj):</span>
+        <span class="s2">&quot;&quot;&quot;Adapt an object to the receiver 
+        &quot;&quot;&quot;</span>
+        <span class="s3">if </span><span class="s1">self.providedBy(obj):</span>
+            <span class="s3">return </span><span class="s1">obj</span>
+
+        <span class="s3">for </span><span class="s1">hook </span><span class="s3">in </span><span class="s1">adapter_hooks:</span>
+            <span class="s1">adapter = hook(self</span><span class="s3">, </span><span class="s1">obj)</span>
+            <span class="s3">if </span><span class="s1">adapter </span><span class="s3">is not None</span><span class="s1">:</span>
+                <span class="s3">return </span><span class="s1">adapter</span>
+
+        <span class="s3">return None</span>
+
+    <span class="s3">def </span><span class="s1">__hash__(self):</span>
+        <span class="s0"># pylint:disable=assigning-non-slot,attribute-defined-outside-init</span>
+        <span class="s3">try</span><span class="s1">:</span>
+            <span class="s3">return </span><span class="s1">self._v_cached_hash</span>
+        <span class="s3">except </span><span class="s1">AttributeError:</span>
+            <span class="s1">self._v_cached_hash = hash((self.__name__</span><span class="s3">, </span><span class="s1">self.__module__))</span>
+        <span class="s3">return </span><span class="s1">self._v_cached_hash</span>
+
+    <span class="s3">def </span><span class="s1">__eq__(self</span><span class="s3">, </span><span class="s1">other):</span>
+        <span class="s1">c = self._compare(other)</span>
+        <span class="s3">if </span><span class="s1">c </span><span class="s3">is </span><span class="s1">NotImplemented:</span>
+            <span class="s3">return </span><span class="s1">c</span>
+        <span class="s3">return </span><span class="s1">c == </span><span class="s5">0</span>
+
+    <span class="s3">def </span><span class="s1">__ne__(self</span><span class="s3">, </span><span class="s1">other):</span>
+        <span class="s3">if </span><span class="s1">other </span><span class="s3">is </span><span class="s1">self:</span>
+            <span class="s3">return False</span>
+
+        <span class="s1">c = self._compare(other)</span>
+        <span class="s3">if </span><span class="s1">c </span><span class="s3">is </span><span class="s1">NotImplemented:</span>
+            <span class="s3">return </span><span class="s1">c</span>
+        <span class="s3">return </span><span class="s1">c != </span><span class="s5">0</span>
+
+<span class="s1">adapter_hooks = _use_c_impl([]</span><span class="s3">, </span><span class="s4">'adapter_hooks'</span><span class="s1">)</span>
+
+
+<span class="s3">class </span><span class="s1">Specification(SpecificationBase):</span>
+    <span class="s2">&quot;&quot;&quot;Specifications 
+ 
+    An interface specification is used to track interface declarations 
+    and component registrations. 
+ 
+    This class is a base class for both interfaces themselves and for 
+    interface specifications (declarations). 
+ 
+    Specifications are mutable.  If you reassign their bases, their 
+    relations with other specifications are adjusted accordingly. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">__slots__ = ()</span>
+
+    <span class="s0"># The root of all Specifications. This will be assigned `Interface`,</span>
+    <span class="s0"># once it is defined.</span>
+    <span class="s1">_ROOT = </span><span class="s3">None</span>
+
+    <span class="s0"># Copy some base class methods for speed</span>
+    <span class="s1">isOrExtends = SpecificationBase.isOrExtends</span>
+    <span class="s1">providedBy = SpecificationBase.providedBy</span>
+
+    <span class="s3">def </span><span class="s1">__init__(self</span><span class="s3">, </span><span class="s1">bases=()):</span>
+        <span class="s0"># There are many leaf interfaces with no dependents,</span>
+        <span class="s0"># and a few with very many. It's a heavily left-skewed</span>
+        <span class="s0"># distribution. In a survey of Plone and Zope related packages</span>
+        <span class="s0"># that loaded 2245 InterfaceClass objects and 2235 ClassProvides</span>
+        <span class="s0"># instances, there were a total of 7000 Specification objects created.</span>
+        <span class="s0"># 4700 had 0 dependents, 1400 had 1, 382 had 2 and so on. Only one</span>
+        <span class="s0"># for &lt;type&gt; had 1664. So there's savings to be had deferring</span>
+        <span class="s0"># the creation of dependents.</span>
+        <span class="s1">self._dependents = </span><span class="s3">None </span><span class="s0"># type: weakref.WeakKeyDictionary</span>
+        <span class="s1">self._bases = ()</span>
+        <span class="s1">self._implied = {}</span>
+        <span class="s1">self._v_attrs = </span><span class="s3">None</span>
+        <span class="s1">self.__iro__ = ()</span>
+        <span class="s1">self.__sro__ = ()</span>
+
+        <span class="s1">self.__bases__ = tuple(bases)</span>
+
+    <span class="s1">@property</span>
+    <span class="s3">def </span><span class="s1">dependents(self):</span>
+        <span class="s3">if </span><span class="s1">self._dependents </span><span class="s3">is None</span><span class="s1">:</span>
+            <span class="s1">self._dependents = weakref.WeakKeyDictionary()</span>
+        <span class="s3">return </span><span class="s1">self._dependents</span>
+
+    <span class="s3">def </span><span class="s1">subscribe(self</span><span class="s3">, </span><span class="s1">dependent):</span>
+        <span class="s1">self._dependents[dependent] = self.dependents.get(dependent</span><span class="s3">, </span><span class="s5">0</span><span class="s1">) + </span><span class="s5">1</span>
+
+    <span class="s3">def </span><span class="s1">unsubscribe(self</span><span class="s3">, </span><span class="s1">dependent):</span>
+        <span class="s3">try</span><span class="s1">:</span>
+            <span class="s1">n = self._dependents[dependent]</span>
+        <span class="s3">except </span><span class="s1">TypeError:</span>
+            <span class="s3">raise </span><span class="s1">KeyError(dependent)</span>
+        <span class="s1">n -= </span><span class="s5">1</span>
+        <span class="s3">if not </span><span class="s1">n:</span>
+            <span class="s3">del </span><span class="s1">self.dependents[dependent]</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s3">assert </span><span class="s1">n &gt; </span><span class="s5">0</span>
+            <span class="s1">self.dependents[dependent] = n</span>
+
+    <span class="s3">def </span><span class="s1">__setBases(self</span><span class="s3">, </span><span class="s1">bases):</span>
+        <span class="s0"># Remove ourselves as a dependent of our old bases</span>
+        <span class="s3">for </span><span class="s1">b </span><span class="s3">in </span><span class="s1">self.__bases__:</span>
+            <span class="s1">b.unsubscribe(self)</span>
+
+        <span class="s0"># Register ourselves as a dependent of our new bases</span>
+        <span class="s1">self._bases = bases</span>
+        <span class="s3">for </span><span class="s1">b </span><span class="s3">in </span><span class="s1">bases:</span>
+            <span class="s1">b.subscribe(self)</span>
+
+        <span class="s1">self.changed(self)</span>
+
+    <span class="s1">__bases__ = property(</span>
+        <span class="s3">lambda </span><span class="s1">self: self._bases</span><span class="s3">,</span>
+        <span class="s1">__setBases</span><span class="s3">,</span>
+        <span class="s1">)</span>
+
+    <span class="s0"># This method exists for tests to override the way we call</span>
+    <span class="s0"># ro.calculate_ro(), usually by adding extra kwargs. We don't</span>
+    <span class="s0"># want to have a mutable dictionary as a class member that we pass</span>
+    <span class="s0"># ourself because mutability is bad, and passing **kw is slower than</span>
+    <span class="s0"># calling the bound function.</span>
+    <span class="s1">_do_calculate_ro = calculate_ro</span>
+
+    <span class="s3">def </span><span class="s1">_calculate_sro(self):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Calculate and return the resolution order for this object, using its ``__bases__``. 
+ 
+        Ensures that ``Interface`` is always the last (lowest priority) element. 
+        &quot;&quot;&quot;</span>
+        <span class="s0"># We'd like to make Interface the lowest priority as a</span>
+        <span class="s0"># property of the resolution order algorithm. That almost</span>
+        <span class="s0"># works out naturally, but it fails when class inheritance has</span>
+        <span class="s0"># some bases that DO implement an interface, and some that DO</span>
+        <span class="s0"># NOT. In such a mixed scenario, you wind up with a set of</span>
+        <span class="s0"># bases to consider that look like this: [[..., Interface],</span>
+        <span class="s0"># [..., object], ...]. Depending on the order of inheritance,</span>
+        <span class="s0"># Interface can wind up before or after object, and that can</span>
+        <span class="s0"># happen at any point in the tree, meaning Interface can wind</span>
+        <span class="s0"># up somewhere in the middle of the order. Since Interface is</span>
+        <span class="s0"># treated as something that everything winds up implementing</span>
+        <span class="s0"># anyway (a catch-all for things like adapters), having it high up</span>
+        <span class="s0"># the order is bad. It's also bad to have it at the end, just before</span>
+        <span class="s0"># some concrete class: concrete classes should be HIGHER priority than</span>
+        <span class="s0"># interfaces (because there's only one class, but many implementations).</span>
+        <span class="s0">#</span>
+        <span class="s0"># One technically nice way to fix this would be to have</span>
+        <span class="s0"># ``implementedBy(object).__bases__ = (Interface,)``</span>
+        <span class="s0">#</span>
+        <span class="s0"># But: (1) That fails for old-style classes and (2) that causes</span>
+        <span class="s0"># everything to appear to *explicitly* implement Interface, when up</span>
+        <span class="s0"># to this point it's been an implicit virtual sort of relationship.</span>
+        <span class="s0">#</span>
+        <span class="s0"># So we force the issue by mutating the resolution order.</span>
+
+        <span class="s0"># Note that we let C3 use pre-computed __sro__ for our bases.</span>
+        <span class="s0"># This requires that by the time this method is invoked, our bases</span>
+        <span class="s0"># have settled their SROs. Thus, ``changed()`` must first</span>
+        <span class="s0"># update itself before telling its descendents of changes.</span>
+        <span class="s1">sro = self._do_calculate_ro(base_mros={</span>
+            <span class="s1">b: b.__sro__</span>
+            <span class="s3">for </span><span class="s1">b </span><span class="s3">in </span><span class="s1">self.__bases__</span>
+        <span class="s1">})</span>
+        <span class="s1">root = self._ROOT</span>
+        <span class="s3">if </span><span class="s1">root </span><span class="s3">is not None and </span><span class="s1">sro </span><span class="s3">and </span><span class="s1">sro[-</span><span class="s5">1</span><span class="s1">] </span><span class="s3">is not </span><span class="s1">root:</span>
+            <span class="s0"># In one dataset of 1823 Interface objects, 1117 ClassProvides objects,</span>
+            <span class="s0"># sro[-1] was root 4496 times, and only not root 118 times. So it's</span>
+            <span class="s0"># probably worth checking.</span>
+
+            <span class="s0"># Once we don't have to deal with old-style classes,</span>
+            <span class="s0"># we can add a check and only do this if base_count &gt; 1,</span>
+            <span class="s0"># if we tweak the bootstrapping for ``&lt;implementedBy object&gt;``</span>
+            <span class="s1">sro = [</span>
+                <span class="s1">x</span>
+                <span class="s3">for </span><span class="s1">x </span><span class="s3">in </span><span class="s1">sro</span>
+                <span class="s3">if </span><span class="s1">x </span><span class="s3">is not </span><span class="s1">root</span>
+            <span class="s1">]</span>
+            <span class="s1">sro.append(root)</span>
+
+        <span class="s3">return </span><span class="s1">sro</span>
+
+    <span class="s3">def </span><span class="s1">changed(self</span><span class="s3">, </span><span class="s1">originally_changed):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        We, or something we depend on, have changed. 
+ 
+        By the time this is called, the things we depend on, 
+        such as our bases, should themselves be stable. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">self._v_attrs = </span><span class="s3">None</span>
+
+        <span class="s1">implied = self._implied</span>
+        <span class="s1">implied.clear()</span>
+
+        <span class="s1">ancestors = self._calculate_sro()</span>
+        <span class="s1">self.__sro__ = tuple(ancestors)</span>
+        <span class="s1">self.__iro__ = tuple([ancestor </span><span class="s3">for </span><span class="s1">ancestor </span><span class="s3">in </span><span class="s1">ancestors</span>
+                              <span class="s3">if </span><span class="s1">isinstance(ancestor</span><span class="s3">, </span><span class="s1">InterfaceClass)</span>
+                              <span class="s1">])</span>
+
+        <span class="s3">for </span><span class="s1">ancestor </span><span class="s3">in </span><span class="s1">ancestors:</span>
+            <span class="s0"># We directly imply our ancestors:</span>
+            <span class="s1">implied[ancestor] = ()</span>
+
+        <span class="s0"># Now, advise our dependents of change</span>
+        <span class="s0"># (being careful not to create the WeakKeyDictionary if not needed):</span>
+        <span class="s3">for </span><span class="s1">dependent </span><span class="s3">in </span><span class="s1">tuple(self._dependents.keys() </span><span class="s3">if </span><span class="s1">self._dependents </span><span class="s3">else </span><span class="s1">()):</span>
+            <span class="s1">dependent.changed(originally_changed)</span>
+
+        <span class="s0"># Just in case something called get() at some point</span>
+        <span class="s0"># during that process and we have a cycle of some sort</span>
+        <span class="s0"># make sure we didn't cache incomplete results.</span>
+        <span class="s1">self._v_attrs = </span><span class="s3">None</span>
+
+    <span class="s3">def </span><span class="s1">interfaces(self):</span>
+        <span class="s2">&quot;&quot;&quot;Return an iterator for the interfaces in the specification. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">seen = {}</span>
+        <span class="s3">for </span><span class="s1">base </span><span class="s3">in </span><span class="s1">self.__bases__:</span>
+            <span class="s3">for </span><span class="s1">interface </span><span class="s3">in </span><span class="s1">base.interfaces():</span>
+                <span class="s3">if </span><span class="s1">interface </span><span class="s3">not in </span><span class="s1">seen:</span>
+                    <span class="s1">seen[interface] = </span><span class="s5">1</span>
+                    <span class="s3">yield </span><span class="s1">interface</span>
+
+    <span class="s3">def </span><span class="s1">extends(self</span><span class="s3">, </span><span class="s1">interface</span><span class="s3">, </span><span class="s1">strict=</span><span class="s3">True</span><span class="s1">):</span>
+        <span class="s2">&quot;&quot;&quot;Does the specification extend the given interface? 
+ 
+        Test whether an interface in the specification extends the 
+        given interface 
+        &quot;&quot;&quot;</span>
+        <span class="s3">return </span><span class="s1">((interface </span><span class="s3">in </span><span class="s1">self._implied)</span>
+                <span class="s3">and</span>
+                <span class="s1">((</span><span class="s3">not </span><span class="s1">strict) </span><span class="s3">or </span><span class="s1">(self != interface))</span>
+                <span class="s1">)</span>
+
+    <span class="s3">def </span><span class="s1">weakref(self</span><span class="s3">, </span><span class="s1">callback=</span><span class="s3">None</span><span class="s1">):</span>
+        <span class="s3">return </span><span class="s1">weakref.ref(self</span><span class="s3">, </span><span class="s1">callback)</span>
+
+    <span class="s3">def </span><span class="s1">get(self</span><span class="s3">, </span><span class="s1">name</span><span class="s3">, </span><span class="s1">default=</span><span class="s3">None</span><span class="s1">):</span>
+        <span class="s2">&quot;&quot;&quot;Query for an attribute description 
+        &quot;&quot;&quot;</span>
+        <span class="s1">attrs = self._v_attrs</span>
+        <span class="s3">if </span><span class="s1">attrs </span><span class="s3">is None</span><span class="s1">:</span>
+            <span class="s1">attrs = self._v_attrs = {}</span>
+        <span class="s1">attr = attrs.get(name)</span>
+        <span class="s3">if </span><span class="s1">attr </span><span class="s3">is None</span><span class="s1">:</span>
+            <span class="s3">for </span><span class="s1">iface </span><span class="s3">in </span><span class="s1">self.__iro__:</span>
+                <span class="s1">attr = iface.direct(name)</span>
+                <span class="s3">if </span><span class="s1">attr </span><span class="s3">is not None</span><span class="s1">:</span>
+                    <span class="s1">attrs[name] = attr</span>
+                    <span class="s3">break</span>
+
+        <span class="s3">return </span><span class="s1">default </span><span class="s3">if </span><span class="s1">attr </span><span class="s3">is None else </span><span class="s1">attr</span>
+
+
+<span class="s3">class </span><span class="s1">_InterfaceMetaClass(type):</span>
+    <span class="s0"># Handling ``__module__`` on ``InterfaceClass`` is tricky. We need</span>
+    <span class="s0"># to be able to read it on a type and get the expected string. We</span>
+    <span class="s0"># also need to be able to set it on an instance and get the value</span>
+    <span class="s0"># we set. So far so good. But what gets tricky is that we'd like</span>
+    <span class="s0"># to store the value in the C structure (``InterfaceBase.__ibmodule__``) for</span>
+    <span class="s0"># direct access during equality, sorting, and hashing. &quot;No</span>
+    <span class="s0"># problem, you think, I'll just use a property&quot; (well, the C</span>
+    <span class="s0"># equivalents, ``PyMemberDef`` or ``PyGetSetDef``).</span>
+    <span class="s0">#</span>
+    <span class="s0"># Except there is a problem. When a subclass is created, the</span>
+    <span class="s0"># metaclass (``type``) always automatically puts the expected</span>
+    <span class="s0"># string in the class's dictionary under ``__module__``, thus</span>
+    <span class="s0"># overriding the property inherited from the superclass. Writing</span>
+    <span class="s0"># ``Subclass.__module__`` still works, but</span>
+    <span class="s0"># ``Subclass().__module__`` fails.</span>
+    <span class="s0">#</span>
+    <span class="s0"># There are multiple ways to work around this:</span>
+    <span class="s0">#</span>
+    <span class="s0"># (1) Define ``InterfaceBase.__getattribute__`` to watch for</span>
+    <span class="s0"># ``__module__`` and return the C storage.</span>
+    <span class="s0">#</span>
+    <span class="s0"># This works, but slows down *all* attribute access (except,</span>
+    <span class="s0"># ironically, to ``__module__``) by about 25% (40ns becomes 50ns)</span>
+    <span class="s0"># (when implemented in C). Since that includes methods like</span>
+    <span class="s0"># ``providedBy``, that's probably not acceptable.</span>
+    <span class="s0">#</span>
+    <span class="s0"># All the other methods involve modifying subclasses. This can be</span>
+    <span class="s0"># done either on the fly in some cases, as instances are</span>
+    <span class="s0"># constructed, or by using a metaclass. These next few can be done on the fly.</span>
+    <span class="s0">#</span>
+    <span class="s0"># (2) Make ``__module__`` a descriptor in each subclass dictionary.</span>
+    <span class="s0"># It can't be a straight up ``@property`` descriptor, though, because accessing</span>
+    <span class="s0"># it on the class returns a ``property`` object, not the desired string.</span>
+    <span class="s0">#</span>
+    <span class="s0"># (3) Implement a data descriptor (``__get__`` and ``__set__``)</span>
+    <span class="s0"># that is both a subclass of string, and also does the redirect of</span>
+    <span class="s0"># ``__module__`` to ``__ibmodule__`` and does the correct thing</span>
+    <span class="s0"># with the ``instance`` argument to ``__get__`` is None (returns</span>
+    <span class="s0"># the class's value.) (Why must it be a subclass of string? Because</span>
+    <span class="s0"># when it' s in the class's dict, it's defined on an *instance* of the</span>
+    <span class="s0"># metaclass; descriptors in an instance's dict aren't honored --- their</span>
+    <span class="s0"># ``__get__`` is never invoked --- so it must also *be* the value we want</span>
+    <span class="s0"># returned.)</span>
+    <span class="s0">#</span>
+    <span class="s0"># This works, preserves the ability to read and write</span>
+    <span class="s0"># ``__module__``, and eliminates any penalty accessing other</span>
+    <span class="s0"># attributes. But it slows down accessing ``__module__`` of</span>
+    <span class="s0"># instances by 200% (40ns to 124ns), requires editing class dicts on the fly</span>
+    <span class="s0"># (in InterfaceClass.__init__), thus slightly slowing down all interface creation,</span>
+    <span class="s0"># and is ugly.</span>
+    <span class="s0">#</span>
+    <span class="s0"># (4) As in the last step, but make it a non-data descriptor (no ``__set__``).</span>
+    <span class="s0">#</span>
+    <span class="s0"># If you then *also* store a copy of ``__ibmodule__`` in</span>
+    <span class="s0"># ``__module__`` in the instance's dict, reading works for both</span>
+    <span class="s0"># class and instance and is full speed for instances. But the cost</span>
+    <span class="s0"># is storage space, and you can't write to it anymore, not without</span>
+    <span class="s0"># things getting out of sync.</span>
+    <span class="s0">#</span>
+    <span class="s0"># (Actually, ``__module__`` was never meant to be writable. Doing</span>
+    <span class="s0"># so would break BTrees and normal dictionaries, as well as the</span>
+    <span class="s0"># repr, maybe more.)</span>
+    <span class="s0">#</span>
+    <span class="s0"># That leaves us with a metaclass. (Recall that a class is an</span>
+    <span class="s0"># instance of its metaclass, so properties/descriptors defined in</span>
+    <span class="s0"># the metaclass are used when accessing attributes on the</span>
+    <span class="s0"># instance/class. We'll use that to define ``__module__``.) Here</span>
+    <span class="s0"># we can have our cake and eat it too: no extra storage, and</span>
+    <span class="s0"># C-speed access to the underlying storage. The only substantial</span>
+    <span class="s0"># cost is that metaclasses tend to make people's heads hurt. (But</span>
+    <span class="s0"># still less than the descriptor-is-string, hopefully.)</span>
+
+    <span class="s1">__slots__ = ()</span>
+
+    <span class="s3">def </span><span class="s1">__new__(cls</span><span class="s3">, </span><span class="s1">name</span><span class="s3">, </span><span class="s1">bases</span><span class="s3">, </span><span class="s1">attrs):</span>
+        <span class="s0"># Figure out what module defined the interface.</span>
+        <span class="s0"># This is copied from ``InterfaceClass.__init__``;</span>
+        <span class="s0"># reviewers aren't sure how AttributeError or KeyError</span>
+        <span class="s0"># could be raised.</span>
+        <span class="s1">__module__ = sys._getframe(</span><span class="s5">1</span><span class="s1">).f_globals[</span><span class="s4">'__name__'</span><span class="s1">]</span>
+        <span class="s0"># Get the C optimized __module__ accessor and give it</span>
+        <span class="s0"># to the new class.</span>
+        <span class="s1">moduledescr = InterfaceBase.__dict__[</span><span class="s4">'__module__'</span><span class="s1">]</span>
+        <span class="s3">if </span><span class="s1">isinstance(moduledescr</span><span class="s3">, </span><span class="s1">str):</span>
+            <span class="s0"># We're working with the Python implementation,</span>
+            <span class="s0"># not the C version</span>
+            <span class="s1">moduledescr = InterfaceBase.__dict__[</span><span class="s4">'__module_property__'</span><span class="s1">]</span>
+        <span class="s1">attrs[</span><span class="s4">'__module__'</span><span class="s1">] = moduledescr</span>
+        <span class="s1">kind = type.__new__(cls</span><span class="s3">, </span><span class="s1">name</span><span class="s3">, </span><span class="s1">bases</span><span class="s3">, </span><span class="s1">attrs)</span>
+        <span class="s1">kind.__module = __module__</span>
+        <span class="s3">return </span><span class="s1">kind</span>
+
+    <span class="s1">@property</span>
+    <span class="s3">def </span><span class="s1">__module__(cls):</span>
+        <span class="s3">return </span><span class="s1">cls.__module</span>
+
+    <span class="s3">def </span><span class="s1">__repr__(cls):</span>
+        <span class="s3">return </span><span class="s4">&quot;&lt;class '%s.%s'&gt;&quot; </span><span class="s1">% (</span>
+            <span class="s1">cls.__module</span><span class="s3">,</span>
+            <span class="s1">cls.__name__</span><span class="s3">,</span>
+        <span class="s1">)</span>
+
+
+<span class="s1">_InterfaceClassBase = _InterfaceMetaClass(</span>
+    <span class="s4">'InterfaceClass'</span><span class="s3">,</span>
+    <span class="s0"># From least specific to most specific.</span>
+    <span class="s1">(InterfaceBase</span><span class="s3">, </span><span class="s1">Specification</span><span class="s3">, </span><span class="s1">Element)</span><span class="s3">,</span>
+    <span class="s1">{</span><span class="s4">'__slots__'</span><span class="s1">: ()}</span>
+<span class="s1">)</span>
+
+
+<span class="s3">def </span><span class="s1">interfacemethod(func):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Convert a method specification to an actual method of the interface. 
+ 
+    This is a decorator that functions like `staticmethod` et al. 
+ 
+    The primary use of this decorator is to allow interface definitions to 
+    define the ``__adapt__`` method, but other interface methods can be 
+    overridden this way too. 
+ 
+    .. seealso:: `zope.interface.interfaces.IInterfaceDeclaration.interfacemethod` 
+    &quot;&quot;&quot;</span>
+    <span class="s1">f_locals = sys._getframe(</span><span class="s5">1</span><span class="s1">).f_locals</span>
+    <span class="s1">methods = f_locals.setdefault(INTERFACE_METHODS</span><span class="s3">, </span><span class="s1">{})</span>
+    <span class="s1">methods[func.__name__] = func</span>
+    <span class="s3">return </span><span class="s1">_decorator_non_return</span>
+
+
+<span class="s3">class </span><span class="s1">InterfaceClass(_InterfaceClassBase):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Prototype (scarecrow) Interfaces Implementation. 
+ 
+    Note that it is not possible to change the ``__name__`` or ``__module__`` 
+    after an instance of this object has been constructed. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s0"># We can't say this yet because we don't have enough</span>
+    <span class="s0"># infrastructure in place.</span>
+    <span class="s0">#</span>
+    <span class="s0">#implements(IInterface)</span>
+
+    <span class="s3">def </span><span class="s1">__new__(cls</span><span class="s3">, </span><span class="s1">name=</span><span class="s3">None, </span><span class="s1">bases=()</span><span class="s3">, </span><span class="s1">attrs=</span><span class="s3">None, </span><span class="s1">__doc__=</span><span class="s3">None, </span><span class="s0"># pylint:disable=redefined-builtin</span>
+                <span class="s1">__module__=</span><span class="s3">None</span><span class="s1">):</span>
+        <span class="s3">assert </span><span class="s1">isinstance(bases</span><span class="s3">, </span><span class="s1">tuple)</span>
+        <span class="s1">attrs = attrs </span><span class="s3">or </span><span class="s1">{}</span>
+        <span class="s1">needs_custom_class = attrs.pop(INTERFACE_METHODS</span><span class="s3">, None</span><span class="s1">)</span>
+        <span class="s3">if </span><span class="s1">needs_custom_class:</span>
+            <span class="s1">needs_custom_class.update(</span>
+                <span class="s1">{</span><span class="s4">'__classcell__'</span><span class="s1">: attrs.pop(</span><span class="s4">'__classcell__'</span><span class="s1">)}</span>
+                <span class="s3">if </span><span class="s4">'__classcell__' </span><span class="s3">in </span><span class="s1">attrs</span>
+                <span class="s3">else </span><span class="s1">{}</span>
+            <span class="s1">)</span>
+            <span class="s3">if </span><span class="s4">'__adapt__' </span><span class="s3">in </span><span class="s1">needs_custom_class:</span>
+                <span class="s0"># We need to tell the C code to call this.</span>
+                <span class="s1">needs_custom_class[</span><span class="s4">'_CALL_CUSTOM_ADAPT'</span><span class="s1">] = </span><span class="s5">1</span>
+
+            <span class="s3">if </span><span class="s1">issubclass(cls</span><span class="s3">, </span><span class="s1">_InterfaceClassWithCustomMethods):</span>
+                <span class="s1">cls_bases = (cls</span><span class="s3">,</span><span class="s1">)</span>
+            <span class="s3">elif </span><span class="s1">cls </span><span class="s3">is </span><span class="s1">InterfaceClass:</span>
+                <span class="s1">cls_bases = (_InterfaceClassWithCustomMethods</span><span class="s3">,</span><span class="s1">)</span>
+            <span class="s3">else</span><span class="s1">:</span>
+                <span class="s1">cls_bases = (cls</span><span class="s3">, </span><span class="s1">_InterfaceClassWithCustomMethods)</span>
+
+            <span class="s1">cls = type(cls)( </span><span class="s0"># pylint:disable=self-cls-assignment</span>
+                <span class="s1">name + </span><span class="s4">&quot;&lt;WithCustomMethods&gt;&quot;</span><span class="s3">,</span>
+                <span class="s1">cls_bases</span><span class="s3">,</span>
+                <span class="s1">needs_custom_class</span>
+            <span class="s1">)</span>
+        <span class="s3">elif </span><span class="s1">PY2 </span><span class="s3">and </span><span class="s1">bases </span><span class="s3">and </span><span class="s1">len(bases) &gt; </span><span class="s5">1</span><span class="s1">:</span>
+            <span class="s1">bases_with_custom_methods = tuple(</span>
+                <span class="s1">type(b)</span>
+                <span class="s3">for </span><span class="s1">b </span><span class="s3">in </span><span class="s1">bases</span>
+                <span class="s3">if </span><span class="s1">issubclass(type(b)</span><span class="s3">, </span><span class="s1">_InterfaceClassWithCustomMethods)</span>
+            <span class="s1">)</span>
+
+            <span class="s0"># If we have a subclass of InterfaceClass in *bases*,</span>
+            <span class="s0"># Python 3 is smart enough to pass that as *cls*, but Python</span>
+            <span class="s0"># 2 just passes whatever the first base in *bases* is. This means that if</span>
+            <span class="s0"># we have multiple inheritance, and one of our bases has already defined</span>
+            <span class="s0"># a custom method like ``__adapt__``, we do the right thing automatically</span>
+            <span class="s0"># and extend it on Python 3, but not necessarily on Python 2. To fix this, we need</span>
+            <span class="s0"># to run the MRO algorithm and get the most derived base manually.</span>
+            <span class="s0"># Note that this only works for consistent resolution orders</span>
+            <span class="s3">if </span><span class="s1">bases_with_custom_methods:</span>
+                <span class="s1">cls = type( </span><span class="s0"># pylint:disable=self-cls-assignment</span>
+                    <span class="s1">name + </span><span class="s4">&quot;&lt;WithCustomMethods&gt;&quot;</span><span class="s3">,</span>
+                    <span class="s1">bases_with_custom_methods</span><span class="s3">,</span>
+                    <span class="s1">{}</span>
+                <span class="s1">).__mro__[</span><span class="s5">1</span><span class="s1">] </span><span class="s0"># Not the class we created, the most derived.</span>
+
+        <span class="s3">return </span><span class="s1">_InterfaceClassBase.__new__(cls)</span>
+
+    <span class="s3">def </span><span class="s1">__init__(self</span><span class="s3">, </span><span class="s1">name</span><span class="s3">, </span><span class="s1">bases=()</span><span class="s3">, </span><span class="s1">attrs=</span><span class="s3">None, </span><span class="s1">__doc__=</span><span class="s3">None,  </span><span class="s0"># pylint:disable=redefined-builtin</span>
+                 <span class="s1">__module__=</span><span class="s3">None</span><span class="s1">):</span>
+        <span class="s0"># We don't call our metaclass parent directly</span>
+        <span class="s0"># pylint:disable=non-parent-init-called</span>
+        <span class="s0"># pylint:disable=super-init-not-called</span>
+        <span class="s3">if not </span><span class="s1">all(isinstance(base</span><span class="s3">, </span><span class="s1">InterfaceClass) </span><span class="s3">for </span><span class="s1">base </span><span class="s3">in </span><span class="s1">bases):</span>
+            <span class="s3">raise </span><span class="s1">TypeError(</span><span class="s4">'Expected base interfaces'</span><span class="s1">)</span>
+
+        <span class="s3">if </span><span class="s1">attrs </span><span class="s3">is None</span><span class="s1">:</span>
+            <span class="s1">attrs = {}</span>
+
+        <span class="s3">if </span><span class="s1">__module__ </span><span class="s3">is None</span><span class="s1">:</span>
+            <span class="s1">__module__ = attrs.get(</span><span class="s4">'__module__'</span><span class="s1">)</span>
+            <span class="s3">if </span><span class="s1">isinstance(__module__</span><span class="s3">, </span><span class="s1">str):</span>
+                <span class="s3">del </span><span class="s1">attrs[</span><span class="s4">'__module__'</span><span class="s1">]</span>
+            <span class="s3">else</span><span class="s1">:</span>
+                <span class="s3">try</span><span class="s1">:</span>
+                    <span class="s0"># Figure out what module defined the interface.</span>
+                    <span class="s0"># This is how cPython figures out the module of</span>
+                    <span class="s0"># a class, but of course it does it in C. :-/</span>
+                    <span class="s1">__module__ = sys._getframe(</span><span class="s5">1</span><span class="s1">).f_globals[</span><span class="s4">'__name__'</span><span class="s1">]</span>
+                <span class="s3">except </span><span class="s1">(AttributeError</span><span class="s3">, </span><span class="s1">KeyError): </span><span class="s0"># pragma: no cover</span>
+                    <span class="s3">pass</span>
+
+        <span class="s1">InterfaceBase.__init__(self</span><span class="s3">, </span><span class="s1">name</span><span class="s3">, </span><span class="s1">__module__)</span>
+        <span class="s0"># These asserts assisted debugging the metaclass</span>
+        <span class="s0"># assert '__module__' not in self.__dict__</span>
+        <span class="s0"># assert self.__ibmodule__ is self.__module__ is __module__</span>
+
+        <span class="s1">d = attrs.get(</span><span class="s4">'__doc__'</span><span class="s1">)</span>
+        <span class="s3">if </span><span class="s1">d </span><span class="s3">is not None</span><span class="s1">:</span>
+            <span class="s3">if not </span><span class="s1">isinstance(d</span><span class="s3">, </span><span class="s1">Attribute):</span>
+                <span class="s3">if </span><span class="s1">__doc__ </span><span class="s3">is None</span><span class="s1">:</span>
+                    <span class="s1">__doc__ = d</span>
+                <span class="s3">del </span><span class="s1">attrs[</span><span class="s4">'__doc__'</span><span class="s1">]</span>
+
+        <span class="s3">if </span><span class="s1">__doc__ </span><span class="s3">is None</span><span class="s1">:</span>
+            <span class="s1">__doc__ = </span><span class="s4">''</span>
+
+        <span class="s1">Element.__init__(self</span><span class="s3">, </span><span class="s1">name</span><span class="s3">, </span><span class="s1">__doc__)</span>
+
+        <span class="s1">tagged_data = attrs.pop(TAGGED_DATA</span><span class="s3">, None</span><span class="s1">)</span>
+        <span class="s3">if </span><span class="s1">tagged_data </span><span class="s3">is not None</span><span class="s1">:</span>
+            <span class="s3">for </span><span class="s1">key</span><span class="s3">, </span><span class="s1">val </span><span class="s3">in </span><span class="s1">tagged_data.items():</span>
+                <span class="s1">self.setTaggedValue(key</span><span class="s3">, </span><span class="s1">val)</span>
+
+        <span class="s1">Specification.__init__(self</span><span class="s3">, </span><span class="s1">bases)</span>
+        <span class="s1">self.__attrs = self.__compute_attrs(attrs)</span>
+
+        <span class="s1">self.__identifier__ = </span><span class="s4">&quot;%s.%s&quot; </span><span class="s1">% (__module__</span><span class="s3">, </span><span class="s1">name)</span>
+
+    <span class="s3">def </span><span class="s1">__compute_attrs(self</span><span class="s3">, </span><span class="s1">attrs):</span>
+        <span class="s0"># Make sure that all recorded attributes (and methods) are of type</span>
+        <span class="s0"># `Attribute` and `Method`</span>
+        <span class="s3">def </span><span class="s1">update_value(aname</span><span class="s3">, </span><span class="s1">aval):</span>
+            <span class="s3">if </span><span class="s1">isinstance(aval</span><span class="s3">, </span><span class="s1">Attribute):</span>
+                <span class="s1">aval.interface = self</span>
+                <span class="s3">if not </span><span class="s1">aval.__name__:</span>
+                    <span class="s1">aval.__name__ = aname</span>
+            <span class="s3">elif </span><span class="s1">isinstance(aval</span><span class="s3">, </span><span class="s1">FunctionType):</span>
+                <span class="s1">aval = fromFunction(aval</span><span class="s3">, </span><span class="s1">self</span><span class="s3">, </span><span class="s1">name=aname)</span>
+            <span class="s3">else</span><span class="s1">:</span>
+                <span class="s3">raise </span><span class="s1">InvalidInterface(</span><span class="s4">&quot;Concrete attribute, &quot; </span><span class="s1">+ aname)</span>
+            <span class="s3">return </span><span class="s1">aval</span>
+
+        <span class="s3">return </span><span class="s1">{</span>
+            <span class="s1">aname: update_value(aname</span><span class="s3">, </span><span class="s1">aval)</span>
+            <span class="s3">for </span><span class="s1">aname</span><span class="s3">, </span><span class="s1">aval </span><span class="s3">in </span><span class="s1">attrs.items()</span>
+            <span class="s3">if </span><span class="s1">aname </span><span class="s3">not in </span><span class="s1">(</span>
+                <span class="s0"># __locals__: Python 3 sometimes adds this.</span>
+                <span class="s4">'__locals__'</span><span class="s3">,</span>
+                <span class="s0"># __qualname__: PEP 3155 (Python 3.3+)</span>
+                <span class="s4">'__qualname__'</span><span class="s3">,</span>
+                <span class="s0"># __annotations__: PEP 3107 (Python 3.0+)</span>
+                <span class="s4">'__annotations__'</span><span class="s3">,</span>
+            <span class="s1">)</span>
+            <span class="s3">and </span><span class="s1">aval </span><span class="s3">is not </span><span class="s1">_decorator_non_return</span>
+        <span class="s1">}</span>
+
+    <span class="s3">def </span><span class="s1">interfaces(self):</span>
+        <span class="s2">&quot;&quot;&quot;Return an iterator for the interfaces in the specification. 
+        &quot;&quot;&quot;</span>
+        <span class="s3">yield </span><span class="s1">self</span>
+
+    <span class="s3">def </span><span class="s1">getBases(self):</span>
+        <span class="s3">return </span><span class="s1">self.__bases__</span>
+
+    <span class="s3">def </span><span class="s1">isEqualOrExtendedBy(self</span><span class="s3">, </span><span class="s1">other):</span>
+        <span class="s2">&quot;&quot;&quot;Same interface or extends?&quot;&quot;&quot;</span>
+        <span class="s3">return </span><span class="s1">self == other </span><span class="s3">or </span><span class="s1">other.extends(self)</span>
+
+    <span class="s3">def </span><span class="s1">names(self</span><span class="s3">, </span><span class="s1">all=</span><span class="s3">False</span><span class="s1">): </span><span class="s0"># pylint:disable=redefined-builtin</span>
+        <span class="s2">&quot;&quot;&quot;Return the attribute names defined by the interface.&quot;&quot;&quot;</span>
+        <span class="s3">if not </span><span class="s1">all:</span>
+            <span class="s3">return </span><span class="s1">self.__attrs.keys()</span>
+
+        <span class="s1">r = self.__attrs.copy()</span>
+
+        <span class="s3">for </span><span class="s1">base </span><span class="s3">in </span><span class="s1">self.__bases__:</span>
+            <span class="s1">r.update(dict.fromkeys(base.names(all)))</span>
+
+        <span class="s3">return </span><span class="s1">r.keys()</span>
+
+    <span class="s3">def </span><span class="s1">__iter__(self):</span>
+        <span class="s3">return </span><span class="s1">iter(self.names(all=</span><span class="s3">True</span><span class="s1">))</span>
+
+    <span class="s3">def </span><span class="s1">namesAndDescriptions(self</span><span class="s3">, </span><span class="s1">all=</span><span class="s3">False</span><span class="s1">): </span><span class="s0"># pylint:disable=redefined-builtin</span>
+        <span class="s2">&quot;&quot;&quot;Return attribute names and descriptions defined by interface.&quot;&quot;&quot;</span>
+        <span class="s3">if not </span><span class="s1">all:</span>
+            <span class="s3">return </span><span class="s1">self.__attrs.items()</span>
+
+        <span class="s1">r = {}</span>
+        <span class="s3">for </span><span class="s1">base </span><span class="s3">in </span><span class="s1">self.__bases__[::-</span><span class="s5">1</span><span class="s1">]:</span>
+            <span class="s1">r.update(dict(base.namesAndDescriptions(all)))</span>
+
+        <span class="s1">r.update(self.__attrs)</span>
+
+        <span class="s3">return </span><span class="s1">r.items()</span>
+
+    <span class="s3">def </span><span class="s1">getDescriptionFor(self</span><span class="s3">, </span><span class="s1">name):</span>
+        <span class="s2">&quot;&quot;&quot;Return the attribute description for the given name.&quot;&quot;&quot;</span>
+        <span class="s1">r = self.get(name)</span>
+        <span class="s3">if </span><span class="s1">r </span><span class="s3">is not None</span><span class="s1">:</span>
+            <span class="s3">return </span><span class="s1">r</span>
+
+        <span class="s3">raise </span><span class="s1">KeyError(name)</span>
+
+    <span class="s1">__getitem__ = getDescriptionFor</span>
+
+    <span class="s3">def </span><span class="s1">__contains__(self</span><span class="s3">, </span><span class="s1">name):</span>
+        <span class="s3">return </span><span class="s1">self.get(name) </span><span class="s3">is not None</span>
+
+    <span class="s3">def </span><span class="s1">direct(self</span><span class="s3">, </span><span class="s1">name):</span>
+        <span class="s3">return </span><span class="s1">self.__attrs.get(name)</span>
+
+    <span class="s3">def </span><span class="s1">queryDescriptionFor(self</span><span class="s3">, </span><span class="s1">name</span><span class="s3">, </span><span class="s1">default=</span><span class="s3">None</span><span class="s1">):</span>
+        <span class="s3">return </span><span class="s1">self.get(name</span><span class="s3">, </span><span class="s1">default)</span>
+
+    <span class="s3">def </span><span class="s1">validateInvariants(self</span><span class="s3">, </span><span class="s1">obj</span><span class="s3">, </span><span class="s1">errors=</span><span class="s3">None</span><span class="s1">):</span>
+        <span class="s2">&quot;&quot;&quot;validate object to defined invariants.&quot;&quot;&quot;</span>
+
+        <span class="s3">for </span><span class="s1">iface </span><span class="s3">in </span><span class="s1">self.__iro__:</span>
+            <span class="s3">for </span><span class="s1">invariant </span><span class="s3">in </span><span class="s1">iface.queryDirectTaggedValue(</span><span class="s4">'invariants'</span><span class="s3">, </span><span class="s1">()):</span>
+                <span class="s3">try</span><span class="s1">:</span>
+                    <span class="s1">invariant(obj)</span>
+                <span class="s3">except </span><span class="s1">Invalid </span><span class="s3">as </span><span class="s1">error:</span>
+                    <span class="s3">if </span><span class="s1">errors </span><span class="s3">is not None</span><span class="s1">:</span>
+                        <span class="s1">errors.append(error)</span>
+                    <span class="s3">else</span><span class="s1">:</span>
+                        <span class="s3">raise</span>
+
+        <span class="s3">if </span><span class="s1">errors:</span>
+            <span class="s3">raise </span><span class="s1">Invalid(errors)</span>
+
+    <span class="s3">def </span><span class="s1">queryTaggedValue(self</span><span class="s3">, </span><span class="s1">tag</span><span class="s3">, </span><span class="s1">default=</span><span class="s3">None</span><span class="s1">):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Queries for the value associated with *tag*, returning it from the nearest 
+        interface in the ``__iro__``. 
+ 
+        If not found, returns *default*. 
+        &quot;&quot;&quot;</span>
+        <span class="s3">for </span><span class="s1">iface </span><span class="s3">in </span><span class="s1">self.__iro__:</span>
+            <span class="s1">value = iface.queryDirectTaggedValue(tag</span><span class="s3">, </span><span class="s1">_marker)</span>
+            <span class="s3">if </span><span class="s1">value </span><span class="s3">is not </span><span class="s1">_marker:</span>
+                <span class="s3">return </span><span class="s1">value</span>
+        <span class="s3">return </span><span class="s1">default</span>
+
+    <span class="s3">def </span><span class="s1">getTaggedValue(self</span><span class="s3">, </span><span class="s1">tag):</span>
+        <span class="s2">&quot;&quot;&quot; Returns the value associated with 'tag'. &quot;&quot;&quot;</span>
+        <span class="s1">value = self.queryTaggedValue(tag</span><span class="s3">, </span><span class="s1">default=_marker)</span>
+        <span class="s3">if </span><span class="s1">value </span><span class="s3">is </span><span class="s1">_marker:</span>
+            <span class="s3">raise </span><span class="s1">KeyError(tag)</span>
+        <span class="s3">return </span><span class="s1">value</span>
+
+    <span class="s3">def </span><span class="s1">getTaggedValueTags(self):</span>
+        <span class="s2">&quot;&quot;&quot; Returns a list of all tags. &quot;&quot;&quot;</span>
+        <span class="s1">keys = set()</span>
+        <span class="s3">for </span><span class="s1">base </span><span class="s3">in </span><span class="s1">self.__iro__:</span>
+            <span class="s1">keys.update(base.getDirectTaggedValueTags())</span>
+        <span class="s3">return </span><span class="s1">keys</span>
+
+    <span class="s3">def </span><span class="s1">__repr__(self):</span>
+        <span class="s3">try</span><span class="s1">:</span>
+            <span class="s3">return </span><span class="s1">self._v_repr</span>
+        <span class="s3">except </span><span class="s1">AttributeError:</span>
+            <span class="s1">name = str(self)</span>
+            <span class="s1">r = </span><span class="s4">&quot;&lt;%s %s&gt;&quot; </span><span class="s1">% (self.__class__.__name__</span><span class="s3">, </span><span class="s1">name)</span>
+            <span class="s1">self._v_repr = r </span><span class="s0"># pylint:disable=attribute-defined-outside-init</span>
+            <span class="s3">return </span><span class="s1">r</span>
+
+    <span class="s3">def </span><span class="s1">__str__(self):</span>
+        <span class="s1">name = self.__name__</span>
+        <span class="s1">m = self.__ibmodule__</span>
+        <span class="s3">if </span><span class="s1">m:</span>
+            <span class="s1">name = </span><span class="s4">'%s.%s' </span><span class="s1">% (m</span><span class="s3">, </span><span class="s1">name)</span>
+        <span class="s3">return </span><span class="s1">name</span>
+
+    <span class="s3">def </span><span class="s1">_call_conform(self</span><span class="s3">, </span><span class="s1">conform):</span>
+        <span class="s3">try</span><span class="s1">:</span>
+            <span class="s3">return </span><span class="s1">conform(self)</span>
+        <span class="s3">except </span><span class="s1">TypeError: </span><span class="s0"># pragma: no cover</span>
+            <span class="s0"># We got a TypeError. It might be an error raised by</span>
+            <span class="s0"># the __conform__ implementation, or *we* may have</span>
+            <span class="s0"># made the TypeError by calling an unbound method</span>
+            <span class="s0"># (object is a class).  In the later case, we behave</span>
+            <span class="s0"># as though there is no __conform__ method. We can</span>
+            <span class="s0"># detect this case by checking whether there is more</span>
+            <span class="s0"># than one traceback object in the traceback chain:</span>
+            <span class="s3">if </span><span class="s1">sys.exc_info()[</span><span class="s5">2</span><span class="s1">].tb_next </span><span class="s3">is not None</span><span class="s1">:</span>
+                <span class="s0"># There is more than one entry in the chain, so</span>
+                <span class="s0"># reraise the error:</span>
+                <span class="s3">raise</span>
+            <span class="s0"># This clever trick is from Phillip Eby</span>
+
+        <span class="s3">return None </span><span class="s0"># pragma: no cover</span>
+
+    <span class="s3">def </span><span class="s1">__reduce__(self):</span>
+        <span class="s3">return </span><span class="s1">self.__name__</span>
+
+<span class="s1">Interface = InterfaceClass(</span><span class="s4">&quot;Interface&quot;</span><span class="s3">, </span><span class="s1">__module__=</span><span class="s4">'zope.interface'</span><span class="s1">)</span>
+<span class="s0"># Interface is the only member of its own SRO.</span>
+<span class="s1">Interface._calculate_sro = </span><span class="s3">lambda</span><span class="s1">: (Interface</span><span class="s3">,</span><span class="s1">)</span>
+<span class="s1">Interface.changed(Interface)</span>
+<span class="s3">assert </span><span class="s1">Interface.__sro__ == (Interface</span><span class="s3">,</span><span class="s1">)</span>
+<span class="s1">Specification._ROOT = Interface</span>
+<span class="s1">ro._ROOT = Interface</span>
+
+<span class="s3">class </span><span class="s1">_InterfaceClassWithCustomMethods(InterfaceClass):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Marker class for interfaces with custom methods that override InterfaceClass methods. 
+    &quot;&quot;&quot;</span>
+
+
+<span class="s3">class </span><span class="s1">Attribute(Element):</span>
+    <span class="s2">&quot;&quot;&quot;Attribute descriptions 
+    &quot;&quot;&quot;</span>
+
+    <span class="s0"># We can't say this yet because we don't have enough</span>
+    <span class="s0"># infrastructure in place.</span>
+    <span class="s0">#</span>
+    <span class="s0"># implements(IAttribute)</span>
+
+    <span class="s1">interface = </span><span class="s3">None</span>
+
+    <span class="s3">def </span><span class="s1">_get_str_info(self):</span>
+        <span class="s2">&quot;&quot;&quot;Return extra data to put at the end of __str__.&quot;&quot;&quot;</span>
+        <span class="s3">return </span><span class="s4">&quot;&quot;</span>
+
+    <span class="s3">def </span><span class="s1">__str__(self):</span>
+        <span class="s1">of = </span><span class="s4">''</span>
+        <span class="s3">if </span><span class="s1">self.interface </span><span class="s3">is not None</span><span class="s1">:</span>
+            <span class="s1">of = self.interface.__module__ + </span><span class="s4">'.' </span><span class="s1">+ self.interface.__name__ + </span><span class="s4">'.'</span>
+        <span class="s0"># self.__name__ may be None during construction (e.g., debugging)</span>
+        <span class="s3">return </span><span class="s1">of + (self.__name__ </span><span class="s3">or </span><span class="s4">'&lt;unknown&gt;'</span><span class="s1">) + self._get_str_info()</span>
+
+    <span class="s3">def </span><span class="s1">__repr__(self):</span>
+        <span class="s3">return </span><span class="s4">&quot;&lt;%s.%s object at 0x%x %s&gt;&quot; </span><span class="s1">% (</span>
+            <span class="s1">type(self).__module__</span><span class="s3">,</span>
+            <span class="s1">type(self).__name__</span><span class="s3">,</span>
+            <span class="s1">id(self)</span><span class="s3">,</span>
+            <span class="s1">self</span>
+        <span class="s1">)</span>
+
+
+<span class="s3">class </span><span class="s1">Method(Attribute):</span>
+    <span class="s2">&quot;&quot;&quot;Method interfaces 
+ 
+    The idea here is that you have objects that describe methods. 
+    This provides an opportunity for rich meta-data. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s0"># We can't say this yet because we don't have enough</span>
+    <span class="s0"># infrastructure in place.</span>
+    <span class="s0">#</span>
+    <span class="s0"># implements(IMethod)</span>
+
+    <span class="s1">positional = required = ()</span>
+    <span class="s1">_optional = varargs = kwargs = </span><span class="s3">None</span>
+    <span class="s3">def </span><span class="s1">_get_optional(self):</span>
+        <span class="s3">if </span><span class="s1">self._optional </span><span class="s3">is None</span><span class="s1">:</span>
+            <span class="s3">return </span><span class="s1">{}</span>
+        <span class="s3">return </span><span class="s1">self._optional</span>
+    <span class="s3">def </span><span class="s1">_set_optional(self</span><span class="s3">, </span><span class="s1">opt):</span>
+        <span class="s1">self._optional = opt</span>
+    <span class="s3">def </span><span class="s1">_del_optional(self):</span>
+        <span class="s1">self._optional = </span><span class="s3">None</span>
+    <span class="s1">optional = property(_get_optional</span><span class="s3">, </span><span class="s1">_set_optional</span><span class="s3">, </span><span class="s1">_del_optional)</span>
+
+    <span class="s3">def </span><span class="s1">__call__(self</span><span class="s3">, </span><span class="s1">*args</span><span class="s3">, </span><span class="s1">**kw):</span>
+        <span class="s3">raise </span><span class="s1">BrokenImplementation(self.interface</span><span class="s3">, </span><span class="s1">self.__name__)</span>
+
+    <span class="s3">def </span><span class="s1">getSignatureInfo(self):</span>
+        <span class="s3">return </span><span class="s1">{</span><span class="s4">'positional'</span><span class="s1">: self.positional</span><span class="s3">,</span>
+                <span class="s4">'required'</span><span class="s1">: self.required</span><span class="s3">,</span>
+                <span class="s4">'optional'</span><span class="s1">: self.optional</span><span class="s3">,</span>
+                <span class="s4">'varargs'</span><span class="s1">: self.varargs</span><span class="s3">,</span>
+                <span class="s4">'kwargs'</span><span class="s1">: self.kwargs</span><span class="s3">,</span>
+                <span class="s1">}</span>
+
+    <span class="s3">def </span><span class="s1">getSignatureString(self):</span>
+        <span class="s1">sig = []</span>
+        <span class="s3">for </span><span class="s1">v </span><span class="s3">in </span><span class="s1">self.positional:</span>
+            <span class="s1">sig.append(v)</span>
+            <span class="s3">if </span><span class="s1">v </span><span class="s3">in </span><span class="s1">self.optional.keys():</span>
+                <span class="s1">sig[-</span><span class="s5">1</span><span class="s1">] += </span><span class="s4">&quot;=&quot; </span><span class="s1">+ repr(self.optional[v])</span>
+        <span class="s3">if </span><span class="s1">self.varargs:</span>
+            <span class="s1">sig.append(</span><span class="s4">&quot;*&quot; </span><span class="s1">+ self.varargs)</span>
+        <span class="s3">if </span><span class="s1">self.kwargs:</span>
+            <span class="s1">sig.append(</span><span class="s4">&quot;**&quot; </span><span class="s1">+ self.kwargs)</span>
+
+        <span class="s3">return </span><span class="s4">&quot;(%s)&quot; </span><span class="s1">% </span><span class="s4">&quot;, &quot;</span><span class="s1">.join(sig)</span>
+
+    <span class="s1">_get_str_info = getSignatureString</span>
+
+
+<span class="s3">def </span><span class="s1">fromFunction(func</span><span class="s3">, </span><span class="s1">interface=</span><span class="s3">None, </span><span class="s1">imlevel=</span><span class="s5">0</span><span class="s3">, </span><span class="s1">name=</span><span class="s3">None</span><span class="s1">):</span>
+    <span class="s1">name = name </span><span class="s3">or </span><span class="s1">func.__name__</span>
+    <span class="s1">method = Method(name</span><span class="s3">, </span><span class="s1">func.__doc__)</span>
+    <span class="s1">defaults = getattr(func</span><span class="s3">, </span><span class="s4">'__defaults__'</span><span class="s3">, None</span><span class="s1">) </span><span class="s3">or </span><span class="s1">()</span>
+    <span class="s1">code = func.__code__</span>
+    <span class="s0"># Number of positional arguments</span>
+    <span class="s1">na = code.co_argcount - imlevel</span>
+    <span class="s1">names = code.co_varnames[imlevel:]</span>
+    <span class="s1">opt = {}</span>
+    <span class="s0"># Number of required arguments</span>
+    <span class="s1">defaults_count = len(defaults)</span>
+    <span class="s3">if not </span><span class="s1">defaults_count:</span>
+        <span class="s0"># PyPy3 uses ``__defaults_count__`` for builtin methods</span>
+        <span class="s0"># like ``dict.pop``. Surprisingly, these don't have recorded</span>
+        <span class="s0"># ``__defaults__``</span>
+        <span class="s1">defaults_count = getattr(func</span><span class="s3">, </span><span class="s4">'__defaults_count__'</span><span class="s3">, </span><span class="s5">0</span><span class="s1">)</span>
+
+    <span class="s1">nr = na - defaults_count</span>
+    <span class="s3">if </span><span class="s1">nr &lt; </span><span class="s5">0</span><span class="s1">:</span>
+        <span class="s1">defaults = defaults[-nr:]</span>
+        <span class="s1">nr = </span><span class="s5">0</span>
+
+    <span class="s0"># Determine the optional arguments.</span>
+    <span class="s1">opt.update(dict(zip(names[nr:]</span><span class="s3">, </span><span class="s1">defaults)))</span>
+
+    <span class="s1">method.positional = names[:na]</span>
+    <span class="s1">method.required = names[:nr]</span>
+    <span class="s1">method.optional = opt</span>
+
+    <span class="s1">argno = na</span>
+
+    <span class="s0"># Determine the function's variable argument's name (i.e. *args)</span>
+    <span class="s3">if </span><span class="s1">code.co_flags &amp; CO_VARARGS:</span>
+        <span class="s1">method.varargs = names[argno]</span>
+        <span class="s1">argno = argno + </span><span class="s5">1</span>
+    <span class="s3">else</span><span class="s1">:</span>
+        <span class="s1">method.varargs = </span><span class="s3">None</span>
+
+    <span class="s0"># Determine the function's keyword argument's name (i.e. **kw)</span>
+    <span class="s3">if </span><span class="s1">code.co_flags &amp; CO_VARKEYWORDS:</span>
+        <span class="s1">method.kwargs = names[argno]</span>
+    <span class="s3">else</span><span class="s1">:</span>
+        <span class="s1">method.kwargs = </span><span class="s3">None</span>
+
+    <span class="s1">method.interface = interface</span>
+
+    <span class="s3">for </span><span class="s1">key</span><span class="s3">, </span><span class="s1">value </span><span class="s3">in </span><span class="s1">func.__dict__.items():</span>
+        <span class="s1">method.setTaggedValue(key</span><span class="s3">, </span><span class="s1">value)</span>
+
+    <span class="s3">return </span><span class="s1">method</span>
+
+
+<span class="s3">def </span><span class="s1">fromMethod(meth</span><span class="s3">, </span><span class="s1">interface=</span><span class="s3">None, </span><span class="s1">name=</span><span class="s3">None</span><span class="s1">):</span>
+    <span class="s3">if </span><span class="s1">isinstance(meth</span><span class="s3">, </span><span class="s1">MethodType):</span>
+        <span class="s1">func = meth.__func__</span>
+    <span class="s3">else</span><span class="s1">:</span>
+        <span class="s1">func = meth</span>
+    <span class="s3">return </span><span class="s1">fromFunction(func</span><span class="s3">, </span><span class="s1">interface</span><span class="s3">, </span><span class="s1">imlevel=</span><span class="s5">1</span><span class="s3">, </span><span class="s1">name=name)</span>
+
+
+<span class="s0"># Now we can create the interesting interfaces and wire them up:</span>
+<span class="s3">def </span><span class="s1">_wire():</span>
+    <span class="s3">from </span><span class="s1">zope.interface.declarations </span><span class="s3">import </span><span class="s1">classImplements</span>
+    <span class="s0"># From lest specific to most specific.</span>
+    <span class="s3">from </span><span class="s1">zope.interface.interfaces </span><span class="s3">import </span><span class="s1">IElement</span>
+    <span class="s1">classImplements(Element</span><span class="s3">, </span><span class="s1">IElement)</span>
+
+    <span class="s3">from </span><span class="s1">zope.interface.interfaces </span><span class="s3">import </span><span class="s1">IAttribute</span>
+    <span class="s1">classImplements(Attribute</span><span class="s3">, </span><span class="s1">IAttribute)</span>
+
+    <span class="s3">from </span><span class="s1">zope.interface.interfaces </span><span class="s3">import </span><span class="s1">IMethod</span>
+    <span class="s1">classImplements(Method</span><span class="s3">, </span><span class="s1">IMethod)</span>
+
+    <span class="s3">from </span><span class="s1">zope.interface.interfaces </span><span class="s3">import </span><span class="s1">ISpecification</span>
+    <span class="s1">classImplements(Specification</span><span class="s3">, </span><span class="s1">ISpecification)</span>
+
+    <span class="s3">from </span><span class="s1">zope.interface.interfaces </span><span class="s3">import </span><span class="s1">IInterface</span>
+    <span class="s1">classImplements(InterfaceClass</span><span class="s3">, </span><span class="s1">IInterface)</span>
+
+
+<span class="s0"># We import this here to deal with module dependencies.</span>
+<span class="s0"># pylint:disable=wrong-import-position</span>
+<span class="s3">from </span><span class="s1">zope.interface.declarations </span><span class="s3">import </span><span class="s1">implementedBy</span>
+<span class="s3">from </span><span class="s1">zope.interface.declarations </span><span class="s3">import </span><span class="s1">providedBy</span>
+<span class="s3">from </span><span class="s1">zope.interface.exceptions </span><span class="s3">import </span><span class="s1">InvalidInterface</span>
+<span class="s3">from </span><span class="s1">zope.interface.exceptions </span><span class="s3">import </span><span class="s1">BrokenImplementation</span>
+
+<span class="s0"># This ensures that ``Interface`` winds up in the flattened()</span>
+<span class="s0"># list of the immutable declaration. It correctly overrides changed()</span>
+<span class="s0"># as a no-op, so we bypass that.</span>
+<span class="s3">from </span><span class="s1">zope.interface.declarations </span><span class="s3">import </span><span class="s1">_empty</span>
+<span class="s1">Specification.changed(_empty</span><span class="s3">, </span><span class="s1">_empty)</span>
+</pre>
+</body>
+</html>

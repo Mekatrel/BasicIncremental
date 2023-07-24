@@ -1,0 +1,202 @@
+<html>
+<head>
+<title>test__os.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #cc7832;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #6a8759;}
+.s3 { color: #808080;}
+.s4 { color: #6897bb;}
+.s5 { color: #a5c261;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+test__os.py</font>
+</center></td></tr></table>
+<pre><span class="s0">from </span><span class="s1">__future__ </span><span class="s0">import </span><span class="s1">print_function</span><span class="s0">, </span><span class="s1">absolute_import</span><span class="s0">, </span><span class="s1">division</span>
+
+<span class="s0">import </span><span class="s1">sys</span>
+<span class="s0">from </span><span class="s1">os </span><span class="s0">import </span><span class="s1">pipe</span>
+
+
+<span class="s0">import </span><span class="s1">gevent</span>
+<span class="s0">from </span><span class="s1">gevent </span><span class="s0">import </span><span class="s1">os</span>
+<span class="s0">from </span><span class="s1">gevent </span><span class="s0">import </span><span class="s1">Greenlet</span><span class="s0">, </span><span class="s1">joinall</span>
+
+<span class="s0">from </span><span class="s1">gevent </span><span class="s0">import </span><span class="s1">testing </span><span class="s0">as </span><span class="s1">greentest</span>
+<span class="s0">from </span><span class="s1">gevent.testing </span><span class="s0">import </span><span class="s1">mock</span>
+<span class="s0">from </span><span class="s1">gevent.testing </span><span class="s0">import </span><span class="s1">six</span>
+<span class="s0">from </span><span class="s1">gevent.testing.skipping </span><span class="s0">import </span><span class="s1">skipOnLibuvOnPyPyOnWin</span>
+
+
+<span class="s0">class </span><span class="s1">TestOS_tp(greentest.TestCase):</span>
+
+    <span class="s1">__timeout__ = greentest.LARGE_TIMEOUT</span>
+
+    <span class="s0">def </span><span class="s1">pipe(self):</span>
+        <span class="s0">return </span><span class="s1">pipe()</span>
+
+    <span class="s1">read = staticmethod(os.tp_read)</span>
+    <span class="s1">write = staticmethod(os.tp_write)</span>
+
+    <span class="s1">@skipOnLibuvOnPyPyOnWin(</span><span class="s2">&quot;Sometimes times out&quot;</span><span class="s1">)</span>
+    <span class="s0">def </span><span class="s1">_test_if_pipe_blocks(self</span><span class="s0">, </span><span class="s1">buffer_class):</span>
+        <span class="s1">r</span><span class="s0">, </span><span class="s1">w = self.pipe()</span>
+        <span class="s3"># set nbytes such that for sure it is &gt; maximum pipe buffer</span>
+        <span class="s1">nbytes = </span><span class="s4">1000000</span>
+        <span class="s1">block = </span><span class="s5">b'x' </span><span class="s1">* </span><span class="s4">4096</span>
+        <span class="s1">buf = buffer_class(block)</span>
+        <span class="s3"># Lack of &quot;nonlocal&quot; keyword in Python 2.x:</span>
+        <span class="s1">bytesread = [</span><span class="s4">0</span><span class="s1">]</span>
+        <span class="s1">byteswritten = [</span><span class="s4">0</span><span class="s1">]</span>
+
+        <span class="s0">def </span><span class="s1">produce():</span>
+            <span class="s0">while </span><span class="s1">byteswritten[</span><span class="s4">0</span><span class="s1">] != nbytes:</span>
+                <span class="s1">bytesleft = nbytes - byteswritten[</span><span class="s4">0</span><span class="s1">]</span>
+                <span class="s1">byteswritten[</span><span class="s4">0</span><span class="s1">] += self.write(w</span><span class="s0">, </span><span class="s1">buf[:min(bytesleft</span><span class="s0">, </span><span class="s4">4096</span><span class="s1">)])</span>
+
+        <span class="s0">def </span><span class="s1">consume():</span>
+            <span class="s0">while </span><span class="s1">bytesread[</span><span class="s4">0</span><span class="s1">] != nbytes:</span>
+                <span class="s1">bytesleft = nbytes - bytesread[</span><span class="s4">0</span><span class="s1">]</span>
+                <span class="s1">bytesread[</span><span class="s4">0</span><span class="s1">] += len(self.read(r</span><span class="s0">, </span><span class="s1">min(bytesleft</span><span class="s0">, </span><span class="s4">4096</span><span class="s1">)))</span>
+
+        <span class="s1">producer = Greenlet(produce)</span>
+        <span class="s1">producer.start()</span>
+        <span class="s1">consumer = Greenlet(consume)</span>
+        <span class="s1">consumer.start_later(</span><span class="s4">1</span><span class="s1">)</span>
+        <span class="s3"># If patching was not succesful, the producer will have filled</span>
+        <span class="s3"># the pipe before the consumer starts, and would block the entire</span>
+        <span class="s3"># process. Therefore the next line would never finish.</span>
+        <span class="s1">joinall([producer</span><span class="s0">, </span><span class="s1">consumer])</span>
+        <span class="s1">self.assertEqual(bytesread[</span><span class="s4">0</span><span class="s1">]</span><span class="s0">, </span><span class="s1">nbytes)</span>
+        <span class="s1">self.assertEqual(bytesread[</span><span class="s4">0</span><span class="s1">]</span><span class="s0">, </span><span class="s1">byteswritten[</span><span class="s4">0</span><span class="s1">])</span>
+
+    <span class="s0">if </span><span class="s1">sys.version_info[</span><span class="s4">0</span><span class="s1">] &lt; </span><span class="s4">3</span><span class="s1">:</span>
+
+        <span class="s0">def </span><span class="s1">test_if_pipe_blocks_buffer(self):</span>
+            <span class="s1">self._test_if_pipe_blocks(six.builtins.buffer)</span>
+
+    <span class="s0">if </span><span class="s1">sys.version_info[:</span><span class="s4">2</span><span class="s1">] &gt;= (</span><span class="s4">2</span><span class="s0">, </span><span class="s4">7</span><span class="s1">):</span>
+
+        <span class="s0">def </span><span class="s1">test_if_pipe_blocks_memoryview(self):</span>
+            <span class="s1">self._test_if_pipe_blocks(six.builtins.memoryview)</span>
+
+
+<span class="s1">@greentest.skipUnless(hasattr(os</span><span class="s0">, </span><span class="s2">'make_nonblocking'</span><span class="s1">)</span><span class="s0">,</span>
+                      <span class="s2">&quot;Only on POSIX&quot;</span><span class="s1">)</span>
+<span class="s0">class </span><span class="s1">TestOS_nb(TestOS_tp):</span>
+
+    <span class="s0">def </span><span class="s1">read(self</span><span class="s0">, </span><span class="s1">fd</span><span class="s0">, </span><span class="s1">count):</span>
+        <span class="s0">return </span><span class="s1">os.nb_read(fd</span><span class="s0">, </span><span class="s1">count)</span>
+
+    <span class="s0">def </span><span class="s1">write(self</span><span class="s0">, </span><span class="s1">fd</span><span class="s0">, </span><span class="s1">count):</span>
+        <span class="s0">return </span><span class="s1">os.nb_write(fd</span><span class="s0">, </span><span class="s1">count)</span>
+
+    <span class="s0">def </span><span class="s1">pipe(self):</span>
+        <span class="s1">r</span><span class="s0">, </span><span class="s1">w = super(TestOS_nb</span><span class="s0">, </span><span class="s1">self).pipe()</span>
+        <span class="s1">os.make_nonblocking(r)</span>
+        <span class="s1">os.make_nonblocking(w)</span>
+        <span class="s0">return </span><span class="s1">r</span><span class="s0">, </span><span class="s1">w</span>
+
+    <span class="s0">def </span><span class="s1">_make_ignored_oserror(self):</span>
+        <span class="s0">import </span><span class="s1">errno</span>
+        <span class="s1">ignored_oserror = OSError()</span>
+        <span class="s1">ignored_oserror.errno = errno.EINTR</span>
+        <span class="s0">return </span><span class="s1">ignored_oserror</span>
+
+
+    <span class="s0">def </span><span class="s1">_check_hub_event_closed(self</span><span class="s0">, </span><span class="s1">mock_get_hub</span><span class="s0">, </span><span class="s1">fd</span><span class="s0">, </span><span class="s1">event):</span>
+        <span class="s1">mock_get_hub.assert_called_once_with()</span>
+        <span class="s1">hub = mock_get_hub.return_value</span>
+        <span class="s1">io = hub.loop.io</span>
+        <span class="s1">io.assert_called_once_with(fd</span><span class="s0">, </span><span class="s1">event)</span>
+
+        <span class="s1">event = io.return_value</span>
+        <span class="s1">event.close.assert_called_once_with()</span>
+
+    <span class="s0">def </span><span class="s1">_test_event_closed_on_normal_io(self</span><span class="s0">, </span><span class="s1">nb_func</span><span class="s0">, </span><span class="s1">nb_arg</span><span class="s0">,</span>
+                                        <span class="s1">mock_io</span><span class="s0">, </span><span class="s1">mock_get_hub</span><span class="s0">, </span><span class="s1">event):</span>
+        <span class="s1">mock_io.side_effect = [self._make_ignored_oserror()</span><span class="s0">, </span><span class="s4">42</span><span class="s1">]</span>
+
+        <span class="s1">fd = </span><span class="s4">100</span>
+        <span class="s1">result = nb_func(fd</span><span class="s0">, </span><span class="s1">nb_arg)</span>
+        <span class="s1">self.assertEqual(result</span><span class="s0">, </span><span class="s4">42</span><span class="s1">)</span>
+
+        <span class="s1">self._check_hub_event_closed(mock_get_hub</span><span class="s0">, </span><span class="s1">fd</span><span class="s0">, </span><span class="s1">event)</span>
+
+    <span class="s0">def </span><span class="s1">_test_event_closed_on_io_error(self</span><span class="s0">, </span><span class="s1">nb_func</span><span class="s0">, </span><span class="s1">nb_arg</span><span class="s0">,</span>
+                                       <span class="s1">mock_io</span><span class="s0">, </span><span class="s1">mock_get_hub</span><span class="s0">, </span><span class="s1">event):</span>
+        <span class="s1">mock_io.side_effect = [self._make_ignored_oserror()</span><span class="s0">, </span><span class="s1">ValueError()]</span>
+
+        <span class="s1">fd = </span><span class="s4">100</span>
+
+        <span class="s0">with </span><span class="s1">self.assertRaises(ValueError):</span>
+            <span class="s1">nb_func(fd</span><span class="s0">, </span><span class="s1">nb_arg)</span>
+
+        <span class="s1">self._check_hub_event_closed(mock_get_hub</span><span class="s0">, </span><span class="s1">fd</span><span class="s0">, </span><span class="s1">event)</span>
+
+    <span class="s1">@mock.patch(</span><span class="s2">'gevent.os.get_hub'</span><span class="s1">)</span>
+    <span class="s1">@mock.patch(</span><span class="s2">'gevent.os._write'</span><span class="s1">)</span>
+    <span class="s0">def </span><span class="s1">test_event_closed_on_write(self</span><span class="s0">, </span><span class="s1">mock_write</span><span class="s0">, </span><span class="s1">mock_get_hub):</span>
+        <span class="s1">self._test_event_closed_on_normal_io(os.nb_write</span><span class="s0">, </span><span class="s5">b'buf'</span><span class="s0">,</span>
+                                             <span class="s1">mock_write</span><span class="s0">, </span><span class="s1">mock_get_hub</span><span class="s0">,</span>
+                                             <span class="s4">2</span><span class="s1">)</span>
+
+    <span class="s1">@mock.patch(</span><span class="s2">'gevent.os.get_hub'</span><span class="s1">)</span>
+    <span class="s1">@mock.patch(</span><span class="s2">'gevent.os._write'</span><span class="s1">)</span>
+    <span class="s0">def </span><span class="s1">test_event_closed_on_write_error(self</span><span class="s0">, </span><span class="s1">mock_write</span><span class="s0">, </span><span class="s1">mock_get_hub):</span>
+        <span class="s1">self._test_event_closed_on_io_error(os.nb_write</span><span class="s0">, </span><span class="s5">b'buf'</span><span class="s0">,</span>
+                                            <span class="s1">mock_write</span><span class="s0">, </span><span class="s1">mock_get_hub</span><span class="s0">,</span>
+                                            <span class="s4">2</span><span class="s1">)</span>
+
+    <span class="s1">@mock.patch(</span><span class="s2">'gevent.os.get_hub'</span><span class="s1">)</span>
+    <span class="s1">@mock.patch(</span><span class="s2">'gevent.os._read'</span><span class="s1">)</span>
+    <span class="s0">def </span><span class="s1">test_event_closed_on_read(self</span><span class="s0">, </span><span class="s1">mock_read</span><span class="s0">, </span><span class="s1">mock_get_hub):</span>
+        <span class="s1">self._test_event_closed_on_normal_io(os.nb_read</span><span class="s0">, </span><span class="s5">b'buf'</span><span class="s0">,</span>
+                                             <span class="s1">mock_read</span><span class="s0">, </span><span class="s1">mock_get_hub</span><span class="s0">,</span>
+                                             <span class="s4">1</span><span class="s1">)</span>
+
+    <span class="s1">@mock.patch(</span><span class="s2">'gevent.os.get_hub'</span><span class="s1">)</span>
+    <span class="s1">@mock.patch(</span><span class="s2">'gevent.os._read'</span><span class="s1">)</span>
+    <span class="s0">def </span><span class="s1">test_event_closed_on_read_error(self</span><span class="s0">, </span><span class="s1">mock_read</span><span class="s0">, </span><span class="s1">mock_get_hub):</span>
+        <span class="s1">self._test_event_closed_on_io_error(os.nb_read</span><span class="s0">, </span><span class="s5">b'buf'</span><span class="s0">,</span>
+                                            <span class="s1">mock_read</span><span class="s0">, </span><span class="s1">mock_get_hub</span><span class="s0">,</span>
+                                            <span class="s4">1</span><span class="s1">)</span>
+
+
+<span class="s1">@greentest.skipUnless(hasattr(os</span><span class="s0">, </span><span class="s2">'fork_and_watch'</span><span class="s1">)</span><span class="s0">,</span>
+                      <span class="s2">&quot;Only on POSIX&quot;</span><span class="s1">)</span>
+<span class="s0">class </span><span class="s1">TestForkAndWatch(greentest.TestCase):</span>
+
+    <span class="s1">__timeout__ = greentest.LARGE_TIMEOUT</span>
+
+    <span class="s0">def </span><span class="s1">test_waitpid_all(self):</span>
+        <span class="s3"># Cover this specific case.</span>
+        <span class="s1">pid = os.fork_and_watch()</span>
+        <span class="s0">if </span><span class="s1">pid:</span>
+            <span class="s1">os.waitpid(-</span><span class="s4">1</span><span class="s0">, </span><span class="s4">0</span><span class="s1">)</span>
+            <span class="s3"># Can't assert on what the found pid actually was,</span>
+            <span class="s3"># our testrunner may have spawned multiple children.</span>
+            <span class="s1">os._reap_children(</span><span class="s4">0</span><span class="s1">) </span><span class="s3"># make the leakchecker happy</span>
+        <span class="s0">else</span><span class="s1">: </span><span class="s3"># pragma: no cover</span>
+            <span class="s1">gevent.sleep(</span><span class="s4">2</span><span class="s1">)</span>
+            <span class="s3"># The test framework will catch a regular SystemExit</span>
+            <span class="s3"># from sys.exit(), we need to just kill the process.</span>
+            <span class="s1">os._exit(</span><span class="s4">0</span><span class="s1">)</span>
+
+    <span class="s0">def </span><span class="s1">test_waitpid_wrong_neg(self):</span>
+        <span class="s1">self.assertRaises(OSError</span><span class="s0">, </span><span class="s1">os.waitpid</span><span class="s0">, </span><span class="s1">-</span><span class="s4">2</span><span class="s0">, </span><span class="s4">0</span><span class="s1">)</span>
+
+    <span class="s0">def </span><span class="s1">test_waitpid_wrong_pos(self):</span>
+        <span class="s1">self.assertRaises(OSError</span><span class="s0">, </span><span class="s1">os.waitpid</span><span class="s0">, </span><span class="s4">1</span><span class="s0">, </span><span class="s4">0</span><span class="s1">)</span>
+
+
+<span class="s0">if </span><span class="s1">__name__ == </span><span class="s2">'__main__'</span><span class="s1">:</span>
+    <span class="s1">greentest.main()</span>
+</pre>
+</body>
+</html>

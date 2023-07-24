@@ -1,0 +1,586 @@
+<html>
+<head>
+<title>test__server.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #cc7832;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #808080;}
+.s3 { color: #6a8759;}
+.s4 { color: #6897bb;}
+.s5 { color: #a5c261;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+test__server.py</font>
+</center></td></tr></table>
+<pre><span class="s0">from </span><span class="s1">__future__ </span><span class="s0">import </span><span class="s1">print_function</span><span class="s0">, </span><span class="s1">division</span>
+<span class="s0">from </span><span class="s1">contextlib </span><span class="s0">import </span><span class="s1">contextmanager</span>
+<span class="s0">import </span><span class="s1">unittest</span>
+<span class="s0">import </span><span class="s1">errno</span>
+<span class="s0">import </span><span class="s1">os</span>
+
+
+<span class="s0">import </span><span class="s1">gevent.testing </span><span class="s0">as </span><span class="s1">greentest</span>
+<span class="s0">from </span><span class="s1">gevent.testing </span><span class="s0">import </span><span class="s1">PY3</span>
+<span class="s0">from </span><span class="s1">gevent.testing </span><span class="s0">import </span><span class="s1">sysinfo</span>
+<span class="s0">from </span><span class="s1">gevent.testing </span><span class="s0">import </span><span class="s1">DEFAULT_SOCKET_TIMEOUT </span><span class="s0">as </span><span class="s1">_DEFAULT_SOCKET_TIMEOUT</span>
+<span class="s0">from </span><span class="s1">gevent.testing.timing </span><span class="s0">import </span><span class="s1">SMALLEST_RELIABLE_DELAY</span>
+<span class="s0">from </span><span class="s1">gevent.testing.sockets </span><span class="s0">import </span><span class="s1">tcp_listener</span>
+<span class="s0">from </span><span class="s1">gevent.testing </span><span class="s0">import </span><span class="s1">WIN</span>
+
+<span class="s0">from </span><span class="s1">gevent </span><span class="s0">import </span><span class="s1">socket</span>
+<span class="s0">import </span><span class="s1">gevent</span>
+<span class="s0">from </span><span class="s1">gevent.server </span><span class="s0">import </span><span class="s1">StreamServer</span>
+<span class="s0">from </span><span class="s1">gevent.exceptions </span><span class="s0">import </span><span class="s1">LoopExit</span>
+
+
+<span class="s0">class </span><span class="s1">SimpleStreamServer(StreamServer):</span>
+
+    <span class="s0">def </span><span class="s1">handle(self</span><span class="s0">, </span><span class="s1">client_socket</span><span class="s0">, </span><span class="s1">_address): </span><span class="s2"># pylint:disable=method-hidden</span>
+        <span class="s1">fd = client_socket.makefile()</span>
+        <span class="s0">try</span><span class="s1">:</span>
+            <span class="s1">request_line = fd.readline()</span>
+            <span class="s0">if not </span><span class="s1">request_line:</span>
+                <span class="s0">return</span>
+            <span class="s0">try</span><span class="s1">:</span>
+                <span class="s1">_method</span><span class="s0">, </span><span class="s1">path</span><span class="s0">, </span><span class="s1">_rest = request_line.split(</span><span class="s3">' '</span><span class="s0">, </span><span class="s4">3</span><span class="s1">)</span>
+            <span class="s0">except </span><span class="s1">Exception:</span>
+                <span class="s1">print(</span><span class="s3">'Failed to parse request line: %r' </span><span class="s1">% (request_line</span><span class="s0">, </span><span class="s1">))</span>
+                <span class="s0">raise</span>
+            <span class="s0">if </span><span class="s1">path == </span><span class="s3">'/ping'</span><span class="s1">:</span>
+                <span class="s1">client_socket.sendall(</span><span class="s5">b'HTTP/1.0 200 OK</span><span class="s0">\r\n\r\n</span><span class="s5">PONG'</span><span class="s1">)</span>
+            <span class="s0">elif </span><span class="s1">path </span><span class="s0">in </span><span class="s1">[</span><span class="s3">'/long'</span><span class="s0">, </span><span class="s3">'/short'</span><span class="s1">]:</span>
+                <span class="s1">client_socket.sendall(</span><span class="s5">b'hello'</span><span class="s1">)</span>
+                <span class="s0">while True</span><span class="s1">:</span>
+                    <span class="s1">data = client_socket.recv(</span><span class="s4">1</span><span class="s1">)</span>
+                    <span class="s0">if not </span><span class="s1">data:</span>
+                        <span class="s0">break</span>
+            <span class="s0">else</span><span class="s1">:</span>
+                <span class="s1">client_socket.sendall(</span><span class="s5">b'HTTP/1.0 404 WTF?</span><span class="s0">\r\n\r\n</span><span class="s5">'</span><span class="s1">)</span>
+        <span class="s0">finally</span><span class="s1">:</span>
+            <span class="s1">fd.close()</span>
+
+<span class="s0">def </span><span class="s1">sleep_to_clear_old_sockets(*_args):</span>
+    <span class="s0">try</span><span class="s1">:</span>
+        <span class="s2"># Allow any queued callbacks needed to close sockets</span>
+        <span class="s2"># to run. On Windows, this needs to spin the event loop to</span>
+        <span class="s2"># allow proper FD cleanup. Otherwise we risk getting an</span>
+        <span class="s2"># old FD that's being closed and then get spurious connection</span>
+        <span class="s2"># errors.</span>
+        <span class="s1">gevent.sleep(</span><span class="s4">0 </span><span class="s0">if not </span><span class="s1">WIN </span><span class="s0">else </span><span class="s1">SMALLEST_RELIABLE_DELAY)</span>
+    <span class="s0">except </span><span class="s1">Exception: </span><span class="s2"># pylint:disable=broad-except</span>
+        <span class="s0">pass</span>
+
+
+<span class="s0">class </span><span class="s1">Settings(object):</span>
+    <span class="s1">ServerClass = StreamServer</span>
+    <span class="s1">ServerSubClass = SimpleStreamServer</span>
+    <span class="s1">restartable = </span><span class="s0">True</span>
+    <span class="s1">close_socket_detected = </span><span class="s0">True</span>
+
+    <span class="s1">@staticmethod</span>
+    <span class="s0">def </span><span class="s1">assertAcceptedConnectionError(inst):</span>
+        <span class="s0">with </span><span class="s1">inst.makefile() </span><span class="s0">as </span><span class="s1">conn:</span>
+            <span class="s0">try</span><span class="s1">:</span>
+                <span class="s1">result = conn.read()</span>
+            <span class="s0">except </span><span class="s1">socket.timeout:</span>
+                <span class="s1">result = </span><span class="s0">None</span>
+        <span class="s1">inst.assertFalse(result)</span>
+
+    <span class="s1">assert500 = assertAcceptedConnectionError</span>
+
+    <span class="s1">@staticmethod</span>
+    <span class="s0">def </span><span class="s1">assert503(inst):</span>
+        <span class="s2"># regular reads timeout</span>
+        <span class="s1">inst.assert500()</span>
+        <span class="s2"># attempt to send anything reset the connection</span>
+        <span class="s0">try</span><span class="s1">:</span>
+            <span class="s1">inst.send_request()</span>
+        <span class="s0">except </span><span class="s1">socket.error </span><span class="s0">as </span><span class="s1">ex:</span>
+            <span class="s0">if </span><span class="s1">ex.args[</span><span class="s4">0</span><span class="s1">] </span><span class="s0">not in </span><span class="s1">greentest.CONN_ABORTED_ERRORS:</span>
+                <span class="s0">raise</span>
+
+    <span class="s1">@staticmethod</span>
+    <span class="s0">def </span><span class="s1">assertPoolFull(inst):</span>
+        <span class="s0">with </span><span class="s1">inst.assertRaises(socket.timeout):</span>
+            <span class="s1">inst.assertRequestSucceeded(timeout=</span><span class="s4">0.01</span><span class="s1">)</span>
+
+    <span class="s1">@staticmethod</span>
+    <span class="s0">def </span><span class="s1">fill_default_server_args(inst</span><span class="s0">, </span><span class="s1">kwargs):</span>
+        <span class="s1">kwargs.setdefault(</span><span class="s3">'spawn'</span><span class="s0">, </span><span class="s1">inst.get_spawn())</span>
+        <span class="s0">return </span><span class="s1">kwargs</span>
+
+<span class="s0">class </span><span class="s1">TestCase(greentest.TestCase):</span>
+    <span class="s2"># pylint: disable=too-many-public-methods</span>
+    <span class="s1">__timeout__ = greentest.LARGE_TIMEOUT</span>
+    <span class="s1">Settings = Settings</span>
+    <span class="s1">server = </span><span class="s0">None</span>
+
+    <span class="s0">def </span><span class="s1">cleanup(self):</span>
+        <span class="s0">if </span><span class="s1">getattr(self</span><span class="s0">, </span><span class="s3">'server'</span><span class="s0">, None</span><span class="s1">) </span><span class="s0">is not None</span><span class="s1">:</span>
+            <span class="s1">self.server.stop()</span>
+            <span class="s1">self.server = </span><span class="s0">None</span>
+        <span class="s1">sleep_to_clear_old_sockets()</span>
+
+    <span class="s0">def </span><span class="s1">get_listener(self):</span>
+        <span class="s0">return </span><span class="s1">self._close_on_teardown(tcp_listener(backlog=</span><span class="s4">5</span><span class="s1">))</span>
+
+    <span class="s0">def </span><span class="s1">get_server_host_port_family(self):</span>
+        <span class="s1">server_host = self.server.server_host</span>
+        <span class="s0">if not </span><span class="s1">server_host:</span>
+            <span class="s1">server_host = greentest.DEFAULT_LOCAL_HOST_ADDR</span>
+        <span class="s0">elif </span><span class="s1">server_host == </span><span class="s3">'::'</span><span class="s1">:</span>
+            <span class="s1">server_host = greentest.DEFAULT_LOCAL_HOST_ADDR6</span>
+
+        <span class="s0">try</span><span class="s1">:</span>
+            <span class="s1">family = self.server.socket.family</span>
+        <span class="s0">except </span><span class="s1">AttributeError:</span>
+            <span class="s2"># server deletes socket when closed</span>
+            <span class="s1">family = socket.AF_INET</span>
+
+        <span class="s0">return </span><span class="s1">server_host</span><span class="s0">, </span><span class="s1">self.server.server_port</span><span class="s0">, </span><span class="s1">family</span>
+
+    <span class="s1">@contextmanager</span>
+    <span class="s0">def </span><span class="s1">makefile(self</span><span class="s0">, </span><span class="s1">timeout=_DEFAULT_SOCKET_TIMEOUT</span><span class="s0">, </span><span class="s1">bufsize=</span><span class="s4">1</span><span class="s0">, </span><span class="s1">include_raw_socket=</span><span class="s0">False</span><span class="s1">):</span>
+        <span class="s1">server_host</span><span class="s0">, </span><span class="s1">server_port</span><span class="s0">, </span><span class="s1">family = self.get_server_host_port_family()</span>
+        <span class="s1">bufarg = </span><span class="s3">'buffering' </span><span class="s0">if </span><span class="s1">PY3 </span><span class="s0">else </span><span class="s3">'bufsize'</span>
+        <span class="s1">makefile_kwargs = {bufarg: bufsize}</span>
+        <span class="s0">if </span><span class="s1">PY3:</span>
+            <span class="s2"># Under Python3, you can't read and write to the same</span>
+            <span class="s2"># makefile() opened in r, and r+ is not allowed</span>
+            <span class="s1">makefile_kwargs[</span><span class="s3">'mode'</span><span class="s1">] = </span><span class="s3">'rwb'</span>
+
+        <span class="s0">with </span><span class="s1">socket.socket(family=family) </span><span class="s0">as </span><span class="s1">sock:</span>
+            <span class="s1">rconn = </span><span class="s0">None</span>
+            <span class="s2"># We want the socket to be accessible from the fileobject</span>
+            <span class="s2"># we return. On Python 2, natively this is available as</span>
+            <span class="s2"># _sock, but Python 3 doesn't have that.</span>
+            <span class="s1">sock.connect((server_host</span><span class="s0">, </span><span class="s1">server_port))</span>
+            <span class="s1">sock.settimeout(timeout)</span>
+            <span class="s0">with </span><span class="s1">sock.makefile(**makefile_kwargs) </span><span class="s0">as </span><span class="s1">rconn:</span>
+                <span class="s1">result = rconn </span><span class="s0">if not </span><span class="s1">include_raw_socket </span><span class="s0">else </span><span class="s1">(rconn</span><span class="s0">, </span><span class="s1">sock)</span>
+                <span class="s0">yield </span><span class="s1">result</span>
+
+    <span class="s0">def </span><span class="s1">send_request(self</span><span class="s0">, </span><span class="s1">url=</span><span class="s3">'/'</span><span class="s0">, </span><span class="s1">timeout=_DEFAULT_SOCKET_TIMEOUT</span><span class="s0">, </span><span class="s1">bufsize=</span><span class="s4">1</span><span class="s1">):</span>
+        <span class="s0">with </span><span class="s1">self.makefile(timeout=timeout</span><span class="s0">, </span><span class="s1">bufsize=bufsize) </span><span class="s0">as </span><span class="s1">conn:</span>
+            <span class="s1">self.send_request_to_fd(conn</span><span class="s0">, </span><span class="s1">url)</span>
+
+    <span class="s0">def </span><span class="s1">send_request_to_fd(self</span><span class="s0">, </span><span class="s1">fd</span><span class="s0">, </span><span class="s1">url=</span><span class="s3">'/'</span><span class="s1">):</span>
+        <span class="s1">fd.write((</span><span class="s3">'GET %s HTTP/1.0</span><span class="s0">\r\n\r\n</span><span class="s3">' </span><span class="s1">% url).encode(</span><span class="s3">'latin-1'</span><span class="s1">))</span>
+        <span class="s1">fd.flush()</span>
+
+    <span class="s1">LOCAL_CONN_REFUSED_ERRORS = ()</span>
+    <span class="s0">if </span><span class="s1">greentest.OSX:</span>
+        <span class="s2"># A kernel bug in OS X sometimes results in this</span>
+        <span class="s1">LOCAL_CONN_REFUSED_ERRORS = (errno.EPROTOTYPE</span><span class="s0">,</span><span class="s1">)</span>
+    <span class="s0">elif </span><span class="s1">greentest.WIN </span><span class="s0">and </span><span class="s1">greentest.PYPY3:</span>
+        <span class="s2"># We see WinError 10049: The requested address is not valid</span>
+        <span class="s2"># which is not one of the errors we get anywhere else.</span>
+        <span class="s2"># Not sure which errno constant this is?</span>
+        <span class="s1">LOCAL_CONN_REFUSED_ERRORS = (</span><span class="s4">10049</span><span class="s0">,</span><span class="s1">)</span>
+
+    <span class="s0">def </span><span class="s1">assertConnectionRefused(self</span><span class="s0">, </span><span class="s1">in_proc_server=</span><span class="s0">True</span><span class="s1">):</span>
+        <span class="s0">try</span><span class="s1">:</span>
+            <span class="s0">with </span><span class="s1">self.assertRaises(socket.error) </span><span class="s0">as </span><span class="s1">exc:</span>
+                <span class="s0">with </span><span class="s1">self.makefile() </span><span class="s0">as </span><span class="s1">conn:</span>
+                    <span class="s1">conn.close()</span>
+        <span class="s0">except </span><span class="s1">LoopExit:</span>
+            <span class="s0">if not </span><span class="s1">in_proc_server:</span>
+                <span class="s0">raise</span>
+            <span class="s2"># A LoopExit is fine. If we've killed the server</span>
+            <span class="s2"># and don't have any other greenlets to run, then</span>
+            <span class="s2"># blocking to open the connection might raise this.</span>
+            <span class="s2"># This became likely on Windows once we stopped</span>
+            <span class="s2"># passing IP addresses through an extra call to</span>
+            <span class="s2"># ``getaddrinfo``, which changed the number of switches</span>
+            <span class="s0">return</span>
+
+        <span class="s1">ex = exc.exception</span>
+        <span class="s1">self.assertIn(ex.args[</span><span class="s4">0</span><span class="s1">]</span><span class="s0">,</span>
+                      <span class="s1">(errno.ECONNREFUSED</span><span class="s0">, </span><span class="s1">errno.EADDRNOTAVAIL</span><span class="s0">,</span>
+                       <span class="s1">errno.ECONNRESET</span><span class="s0">, </span><span class="s1">errno.ECONNABORTED) + self.LOCAL_CONN_REFUSED_ERRORS</span><span class="s0">,</span>
+                      <span class="s1">(ex</span><span class="s0">, </span><span class="s1">ex.args))</span>
+
+    <span class="s0">def </span><span class="s1">assert500(self):</span>
+        <span class="s1">self.Settings.assert500(self)</span>
+
+    <span class="s0">def </span><span class="s1">assert503(self):</span>
+        <span class="s1">self.Settings.assert503(self)</span>
+
+    <span class="s0">def </span><span class="s1">assertAcceptedConnectionError(self):</span>
+        <span class="s1">self.Settings.assertAcceptedConnectionError(self)</span>
+
+    <span class="s0">def </span><span class="s1">assertPoolFull(self):</span>
+        <span class="s1">self.Settings.assertPoolFull(self)</span>
+
+    <span class="s0">def </span><span class="s1">assertNotAccepted(self):</span>
+        <span class="s0">try</span><span class="s1">:</span>
+            <span class="s0">with </span><span class="s1">self.makefile(include_raw_socket=</span><span class="s0">True</span><span class="s1">) </span><span class="s0">as </span><span class="s1">(conn</span><span class="s0">, </span><span class="s1">sock):</span>
+                <span class="s1">conn.write(</span><span class="s5">b'GET / HTTP/1.0</span><span class="s0">\r\n\r\n</span><span class="s5">'</span><span class="s1">)</span>
+                <span class="s1">conn.flush()</span>
+                <span class="s1">result = </span><span class="s5">b''</span>
+                <span class="s0">try</span><span class="s1">:</span>
+                    <span class="s0">while True</span><span class="s1">:</span>
+                        <span class="s1">data = sock.recv(</span><span class="s4">1</span><span class="s1">)</span>
+                        <span class="s0">if not </span><span class="s1">data:</span>
+                            <span class="s0">break</span>
+                        <span class="s1">result += data</span>
+                <span class="s0">except </span><span class="s1">socket.timeout:</span>
+                    <span class="s1">self.assertFalse(result)</span>
+                    <span class="s0">return</span>
+        <span class="s0">except </span><span class="s1">LoopExit:</span>
+            <span class="s2"># See assertConnectionRefused</span>
+            <span class="s0">return</span>
+
+        <span class="s1">self.assertTrue(result.startswith(</span><span class="s5">b'HTTP/1.0 500 Internal Server Error'</span><span class="s1">)</span><span class="s0">, </span><span class="s1">repr(result))</span>
+
+
+    <span class="s0">def </span><span class="s1">assertRequestSucceeded(self</span><span class="s0">, </span><span class="s1">timeout=_DEFAULT_SOCKET_TIMEOUT):</span>
+        <span class="s0">with </span><span class="s1">self.makefile(timeout=timeout) </span><span class="s0">as </span><span class="s1">conn:</span>
+            <span class="s1">conn.write(</span><span class="s5">b'GET /ping HTTP/1.0</span><span class="s0">\r\n\r\n</span><span class="s5">'</span><span class="s1">)</span>
+            <span class="s1">result = conn.read()</span>
+
+        <span class="s1">self.assertTrue(result.endswith(</span><span class="s5">b'</span><span class="s0">\r\n\r\n</span><span class="s5">PONG'</span><span class="s1">)</span><span class="s0">, </span><span class="s1">repr(result))</span>
+
+    <span class="s0">def </span><span class="s1">start_server(self):</span>
+        <span class="s1">self.server.start()</span>
+        <span class="s1">self.assertRequestSucceeded()</span>
+        <span class="s1">self.assertRequestSucceeded()</span>
+
+    <span class="s0">def </span><span class="s1">stop_server(self):</span>
+        <span class="s1">self.server.stop()</span>
+        <span class="s1">self.assertConnectionRefused()</span>
+
+    <span class="s0">def </span><span class="s1">report_netstat(self</span><span class="s0">, </span><span class="s1">_msg):</span>
+        <span class="s2"># At one point this would call 'sudo netstat -anp | grep PID'</span>
+        <span class="s2"># with os.system. We can probably do better with psutil.</span>
+        <span class="s0">return</span>
+
+    <span class="s0">def </span><span class="s1">_create_server(self</span><span class="s0">, </span><span class="s1">*args</span><span class="s0">, </span><span class="s1">**kwargs):</span>
+        <span class="s1">kind = kwargs.pop(</span><span class="s3">'server_kind'</span><span class="s0">, </span><span class="s1">self.ServerSubClass)</span>
+        <span class="s1">addr = kwargs.pop(</span><span class="s3">'server_listen_addr'</span><span class="s0">, </span><span class="s1">(greentest.DEFAULT_BIND_ADDR</span><span class="s0">, </span><span class="s4">0</span><span class="s1">))</span>
+        <span class="s0">return </span><span class="s1">kind(addr</span><span class="s0">, </span><span class="s1">*args</span><span class="s0">, </span><span class="s1">**kwargs)</span>
+
+    <span class="s0">def </span><span class="s1">init_server(self</span><span class="s0">, </span><span class="s1">*args</span><span class="s0">, </span><span class="s1">**kwargs):</span>
+        <span class="s1">self.server = self._create_server(*args</span><span class="s0">, </span><span class="s1">**kwargs)</span>
+        <span class="s1">self.server.start()</span>
+        <span class="s1">sleep_to_clear_old_sockets()</span>
+
+    <span class="s1">@property</span>
+    <span class="s0">def </span><span class="s1">socket(self):</span>
+        <span class="s0">return </span><span class="s1">self.server.socket</span>
+
+    <span class="s0">def </span><span class="s1">_test_invalid_callback(self):</span>
+        <span class="s0">if </span><span class="s1">sysinfo.RUNNING_ON_APPVEYOR:</span>
+            <span class="s1">self.skipTest(</span><span class="s3">&quot;Sometimes misses the error&quot;</span><span class="s1">) </span><span class="s2"># XXX: Why?</span>
+
+        <span class="s0">try</span><span class="s1">:</span>
+            <span class="s2"># Can't use a kwarg here, WSGIServer and StreamServer</span>
+            <span class="s2"># take different things (application and handle)</span>
+            <span class="s1">self.init_server(</span><span class="s0">lambda</span><span class="s1">: </span><span class="s0">None</span><span class="s1">)</span>
+            <span class="s1">self.expect_one_error()</span>
+
+            <span class="s1">self.assert500()</span>
+            <span class="s1">self.assert_error(TypeError)</span>
+        <span class="s0">finally</span><span class="s1">:</span>
+            <span class="s1">self.server.stop()</span>
+            <span class="s2"># XXX: There's something unreachable (with a traceback?)</span>
+            <span class="s2"># We need to clear it to make the leak checks work on Travis;</span>
+            <span class="s2"># so far I can't reproduce it locally on OS X.</span>
+            <span class="s0">import </span><span class="s1">gc; gc.collect()</span>
+
+    <span class="s0">def </span><span class="s1">fill_default_server_args(self</span><span class="s0">, </span><span class="s1">kwargs):</span>
+        <span class="s0">return </span><span class="s1">self.Settings.fill_default_server_args(self</span><span class="s0">, </span><span class="s1">kwargs)</span>
+
+    <span class="s0">def </span><span class="s1">ServerClass(self</span><span class="s0">, </span><span class="s1">*args</span><span class="s0">, </span><span class="s1">**kwargs):</span>
+        <span class="s0">return </span><span class="s1">self.Settings.ServerClass(*args</span><span class="s0">,</span>
+                                         <span class="s1">**self.fill_default_server_args(kwargs))</span>
+
+    <span class="s0">def </span><span class="s1">ServerSubClass(self</span><span class="s0">, </span><span class="s1">*args</span><span class="s0">, </span><span class="s1">**kwargs):</span>
+        <span class="s0">return </span><span class="s1">self.Settings.ServerSubClass(*args</span><span class="s0">,</span>
+                                            <span class="s1">**self.fill_default_server_args(kwargs))</span>
+
+    <span class="s0">def </span><span class="s1">get_spawn(self):</span>
+        <span class="s0">return None</span>
+
+<span class="s0">class </span><span class="s1">TestDefaultSpawn(TestCase):</span>
+
+    <span class="s0">def </span><span class="s1">get_spawn(self):</span>
+        <span class="s0">return </span><span class="s1">gevent.spawn</span>
+
+    <span class="s0">def </span><span class="s1">_test_server_start_stop(self</span><span class="s0">, </span><span class="s1">restartable):</span>
+        <span class="s1">self.report_netstat(</span><span class="s3">'before start'</span><span class="s1">)</span>
+        <span class="s1">self.start_server()</span>
+        <span class="s1">self.report_netstat(</span><span class="s3">'after start'</span><span class="s1">)</span>
+        <span class="s0">if </span><span class="s1">restartable </span><span class="s0">and </span><span class="s1">self.Settings.restartable:</span>
+            <span class="s1">self.server.stop_accepting()</span>
+            <span class="s1">self.report_netstat(</span><span class="s3">'after stop_accepting'</span><span class="s1">)</span>
+            <span class="s1">self.assertNotAccepted()</span>
+            <span class="s1">self.server.start_accepting()</span>
+            <span class="s1">self.report_netstat(</span><span class="s3">'after start_accepting'</span><span class="s1">)</span>
+            <span class="s1">sleep_to_clear_old_sockets()</span>
+            <span class="s1">self.assertRequestSucceeded()</span>
+        <span class="s1">self.stop_server()</span>
+        <span class="s1">self.report_netstat(</span><span class="s3">'after stop'</span><span class="s1">)</span>
+
+    <span class="s0">def </span><span class="s1">test_backlog_is_not_accepted_for_socket(self):</span>
+        <span class="s1">self.switch_expected = </span><span class="s0">False</span>
+        <span class="s0">with </span><span class="s1">self.assertRaises(TypeError):</span>
+            <span class="s1">self.ServerClass(self.get_listener()</span><span class="s0">, </span><span class="s1">backlog=</span><span class="s4">25</span><span class="s1">)</span>
+
+    <span class="s1">@greentest.skipOnLibuvOnCIOnPyPy(</span><span class="s3">&quot;Sometimes times out&quot;</span><span class="s1">)</span>
+    <span class="s1">@greentest.skipOnAppVeyor(</span><span class="s3">&quot;Sometimes times out.&quot;</span><span class="s1">)</span>
+    <span class="s0">def </span><span class="s1">test_backlog_is_accepted_for_address(self):</span>
+        <span class="s1">self.server = self.ServerSubClass((greentest.DEFAULT_BIND_ADDR</span><span class="s0">, </span><span class="s4">0</span><span class="s1">)</span><span class="s0">, </span><span class="s1">backlog=</span><span class="s4">25</span><span class="s1">)</span>
+        <span class="s1">self.assertConnectionRefused()</span>
+        <span class="s1">self._test_server_start_stop(restartable=</span><span class="s0">False</span><span class="s1">)</span>
+
+    <span class="s0">def </span><span class="s1">test_subclass_just_create(self):</span>
+        <span class="s1">self.server = self.ServerSubClass(self.get_listener())</span>
+        <span class="s1">self.assertNotAccepted()</span>
+
+    <span class="s1">@greentest.skipOnAppVeyor(</span><span class="s3">&quot;Sometimes times out.&quot;</span><span class="s1">)</span>
+    <span class="s0">def </span><span class="s1">test_subclass_with_socket(self):</span>
+        <span class="s1">self.server = self.ServerSubClass(self.get_listener())</span>
+        <span class="s2"># the connection won't be refused, because there exists a</span>
+        <span class="s2"># listening socket, but it won't be handled also</span>
+        <span class="s1">self.assertNotAccepted()</span>
+        <span class="s1">self._test_server_start_stop(restartable=</span><span class="s0">True</span><span class="s1">)</span>
+
+    <span class="s0">def </span><span class="s1">test_subclass_with_address(self):</span>
+        <span class="s1">self.server = self.ServerSubClass((greentest.DEFAULT_BIND_ADDR</span><span class="s0">, </span><span class="s4">0</span><span class="s1">))</span>
+        <span class="s1">self.assertConnectionRefused()</span>
+        <span class="s1">self._test_server_start_stop(restartable=</span><span class="s0">True</span><span class="s1">)</span>
+
+    <span class="s0">def </span><span class="s1">test_invalid_callback(self):</span>
+        <span class="s1">self._test_invalid_callback()</span>
+
+    <span class="s1">@greentest.reraises_flaky_timeout(socket.timeout)</span>
+    <span class="s0">def </span><span class="s1">_test_serve_forever(self):</span>
+        <span class="s1">g = gevent.spawn(self.server.serve_forever)</span>
+        <span class="s0">try</span><span class="s1">:</span>
+            <span class="s1">sleep_to_clear_old_sockets()</span>
+            <span class="s1">self.assertRequestSucceeded()</span>
+            <span class="s1">self.server.stop()</span>
+            <span class="s1">self.assertFalse(self.server.started)</span>
+            <span class="s1">self.assertConnectionRefused()</span>
+        <span class="s0">finally</span><span class="s1">:</span>
+            <span class="s1">g.kill()</span>
+            <span class="s1">g.get()</span>
+            <span class="s1">self.server.stop()</span>
+
+    <span class="s0">def </span><span class="s1">test_serve_forever(self):</span>
+        <span class="s1">self.server = self.ServerSubClass((greentest.DEFAULT_BIND_ADDR</span><span class="s0">, </span><span class="s4">0</span><span class="s1">))</span>
+        <span class="s1">self.assertFalse(self.server.started)</span>
+        <span class="s1">self.assertConnectionRefused()</span>
+        <span class="s1">self._test_serve_forever()</span>
+
+    <span class="s0">def </span><span class="s1">test_serve_forever_after_start(self):</span>
+        <span class="s1">self.server = self.ServerSubClass((greentest.DEFAULT_BIND_ADDR</span><span class="s0">, </span><span class="s4">0</span><span class="s1">))</span>
+        <span class="s1">self.assertConnectionRefused()</span>
+        <span class="s1">self.assertFalse(self.server.started)</span>
+        <span class="s1">self.server.start()</span>
+        <span class="s1">self.assertTrue(self.server.started)</span>
+        <span class="s1">self._test_serve_forever()</span>
+
+    <span class="s1">@greentest.skipIf(greentest.EXPECT_POOR_TIMER_RESOLUTION</span><span class="s0">, </span><span class="s3">&quot;Sometimes spuriously fails&quot;</span><span class="s1">)</span>
+    <span class="s0">def </span><span class="s1">test_server_closes_client_sockets(self):</span>
+        <span class="s1">self.server = self.ServerClass((greentest.DEFAULT_BIND_ADDR</span><span class="s0">, </span><span class="s4">0</span><span class="s1">)</span><span class="s0">, lambda </span><span class="s1">*args: [])</span>
+        <span class="s1">self.server.start()</span>
+        <span class="s1">sleep_to_clear_old_sockets()</span>
+        <span class="s0">with </span><span class="s1">self.makefile() </span><span class="s0">as </span><span class="s1">conn:</span>
+            <span class="s1">self.send_request_to_fd(conn)</span>
+            <span class="s2"># use assert500 below?</span>
+            <span class="s0">with </span><span class="s1">gevent.Timeout._start_new_or_dummy(</span><span class="s4">1</span><span class="s1">):</span>
+                <span class="s0">try</span><span class="s1">:</span>
+                    <span class="s1">result = conn.read()</span>
+                    <span class="s0">if </span><span class="s1">result:</span>
+                        <span class="s0">assert </span><span class="s1">result.startswith(</span><span class="s3">'HTTP/1.0 500 Internal Server Error'</span><span class="s1">)</span><span class="s0">, </span><span class="s1">repr(result)</span>
+                <span class="s0">except </span><span class="s1">socket.timeout:</span>
+                    <span class="s0">pass</span>
+                <span class="s0">except </span><span class="s1">socket.error </span><span class="s0">as </span><span class="s1">ex:</span>
+                    <span class="s0">if </span><span class="s1">ex.args[</span><span class="s4">0</span><span class="s1">] == </span><span class="s4">10053</span><span class="s1">:</span>
+                        <span class="s0">pass  </span><span class="s2"># &quot;established connection was aborted by the software in your host machine&quot;</span>
+                    <span class="s0">elif </span><span class="s1">ex.args[</span><span class="s4">0</span><span class="s1">] == errno.ECONNRESET:</span>
+                        <span class="s0">pass</span>
+                    <span class="s0">else</span><span class="s1">:</span>
+                        <span class="s0">raise</span>
+
+        <span class="s1">self.stop_server()</span>
+
+    <span class="s1">@property</span>
+    <span class="s0">def </span><span class="s1">socket(self):</span>
+        <span class="s0">return </span><span class="s1">self.server.socket</span>
+
+    <span class="s0">def </span><span class="s1">test_error_in_spawn(self):</span>
+        <span class="s1">self.init_server()</span>
+        <span class="s1">self.assertTrue(self.server.started)</span>
+        <span class="s1">error = ExpectedError(</span><span class="s3">'test_error_in_spawn'</span><span class="s1">)</span>
+        <span class="s0">def </span><span class="s1">_spawn(*_args):</span>
+            <span class="s1">gevent.getcurrent().throw(error)</span>
+        <span class="s1">self.server._spawn = _spawn</span>
+        <span class="s1">self.expect_one_error()</span>
+        <span class="s1">self.assertAcceptedConnectionError()</span>
+        <span class="s1">self.assert_error(ExpectedError</span><span class="s0">, </span><span class="s1">error)</span>
+
+    <span class="s0">def </span><span class="s1">test_server_repr_when_handle_is_instancemethod(self):</span>
+        <span class="s2"># PR 501</span>
+        <span class="s1">self.init_server()</span>
+        <span class="s0">assert </span><span class="s1">self.server.started</span>
+        <span class="s1">self.assertIn(</span><span class="s3">'Server'</span><span class="s0">, </span><span class="s1">repr(self.server))</span>
+
+        <span class="s1">self.server.set_handle(self.server.handle)</span>
+        <span class="s1">self.assertIn(</span><span class="s3">'handle=&lt;bound method'</span><span class="s0">, </span><span class="s1">repr(self.server))</span>
+        <span class="s1">self.assertIn(</span><span class="s3">'of self&gt;'</span><span class="s0">, </span><span class="s1">repr(self.server))</span>
+
+        <span class="s1">self.server.set_handle(self.test_server_repr_when_handle_is_instancemethod)</span>
+        <span class="s1">self.assertIn(</span><span class="s3">'test_server_repr_when_handle_is_instancemethod'</span><span class="s0">, </span><span class="s1">repr(self.server))</span>
+
+        <span class="s0">def </span><span class="s1">handle():</span>
+            <span class="s0">pass</span>
+        <span class="s1">self.server.set_handle(handle)</span>
+        <span class="s1">self.assertIn(</span><span class="s3">'handle=&lt;function'</span><span class="s0">, </span><span class="s1">repr(self.server))</span>
+
+
+<span class="s0">class </span><span class="s1">TestRawSpawn(TestDefaultSpawn):</span>
+
+    <span class="s0">def </span><span class="s1">get_spawn(self):</span>
+        <span class="s0">return </span><span class="s1">gevent.spawn_raw</span>
+
+
+<span class="s0">class </span><span class="s1">TestPoolSpawn(TestDefaultSpawn):</span>
+
+    <span class="s0">def </span><span class="s1">get_spawn(self):</span>
+        <span class="s0">return </span><span class="s4">2</span>
+
+    <span class="s1">@greentest.skipIf(greentest.EXPECT_POOR_TIMER_RESOLUTION</span><span class="s0">,</span>
+                      <span class="s3">&quot;If we have bad timer resolution and hence increase timeouts, &quot;</span>
+                      <span class="s3">&quot;it can be hard to sleep for a correct amount of time that lets &quot;</span>
+                      <span class="s3">&quot;requests in the pool be full.&quot;</span><span class="s1">)</span>
+    <span class="s0">def </span><span class="s1">test_pool_full(self):</span>
+        <span class="s1">self.init_server()</span>
+        <span class="s0">with </span><span class="s1">self.makefile() </span><span class="s0">as </span><span class="s1">long_request:</span>
+            <span class="s0">with </span><span class="s1">self.makefile() </span><span class="s0">as </span><span class="s1">short_request:</span>
+                <span class="s1">self.send_request_to_fd(short_request</span><span class="s0">, </span><span class="s3">'/short'</span><span class="s1">)</span>
+                <span class="s1">self.send_request_to_fd(long_request</span><span class="s0">, </span><span class="s3">'/long'</span><span class="s1">)</span>
+
+                <span class="s2"># keep long_request in scope, otherwise the connection will be closed</span>
+                <span class="s1">gevent.get_hub().loop.update_now()</span>
+                <span class="s1">gevent.sleep(_DEFAULT_SOCKET_TIMEOUT / </span><span class="s4">10.0</span><span class="s1">)</span>
+                <span class="s1">self.assertPoolFull()</span>
+                <span class="s1">self.assertPoolFull()</span>
+                <span class="s2"># XXX Not entirely clear why this fails (timeout) on appveyor;</span>
+                <span class="s2"># underlying socket timeout causing the long_request to close?</span>
+                <span class="s1">self.assertPoolFull()</span>
+
+        <span class="s2"># gevent.http and gevent.wsgi cannot detect socket close, so sleep a little</span>
+        <span class="s2"># to let /short request finish</span>
+        <span class="s1">gevent.sleep(_DEFAULT_SOCKET_TIMEOUT)</span>
+        <span class="s2"># XXX: This tends to timeout. Which is weird, because what would have</span>
+        <span class="s2"># been the third call to assertPoolFull() DID NOT timeout, hence why it</span>
+        <span class="s2"># was removed.</span>
+        <span class="s0">try</span><span class="s1">:</span>
+            <span class="s1">self.assertRequestSucceeded()</span>
+        <span class="s0">except </span><span class="s1">socket.timeout:</span>
+            <span class="s1">greentest.reraiseFlakyTestTimeout()</span>
+
+    <span class="s1">test_pool_full.error_fatal = </span><span class="s0">False</span>
+
+
+<span class="s0">class </span><span class="s1">TestNoneSpawn(TestCase):</span>
+
+    <span class="s0">def </span><span class="s1">get_spawn(self):</span>
+        <span class="s0">return None</span>
+
+    <span class="s0">def </span><span class="s1">test_invalid_callback(self):</span>
+        <span class="s1">self._test_invalid_callback()</span>
+
+    <span class="s1">@greentest.skipOnAppVeyor(</span><span class="s3">&quot;Sometimes doesn't get the error.&quot;</span><span class="s1">)</span>
+    <span class="s0">def </span><span class="s1">test_assertion_in_blocking_func(self):</span>
+        <span class="s0">def </span><span class="s1">sleep(*_args):</span>
+            <span class="s1">gevent.sleep(SMALLEST_RELIABLE_DELAY)</span>
+        <span class="s1">self.init_server(sleep</span><span class="s0">, </span><span class="s1">server_kind=self.ServerSubClass</span><span class="s0">, </span><span class="s1">spawn=</span><span class="s0">None</span><span class="s1">)</span>
+        <span class="s1">self.expect_one_error()</span>
+        <span class="s1">self.assert500()</span>
+        <span class="s1">self.assert_error(AssertionError</span><span class="s0">, </span><span class="s3">'Impossible to call blocking function in the event loop callback'</span><span class="s1">)</span>
+
+
+<span class="s0">class </span><span class="s1">ExpectedError(Exception):</span>
+    <span class="s0">pass</span>
+
+
+
+<span class="s0">class </span><span class="s1">TestSSLSocketNotAllowed(TestCase):</span>
+
+    <span class="s1">switch_expected = </span><span class="s0">False</span>
+
+    <span class="s0">def </span><span class="s1">get_spawn(self):</span>
+        <span class="s0">return </span><span class="s1">gevent.spawn</span>
+
+    <span class="s1">@unittest.skipUnless(hasattr(socket</span><span class="s0">, </span><span class="s3">'ssl'</span><span class="s1">)</span><span class="s0">, </span><span class="s3">&quot;Uses socket.ssl&quot;</span><span class="s1">)</span>
+    <span class="s0">def </span><span class="s1">test(self):</span>
+        <span class="s0">from </span><span class="s1">gevent.socket </span><span class="s0">import </span><span class="s1">ssl</span>
+        <span class="s1">listener = self._close_on_teardown(tcp_listener(backlog=</span><span class="s4">5</span><span class="s1">))</span>
+        <span class="s1">listener = ssl(listener)</span>
+        <span class="s1">self.assertRaises(TypeError</span><span class="s0">, </span><span class="s1">self.ServerSubClass</span><span class="s0">, </span><span class="s1">listener)</span>
+
+<span class="s0">def </span><span class="s1">_file(name</span><span class="s0">, </span><span class="s1">here=os.path.dirname(__file__)):</span>
+    <span class="s0">return </span><span class="s1">os.path.abspath(os.path.join(here</span><span class="s0">, </span><span class="s1">name))</span>
+
+
+<span class="s0">class </span><span class="s1">BadWrapException(BaseException):</span>
+    <span class="s0">pass</span>
+
+
+<span class="s0">class </span><span class="s1">TestSSLGetCertificate(TestCase):</span>
+
+    <span class="s0">def </span><span class="s1">_create_server(self): </span><span class="s2"># pylint:disable=arguments-differ</span>
+        <span class="s0">return </span><span class="s1">self.ServerSubClass((greentest.DEFAULT_BIND_ADDR</span><span class="s0">, </span><span class="s4">0</span><span class="s1">)</span><span class="s0">,</span>
+                                   <span class="s1">keyfile=_file(</span><span class="s3">'server.key'</span><span class="s1">)</span><span class="s0">,</span>
+                                   <span class="s1">certfile=_file(</span><span class="s3">'server.crt'</span><span class="s1">))</span>
+
+    <span class="s0">def </span><span class="s1">get_spawn(self):</span>
+        <span class="s0">return </span><span class="s1">gevent.spawn</span>
+
+    <span class="s0">def </span><span class="s1">test_certificate(self):</span>
+        <span class="s2"># Issue 801</span>
+        <span class="s0">from </span><span class="s1">gevent </span><span class="s0">import </span><span class="s1">monkey</span><span class="s0">, </span><span class="s1">ssl</span>
+        <span class="s2"># only broken if *not* monkey patched</span>
+        <span class="s1">self.assertFalse(monkey.is_module_patched(</span><span class="s3">'ssl'</span><span class="s1">))</span>
+        <span class="s1">self.assertFalse(monkey.is_module_patched(</span><span class="s3">'socket'</span><span class="s1">))</span>
+
+        <span class="s1">self.init_server()</span>
+
+        <span class="s1">server_host</span><span class="s0">, </span><span class="s1">server_port</span><span class="s0">, </span><span class="s1">_family = self.get_server_host_port_family()</span>
+        <span class="s1">ssl.get_server_certificate((server_host</span><span class="s0">, </span><span class="s1">server_port)) </span><span class="s2"># pylint:disable=no-member</span>
+
+
+    <span class="s0">def </span><span class="s1">test_wrap_socket_and_handle_wrap_failure(self):</span>
+        <span class="s2"># A failure to wrap the socket doesn't have follow on effects</span>
+        <span class="s2"># like failing with a UnboundLocalError.</span>
+
+        <span class="s2"># See https://github.com/gevent/gevent/issues/1236</span>
+        <span class="s1">self.init_server()</span>
+
+        <span class="s0">def </span><span class="s1">bad_wrap(_client_socket</span><span class="s0">, </span><span class="s1">**_wrap_args):</span>
+            <span class="s0">raise </span><span class="s1">BadWrapException()</span>
+
+        <span class="s1">self.server.wrap_socket = bad_wrap</span>
+
+        <span class="s0">with </span><span class="s1">self.assertRaises(BadWrapException):</span>
+            <span class="s1">self.server._handle(</span><span class="s0">None, None</span><span class="s1">)</span>
+
+<span class="s2"># test non-socket.error exception in accept call: fatal</span>
+<span class="s2"># test error in spawn(): non-fatal</span>
+<span class="s2"># test error in spawned handler: non-fatal</span>
+
+
+<span class="s0">if </span><span class="s1">__name__ == </span><span class="s3">'__main__'</span><span class="s1">:</span>
+    <span class="s1">greentest.main()</span>
+</pre>
+</body>
+</html>

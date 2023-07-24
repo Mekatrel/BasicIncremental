@@ -1,0 +1,212 @@
+<html>
+<head>
+<title>test__refcount.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #629755; font-style: italic;}
+.s3 { color: #cc7832;}
+.s4 { color: #6897bb;}
+.s5 { color: #6a8759;}
+.s6 { color: #a5c261;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+test__refcount.py</font>
+</center></td></tr></table>
+<pre><span class="s0"># Copyright (c) 2008 AG Projects</span>
+<span class="s0"># Author: Denis Bilenko</span>
+<span class="s0">#</span>
+<span class="s0"># Permission is hereby granted, free of charge, to any person obtaining a copy</span>
+<span class="s0"># of this software and associated documentation files (the &quot;Software&quot;), to deal</span>
+<span class="s0"># in the Software without restriction, including without limitation the rights</span>
+<span class="s0"># to use, copy, modify, merge, publish, distribute, sublicense, and/or sell</span>
+<span class="s0"># copies of the Software, and to permit persons to whom the Software is</span>
+<span class="s0"># furnished to do so, subject to the following conditions:</span>
+<span class="s0">#</span>
+<span class="s0"># The above copyright notice and this permission notice shall be included in</span>
+<span class="s0"># all copies or substantial portions of the Software.</span>
+<span class="s0">#</span>
+<span class="s0"># THE SOFTWARE IS PROVIDED &quot;AS IS&quot;, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR</span>
+<span class="s0"># IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,</span>
+<span class="s0"># FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE</span>
+<span class="s0"># AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER</span>
+<span class="s0"># LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,</span>
+<span class="s0"># OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN</span>
+<span class="s0"># THE SOFTWARE.</span>
+
+<span class="s2">&quot;&quot;&quot;This test checks that underlying socket instances (gevent.socket.socket._sock) 
+are not leaked by the hub. 
+&quot;&quot;&quot;</span>
+<span class="s3">from </span><span class="s1">__future__ </span><span class="s3">import </span><span class="s1">print_function</span>
+
+<span class="s3">from </span><span class="s1">_socket </span><span class="s3">import </span><span class="s1">socket </span><span class="s3">as </span><span class="s1">c_socket</span>
+<span class="s3">import </span><span class="s1">sys</span>
+<span class="s3">if </span><span class="s1">sys.version_info[</span><span class="s4">0</span><span class="s1">] &gt;= </span><span class="s4">3</span><span class="s1">:</span>
+    <span class="s0"># Python3 enforces that __weakref__ appears only once,</span>
+    <span class="s0"># and not when a slotted class inherits from an unslotted class.</span>
+    <span class="s0"># We mess around with the class MRO below and violate that rule</span>
+    <span class="s0"># (because socket.socket defines __slots__ with __weakref__),</span>
+    <span class="s0"># so import socket.socket before that can happen.</span>
+    <span class="s1">__import__(</span><span class="s5">'socket'</span><span class="s1">)</span>
+    <span class="s1">Socket = c_socket</span>
+<span class="s3">else</span><span class="s1">:</span>
+    <span class="s3">class </span><span class="s1">Socket(c_socket):</span>
+        <span class="s2">&quot;Something we can have a weakref to&quot;</span>
+
+<span class="s3">import </span><span class="s1">_socket</span>
+<span class="s1">_socket.socket = Socket</span>
+
+
+<span class="s3">from </span><span class="s1">gevent </span><span class="s3">import </span><span class="s1">monkey; monkey.patch_all()</span>
+
+<span class="s3">import </span><span class="s1">gevent.testing </span><span class="s3">as </span><span class="s1">greentest</span>
+<span class="s3">from </span><span class="s1">gevent.testing </span><span class="s3">import </span><span class="s1">support</span>
+<span class="s3">from </span><span class="s1">gevent.testing </span><span class="s3">import </span><span class="s1">params</span>
+
+
+<span class="s3">try</span><span class="s1">:</span>
+    <span class="s3">from </span><span class="s1">thread </span><span class="s3">import </span><span class="s1">start_new_thread</span>
+<span class="s3">except </span><span class="s1">ImportError:</span>
+    <span class="s3">from </span><span class="s1">_thread </span><span class="s3">import </span><span class="s1">start_new_thread</span>
+<span class="s3">from </span><span class="s1">time </span><span class="s3">import </span><span class="s1">sleep</span>
+<span class="s3">import </span><span class="s1">weakref</span>
+<span class="s3">import </span><span class="s1">gc</span>
+
+<span class="s3">import </span><span class="s1">socket</span>
+<span class="s1">socket._realsocket = Socket</span>
+
+<span class="s1">SOCKET_TIMEOUT = </span><span class="s4">0.1</span>
+<span class="s3">if </span><span class="s1">greentest.RESOLVER_DNSPYTHON:</span>
+    <span class="s0"># Takes a bit longer to resolve the client</span>
+    <span class="s0"># address initially.</span>
+    <span class="s1">SOCKET_TIMEOUT *= </span><span class="s4">2</span>
+
+<span class="s3">if </span><span class="s1">greentest.RUNNING_ON_CI:</span>
+    <span class="s1">SOCKET_TIMEOUT *= </span><span class="s4">2</span>
+
+
+<span class="s3">class </span><span class="s1">Server(object):</span>
+
+    <span class="s1">listening = </span><span class="s3">False</span>
+    <span class="s1">client_data = </span><span class="s3">None</span>
+    <span class="s1">server_port = </span><span class="s3">None</span>
+
+    <span class="s3">def </span><span class="s1">__init__(self</span><span class="s3">, </span><span class="s1">raise_on_timeout):</span>
+        <span class="s1">self.raise_on_timeout = raise_on_timeout</span>
+        <span class="s1">self.socket = socket.socket(socket.AF_INET</span><span class="s3">, </span><span class="s1">socket.SOCK_STREAM)</span>
+        <span class="s3">try</span><span class="s1">:</span>
+            <span class="s1">self.server_port = support.bind_port(self.socket</span><span class="s3">, </span><span class="s1">params.DEFAULT_BIND_ADDR)</span>
+        <span class="s3">except</span><span class="s1">:</span>
+            <span class="s1">self.close()</span>
+            <span class="s3">raise</span>
+
+    <span class="s3">def </span><span class="s1">close(self):</span>
+        <span class="s1">self.socket.close()</span>
+        <span class="s1">self.socket = </span><span class="s3">None</span>
+
+    <span class="s3">def </span><span class="s1">handle_request(self):</span>
+        <span class="s3">try</span><span class="s1">:</span>
+            <span class="s1">self.socket.settimeout(SOCKET_TIMEOUT)</span>
+
+            <span class="s1">self.socket.listen(</span><span class="s4">5</span><span class="s1">)</span>
+
+            <span class="s1">self.listening = </span><span class="s3">True</span>
+
+            <span class="s3">try</span><span class="s1">:</span>
+                <span class="s1">conn</span><span class="s3">, </span><span class="s1">_ = self.socket.accept() </span><span class="s0"># pylint:disable=no-member</span>
+            <span class="s3">except </span><span class="s1">socket.timeout:</span>
+                <span class="s3">if </span><span class="s1">self.raise_on_timeout:</span>
+                    <span class="s3">raise</span>
+                <span class="s3">return</span>
+
+            <span class="s3">try</span><span class="s1">:</span>
+                <span class="s1">self.client_data = conn.recv(</span><span class="s4">100</span><span class="s1">)</span>
+                <span class="s1">conn.send(</span><span class="s6">b'bye'</span><span class="s1">)</span>
+            <span class="s3">finally</span><span class="s1">:</span>
+                <span class="s1">conn.close()</span>
+        <span class="s3">finally</span><span class="s1">:</span>
+            <span class="s1">self.close()</span>
+
+
+<span class="s3">class </span><span class="s1">Client(object):</span>
+
+    <span class="s1">server_data = </span><span class="s3">None</span>
+
+    <span class="s3">def </span><span class="s1">__init__(self</span><span class="s3">, </span><span class="s1">server_port):</span>
+        <span class="s1">self.socket = socket.socket(socket.AF_INET</span><span class="s3">, </span><span class="s1">socket.SOCK_STREAM)</span>
+        <span class="s1">self.server_port = server_port</span>
+
+
+    <span class="s3">def </span><span class="s1">close(self):</span>
+        <span class="s1">self.socket.close()</span>
+        <span class="s1">self.socket = </span><span class="s3">None</span>
+
+    <span class="s3">def </span><span class="s1">make_request(self):</span>
+        <span class="s3">try</span><span class="s1">:</span>
+            <span class="s1">self.socket.connect((params.DEFAULT_CONNECT</span><span class="s3">, </span><span class="s1">self.server_port))</span>
+            <span class="s1">self.socket.send(</span><span class="s6">b'hello'</span><span class="s1">)</span>
+            <span class="s1">self.server_data = self.socket.recv(</span><span class="s4">100</span><span class="s1">)</span>
+        <span class="s3">finally</span><span class="s1">:</span>
+            <span class="s1">self.close()</span>
+
+
+<span class="s3">class </span><span class="s1">Test(greentest.TestCase):</span>
+    <span class="s1">__timeout__ = greentest.LARGE_TIMEOUT</span>
+
+    <span class="s3">def </span><span class="s1">run_interaction(self</span><span class="s3">, </span><span class="s1">run_client):</span>
+        <span class="s1">server = Server(raise_on_timeout=run_client)</span>
+        <span class="s1">wref_to_hidden_server_socket = weakref.ref(server.socket._sock)</span>
+        <span class="s1">client = </span><span class="s3">None</span>
+        <span class="s1">start_new_thread(server.handle_request)</span>
+        <span class="s3">if </span><span class="s1">run_client:</span>
+            <span class="s1">client = Client(server.server_port)</span>
+            <span class="s1">start_new_thread(client.make_request)</span>
+
+        <span class="s0"># Wait until we do our business; we will always close</span>
+        <span class="s0"># the server; We may also close the client.</span>
+        <span class="s0"># On PyPy, we may not actually see the changes they write to</span>
+        <span class="s0"># their dicts immediately.</span>
+        <span class="s3">for </span><span class="s1">obj </span><span class="s3">in </span><span class="s1">server</span><span class="s3">, </span><span class="s1">client:</span>
+            <span class="s3">if </span><span class="s1">obj </span><span class="s3">is None</span><span class="s1">:</span>
+                <span class="s3">continue</span>
+            <span class="s3">while </span><span class="s1">obj.socket </span><span class="s3">is not None</span><span class="s1">:</span>
+                <span class="s1">sleep(</span><span class="s4">0.01</span><span class="s1">)</span>
+
+        <span class="s0"># If we have a client, then we should have data</span>
+        <span class="s3">if </span><span class="s1">run_client:</span>
+            <span class="s1">self.assertEqual(server.client_data</span><span class="s3">, </span><span class="s6">b'hello'</span><span class="s1">)</span>
+            <span class="s1">self.assertEqual(client.server_data</span><span class="s3">, </span><span class="s6">b'bye'</span><span class="s1">)</span>
+
+        <span class="s3">return </span><span class="s1">wref_to_hidden_server_socket</span>
+
+    <span class="s3">def </span><span class="s1">run_and_check(self</span><span class="s3">, </span><span class="s1">run_client):</span>
+        <span class="s1">wref_to_hidden_server_socket = self.run_interaction(run_client=run_client)</span>
+        <span class="s1">greentest.gc_collect_if_needed()</span>
+        <span class="s3">if </span><span class="s1">wref_to_hidden_server_socket():</span>
+            <span class="s3">from </span><span class="s1">pprint </span><span class="s3">import </span><span class="s1">pformat</span>
+            <span class="s1">print(pformat(gc.get_referrers(wref_to_hidden_server_socket())))</span>
+            <span class="s3">for </span><span class="s1">x </span><span class="s3">in </span><span class="s1">gc.get_referrers(wref_to_hidden_server_socket()):</span>
+                <span class="s1">print(pformat(x))</span>
+                <span class="s3">for </span><span class="s1">y </span><span class="s3">in </span><span class="s1">gc.get_referrers(x):</span>
+                    <span class="s1">print(</span><span class="s5">'-'</span><span class="s3">, </span><span class="s1">pformat(y))</span>
+            <span class="s1">self.fail(</span><span class="s5">'server socket should be dead by now'</span><span class="s1">)</span>
+
+    <span class="s3">def </span><span class="s1">test_clean_exit(self):</span>
+        <span class="s1">self.run_and_check(</span><span class="s3">True</span><span class="s1">)</span>
+        <span class="s1">self.run_and_check(</span><span class="s3">True</span><span class="s1">)</span>
+
+    <span class="s3">def </span><span class="s1">test_timeout_exit(self):</span>
+        <span class="s1">self.run_and_check(</span><span class="s3">False</span><span class="s1">)</span>
+        <span class="s1">self.run_and_check(</span><span class="s3">False</span><span class="s1">)</span>
+
+
+<span class="s3">if </span><span class="s1">__name__ == </span><span class="s5">'__main__'</span><span class="s1">:</span>
+    <span class="s1">greentest.main()</span>
+</pre>
+</body>
+</html>

@@ -1,0 +1,646 @@
+<html>
+<head>
+<title>local.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #629755; font-style: italic;}
+.s3 { color: #cc7832;}
+.s4 { color: #6a8759;}
+.s5 { color: #6897bb;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+local.py</font>
+</center></td></tr></table>
+<pre><span class="s0"># cython: auto_pickle=False,embedsignature=True,always_allow_keywords=False</span>
+<span class="s2">&quot;&quot;&quot; 
+Greenlet-local objects. 
+ 
+This module is based on `_threading_local.py`__ from the standard 
+library of Python 3.4. 
+ 
+__ https://github.com/python/cpython/blob/3.4/Lib/_threading_local.py 
+ 
+Greenlet-local objects support the management of greenlet-local data. 
+If you have data that you want to be local to a greenlet, simply create 
+a greenlet-local object and use its attributes: 
+ 
+  &gt;&gt;&gt; import gevent 
+  &gt;&gt;&gt; from gevent.local import local 
+  &gt;&gt;&gt; mydata = local() 
+  &gt;&gt;&gt; mydata.number = 42 
+  &gt;&gt;&gt; mydata.number 
+  42 
+ 
+You can also access the local-object's dictionary: 
+ 
+  &gt;&gt;&gt; mydata.__dict__ 
+  {'number': 42} 
+  &gt;&gt;&gt; mydata.__dict__.setdefault('widgets', []) 
+  [] 
+  &gt;&gt;&gt; mydata.widgets 
+  [] 
+ 
+What's important about greenlet-local objects is that their data are 
+local to a greenlet. If we access the data in a different greenlet: 
+ 
+  &gt;&gt;&gt; log = [] 
+  &gt;&gt;&gt; def f(): 
+  ...     items = list(mydata.__dict__.items()) 
+  ...     items.sort() 
+  ...     log.append(items) 
+  ...     mydata.number = 11 
+  ...     log.append(mydata.number) 
+  &gt;&gt;&gt; greenlet = gevent.spawn(f) 
+  &gt;&gt;&gt; greenlet.join() 
+  &gt;&gt;&gt; log 
+  [[], 11] 
+ 
+we get different data.  Furthermore, changes made in the other greenlet 
+don't affect data seen in this greenlet: 
+ 
+  &gt;&gt;&gt; mydata.number 
+  42 
+ 
+Of course, values you get from a local object, including a __dict__ 
+attribute, are for whatever greenlet was current at the time the 
+attribute was read.  For that reason, you generally don't want to save 
+these values across greenlets, as they apply only to the greenlet they 
+came from. 
+ 
+You can create custom local objects by subclassing the local class: 
+ 
+  &gt;&gt;&gt; class MyLocal(local): 
+  ...     number = 2 
+  ...     initialized = False 
+  ...     def __init__(self, **kw): 
+  ...         if self.initialized: 
+  ...             raise SystemError('__init__ called too many times') 
+  ...         self.initialized = True 
+  ...         self.__dict__.update(kw) 
+  ...     def squared(self): 
+  ...         return self.number ** 2 
+ 
+This can be useful to support default values, methods and 
+initialization.  Note that if you define an __init__ method, it will be 
+called each time the local object is used in a separate greenlet.  This 
+is necessary to initialize each greenlet's dictionary. 
+ 
+Now if we create a local object: 
+ 
+  &gt;&gt;&gt; mydata = MyLocal(color='red') 
+ 
+Now we have a default number: 
+ 
+  &gt;&gt;&gt; mydata.number 
+  2 
+ 
+an initial color: 
+ 
+  &gt;&gt;&gt; mydata.color 
+  'red' 
+  &gt;&gt;&gt; del mydata.color 
+ 
+And a method that operates on the data: 
+ 
+  &gt;&gt;&gt; mydata.squared() 
+  4 
+ 
+As before, we can access the data in a separate greenlet: 
+ 
+  &gt;&gt;&gt; log = [] 
+  &gt;&gt;&gt; greenlet = gevent.spawn(f) 
+  &gt;&gt;&gt; greenlet.join() 
+  &gt;&gt;&gt; log 
+  [[('color', 'red'), ('initialized', True)], 11] 
+ 
+without affecting this greenlet's data: 
+ 
+  &gt;&gt;&gt; mydata.number 
+  2 
+  &gt;&gt;&gt; mydata.color 
+  Traceback (most recent call last): 
+  ... 
+  AttributeError: 'MyLocal' object has no attribute 'color' 
+ 
+Note that subclasses can define slots, but they are not greenlet 
+local. They are shared across greenlets:: 
+ 
+  &gt;&gt;&gt; class MyLocal(local): 
+  ...     __slots__ = 'number' 
+ 
+  &gt;&gt;&gt; mydata = MyLocal() 
+  &gt;&gt;&gt; mydata.number = 42 
+  &gt;&gt;&gt; mydata.color = 'red' 
+ 
+So, the separate greenlet: 
+ 
+  &gt;&gt;&gt; greenlet = gevent.spawn(f) 
+  &gt;&gt;&gt; greenlet.join() 
+ 
+affects what we see: 
+ 
+  &gt;&gt;&gt; mydata.number 
+  11 
+ 
+&gt;&gt;&gt; del mydata 
+ 
+.. versionchanged:: 1.1a2 
+   Update the implementation to match Python 3.4 instead of Python 2.5. 
+   This results in locals being eligible for garbage collection as soon 
+   as their greenlet exits. 
+ 
+.. versionchanged:: 1.2.3 
+   Use a weak-reference to clear the greenlet link we establish in case 
+   the local object dies before the greenlet does. 
+ 
+.. versionchanged:: 1.3a1 
+   Implement the methods for attribute access directly, handling 
+   descriptors directly here. This allows removing the use of a lock 
+   and facilitates greatly improved performance. 
+ 
+.. versionchanged:: 1.3a1 
+   The ``__init__`` method of subclasses of ``local`` is no longer 
+   called with a lock held. CPython does not use such a lock in its 
+   native implementation. This could potentially show as a difference 
+   if code that uses multiple dependent attributes in ``__slots__`` 
+   (which are shared across all greenlets) switches during ``__init__``. 
+ 
+&quot;&quot;&quot;</span>
+<span class="s3">from </span><span class="s1">__future__ </span><span class="s3">import </span><span class="s1">print_function</span>
+
+<span class="s3">from </span><span class="s1">copy </span><span class="s3">import </span><span class="s1">copy</span>
+<span class="s3">from </span><span class="s1">weakref </span><span class="s3">import </span><span class="s1">ref</span>
+
+
+<span class="s1">locals()[</span><span class="s4">'getcurrent'</span><span class="s1">] = __import__(</span><span class="s4">'greenlet'</span><span class="s1">).getcurrent</span>
+<span class="s1">locals()[</span><span class="s4">'greenlet_init'</span><span class="s1">] = </span><span class="s3">lambda</span><span class="s1">: </span><span class="s3">None</span>
+
+<span class="s1">__all__ = [</span>
+    <span class="s4">&quot;local&quot;</span><span class="s3">,</span>
+<span class="s1">]</span>
+
+<span class="s0"># The key used in the Thread objects' attribute dicts.</span>
+<span class="s0"># We keep it a string for speed but make it unlikely to clash with</span>
+<span class="s0"># a &quot;real&quot; attribute.</span>
+<span class="s1">key_prefix = </span><span class="s4">'_gevent_local_localimpl_'</span>
+
+<span class="s0"># The overall structure is as follows:</span>
+<span class="s0"># For each local() object:</span>
+<span class="s0"># greenlet.__dict__[key_prefix + str(id(local))]</span>
+<span class="s0">#    =&gt; _localimpl.dicts[id(greenlet)] =&gt; (ref(greenlet), {})</span>
+
+<span class="s0"># That final tuple is actually a localimpl_dict_entry object.</span>
+
+<span class="s3">def </span><span class="s1">all_local_dicts_for_greenlet(greenlet):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Internal debug helper for getting the local values associated 
+    with a greenlet. This is subject to change or removal at any time. 
+ 
+    :return: A list of ((type, id), {}) pairs, where the first element 
+      is the type and id of the local object and the second object is its 
+      instance dictionary, as seen from this greenlet. 
+ 
+    .. versionadded:: 1.3a2 
+    &quot;&quot;&quot;</span>
+
+    <span class="s1">result = []</span>
+    <span class="s1">id_greenlet = id(greenlet)</span>
+    <span class="s1">greenlet_dict = greenlet.__dict__</span>
+    <span class="s3">for </span><span class="s1">k</span><span class="s3">, </span><span class="s1">v </span><span class="s3">in </span><span class="s1">greenlet_dict.items():</span>
+        <span class="s3">if not </span><span class="s1">k.startswith(key_prefix):</span>
+            <span class="s3">continue</span>
+        <span class="s1">local_impl = v()</span>
+        <span class="s3">if </span><span class="s1">local_impl </span><span class="s3">is None</span><span class="s1">:</span>
+            <span class="s3">continue</span>
+        <span class="s1">entry = local_impl.dicts.get(id_greenlet)</span>
+        <span class="s3">if </span><span class="s1">entry </span><span class="s3">is None</span><span class="s1">:</span>
+            <span class="s0"># Not yet used in this greenlet.</span>
+            <span class="s3">continue</span>
+        <span class="s3">assert </span><span class="s1">entry.wrgreenlet() </span><span class="s3">is </span><span class="s1">greenlet</span>
+        <span class="s1">result.append((local_impl.localtypeid</span><span class="s3">, </span><span class="s1">entry.localdict))</span>
+
+    <span class="s3">return </span><span class="s1">result</span>
+
+
+<span class="s3">class </span><span class="s1">_wrefdict(dict):</span>
+    <span class="s2">&quot;&quot;&quot;A dict that can be weak referenced&quot;&quot;&quot;</span>
+
+<span class="s3">class </span><span class="s1">_greenlet_deleted(object):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    A weakref callback for when the greenlet 
+    is deleted. 
+ 
+    If the greenlet is a `gevent.greenlet.Greenlet` and 
+    supplies ``rawlink``, that will be used instead of a 
+    weakref. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">__slots__ = (</span><span class="s4">'idt'</span><span class="s3">, </span><span class="s4">'wrdicts'</span><span class="s1">)</span>
+
+    <span class="s3">def </span><span class="s1">__init__(self</span><span class="s3">, </span><span class="s1">idt</span><span class="s3">, </span><span class="s1">wrdicts):</span>
+        <span class="s1">self.idt = idt</span>
+        <span class="s1">self.wrdicts = wrdicts</span>
+
+    <span class="s3">def </span><span class="s1">__call__(self</span><span class="s3">, </span><span class="s1">_unused):</span>
+        <span class="s1">dicts = self.wrdicts()</span>
+        <span class="s3">if </span><span class="s1">dicts:</span>
+            <span class="s1">dicts.pop(self.idt</span><span class="s3">, None</span><span class="s1">)</span>
+
+<span class="s3">class </span><span class="s1">_local_deleted(object):</span>
+    <span class="s1">__slots__ = (</span><span class="s4">'key'</span><span class="s3">, </span><span class="s4">'wrthread'</span><span class="s3">, </span><span class="s4">'greenlet_deleted'</span><span class="s1">)</span>
+
+    <span class="s3">def </span><span class="s1">__init__(self</span><span class="s3">, </span><span class="s1">key</span><span class="s3">, </span><span class="s1">wrthread</span><span class="s3">, </span><span class="s1">greenlet_deleted):</span>
+        <span class="s1">self.key = key</span>
+        <span class="s1">self.wrthread = wrthread</span>
+        <span class="s1">self.greenlet_deleted = greenlet_deleted</span>
+
+    <span class="s3">def </span><span class="s1">__call__(self</span><span class="s3">, </span><span class="s1">_unused):</span>
+        <span class="s1">thread = self.wrthread()</span>
+        <span class="s3">if </span><span class="s1">thread </span><span class="s3">is not None</span><span class="s1">:</span>
+            <span class="s3">try</span><span class="s1">:</span>
+                <span class="s1">unlink = thread.unlink</span>
+            <span class="s3">except </span><span class="s1">AttributeError:</span>
+                <span class="s3">pass</span>
+            <span class="s3">else</span><span class="s1">:</span>
+                <span class="s1">unlink(self.greenlet_deleted)</span>
+            <span class="s3">del </span><span class="s1">thread.__dict__[self.key]</span>
+
+<span class="s3">class </span><span class="s1">_localimpl(object):</span>
+    <span class="s2">&quot;&quot;&quot;A class managing thread-local dicts&quot;&quot;&quot;</span>
+    <span class="s1">__slots__ = (</span><span class="s4">'key'</span><span class="s3">, </span><span class="s4">'dicts'</span><span class="s3">,</span>
+                 <span class="s4">'localargs'</span><span class="s3">, </span><span class="s4">'localkwargs'</span><span class="s3">,</span>
+                 <span class="s4">'localtypeid'</span><span class="s3">,</span>
+                 <span class="s4">'__weakref__'</span><span class="s3">,</span><span class="s1">)</span>
+
+    <span class="s3">def </span><span class="s1">__init__(self</span><span class="s3">, </span><span class="s1">args</span><span class="s3">, </span><span class="s1">kwargs</span><span class="s3">, </span><span class="s1">local_type</span><span class="s3">, </span><span class="s1">id_local):</span>
+        <span class="s1">self.key = key_prefix + str(id(self))</span>
+        <span class="s0"># { id(greenlet) -&gt; _localimpl_dict_entry(ref(greenlet), greenlet-local dict) }</span>
+        <span class="s1">self.dicts = _wrefdict()</span>
+        <span class="s1">self.localargs = args</span>
+        <span class="s1">self.localkwargs = kwargs</span>
+        <span class="s1">self.localtypeid = local_type</span><span class="s3">, </span><span class="s1">id_local</span>
+
+        <span class="s0"># We need to create the thread dict in anticipation of</span>
+        <span class="s0"># __init__ being called, to make sure we don't call it</span>
+        <span class="s0"># again ourselves. MUST do this before setting any attributes.</span>
+        <span class="s1">greenlet = getcurrent() </span><span class="s0"># pylint:disable=undefined-variable</span>
+        <span class="s1">_localimpl_create_dict(self</span><span class="s3">, </span><span class="s1">greenlet</span><span class="s3">, </span><span class="s1">id(greenlet))</span>
+
+<span class="s3">class </span><span class="s1">_localimpl_dict_entry(object):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    The object that goes in the ``dicts`` of ``_localimpl`` 
+    object for each thread. 
+    &quot;&quot;&quot;</span>
+    <span class="s0"># This is a class, not just a tuple, so that cython can optimize</span>
+    <span class="s0"># attribute access</span>
+    <span class="s1">__slots__ = (</span><span class="s4">'wrgreenlet'</span><span class="s3">, </span><span class="s4">'localdict'</span><span class="s1">)</span>
+
+    <span class="s3">def </span><span class="s1">__init__(self</span><span class="s3">, </span><span class="s1">wrgreenlet</span><span class="s3">, </span><span class="s1">localdict):</span>
+        <span class="s1">self.wrgreenlet = wrgreenlet</span>
+        <span class="s1">self.localdict = localdict</span>
+
+<span class="s0"># We use functions instead of methods so that they can be cdef'd in</span>
+<span class="s0"># local.pxd; if they were cdef'd as methods, they would cause</span>
+<span class="s0"># the creation of a pointer and a vtable. This happens</span>
+<span class="s0"># even if we declare the class @cython.final. functions thus save memory overhead</span>
+<span class="s0"># (but not pointer chasing overhead; the vtable isn't used when we declare</span>
+<span class="s0"># the class final).</span>
+
+
+<span class="s3">def </span><span class="s1">_localimpl_create_dict(self</span><span class="s3">, </span><span class="s1">greenlet</span><span class="s3">, </span><span class="s1">id_greenlet):</span>
+    <span class="s2">&quot;&quot;&quot;Create a new dict for the current thread, and return it.&quot;&quot;&quot;</span>
+    <span class="s1">localdict = {}</span>
+    <span class="s1">key = self.key</span>
+
+    <span class="s1">wrdicts = ref(self.dicts)</span>
+
+    <span class="s0"># When the greenlet is deleted, remove the local dict.</span>
+    <span class="s0"># Note that this is suboptimal if the greenlet object gets</span>
+    <span class="s0"># caught in a reference loop. We would like to be called</span>
+    <span class="s0"># as soon as the OS-level greenlet ends instead.</span>
+
+    <span class="s0"># If we are working with a gevent.greenlet.Greenlet, we</span>
+    <span class="s0"># can pro-actively clear out with a link, avoiding the</span>
+    <span class="s0"># issue described above. Use rawlink to avoid spawning any</span>
+    <span class="s0"># more greenlets.</span>
+    <span class="s1">greenlet_deleted = _greenlet_deleted(id_greenlet</span><span class="s3">, </span><span class="s1">wrdicts)</span>
+
+    <span class="s1">rawlink = getattr(greenlet</span><span class="s3">, </span><span class="s4">'rawlink'</span><span class="s3">, None</span><span class="s1">)</span>
+    <span class="s3">if </span><span class="s1">rawlink </span><span class="s3">is not None</span><span class="s1">:</span>
+        <span class="s1">rawlink(greenlet_deleted)</span>
+        <span class="s1">wrthread = ref(greenlet)</span>
+    <span class="s3">else</span><span class="s1">:</span>
+        <span class="s1">wrthread = ref(greenlet</span><span class="s3">, </span><span class="s1">greenlet_deleted)</span>
+
+
+    <span class="s0"># When the localimpl is deleted, remove the thread attribute.</span>
+    <span class="s1">local_deleted = _local_deleted(key</span><span class="s3">, </span><span class="s1">wrthread</span><span class="s3">, </span><span class="s1">greenlet_deleted)</span>
+
+
+    <span class="s1">wrlocal = ref(self</span><span class="s3">, </span><span class="s1">local_deleted)</span>
+    <span class="s1">greenlet.__dict__[key] = wrlocal</span>
+
+    <span class="s1">self.dicts[id_greenlet] = _localimpl_dict_entry(wrthread</span><span class="s3">, </span><span class="s1">localdict)</span>
+    <span class="s3">return </span><span class="s1">localdict</span>
+
+
+<span class="s1">_marker = object()</span>
+
+<span class="s3">def </span><span class="s1">_local_get_dict(self):</span>
+    <span class="s1">impl = self._local__impl</span>
+    <span class="s0"># Cython can optimize dict[], but not dict.get()</span>
+    <span class="s1">greenlet = getcurrent() </span><span class="s0"># pylint:disable=undefined-variable</span>
+    <span class="s1">idg = id(greenlet)</span>
+    <span class="s3">try</span><span class="s1">:</span>
+        <span class="s1">entry = impl.dicts[idg]</span>
+        <span class="s1">dct = entry.localdict</span>
+    <span class="s3">except </span><span class="s1">KeyError:</span>
+        <span class="s1">dct = _localimpl_create_dict(impl</span><span class="s3">, </span><span class="s1">greenlet</span><span class="s3">, </span><span class="s1">idg)</span>
+        <span class="s1">self.__init__(*impl.localargs</span><span class="s3">, </span><span class="s1">**impl.localkwargs)</span>
+    <span class="s3">return </span><span class="s1">dct</span>
+
+<span class="s3">def </span><span class="s1">_init():</span>
+    <span class="s1">greenlet_init() </span><span class="s0"># pylint:disable=undefined-variable</span>
+
+<span class="s1">_local_attrs = {</span>
+    <span class="s4">'_local__impl'</span><span class="s3">,</span>
+    <span class="s4">'_local_type_get_descriptors'</span><span class="s3">,</span>
+    <span class="s4">'_local_type_set_or_del_descriptors'</span><span class="s3">,</span>
+    <span class="s4">'_local_type_del_descriptors'</span><span class="s3">,</span>
+    <span class="s4">'_local_type_set_descriptors'</span><span class="s3">,</span>
+    <span class="s4">'_local_type'</span><span class="s3">,</span>
+    <span class="s4">'_local_type_vars'</span><span class="s3">,</span>
+    <span class="s4">'__class__'</span><span class="s3">,</span>
+    <span class="s4">'__cinit__'</span><span class="s3">,</span>
+<span class="s1">}</span>
+
+<span class="s3">class </span><span class="s1">local(object):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    An object whose attributes are greenlet-local. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">__slots__ = tuple(_local_attrs - {</span><span class="s4">'__class__'</span><span class="s3">, </span><span class="s4">'__cinit__'</span><span class="s1">})</span>
+
+    <span class="s3">def </span><span class="s1">__cinit__(self</span><span class="s3">, </span><span class="s1">*args</span><span class="s3">, </span><span class="s1">**kw):</span>
+        <span class="s3">if </span><span class="s1">args </span><span class="s3">or </span><span class="s1">kw:</span>
+            <span class="s3">if </span><span class="s1">type(self).__init__ == object.__init__: </span><span class="s0"># pylint:disable=comparison-with-callable</span>
+                <span class="s3">raise </span><span class="s1">TypeError(</span><span class="s4">&quot;Initialization arguments are not supported&quot;</span><span class="s3">, </span><span class="s1">args</span><span class="s3">, </span><span class="s1">kw)</span>
+        <span class="s1">impl = _localimpl(args</span><span class="s3">, </span><span class="s1">kw</span><span class="s3">, </span><span class="s1">type(self)</span><span class="s3">, </span><span class="s1">id(self))</span>
+        <span class="s0"># pylint:disable=attribute-defined-outside-init</span>
+        <span class="s1">self._local__impl = impl</span>
+        <span class="s1">get</span><span class="s3">, </span><span class="s1">dels</span><span class="s3">, </span><span class="s1">sets_or_dels</span><span class="s3">, </span><span class="s1">sets = _local_find_descriptors(self)</span>
+        <span class="s1">self._local_type_get_descriptors = get</span>
+        <span class="s1">self._local_type_set_or_del_descriptors = sets_or_dels</span>
+        <span class="s1">self._local_type_del_descriptors = dels</span>
+        <span class="s1">self._local_type_set_descriptors = sets</span>
+        <span class="s1">self._local_type = type(self)</span>
+        <span class="s1">self._local_type_vars = set(dir(self._local_type))</span>
+
+    <span class="s3">def </span><span class="s1">__getattribute__(self</span><span class="s3">, </span><span class="s1">name): </span><span class="s0"># pylint:disable=too-many-return-statements</span>
+        <span class="s3">if </span><span class="s1">name </span><span class="s3">in </span><span class="s1">_local_attrs:</span>
+            <span class="s0"># The _local__impl,  __cinit__, etc, won't be hit by the</span>
+            <span class="s0"># Cython version, if we've done things right. If we haven't,</span>
+            <span class="s0"># they will be, and this will produce an error.</span>
+            <span class="s3">return </span><span class="s1">object.__getattribute__(self</span><span class="s3">, </span><span class="s1">name)</span>
+
+        <span class="s1">dct = _local_get_dict(self)</span>
+
+        <span class="s3">if </span><span class="s1">name == </span><span class="s4">'__dict__'</span><span class="s1">:</span>
+            <span class="s3">return </span><span class="s1">dct</span>
+        <span class="s0"># If there's no possible way we can switch, because this</span>
+        <span class="s0"># attribute is *not* found in the class where it might be a</span>
+        <span class="s0"># data descriptor (property), and it *is* in the dict</span>
+        <span class="s0"># then we don't need to swizzle the dict and take the lock.</span>
+
+        <span class="s0"># We don't have to worry about people overriding __getattribute__</span>
+        <span class="s0"># because if they did, the dict-swizzling would only last as</span>
+        <span class="s0"># long as we were in here anyway.</span>
+        <span class="s0"># Similarly, a __getattr__ will still be called by _oga() if needed</span>
+        <span class="s0"># if it's not in the dict.</span>
+
+        <span class="s0"># Optimization: If we're not subclassed, then</span>
+        <span class="s0"># there can be no descriptors except for methods, which will</span>
+        <span class="s0"># never need to use __dict__.</span>
+        <span class="s3">if </span><span class="s1">self._local_type </span><span class="s3">is </span><span class="s1">local:</span>
+            <span class="s3">return </span><span class="s1">dct[name] </span><span class="s3">if </span><span class="s1">name </span><span class="s3">in </span><span class="s1">dct </span><span class="s3">else </span><span class="s1">object.__getattribute__(self</span><span class="s3">, </span><span class="s1">name)</span>
+
+        <span class="s0"># NOTE: If this is a descriptor, this will invoke its __get__.</span>
+        <span class="s0"># A broken descriptor that doesn't return itself when called with</span>
+        <span class="s0"># a None for the instance argument could mess us up here.</span>
+        <span class="s0"># But this is faster than a loop over mro() checking each class __dict__</span>
+        <span class="s0"># manually.</span>
+        <span class="s3">if </span><span class="s1">name </span><span class="s3">in </span><span class="s1">dct:</span>
+            <span class="s3">if </span><span class="s1">name </span><span class="s3">not in </span><span class="s1">self._local_type_vars:</span>
+                <span class="s0"># If there is a dict value, and nothing in the type,</span>
+                <span class="s0"># it can't possibly be a descriptor, so it is just returned.</span>
+                <span class="s3">return </span><span class="s1">dct[name]</span>
+
+            <span class="s0"># It's in the type *and* in the dict. If the type value is</span>
+            <span class="s0"># a data descriptor (defines __get__ *and* either __set__ or</span>
+            <span class="s0"># __delete__), then the type wins. If it's a non-data descriptor</span>
+            <span class="s0"># (defines just __get__), then the instance wins. If it's not a</span>
+            <span class="s0"># descriptor at all (doesn't have __get__), the instance wins.</span>
+            <span class="s0"># NOTE that the docs for descriptors say that these methods must be</span>
+            <span class="s0"># defined on the *class* of the object in the type.</span>
+            <span class="s3">if </span><span class="s1">name </span><span class="s3">not in </span><span class="s1">self._local_type_get_descriptors:</span>
+                <span class="s0"># Entirely not a descriptor. Instance wins.</span>
+                <span class="s3">return </span><span class="s1">dct[name]</span>
+            <span class="s3">if </span><span class="s1">name </span><span class="s3">in </span><span class="s1">self._local_type_set_or_del_descriptors:</span>
+                <span class="s0"># A data descriptor.</span>
+                <span class="s0"># arbitrary code execution while these run. If they touch self again,</span>
+                <span class="s0"># they'll call back into us and we'll repeat the dance.</span>
+                <span class="s1">type_attr = getattr(self._local_type</span><span class="s3">, </span><span class="s1">name)</span>
+                <span class="s3">return </span><span class="s1">type(type_attr).__get__(type_attr</span><span class="s3">, </span><span class="s1">self</span><span class="s3">, </span><span class="s1">self._local_type)</span>
+            <span class="s0"># Last case is a non-data descriptor. Instance wins.</span>
+            <span class="s3">return </span><span class="s1">dct[name]</span>
+
+        <span class="s3">if </span><span class="s1">name </span><span class="s3">in </span><span class="s1">self._local_type_vars:</span>
+            <span class="s0"># Not in the dictionary, but is found in the type. It could be</span>
+            <span class="s0"># a non-data descriptor still. Some descriptors, like @staticmethod,</span>
+            <span class="s0"># return objects (functions, in this case), that are *themselves*</span>
+            <span class="s0"># descriptors, which when invoked, again, would do the wrong thing.</span>
+            <span class="s0"># So we can't rely on getattr() on the type for them, we have to</span>
+            <span class="s0"># look through the MRO dicts ourself.</span>
+            <span class="s3">if </span><span class="s1">name </span><span class="s3">not in </span><span class="s1">self._local_type_get_descriptors:</span>
+                <span class="s0"># Not a descriptor, can't execute code. So all we need is</span>
+                <span class="s0"># the return value of getattr() on our type.</span>
+                <span class="s3">return </span><span class="s1">getattr(self._local_type</span><span class="s3">, </span><span class="s1">name)</span>
+
+            <span class="s3">for </span><span class="s1">base </span><span class="s3">in </span><span class="s1">self._local_type.mro():</span>
+                <span class="s1">bd = base.__dict__</span>
+                <span class="s3">if </span><span class="s1">name </span><span class="s3">in </span><span class="s1">bd:</span>
+                    <span class="s1">attr_on_type = bd[name]</span>
+                    <span class="s1">result = type(attr_on_type).__get__(attr_on_type</span><span class="s3">, </span><span class="s1">self</span><span class="s3">, </span><span class="s1">self._local_type)</span>
+                    <span class="s3">return </span><span class="s1">result</span>
+
+        <span class="s0"># It wasn't in the dict and it wasn't in the type.</span>
+        <span class="s0"># So the next step is to invoke type(self)__getattr__, if it</span>
+        <span class="s0"># exists, otherwise raise an AttributeError.</span>
+        <span class="s0"># we will invoke type(self).__getattr__ or raise an attribute error.</span>
+        <span class="s3">if </span><span class="s1">hasattr(self._local_type</span><span class="s3">, </span><span class="s4">'__getattr__'</span><span class="s1">):</span>
+            <span class="s3">return </span><span class="s1">self._local_type.__getattr__(self</span><span class="s3">, </span><span class="s1">name)</span>
+        <span class="s3">raise </span><span class="s1">AttributeError(</span><span class="s4">&quot;%r object has no attribute '%s'&quot;</span>
+                             <span class="s1">% (self._local_type.__name__</span><span class="s3">, </span><span class="s1">name))</span>
+
+    <span class="s3">def </span><span class="s1">__setattr__(self</span><span class="s3">, </span><span class="s1">name</span><span class="s3">, </span><span class="s1">value):</span>
+        <span class="s3">if </span><span class="s1">name == </span><span class="s4">'__dict__'</span><span class="s1">:</span>
+            <span class="s3">raise </span><span class="s1">AttributeError(</span>
+                <span class="s4">&quot;%r object attribute '__dict__' is read-only&quot;</span>
+                <span class="s1">% type(self))</span>
+
+        <span class="s3">if </span><span class="s1">name </span><span class="s3">in </span><span class="s1">_local_attrs:</span>
+            <span class="s1">object.__setattr__(self</span><span class="s3">, </span><span class="s1">name</span><span class="s3">, </span><span class="s1">value)</span>
+            <span class="s3">return</span>
+
+        <span class="s1">dct = _local_get_dict(self)</span>
+
+        <span class="s3">if </span><span class="s1">self._local_type </span><span class="s3">is </span><span class="s1">local:</span>
+            <span class="s0"># Optimization: If we're not subclassed, we can't</span>
+            <span class="s0"># have data descriptors, so this goes right in the dict.</span>
+            <span class="s1">dct[name] = value</span>
+            <span class="s3">return</span>
+
+        <span class="s3">if </span><span class="s1">name </span><span class="s3">in </span><span class="s1">self._local_type_vars:</span>
+            <span class="s3">if </span><span class="s1">name </span><span class="s3">in </span><span class="s1">self._local_type_set_descriptors:</span>
+                <span class="s1">type_attr = getattr(self._local_type</span><span class="s3">, </span><span class="s1">name</span><span class="s3">, </span><span class="s1">_marker)</span>
+                <span class="s0"># A data descriptor, like a property or a slot.</span>
+                <span class="s1">type(type_attr).__set__(type_attr</span><span class="s3">, </span><span class="s1">self</span><span class="s3">, </span><span class="s1">value)</span>
+                <span class="s3">return</span>
+        <span class="s0"># Otherwise it goes directly in the dict</span>
+        <span class="s1">dct[name] = value</span>
+
+    <span class="s3">def </span><span class="s1">__delattr__(self</span><span class="s3">, </span><span class="s1">name):</span>
+        <span class="s3">if </span><span class="s1">name == </span><span class="s4">'__dict__'</span><span class="s1">:</span>
+            <span class="s3">raise </span><span class="s1">AttributeError(</span>
+                <span class="s4">&quot;%r object attribute '__dict__' is read-only&quot;</span>
+                <span class="s1">% self.__class__.__name__)</span>
+
+        <span class="s3">if </span><span class="s1">name </span><span class="s3">in </span><span class="s1">self._local_type_vars:</span>
+            <span class="s3">if </span><span class="s1">name </span><span class="s3">in </span><span class="s1">self._local_type_del_descriptors:</span>
+                <span class="s0"># A data descriptor, like a property or a slot.</span>
+                <span class="s1">type_attr = getattr(self._local_type</span><span class="s3">, </span><span class="s1">name</span><span class="s3">, </span><span class="s1">_marker)</span>
+                <span class="s1">type(type_attr).__delete__(type_attr</span><span class="s3">, </span><span class="s1">self)</span>
+                <span class="s3">return</span>
+        <span class="s0"># Otherwise it goes directly in the dict</span>
+
+        <span class="s0"># Begin inlined function _get_dict()</span>
+        <span class="s1">dct = _local_get_dict(self)</span>
+
+        <span class="s3">try</span><span class="s1">:</span>
+            <span class="s3">del </span><span class="s1">dct[name]</span>
+        <span class="s3">except </span><span class="s1">KeyError:</span>
+            <span class="s3">raise </span><span class="s1">AttributeError(name)</span>
+
+    <span class="s3">def </span><span class="s1">__copy__(self):</span>
+        <span class="s1">impl = self._local__impl</span>
+        <span class="s1">entry = impl.dicts[id(getcurrent())]  </span><span class="s0"># pylint:disable=undefined-variable</span>
+
+        <span class="s1">dct = entry.localdict</span>
+        <span class="s1">duplicate = copy(dct)</span>
+
+        <span class="s1">cls = type(self)</span>
+        <span class="s1">instance = cls(*impl.localargs</span><span class="s3">, </span><span class="s1">**impl.localkwargs)</span>
+        <span class="s1">_local__copy_dict_from(instance</span><span class="s3">, </span><span class="s1">impl</span><span class="s3">, </span><span class="s1">duplicate)</span>
+        <span class="s3">return </span><span class="s1">instance</span>
+
+<span class="s3">def </span><span class="s1">_local__copy_dict_from(self</span><span class="s3">, </span><span class="s1">impl</span><span class="s3">, </span><span class="s1">duplicate):</span>
+    <span class="s1">current = getcurrent() </span><span class="s0"># pylint:disable=undefined-variable</span>
+    <span class="s1">currentId = id(current)</span>
+    <span class="s1">new_impl = self._local__impl</span>
+    <span class="s3">assert </span><span class="s1">new_impl </span><span class="s3">is not </span><span class="s1">impl</span>
+    <span class="s1">entry = new_impl.dicts[currentId]</span>
+    <span class="s1">new_impl.dicts[currentId] = _localimpl_dict_entry(entry.wrgreenlet</span><span class="s3">, </span><span class="s1">duplicate)</span>
+
+<span class="s3">def </span><span class="s1">_local_find_descriptors(self):</span>
+    <span class="s1">type_self = type(self)</span>
+    <span class="s1">gets = set()</span>
+    <span class="s1">dels = set()</span>
+    <span class="s1">set_or_del = set()</span>
+    <span class="s1">sets = set()</span>
+    <span class="s1">mro = list(type_self.mro())</span>
+
+    <span class="s3">for </span><span class="s1">attr_name </span><span class="s3">in </span><span class="s1">dir(type_self):</span>
+        <span class="s0"># Conventionally, descriptors when called on a class</span>
+        <span class="s0"># return themself, but not all do. Notable exceptions are</span>
+        <span class="s0"># in the zope.interface package, where things like __provides__</span>
+        <span class="s0"># return other class attributes. So we can't use getattr, and instead</span>
+        <span class="s0"># walk up the dicts</span>
+        <span class="s3">for </span><span class="s1">base </span><span class="s3">in </span><span class="s1">mro:</span>
+            <span class="s1">bd = base.__dict__</span>
+            <span class="s3">if </span><span class="s1">attr_name </span><span class="s3">in </span><span class="s1">bd:</span>
+                <span class="s1">attr = bd[attr_name]</span>
+                <span class="s3">break</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s3">raise </span><span class="s1">AttributeError(attr_name)</span>
+
+        <span class="s1">type_attr = type(attr)</span>
+        <span class="s3">if </span><span class="s1">hasattr(type_attr</span><span class="s3">, </span><span class="s4">'__get__'</span><span class="s1">):</span>
+            <span class="s1">gets.add(attr_name)</span>
+        <span class="s3">if </span><span class="s1">hasattr(type_attr</span><span class="s3">, </span><span class="s4">'__delete__'</span><span class="s1">):</span>
+            <span class="s1">dels.add(attr_name)</span>
+            <span class="s1">set_or_del.add(attr_name)</span>
+        <span class="s3">if </span><span class="s1">hasattr(type_attr</span><span class="s3">, </span><span class="s4">'__set__'</span><span class="s1">):</span>
+            <span class="s1">sets.add(attr_name)</span>
+
+    <span class="s3">return </span><span class="s1">(gets</span><span class="s3">, </span><span class="s1">dels</span><span class="s3">, </span><span class="s1">set_or_del</span><span class="s3">, </span><span class="s1">sets)</span>
+
+<span class="s0"># Cython doesn't let us use __new__, it requires</span>
+<span class="s0"># __cinit__. But we need __new__ if we're not compiled</span>
+<span class="s0"># (e.g., on PyPy). So we set it at runtime. Cython</span>
+<span class="s0"># will raise an error if we're compiled.</span>
+<span class="s3">def </span><span class="s1">__new__(cls</span><span class="s3">, </span><span class="s1">*args</span><span class="s3">, </span><span class="s1">**kw):</span>
+    <span class="s1">self = super(local</span><span class="s3">, </span><span class="s1">cls).__new__(cls) </span><span class="s0"># pylint:disable=no-value-for-parameter</span>
+    <span class="s0"># We get the cls in *args for some reason</span>
+    <span class="s0"># too when we do it this way....except on PyPy3, which does</span>
+    <span class="s0"># not *unless* it's wrapped in a classmethod (which it is)</span>
+    <span class="s1">self.__cinit__(*args[</span><span class="s5">1</span><span class="s1">:]</span><span class="s3">, </span><span class="s1">**kw)</span>
+    <span class="s3">return </span><span class="s1">self</span>
+
+<span class="s3">if </span><span class="s1">local.__module__ == </span><span class="s4">'gevent.local'</span><span class="s1">:</span>
+    <span class="s0"># PyPy2/3 and CPython handle adding a __new__ to the class</span>
+    <span class="s0"># in different ways. In CPython and PyPy3, it must be wrapped with classmethod;</span>
+    <span class="s0"># in PyPy2 &lt; 7.3.3, it must not. In either case, the args that get passed to</span>
+    <span class="s0"># it are stil wrong.</span>
+    <span class="s0">#</span>
+    <span class="s0"># Prior to Python 3.10, Cython-compiled classes were immutable and</span>
+    <span class="s0"># raised a TypeError on assignment to __new__, and we relied on that</span>
+    <span class="s0"># to detect the compiled version; but that breaks in</span>
+    <span class="s0"># 3.10 as classes are now mutable. (See</span>
+    <span class="s0"># https://github.com/cython/cython/issues/4326).</span>
+    <span class="s0">#</span>
+    <span class="s0"># That's OK; post https://github.com/gevent/gevent/issues/1480, the Cython-compiled</span>
+    <span class="s0"># module has a different name than the pure-Python version and we can check for that.</span>
+    <span class="s0"># It's not as direct, but it works.</span>
+    <span class="s0"># So here we're not compiled</span>
+    <span class="s3">from </span><span class="s1">gevent._compat </span><span class="s3">import </span><span class="s1">PYPY</span>
+    <span class="s3">from </span><span class="s1">gevent._compat </span><span class="s3">import </span><span class="s1">PY2</span>
+    <span class="s3">if </span><span class="s1">PYPY </span><span class="s3">and </span><span class="s1">PY2:</span>
+        <span class="s0"># The behaviour changed with no warning between PyPy2 7.3.2 and 7.3.3.</span>
+        <span class="s1">local.__new__ = __new__</span>
+        <span class="s3">try</span><span class="s1">:</span>
+            <span class="s1">local() </span><span class="s0"># &lt;= 7.3.2</span>
+        <span class="s3">except </span><span class="s1">TypeError:</span>
+            <span class="s0"># &gt;= 7.3.3</span>
+            <span class="s1">local.__new__ = classmethod(__new__)</span>
+    <span class="s3">else</span><span class="s1">:</span>
+        <span class="s1">local.__new__ = classmethod(__new__)</span>
+
+    <span class="s3">del </span><span class="s1">PYPY</span>
+    <span class="s3">del </span><span class="s1">PY2</span>
+<span class="s3">else</span><span class="s1">: </span><span class="s0"># pragma: no cover</span>
+    <span class="s0"># Make sure we revisit in case of changes to the (accelerator) module names.</span>
+    <span class="s3">if </span><span class="s1">local.__module__ != </span><span class="s4">'gevent._gevent_clocal'</span><span class="s1">:</span>
+        <span class="s3">raise </span><span class="s1">AssertionError(</span><span class="s4">&quot;Module names changed (local: %r; __name__: %r); revisit this code&quot; </span><span class="s1">% (</span>
+            <span class="s1">local.__module__</span><span class="s3">, </span><span class="s1">__name__) )</span>
+
+<span class="s1">_init()</span>
+
+<span class="s3">from </span><span class="s1">gevent._util </span><span class="s3">import </span><span class="s1">import_c_accel</span>
+<span class="s1">import_c_accel(globals()</span><span class="s3">, </span><span class="s4">'gevent._local'</span><span class="s1">)</span>
+</pre>
+</body>
+</html>

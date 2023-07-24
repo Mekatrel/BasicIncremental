@@ -1,0 +1,336 @@
+<html>
+<head>
+<title>misc.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #629755; font-style: italic;}
+.s3 { color: #cc7832;}
+.s4 { color: #6a8759;}
+.s5 { color: #6897bb;}
+.s6 { color: #a5c261;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+misc.py</font>
+</center></td></tr></table>
+<pre><span class="s0">#-----------------------------------------------------------------------------</span>
+<span class="s0"># Copyright (c) 2013-2021, PyInstaller Development Team.</span>
+<span class="s0">#</span>
+<span class="s0"># Distributed under the terms of the GNU General Public License (version 2</span>
+<span class="s0"># or later) with exception for distributing the bootloader.</span>
+<span class="s0">#</span>
+<span class="s0"># The full license is in the file COPYING.txt, distributed with this software.</span>
+<span class="s0">#</span>
+<span class="s0"># SPDX-License-Identifier: (GPL-2.0-or-later WITH Bootloader-exception)</span>
+<span class="s0">#-----------------------------------------------------------------------------</span>
+<span class="s2">&quot;&quot;&quot; 
+This module contains miscellaneous functions that do not fit anywhere else. 
+&quot;&quot;&quot;</span>
+
+<span class="s3">import </span><span class="s1">glob</span>
+<span class="s3">import </span><span class="s1">os</span>
+<span class="s3">import </span><span class="s1">pprint</span>
+<span class="s3">import </span><span class="s1">py_compile</span>
+<span class="s3">import </span><span class="s1">sys</span>
+<span class="s3">import </span><span class="s1">codecs</span>
+<span class="s3">import </span><span class="s1">re</span>
+<span class="s3">import </span><span class="s1">tokenize</span>
+<span class="s3">import </span><span class="s1">io</span>
+
+<span class="s3">from </span><span class="s1">PyInstaller </span><span class="s3">import </span><span class="s1">log </span><span class="s3">as </span><span class="s1">logging</span>
+<span class="s3">from </span><span class="s1">PyInstaller.compat </span><span class="s3">import </span><span class="s1">BYTECODE_MAGIC</span><span class="s3">, </span><span class="s1">is_win</span>
+
+<span class="s1">logger = logging.getLogger(__name__)</span>
+
+
+<span class="s3">def </span><span class="s1">dlls_in_subdirs(directory):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Returns a list *.dll, *.so, *.dylib in the given directory and its subdirectories. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">filelist = []</span>
+    <span class="s3">for </span><span class="s1">root</span><span class="s3">, </span><span class="s1">dirs</span><span class="s3">, </span><span class="s1">files </span><span class="s3">in </span><span class="s1">os.walk(directory):</span>
+        <span class="s1">filelist.extend(dlls_in_dir(root))</span>
+    <span class="s3">return </span><span class="s1">filelist</span>
+
+
+<span class="s3">def </span><span class="s1">dlls_in_dir(directory):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Returns a list of *.dll, *.so, *.dylib in the given directory. 
+    &quot;&quot;&quot;</span>
+    <span class="s3">return </span><span class="s1">files_in_dir(directory</span><span class="s3">, </span><span class="s1">[</span><span class="s4">&quot;*.so&quot;</span><span class="s3">, </span><span class="s4">&quot;*.dll&quot;</span><span class="s3">, </span><span class="s4">&quot;*.dylib&quot;</span><span class="s1">])</span>
+
+
+<span class="s3">def </span><span class="s1">files_in_dir(directory</span><span class="s3">, </span><span class="s1">file_patterns=[]):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Returns a list of files in the given directory that match the given pattern. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">files = []</span>
+    <span class="s3">for </span><span class="s1">file_pattern </span><span class="s3">in </span><span class="s1">file_patterns:</span>
+        <span class="s1">files.extend(glob.glob(os.path.join(directory</span><span class="s3">, </span><span class="s1">file_pattern)))</span>
+    <span class="s3">return </span><span class="s1">files</span>
+
+
+<span class="s3">def </span><span class="s1">get_unicode_modules():</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Try importing modules required for unicode support in the frozen application. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">modules = []</span>
+    <span class="s3">try</span><span class="s1">:</span>
+        <span class="s0"># `codecs` depends on `encodings`, so the latter are included automatically.</span>
+        <span class="s3">import </span><span class="s1">codecs  </span><span class="s0"># noqa: F401</span>
+        <span class="s1">modules.append(</span><span class="s4">'codecs'</span><span class="s1">)</span>
+    <span class="s3">except </span><span class="s1">ImportError:</span>
+        <span class="s1">logger.error(</span><span class="s4">&quot;Cannot detect modules 'codecs'.&quot;</span><span class="s1">)</span>
+
+    <span class="s3">return </span><span class="s1">modules</span>
+
+
+<span class="s3">def </span><span class="s1">get_path_to_toplevel_modules(filename):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Return the path to top-level directory that contains Python modules. 
+ 
+    It will look in parent directories for __init__.py files. The first parent directory without __init__.py is the 
+    top-level directory. 
+ 
+    Returned directory might be used to extend the PYTHONPATH. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">curr_dir = os.path.dirname(os.path.abspath(filename))</span>
+    <span class="s1">pattern = </span><span class="s4">'__init__.py'</span>
+
+    <span class="s0"># Try max. 10 levels up.</span>
+    <span class="s3">try</span><span class="s1">:</span>
+        <span class="s3">for </span><span class="s1">i </span><span class="s3">in </span><span class="s1">range(</span><span class="s5">10</span><span class="s1">):</span>
+            <span class="s1">files = set(os.listdir(curr_dir))</span>
+            <span class="s0"># 'curr_dir' is still not top-level; go to parent dir.</span>
+            <span class="s3">if </span><span class="s1">pattern </span><span class="s3">in </span><span class="s1">files:</span>
+                <span class="s1">curr_dir = os.path.dirname(curr_dir)</span>
+            <span class="s0"># Top-level dir found; return it.</span>
+            <span class="s3">else</span><span class="s1">:</span>
+                <span class="s3">return </span><span class="s1">curr_dir</span>
+    <span class="s3">except </span><span class="s1">IOError:</span>
+        <span class="s3">pass</span>
+    <span class="s0"># No top-level directory found, or error was encountered.</span>
+    <span class="s3">return None</span>
+
+
+<span class="s3">def </span><span class="s1">mtime(fnm):</span>
+    <span class="s3">try</span><span class="s1">:</span>
+        <span class="s0"># TODO: explain why this does not use os.path.getmtime() ?</span>
+        <span class="s0">#       - It is probably not used because it returns float and not int.</span>
+        <span class="s3">return </span><span class="s1">os.stat(fnm)[</span><span class="s5">8</span><span class="s1">]</span>
+    <span class="s3">except </span><span class="s1">Exception:</span>
+        <span class="s3">return </span><span class="s5">0</span>
+
+
+<span class="s3">def </span><span class="s1">compile_py_files(toc</span><span class="s3">, </span><span class="s1">workpath):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Given a TOC or equivalent list of tuples, generates all the required pyc/pyo files, writing in a local directory 
+    if required, and returns the list of tuples with the updated pathnames. 
+ 
+    In the old system using ImpTracker, the generated TOC of &quot;pure&quot; modules already contains paths to nm.pyc or 
+    nm.pyo and it is only necessary to check that these files are not older than the source. In the new system using 
+    ModuleGraph, the path given is to nm.py and we do not know if nm.pyc/.pyo exists. The following logic works with 
+    both (so if at some time modulegraph starts returning filenames of .pyc, it will cope). 
+    &quot;&quot;&quot;</span>
+
+    <span class="s0"># For those modules that need to be rebuilt, use the build directory PyInstaller creates during the build process.</span>
+    <span class="s1">basepath = os.path.join(workpath</span><span class="s3">, </span><span class="s4">&quot;localpycos&quot;</span><span class="s1">)</span>
+
+    <span class="s0"># Copy everything from toc to this new TOC, possibly unchanged.</span>
+    <span class="s1">new_toc = []</span>
+    <span class="s3">for </span><span class="s1">(nm</span><span class="s3">, </span><span class="s1">fnm</span><span class="s3">, </span><span class="s1">typ) </span><span class="s3">in </span><span class="s1">toc:</span>
+        <span class="s0"># Keep irrelevant items unchanged.</span>
+        <span class="s3">if </span><span class="s1">typ != </span><span class="s4">'PYMODULE'</span><span class="s1">:</span>
+            <span class="s1">new_toc.append((nm</span><span class="s3">, </span><span class="s1">fnm</span><span class="s3">, </span><span class="s1">typ))</span>
+            <span class="s3">continue</span>
+
+        <span class="s3">if </span><span class="s1">fnm </span><span class="s3">in </span><span class="s1">(</span><span class="s4">'-'</span><span class="s3">, None</span><span class="s1">):</span>
+            <span class="s0"># If fmn represents a namespace then skip</span>
+            <span class="s3">continue</span>
+
+        <span class="s3">if </span><span class="s1">fnm.endswith(</span><span class="s4">'.py'</span><span class="s1">):</span>
+            <span class="s0"># We are given a source path, determine the object path, if any.</span>
+            <span class="s1">src_fnm = fnm</span>
+            <span class="s0"># Assume we want pyo only when now running -O or -OO</span>
+            <span class="s1">obj_fnm = src_fnm + (</span><span class="s4">'o' </span><span class="s3">if </span><span class="s1">sys.flags.optimize </span><span class="s3">else </span><span class="s4">'c'</span><span class="s1">)</span>
+            <span class="s3">if not </span><span class="s1">os.path.exists(obj_fnm):</span>
+                <span class="s0"># Alas that one is not there so assume the other choice.</span>
+                <span class="s1">obj_fnm = src_fnm + (</span><span class="s4">'c' </span><span class="s3">if </span><span class="s1">sys.flags.optimize </span><span class="s3">else </span><span class="s4">'o'</span><span class="s1">)</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s0"># fnm is not &quot;name.py&quot;, so assume we are given name.pyc/.pyo</span>
+            <span class="s1">obj_fnm = fnm  </span><span class="s0"># take that name to be the desired object</span>
+            <span class="s1">src_fnm = fnm[:-</span><span class="s5">1</span><span class="s1">]  </span><span class="s0"># drop the 'c' or 'o' to make a source name</span>
+
+        <span class="s0"># We need to perform a build ourselves if obj_fnm does not exist, or if src_fnm is newer than obj_fnm, or if</span>
+        <span class="s0"># obj_fnm was created by a different Python version.</span>
+
+        <span class="s0"># TODO: explain why this does read()[:4] (reading all the file) instead of just read(4)? Yes for many a .pyc</span>
+        <span class="s0">#       file, it is all in one sector so there is no difference in I/O, but still it seems inelegant to copy it</span>
+        <span class="s0">#       all then subscript 4 bytes.</span>
+        <span class="s1">needs_compile = </span><span class="s3">not </span><span class="s1">os.path.exists(obj_fnm) </span><span class="s3">or </span><span class="s1">mtime(src_fnm) &gt; mtime(obj_fnm)</span>
+        <span class="s3">if not </span><span class="s1">needs_compile:</span>
+            <span class="s3">with </span><span class="s1">open(obj_fnm</span><span class="s3">, </span><span class="s4">'rb'</span><span class="s1">) </span><span class="s3">as </span><span class="s1">fh:</span>
+                <span class="s1">needs_compile = fh.read()[:</span><span class="s5">4</span><span class="s1">] != BYTECODE_MAGIC</span>
+        <span class="s3">if </span><span class="s1">needs_compile:</span>
+            <span class="s3">try</span><span class="s1">:</span>
+                <span class="s0"># TODO: there should be no need to repeat the compile, because ModuleGraph does a compile and stores the</span>
+                <span class="s0">#       result in the .code member of the graph node. Should be possible to get the node and write the</span>
+                <span class="s0">#       code to obj_fnm.</span>
+                <span class="s1">py_compile.compile(src_fnm</span><span class="s3">, </span><span class="s1">obj_fnm)</span>
+                <span class="s1">logger.debug(</span><span class="s4">&quot;compiled %s&quot;</span><span class="s3">, </span><span class="s1">src_fnm)</span>
+            <span class="s3">except </span><span class="s1">IOError:</span>
+                <span class="s0"># If we are compiling in a system directory, we probably do not have write permissions; thus we compile</span>
+                <span class="s0"># to a local directory and change the TOC entry accordingly.</span>
+                <span class="s1">ext = os.path.splitext(obj_fnm)[</span><span class="s5">1</span><span class="s1">]</span>
+
+                <span class="s3">if </span><span class="s4">&quot;__init__&quot; </span><span class="s3">not in </span><span class="s1">obj_fnm:</span>
+                    <span class="s0"># If it is a normal module, use the last part of the qualified name as the module name and the first</span>
+                    <span class="s0"># part as the leading path.</span>
+                    <span class="s1">leading</span><span class="s3">, </span><span class="s1">mod_name = nm.split(</span><span class="s4">&quot;.&quot;</span><span class="s1">)[:-</span><span class="s5">1</span><span class="s1">]</span><span class="s3">, </span><span class="s1">nm.split(</span><span class="s4">&quot;.&quot;</span><span class="s1">)[-</span><span class="s5">1</span><span class="s1">]</span>
+                <span class="s3">else</span><span class="s1">:</span>
+                    <span class="s0"># In case of an __init__ module, use all the qualified name as the leading path and use &quot;__init__&quot;</span>
+                    <span class="s0"># as the module name.</span>
+                    <span class="s1">leading</span><span class="s3">, </span><span class="s1">mod_name = nm.split(</span><span class="s4">&quot;.&quot;</span><span class="s1">)</span><span class="s3">, </span><span class="s4">&quot;__init__&quot;</span>
+
+                <span class="s1">leading = os.path.join(basepath</span><span class="s3">, </span><span class="s1">*leading)</span>
+
+                <span class="s3">if not </span><span class="s1">os.path.exists(leading):</span>
+                    <span class="s1">os.makedirs(leading)</span>
+
+                <span class="s1">obj_fnm = os.path.join(leading</span><span class="s3">, </span><span class="s1">mod_name + ext)</span>
+                <span class="s0"># TODO: see above TODO regarding read()[:4] versus read(4).</span>
+                <span class="s1">needs_compile = </span><span class="s3">not </span><span class="s1">os.path.exists(obj_fnm) </span><span class="s3">or </span><span class="s1">mtime(src_fnm) &gt; mtime(obj_fnm)</span>
+                <span class="s3">if not </span><span class="s1">needs_compile:</span>
+                    <span class="s3">with </span><span class="s1">open(obj_fnm</span><span class="s3">, </span><span class="s4">'rb'</span><span class="s1">) </span><span class="s3">as </span><span class="s1">fh:</span>
+                        <span class="s1">needs_compile = fh.read()[:</span><span class="s5">4</span><span class="s1">] != BYTECODE_MAGIC</span>
+                <span class="s3">if </span><span class="s1">needs_compile:</span>
+                    <span class="s0"># TODO: see above TODO regarding using node.code.</span>
+                    <span class="s1">py_compile.compile(src_fnm</span><span class="s3">, </span><span class="s1">obj_fnm)</span>
+                    <span class="s1">logger.debug(</span><span class="s4">&quot;compiled %s&quot;</span><span class="s3">, </span><span class="s1">src_fnm)</span>
+        <span class="s0"># If we get to here, obj_fnm is the path to the compiled module nm.py</span>
+        <span class="s1">new_toc.append((nm</span><span class="s3">, </span><span class="s1">obj_fnm</span><span class="s3">, </span><span class="s1">typ))</span>
+
+    <span class="s3">return </span><span class="s1">new_toc</span>
+
+
+<span class="s3">def </span><span class="s1">save_py_data_struct(filename</span><span class="s3">, </span><span class="s1">data):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Save data into text file as Python data structure. 
+    :param filename: 
+    :param data: 
+    :return: 
+    &quot;&quot;&quot;</span>
+    <span class="s1">dirname = os.path.dirname(filename)</span>
+    <span class="s3">if not </span><span class="s1">os.path.exists(dirname):</span>
+        <span class="s1">os.makedirs(dirname)</span>
+    <span class="s3">with </span><span class="s1">open(filename</span><span class="s3">, </span><span class="s4">'w'</span><span class="s3">, </span><span class="s1">encoding=</span><span class="s4">'utf-8'</span><span class="s1">) </span><span class="s3">as </span><span class="s1">f:</span>
+        <span class="s1">pprint.pprint(data</span><span class="s3">, </span><span class="s1">f)</span>
+
+
+<span class="s3">def </span><span class="s1">load_py_data_struct(filename):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Load data saved as python code and interpret that code. 
+    :param filename: 
+    :return: 
+    &quot;&quot;&quot;</span>
+    <span class="s3">with </span><span class="s1">open(filename</span><span class="s3">, </span><span class="s4">'r'</span><span class="s3">, </span><span class="s1">encoding=</span><span class="s4">'utf-8'</span><span class="s1">) </span><span class="s3">as </span><span class="s1">f:</span>
+        <span class="s0"># Binding redirects are stored as a named tuple, so bring the namedtuple class into scope for parsing the TOC.</span>
+        <span class="s3">from </span><span class="s1">PyInstaller.depend.bindepend </span><span class="s3">import </span><span class="s1">BindingRedirect  </span><span class="s0"># noqa: F401</span>
+
+        <span class="s3">if </span><span class="s1">is_win:</span>
+            <span class="s0"># import versioninfo so that VSVersionInfo can parse correctly.</span>
+            <span class="s3">from </span><span class="s1">PyInstaller.utils.win32 </span><span class="s3">import </span><span class="s1">versioninfo  </span><span class="s0"># noqa: F401</span>
+
+        <span class="s3">return </span><span class="s1">eval(f.read())</span>
+
+
+<span class="s3">def </span><span class="s1">absnormpath(apath):</span>
+    <span class="s3">return </span><span class="s1">os.path.abspath(os.path.normpath(apath))</span>
+
+
+<span class="s3">def </span><span class="s1">module_parent_packages(full_modname):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Return list of parent package names. 
+        'aaa.bb.c.dddd' -&gt;  ['aaa', 'aaa.bb', 'aaa.bb.c'] 
+    :param full_modname: Full name of a module. 
+    :return: List of parent module names. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">prefix = </span><span class="s4">''</span>
+    <span class="s1">parents = []</span>
+    <span class="s0"># Ignore the last component in module name and get really just parent, grandparent, great grandparent, etc.</span>
+    <span class="s3">for </span><span class="s1">pkg </span><span class="s3">in </span><span class="s1">full_modname.split(</span><span class="s4">'.'</span><span class="s1">)[</span><span class="s5">0</span><span class="s1">:-</span><span class="s5">1</span><span class="s1">]:</span>
+        <span class="s0"># Ensure that first item does not start with dot '.'</span>
+        <span class="s1">prefix += </span><span class="s4">'.' </span><span class="s1">+ pkg </span><span class="s3">if </span><span class="s1">prefix </span><span class="s3">else </span><span class="s1">pkg</span>
+        <span class="s1">parents.append(prefix)</span>
+    <span class="s3">return </span><span class="s1">parents</span>
+
+
+<span class="s3">def </span><span class="s1">is_file_qt_plugin(filename):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Check if the given file is a Qt plugin file. 
+    :param filename: Full path to file to check. 
+    :return: True if given file is a Qt plugin file, False if not. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s0"># Check the file contents; scan for QTMETADATA string. The scan is based on the brute-force Windows codepath of</span>
+    <span class="s0"># findPatternUnloaded() from qtbase/src/corelib/plugin/qlibrary.cpp in Qt5.</span>
+    <span class="s3">with </span><span class="s1">open(filename</span><span class="s3">, </span><span class="s4">'rb'</span><span class="s1">) </span><span class="s3">as </span><span class="s1">fp:</span>
+        <span class="s1">fp.seek(</span><span class="s5">0</span><span class="s3">, </span><span class="s1">os.SEEK_END)</span>
+        <span class="s1">end_pos = fp.tell()</span>
+
+        <span class="s1">SEARCH_CHUNK_SIZE = </span><span class="s5">8192</span>
+        <span class="s1">QTMETADATA_MAGIC = </span><span class="s6">b'QTMETADATA '</span>
+
+        <span class="s1">magic_offset = -</span><span class="s5">1</span>
+        <span class="s3">while </span><span class="s1">end_pos &gt;= len(QTMETADATA_MAGIC):</span>
+            <span class="s1">start_pos = max(end_pos - SEARCH_CHUNK_SIZE</span><span class="s3">, </span><span class="s5">0</span><span class="s1">)</span>
+            <span class="s1">chunk_size = end_pos - start_pos</span>
+            <span class="s0"># Is the remaining chunk large enough to hold the pattern?</span>
+            <span class="s3">if </span><span class="s1">chunk_size &lt; len(QTMETADATA_MAGIC):</span>
+                <span class="s3">break</span>
+            <span class="s0"># Read and scan the chunk</span>
+            <span class="s1">fp.seek(start_pos</span><span class="s3">, </span><span class="s1">os.SEEK_SET)</span>
+            <span class="s1">buf = fp.read(chunk_size)</span>
+            <span class="s1">pos = buf.rfind(QTMETADATA_MAGIC)</span>
+            <span class="s3">if </span><span class="s1">pos != -</span><span class="s5">1</span><span class="s1">:</span>
+                <span class="s1">magic_offset = start_pos + pos</span>
+                <span class="s3">break</span>
+            <span class="s0"># Adjust search location for next chunk; ensure proper overlap.</span>
+            <span class="s1">end_pos = start_pos + len(QTMETADATA_MAGIC) - </span><span class="s5">1</span>
+        <span class="s3">if </span><span class="s1">magic_offset == -</span><span class="s5">1</span><span class="s1">:</span>
+            <span class="s3">return False</span>
+
+        <span class="s3">return True</span>
+
+
+<span class="s1">BOM_MARKERS_TO_DECODERS = {</span>
+    <span class="s1">codecs.BOM_UTF32_LE: codecs.utf_32_le_decode</span><span class="s3">,</span>
+    <span class="s1">codecs.BOM_UTF32_BE: codecs.utf_32_be_decode</span><span class="s3">,</span>
+    <span class="s1">codecs.BOM_UTF32: codecs.utf_32_decode</span><span class="s3">,</span>
+    <span class="s1">codecs.BOM_UTF16_LE: codecs.utf_16_le_decode</span><span class="s3">,</span>
+    <span class="s1">codecs.BOM_UTF16_BE: codecs.utf_16_be_decode</span><span class="s3">,</span>
+    <span class="s1">codecs.BOM_UTF16: codecs.utf_16_decode</span><span class="s3">,</span>
+    <span class="s1">codecs.BOM_UTF8: codecs.utf_8_decode</span><span class="s3">,</span>
+<span class="s1">}</span>
+<span class="s1">BOM_RE = re.compile(</span><span class="s6">rb&quot;\A(%s)?(.*)&quot; </span><span class="s1">% </span><span class="s6">b&quot;|&quot;</span><span class="s1">.join(map(re.escape</span><span class="s3">, </span><span class="s1">BOM_MARKERS_TO_DECODERS))</span><span class="s3">, </span><span class="s1">re.DOTALL)</span>
+
+
+<span class="s3">def </span><span class="s1">decode(raw: bytes):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Decode bytes to string, respecting and removing any byte-order marks if present, or respecting but not removing any 
+    PEP263 encoding comments (# encoding: cp1252). 
+    &quot;&quot;&quot;</span>
+    <span class="s1">bom</span><span class="s3">, </span><span class="s1">raw = BOM_RE.match(raw).groups()</span>
+    <span class="s3">if </span><span class="s1">bom:</span>
+        <span class="s3">return </span><span class="s1">BOM_MARKERS_TO_DECODERS[bom](raw)[</span><span class="s5">0</span><span class="s1">]</span>
+
+    <span class="s1">encoding</span><span class="s3">, </span><span class="s1">_ = tokenize.detect_encoding(io.BytesIO(raw).readline)</span>
+    <span class="s3">return </span><span class="s1">raw.decode(encoding)</span>
+</pre>
+</body>
+</html>

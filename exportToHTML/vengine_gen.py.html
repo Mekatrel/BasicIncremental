@@ -1,0 +1,696 @@
+<html>
+<head>
+<title>vengine_gen.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #cc7832;}
+.s3 { color: #6a8759;}
+.s4 { color: #6897bb;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+vengine_gen.py</font>
+</center></td></tr></table>
+<pre><span class="s0">#</span>
+<span class="s0"># DEPRECATED: implementation for ffi.verify()</span>
+<span class="s0">#</span>
+<span class="s2">import </span><span class="s1">sys</span><span class="s2">, </span><span class="s1">os</span>
+<span class="s2">import </span><span class="s1">types</span>
+
+<span class="s2">from </span><span class="s1">. </span><span class="s2">import </span><span class="s1">model</span>
+<span class="s2">from </span><span class="s1">.error </span><span class="s2">import </span><span class="s1">VerificationError</span>
+
+
+<span class="s2">class </span><span class="s1">VGenericEngine(object):</span>
+    <span class="s1">_class_key = </span><span class="s3">'g'</span>
+    <span class="s1">_gen_python_module = </span><span class="s2">False</span>
+
+    <span class="s2">def </span><span class="s1">__init__(self</span><span class="s2">, </span><span class="s1">verifier):</span>
+        <span class="s1">self.verifier = verifier</span>
+        <span class="s1">self.ffi = verifier.ffi</span>
+        <span class="s1">self.export_symbols = []</span>
+        <span class="s1">self._struct_pending_verification = {}</span>
+
+    <span class="s2">def </span><span class="s1">patch_extension_kwds(self</span><span class="s2">, </span><span class="s1">kwds):</span>
+        <span class="s0"># add 'export_symbols' to the dictionary.  Note that we add the</span>
+        <span class="s0"># list before filling it.  When we fill it, it will thus also show</span>
+        <span class="s0"># up in kwds['export_symbols'].</span>
+        <span class="s1">kwds.setdefault(</span><span class="s3">'export_symbols'</span><span class="s2">, </span><span class="s1">self.export_symbols)</span>
+
+    <span class="s2">def </span><span class="s1">find_module(self</span><span class="s2">, </span><span class="s1">module_name</span><span class="s2">, </span><span class="s1">path</span><span class="s2">, </span><span class="s1">so_suffixes):</span>
+        <span class="s2">for </span><span class="s1">so_suffix </span><span class="s2">in </span><span class="s1">so_suffixes:</span>
+            <span class="s1">basename = module_name + so_suffix</span>
+            <span class="s2">if </span><span class="s1">path </span><span class="s2">is None</span><span class="s1">:</span>
+                <span class="s1">path = sys.path</span>
+            <span class="s2">for </span><span class="s1">dirname </span><span class="s2">in </span><span class="s1">path:</span>
+                <span class="s1">filename = os.path.join(dirname</span><span class="s2">, </span><span class="s1">basename)</span>
+                <span class="s2">if </span><span class="s1">os.path.isfile(filename):</span>
+                    <span class="s2">return </span><span class="s1">filename</span>
+
+    <span class="s2">def </span><span class="s1">collect_types(self):</span>
+        <span class="s2">pass      </span><span class="s0"># not needed in the generic engine</span>
+
+    <span class="s2">def </span><span class="s1">_prnt(self</span><span class="s2">, </span><span class="s1">what=</span><span class="s3">''</span><span class="s1">):</span>
+        <span class="s1">self._f.write(what + </span><span class="s3">'</span><span class="s2">\n</span><span class="s3">'</span><span class="s1">)</span>
+
+    <span class="s2">def </span><span class="s1">write_source_to_f(self):</span>
+        <span class="s1">prnt = self._prnt</span>
+        <span class="s0"># first paste some standard set of lines that are mostly '#include'</span>
+        <span class="s1">prnt(cffimod_header)</span>
+        <span class="s0"># then paste the C source given by the user, verbatim.</span>
+        <span class="s1">prnt(self.verifier.preamble)</span>
+        <span class="s0">#</span>
+        <span class="s0"># call generate_gen_xxx_decl(), for every xxx found from</span>
+        <span class="s0"># ffi._parser._declarations.  This generates all the functions.</span>
+        <span class="s1">self._generate(</span><span class="s3">'decl'</span><span class="s1">)</span>
+        <span class="s0">#</span>
+        <span class="s0"># on Windows, distutils insists on putting init_cffi_xyz in</span>
+        <span class="s0"># 'export_symbols', so instead of fighting it, just give up and</span>
+        <span class="s0"># give it one</span>
+        <span class="s2">if </span><span class="s1">sys.platform == </span><span class="s3">'win32'</span><span class="s1">:</span>
+            <span class="s2">if </span><span class="s1">sys.version_info &gt;= (</span><span class="s4">3</span><span class="s2">,</span><span class="s1">):</span>
+                <span class="s1">prefix = </span><span class="s3">'PyInit_'</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s1">prefix = </span><span class="s3">'init'</span>
+            <span class="s1">modname = self.verifier.get_module_name()</span>
+            <span class="s1">prnt(</span><span class="s3">&quot;void %s%s(void) { }</span><span class="s2">\n</span><span class="s3">&quot; </span><span class="s1">% (prefix</span><span class="s2">, </span><span class="s1">modname))</span>
+
+    <span class="s2">def </span><span class="s1">load_library(self</span><span class="s2">, </span><span class="s1">flags=</span><span class="s4">0</span><span class="s1">):</span>
+        <span class="s0"># import it with the CFFI backend</span>
+        <span class="s1">backend = self.ffi._backend</span>
+        <span class="s0"># needs to make a path that contains '/', on Posix</span>
+        <span class="s1">filename = os.path.join(os.curdir</span><span class="s2">, </span><span class="s1">self.verifier.modulefilename)</span>
+        <span class="s1">module = backend.load_library(filename</span><span class="s2">, </span><span class="s1">flags)</span>
+        <span class="s0">#</span>
+        <span class="s0"># call loading_gen_struct() to get the struct layout inferred by</span>
+        <span class="s0"># the C compiler</span>
+        <span class="s1">self._load(module</span><span class="s2">, </span><span class="s3">'loading'</span><span class="s1">)</span>
+
+        <span class="s0"># build the FFILibrary class and instance, this is a module subclass</span>
+        <span class="s0"># because modules are expected to have usually-constant-attributes and</span>
+        <span class="s0"># in PyPy this means the JIT is able to treat attributes as constant,</span>
+        <span class="s0"># which we want.</span>
+        <span class="s2">class </span><span class="s1">FFILibrary(types.ModuleType):</span>
+            <span class="s1">_cffi_generic_module = module</span>
+            <span class="s1">_cffi_ffi = self.ffi</span>
+            <span class="s1">_cffi_dir = []</span>
+            <span class="s2">def </span><span class="s1">__dir__(self):</span>
+                <span class="s2">return </span><span class="s1">FFILibrary._cffi_dir</span>
+        <span class="s1">library = FFILibrary(</span><span class="s3">&quot;&quot;</span><span class="s1">)</span>
+        <span class="s0">#</span>
+        <span class="s0"># finally, call the loaded_gen_xxx() functions.  This will set</span>
+        <span class="s0"># up the 'library' object.</span>
+        <span class="s1">self._load(module</span><span class="s2">, </span><span class="s3">'loaded'</span><span class="s2">, </span><span class="s1">library=library)</span>
+        <span class="s2">return </span><span class="s1">library</span>
+
+    <span class="s2">def </span><span class="s1">_get_declarations(self):</span>
+        <span class="s1">lst = [(key</span><span class="s2">, </span><span class="s1">tp) </span><span class="s2">for </span><span class="s1">(key</span><span class="s2">, </span><span class="s1">(tp</span><span class="s2">, </span><span class="s1">qual)) </span><span class="s2">in</span>
+                                <span class="s1">self.ffi._parser._declarations.items()]</span>
+        <span class="s1">lst.sort()</span>
+        <span class="s2">return </span><span class="s1">lst</span>
+
+    <span class="s2">def </span><span class="s1">_generate(self</span><span class="s2">, </span><span class="s1">step_name):</span>
+        <span class="s2">for </span><span class="s1">name</span><span class="s2">, </span><span class="s1">tp </span><span class="s2">in </span><span class="s1">self._get_declarations():</span>
+            <span class="s1">kind</span><span class="s2">, </span><span class="s1">realname = name.split(</span><span class="s3">' '</span><span class="s2">, </span><span class="s4">1</span><span class="s1">)</span>
+            <span class="s2">try</span><span class="s1">:</span>
+                <span class="s1">method = getattr(self</span><span class="s2">, </span><span class="s3">'_generate_gen_%s_%s' </span><span class="s1">% (kind</span><span class="s2">,</span>
+                                                                <span class="s1">step_name))</span>
+            <span class="s2">except </span><span class="s1">AttributeError:</span>
+                <span class="s2">raise </span><span class="s1">VerificationError(</span>
+                    <span class="s3">&quot;not implemented in verify(): %r&quot; </span><span class="s1">% name)</span>
+            <span class="s2">try</span><span class="s1">:</span>
+                <span class="s1">method(tp</span><span class="s2">, </span><span class="s1">realname)</span>
+            <span class="s2">except </span><span class="s1">Exception </span><span class="s2">as </span><span class="s1">e:</span>
+                <span class="s1">model.attach_exception_info(e</span><span class="s2">, </span><span class="s1">name)</span>
+                <span class="s2">raise</span>
+
+    <span class="s2">def </span><span class="s1">_load(self</span><span class="s2">, </span><span class="s1">module</span><span class="s2">, </span><span class="s1">step_name</span><span class="s2">, </span><span class="s1">**kwds):</span>
+        <span class="s2">for </span><span class="s1">name</span><span class="s2">, </span><span class="s1">tp </span><span class="s2">in </span><span class="s1">self._get_declarations():</span>
+            <span class="s1">kind</span><span class="s2">, </span><span class="s1">realname = name.split(</span><span class="s3">' '</span><span class="s2">, </span><span class="s4">1</span><span class="s1">)</span>
+            <span class="s1">method = getattr(self</span><span class="s2">, </span><span class="s3">'_%s_gen_%s' </span><span class="s1">% (step_name</span><span class="s2">, </span><span class="s1">kind))</span>
+            <span class="s2">try</span><span class="s1">:</span>
+                <span class="s1">method(tp</span><span class="s2">, </span><span class="s1">realname</span><span class="s2">, </span><span class="s1">module</span><span class="s2">, </span><span class="s1">**kwds)</span>
+            <span class="s2">except </span><span class="s1">Exception </span><span class="s2">as </span><span class="s1">e:</span>
+                <span class="s1">model.attach_exception_info(e</span><span class="s2">, </span><span class="s1">name)</span>
+                <span class="s2">raise</span>
+
+    <span class="s2">def </span><span class="s1">_generate_nothing(self</span><span class="s2">, </span><span class="s1">tp</span><span class="s2">, </span><span class="s1">name):</span>
+        <span class="s2">pass</span>
+
+    <span class="s2">def </span><span class="s1">_loaded_noop(self</span><span class="s2">, </span><span class="s1">tp</span><span class="s2">, </span><span class="s1">name</span><span class="s2">, </span><span class="s1">module</span><span class="s2">, </span><span class="s1">**kwds):</span>
+        <span class="s2">pass</span>
+
+    <span class="s0"># ----------</span>
+    <span class="s0"># typedefs: generates no code so far</span>
+
+    <span class="s1">_generate_gen_typedef_decl   = _generate_nothing</span>
+    <span class="s1">_loading_gen_typedef         = _loaded_noop</span>
+    <span class="s1">_loaded_gen_typedef          = _loaded_noop</span>
+
+    <span class="s0"># ----------</span>
+    <span class="s0"># function declarations</span>
+
+    <span class="s2">def </span><span class="s1">_generate_gen_function_decl(self</span><span class="s2">, </span><span class="s1">tp</span><span class="s2">, </span><span class="s1">name):</span>
+        <span class="s2">assert </span><span class="s1">isinstance(tp</span><span class="s2">, </span><span class="s1">model.FunctionPtrType)</span>
+        <span class="s2">if </span><span class="s1">tp.ellipsis:</span>
+            <span class="s0"># cannot support vararg functions better than this: check for its</span>
+            <span class="s0"># exact type (including the fixed arguments), and build it as a</span>
+            <span class="s0"># constant function pointer (no _cffi_f_%s wrapper)</span>
+            <span class="s1">self._generate_gen_const(</span><span class="s2">False, </span><span class="s1">name</span><span class="s2">, </span><span class="s1">tp)</span>
+            <span class="s2">return</span>
+        <span class="s1">prnt = self._prnt</span>
+        <span class="s1">numargs = len(tp.args)</span>
+        <span class="s1">argnames = []</span>
+        <span class="s2">for </span><span class="s1">i</span><span class="s2">, </span><span class="s1">type </span><span class="s2">in </span><span class="s1">enumerate(tp.args):</span>
+            <span class="s1">indirection = </span><span class="s3">''</span>
+            <span class="s2">if </span><span class="s1">isinstance(type</span><span class="s2">, </span><span class="s1">model.StructOrUnion):</span>
+                <span class="s1">indirection = </span><span class="s3">'*'</span>
+            <span class="s1">argnames.append(</span><span class="s3">'%sx%d' </span><span class="s1">% (indirection</span><span class="s2">, </span><span class="s1">i))</span>
+        <span class="s1">context = </span><span class="s3">'argument of %s' </span><span class="s1">% name</span>
+        <span class="s1">arglist = [type.get_c_name(</span><span class="s3">' %s' </span><span class="s1">% arg</span><span class="s2">, </span><span class="s1">context)</span>
+                   <span class="s2">for </span><span class="s1">type</span><span class="s2">, </span><span class="s1">arg </span><span class="s2">in </span><span class="s1">zip(tp.args</span><span class="s2">, </span><span class="s1">argnames)]</span>
+        <span class="s1">tpresult = tp.result</span>
+        <span class="s2">if </span><span class="s1">isinstance(tpresult</span><span class="s2">, </span><span class="s1">model.StructOrUnion):</span>
+            <span class="s1">arglist.insert(</span><span class="s4">0</span><span class="s2">, </span><span class="s1">tpresult.get_c_name(</span><span class="s3">' *r'</span><span class="s2">, </span><span class="s1">context))</span>
+            <span class="s1">tpresult = model.void_type</span>
+        <span class="s1">arglist = </span><span class="s3">', '</span><span class="s1">.join(arglist) </span><span class="s2">or </span><span class="s3">'void'</span>
+        <span class="s1">wrappername = </span><span class="s3">'_cffi_f_%s' </span><span class="s1">% name</span>
+        <span class="s1">self.export_symbols.append(wrappername)</span>
+        <span class="s2">if </span><span class="s1">tp.abi:</span>
+            <span class="s1">abi = tp.abi + </span><span class="s3">' '</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">abi = </span><span class="s3">''</span>
+        <span class="s1">funcdecl = </span><span class="s3">' %s%s(%s)' </span><span class="s1">% (abi</span><span class="s2">, </span><span class="s1">wrappername</span><span class="s2">, </span><span class="s1">arglist)</span>
+        <span class="s1">context = </span><span class="s3">'result of %s' </span><span class="s1">% name</span>
+        <span class="s1">prnt(tpresult.get_c_name(funcdecl</span><span class="s2">, </span><span class="s1">context))</span>
+        <span class="s1">prnt(</span><span class="s3">'{'</span><span class="s1">)</span>
+        <span class="s0">#</span>
+        <span class="s2">if </span><span class="s1">isinstance(tp.result</span><span class="s2">, </span><span class="s1">model.StructOrUnion):</span>
+            <span class="s1">result_code = </span><span class="s3">'*r = '</span>
+        <span class="s2">elif not </span><span class="s1">isinstance(tp.result</span><span class="s2">, </span><span class="s1">model.VoidType):</span>
+            <span class="s1">result_code = </span><span class="s3">'return '</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">result_code = </span><span class="s3">''</span>
+        <span class="s1">prnt(</span><span class="s3">'  %s%s(%s);' </span><span class="s1">% (result_code</span><span class="s2">, </span><span class="s1">name</span><span class="s2">, </span><span class="s3">', '</span><span class="s1">.join(argnames)))</span>
+        <span class="s1">prnt(</span><span class="s3">'}'</span><span class="s1">)</span>
+        <span class="s1">prnt()</span>
+
+    <span class="s1">_loading_gen_function = _loaded_noop</span>
+
+    <span class="s2">def </span><span class="s1">_loaded_gen_function(self</span><span class="s2">, </span><span class="s1">tp</span><span class="s2">, </span><span class="s1">name</span><span class="s2">, </span><span class="s1">module</span><span class="s2">, </span><span class="s1">library):</span>
+        <span class="s2">assert </span><span class="s1">isinstance(tp</span><span class="s2">, </span><span class="s1">model.FunctionPtrType)</span>
+        <span class="s2">if </span><span class="s1">tp.ellipsis:</span>
+            <span class="s1">newfunction = self._load_constant(</span><span class="s2">False, </span><span class="s1">tp</span><span class="s2">, </span><span class="s1">name</span><span class="s2">, </span><span class="s1">module)</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">indirections = []</span>
+            <span class="s1">base_tp = tp</span>
+            <span class="s2">if </span><span class="s1">(any(isinstance(typ</span><span class="s2">, </span><span class="s1">model.StructOrUnion) </span><span class="s2">for </span><span class="s1">typ </span><span class="s2">in </span><span class="s1">tp.args)</span>
+                    <span class="s2">or </span><span class="s1">isinstance(tp.result</span><span class="s2">, </span><span class="s1">model.StructOrUnion)):</span>
+                <span class="s1">indirect_args = []</span>
+                <span class="s2">for </span><span class="s1">i</span><span class="s2">, </span><span class="s1">typ </span><span class="s2">in </span><span class="s1">enumerate(tp.args):</span>
+                    <span class="s2">if </span><span class="s1">isinstance(typ</span><span class="s2">, </span><span class="s1">model.StructOrUnion):</span>
+                        <span class="s1">typ = model.PointerType(typ)</span>
+                        <span class="s1">indirections.append((i</span><span class="s2">, </span><span class="s1">typ))</span>
+                    <span class="s1">indirect_args.append(typ)</span>
+                <span class="s1">indirect_result = tp.result</span>
+                <span class="s2">if </span><span class="s1">isinstance(indirect_result</span><span class="s2">, </span><span class="s1">model.StructOrUnion):</span>
+                    <span class="s2">if </span><span class="s1">indirect_result.fldtypes </span><span class="s2">is None</span><span class="s1">:</span>
+                        <span class="s2">raise </span><span class="s1">TypeError(</span><span class="s3">&quot;'%s' is used as result type, &quot;</span>
+                                        <span class="s3">&quot;but is opaque&quot; </span><span class="s1">% (</span>
+                                            <span class="s1">indirect_result._get_c_name()</span><span class="s2">,</span><span class="s1">))</span>
+                    <span class="s1">indirect_result = model.PointerType(indirect_result)</span>
+                    <span class="s1">indirect_args.insert(</span><span class="s4">0</span><span class="s2">, </span><span class="s1">indirect_result)</span>
+                    <span class="s1">indirections.insert(</span><span class="s4">0</span><span class="s2">, </span><span class="s1">(</span><span class="s3">&quot;result&quot;</span><span class="s2">, </span><span class="s1">indirect_result))</span>
+                    <span class="s1">indirect_result = model.void_type</span>
+                <span class="s1">tp = model.FunctionPtrType(tuple(indirect_args)</span><span class="s2">,</span>
+                                           <span class="s1">indirect_result</span><span class="s2">, </span><span class="s1">tp.ellipsis)</span>
+            <span class="s1">BFunc = self.ffi._get_cached_btype(tp)</span>
+            <span class="s1">wrappername = </span><span class="s3">'_cffi_f_%s' </span><span class="s1">% name</span>
+            <span class="s1">newfunction = module.load_function(BFunc</span><span class="s2">, </span><span class="s1">wrappername)</span>
+            <span class="s2">for </span><span class="s1">i</span><span class="s2">, </span><span class="s1">typ </span><span class="s2">in </span><span class="s1">indirections:</span>
+                <span class="s1">newfunction = self._make_struct_wrapper(newfunction</span><span class="s2">, </span><span class="s1">i</span><span class="s2">, </span><span class="s1">typ</span><span class="s2">,</span>
+                                                        <span class="s1">base_tp)</span>
+        <span class="s1">setattr(library</span><span class="s2">, </span><span class="s1">name</span><span class="s2">, </span><span class="s1">newfunction)</span>
+        <span class="s1">type(library)._cffi_dir.append(name)</span>
+
+    <span class="s2">def </span><span class="s1">_make_struct_wrapper(self</span><span class="s2">, </span><span class="s1">oldfunc</span><span class="s2">, </span><span class="s1">i</span><span class="s2">, </span><span class="s1">tp</span><span class="s2">, </span><span class="s1">base_tp):</span>
+        <span class="s1">backend = self.ffi._backend</span>
+        <span class="s1">BType = self.ffi._get_cached_btype(tp)</span>
+        <span class="s2">if </span><span class="s1">i == </span><span class="s3">&quot;result&quot;</span><span class="s1">:</span>
+            <span class="s1">ffi = self.ffi</span>
+            <span class="s2">def </span><span class="s1">newfunc(*args):</span>
+                <span class="s1">res = ffi.new(BType)</span>
+                <span class="s1">oldfunc(res</span><span class="s2">, </span><span class="s1">*args)</span>
+                <span class="s2">return </span><span class="s1">res[</span><span class="s4">0</span><span class="s1">]</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s2">def </span><span class="s1">newfunc(*args):</span>
+                <span class="s1">args = args[:i] + (backend.newp(BType</span><span class="s2">, </span><span class="s1">args[i])</span><span class="s2">,</span><span class="s1">) + args[i+</span><span class="s4">1</span><span class="s1">:]</span>
+                <span class="s2">return </span><span class="s1">oldfunc(*args)</span>
+        <span class="s1">newfunc._cffi_base_type = base_tp</span>
+        <span class="s2">return </span><span class="s1">newfunc</span>
+
+    <span class="s0"># ----------</span>
+    <span class="s0"># named structs</span>
+
+    <span class="s2">def </span><span class="s1">_generate_gen_struct_decl(self</span><span class="s2">, </span><span class="s1">tp</span><span class="s2">, </span><span class="s1">name):</span>
+        <span class="s2">assert </span><span class="s1">name == tp.name</span>
+        <span class="s1">self._generate_struct_or_union_decl(tp</span><span class="s2">, </span><span class="s3">'struct'</span><span class="s2">, </span><span class="s1">name)</span>
+
+    <span class="s2">def </span><span class="s1">_loading_gen_struct(self</span><span class="s2">, </span><span class="s1">tp</span><span class="s2">, </span><span class="s1">name</span><span class="s2">, </span><span class="s1">module):</span>
+        <span class="s1">self._loading_struct_or_union(tp</span><span class="s2">, </span><span class="s3">'struct'</span><span class="s2">, </span><span class="s1">name</span><span class="s2">, </span><span class="s1">module)</span>
+
+    <span class="s2">def </span><span class="s1">_loaded_gen_struct(self</span><span class="s2">, </span><span class="s1">tp</span><span class="s2">, </span><span class="s1">name</span><span class="s2">, </span><span class="s1">module</span><span class="s2">, </span><span class="s1">**kwds):</span>
+        <span class="s1">self._loaded_struct_or_union(tp)</span>
+
+    <span class="s2">def </span><span class="s1">_generate_gen_union_decl(self</span><span class="s2">, </span><span class="s1">tp</span><span class="s2">, </span><span class="s1">name):</span>
+        <span class="s2">assert </span><span class="s1">name == tp.name</span>
+        <span class="s1">self._generate_struct_or_union_decl(tp</span><span class="s2">, </span><span class="s3">'union'</span><span class="s2">, </span><span class="s1">name)</span>
+
+    <span class="s2">def </span><span class="s1">_loading_gen_union(self</span><span class="s2">, </span><span class="s1">tp</span><span class="s2">, </span><span class="s1">name</span><span class="s2">, </span><span class="s1">module):</span>
+        <span class="s1">self._loading_struct_or_union(tp</span><span class="s2">, </span><span class="s3">'union'</span><span class="s2">, </span><span class="s1">name</span><span class="s2">, </span><span class="s1">module)</span>
+
+    <span class="s2">def </span><span class="s1">_loaded_gen_union(self</span><span class="s2">, </span><span class="s1">tp</span><span class="s2">, </span><span class="s1">name</span><span class="s2">, </span><span class="s1">module</span><span class="s2">, </span><span class="s1">**kwds):</span>
+        <span class="s1">self._loaded_struct_or_union(tp)</span>
+
+    <span class="s2">def </span><span class="s1">_generate_struct_or_union_decl(self</span><span class="s2">, </span><span class="s1">tp</span><span class="s2">, </span><span class="s1">prefix</span><span class="s2">, </span><span class="s1">name):</span>
+        <span class="s2">if </span><span class="s1">tp.fldnames </span><span class="s2">is None</span><span class="s1">:</span>
+            <span class="s2">return     </span><span class="s0"># nothing to do with opaque structs</span>
+        <span class="s1">checkfuncname = </span><span class="s3">'_cffi_check_%s_%s' </span><span class="s1">% (prefix</span><span class="s2">, </span><span class="s1">name)</span>
+        <span class="s1">layoutfuncname = </span><span class="s3">'_cffi_layout_%s_%s' </span><span class="s1">% (prefix</span><span class="s2">, </span><span class="s1">name)</span>
+        <span class="s1">cname = (</span><span class="s3">'%s %s' </span><span class="s1">% (prefix</span><span class="s2">, </span><span class="s1">name)).strip()</span>
+        <span class="s0">#</span>
+        <span class="s1">prnt = self._prnt</span>
+        <span class="s1">prnt(</span><span class="s3">'static void %s(%s *p)' </span><span class="s1">% (checkfuncname</span><span class="s2">, </span><span class="s1">cname))</span>
+        <span class="s1">prnt(</span><span class="s3">'{'</span><span class="s1">)</span>
+        <span class="s1">prnt(</span><span class="s3">'  /* only to generate compile-time warnings or errors */'</span><span class="s1">)</span>
+        <span class="s1">prnt(</span><span class="s3">'  (void)p;'</span><span class="s1">)</span>
+        <span class="s2">for </span><span class="s1">fname</span><span class="s2">, </span><span class="s1">ftype</span><span class="s2">, </span><span class="s1">fbitsize</span><span class="s2">, </span><span class="s1">fqual </span><span class="s2">in </span><span class="s1">tp.enumfields():</span>
+            <span class="s2">if </span><span class="s1">(isinstance(ftype</span><span class="s2">, </span><span class="s1">model.PrimitiveType)</span>
+                <span class="s2">and </span><span class="s1">ftype.is_integer_type()) </span><span class="s2">or </span><span class="s1">fbitsize &gt;= </span><span class="s4">0</span><span class="s1">:</span>
+                <span class="s0"># accept all integers, but complain on float or double</span>
+                <span class="s1">prnt(</span><span class="s3">'  (void)((p-&gt;%s) &lt;&lt; 1);' </span><span class="s1">% fname)</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s0"># only accept exactly the type declared.</span>
+                <span class="s2">try</span><span class="s1">:</span>
+                    <span class="s1">prnt(</span><span class="s3">'  { %s = &amp;p-&gt;%s; (void)tmp; }' </span><span class="s1">% (</span>
+                        <span class="s1">ftype.get_c_name(</span><span class="s3">'*tmp'</span><span class="s2">, </span><span class="s3">'field %r'</span><span class="s1">%fname</span><span class="s2">, </span><span class="s1">quals=fqual)</span><span class="s2">,</span>
+                        <span class="s1">fname))</span>
+                <span class="s2">except </span><span class="s1">VerificationError </span><span class="s2">as </span><span class="s1">e:</span>
+                    <span class="s1">prnt(</span><span class="s3">'  /* %s */' </span><span class="s1">% str(e))   </span><span class="s0"># cannot verify it, ignore</span>
+        <span class="s1">prnt(</span><span class="s3">'}'</span><span class="s1">)</span>
+        <span class="s1">self.export_symbols.append(layoutfuncname)</span>
+        <span class="s1">prnt(</span><span class="s3">'intptr_t %s(intptr_t i)' </span><span class="s1">% (layoutfuncname</span><span class="s2">,</span><span class="s1">))</span>
+        <span class="s1">prnt(</span><span class="s3">'{'</span><span class="s1">)</span>
+        <span class="s1">prnt(</span><span class="s3">'  struct _cffi_aligncheck { char x; %s y; };' </span><span class="s1">% cname)</span>
+        <span class="s1">prnt(</span><span class="s3">'  static intptr_t nums[] = {'</span><span class="s1">)</span>
+        <span class="s1">prnt(</span><span class="s3">'    sizeof(%s),' </span><span class="s1">% cname)</span>
+        <span class="s1">prnt(</span><span class="s3">'    offsetof(struct _cffi_aligncheck, y),'</span><span class="s1">)</span>
+        <span class="s2">for </span><span class="s1">fname</span><span class="s2">, </span><span class="s1">ftype</span><span class="s2">, </span><span class="s1">fbitsize</span><span class="s2">, </span><span class="s1">fqual </span><span class="s2">in </span><span class="s1">tp.enumfields():</span>
+            <span class="s2">if </span><span class="s1">fbitsize &gt;= </span><span class="s4">0</span><span class="s1">:</span>
+                <span class="s2">continue      </span><span class="s0"># xxx ignore fbitsize for now</span>
+            <span class="s1">prnt(</span><span class="s3">'    offsetof(%s, %s),' </span><span class="s1">% (cname</span><span class="s2">, </span><span class="s1">fname))</span>
+            <span class="s2">if </span><span class="s1">isinstance(ftype</span><span class="s2">, </span><span class="s1">model.ArrayType) </span><span class="s2">and </span><span class="s1">ftype.length </span><span class="s2">is None</span><span class="s1">:</span>
+                <span class="s1">prnt(</span><span class="s3">'    0,  /* %s */' </span><span class="s1">% ftype._get_c_name())</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s1">prnt(</span><span class="s3">'    sizeof(((%s *)0)-&gt;%s),' </span><span class="s1">% (cname</span><span class="s2">, </span><span class="s1">fname))</span>
+        <span class="s1">prnt(</span><span class="s3">'    -1'</span><span class="s1">)</span>
+        <span class="s1">prnt(</span><span class="s3">'  };'</span><span class="s1">)</span>
+        <span class="s1">prnt(</span><span class="s3">'  return nums[i];'</span><span class="s1">)</span>
+        <span class="s1">prnt(</span><span class="s3">'  /* the next line is not executed, but compiled */'</span><span class="s1">)</span>
+        <span class="s1">prnt(</span><span class="s3">'  %s(0);' </span><span class="s1">% (checkfuncname</span><span class="s2">,</span><span class="s1">))</span>
+        <span class="s1">prnt(</span><span class="s3">'}'</span><span class="s1">)</span>
+        <span class="s1">prnt()</span>
+
+    <span class="s2">def </span><span class="s1">_loading_struct_or_union(self</span><span class="s2">, </span><span class="s1">tp</span><span class="s2">, </span><span class="s1">prefix</span><span class="s2">, </span><span class="s1">name</span><span class="s2">, </span><span class="s1">module):</span>
+        <span class="s2">if </span><span class="s1">tp.fldnames </span><span class="s2">is None</span><span class="s1">:</span>
+            <span class="s2">return     </span><span class="s0"># nothing to do with opaque structs</span>
+        <span class="s1">layoutfuncname = </span><span class="s3">'_cffi_layout_%s_%s' </span><span class="s1">% (prefix</span><span class="s2">, </span><span class="s1">name)</span>
+        <span class="s0">#</span>
+        <span class="s1">BFunc = self.ffi._typeof_locked(</span><span class="s3">&quot;intptr_t(*)(intptr_t)&quot;</span><span class="s1">)[</span><span class="s4">0</span><span class="s1">]</span>
+        <span class="s1">function = module.load_function(BFunc</span><span class="s2">, </span><span class="s1">layoutfuncname)</span>
+        <span class="s1">layout = []</span>
+        <span class="s1">num = </span><span class="s4">0</span>
+        <span class="s2">while True</span><span class="s1">:</span>
+            <span class="s1">x = function(num)</span>
+            <span class="s2">if </span><span class="s1">x &lt; </span><span class="s4">0</span><span class="s1">: </span><span class="s2">break</span>
+            <span class="s1">layout.append(x)</span>
+            <span class="s1">num += </span><span class="s4">1</span>
+        <span class="s2">if </span><span class="s1">isinstance(tp</span><span class="s2">, </span><span class="s1">model.StructOrUnion) </span><span class="s2">and </span><span class="s1">tp.partial:</span>
+            <span class="s0"># use the function()'s sizes and offsets to guide the</span>
+            <span class="s0"># layout of the struct</span>
+            <span class="s1">totalsize = layout[</span><span class="s4">0</span><span class="s1">]</span>
+            <span class="s1">totalalignment = layout[</span><span class="s4">1</span><span class="s1">]</span>
+            <span class="s1">fieldofs = layout[</span><span class="s4">2</span><span class="s1">::</span><span class="s4">2</span><span class="s1">]</span>
+            <span class="s1">fieldsize = layout[</span><span class="s4">3</span><span class="s1">::</span><span class="s4">2</span><span class="s1">]</span>
+            <span class="s1">tp.force_flatten()</span>
+            <span class="s2">assert </span><span class="s1">len(fieldofs) == len(fieldsize) == len(tp.fldnames)</span>
+            <span class="s1">tp.fixedlayout = fieldofs</span><span class="s2">, </span><span class="s1">fieldsize</span><span class="s2">, </span><span class="s1">totalsize</span><span class="s2">, </span><span class="s1">totalalignment</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">cname = (</span><span class="s3">'%s %s' </span><span class="s1">% (prefix</span><span class="s2">, </span><span class="s1">name)).strip()</span>
+            <span class="s1">self._struct_pending_verification[tp] = layout</span><span class="s2">, </span><span class="s1">cname</span>
+
+    <span class="s2">def </span><span class="s1">_loaded_struct_or_union(self</span><span class="s2">, </span><span class="s1">tp):</span>
+        <span class="s2">if </span><span class="s1">tp.fldnames </span><span class="s2">is None</span><span class="s1">:</span>
+            <span class="s2">return     </span><span class="s0"># nothing to do with opaque structs</span>
+        <span class="s1">self.ffi._get_cached_btype(tp)   </span><span class="s0"># force 'fixedlayout' to be considered</span>
+
+        <span class="s2">if </span><span class="s1">tp </span><span class="s2">in </span><span class="s1">self._struct_pending_verification:</span>
+            <span class="s0"># check that the layout sizes and offsets match the real ones</span>
+            <span class="s2">def </span><span class="s1">check(realvalue</span><span class="s2">, </span><span class="s1">expectedvalue</span><span class="s2">, </span><span class="s1">msg):</span>
+                <span class="s2">if </span><span class="s1">realvalue != expectedvalue:</span>
+                    <span class="s2">raise </span><span class="s1">VerificationError(</span>
+                        <span class="s3">&quot;%s (we have %d, but C compiler says %d)&quot;</span>
+                        <span class="s1">% (msg</span><span class="s2">, </span><span class="s1">expectedvalue</span><span class="s2">, </span><span class="s1">realvalue))</span>
+            <span class="s1">ffi = self.ffi</span>
+            <span class="s1">BStruct = ffi._get_cached_btype(tp)</span>
+            <span class="s1">layout</span><span class="s2">, </span><span class="s1">cname = self._struct_pending_verification.pop(tp)</span>
+            <span class="s1">check(layout[</span><span class="s4">0</span><span class="s1">]</span><span class="s2">, </span><span class="s1">ffi.sizeof(BStruct)</span><span class="s2">, </span><span class="s3">&quot;wrong total size&quot;</span><span class="s1">)</span>
+            <span class="s1">check(layout[</span><span class="s4">1</span><span class="s1">]</span><span class="s2">, </span><span class="s1">ffi.alignof(BStruct)</span><span class="s2">, </span><span class="s3">&quot;wrong total alignment&quot;</span><span class="s1">)</span>
+            <span class="s1">i = </span><span class="s4">2</span>
+            <span class="s2">for </span><span class="s1">fname</span><span class="s2">, </span><span class="s1">ftype</span><span class="s2">, </span><span class="s1">fbitsize</span><span class="s2">, </span><span class="s1">fqual </span><span class="s2">in </span><span class="s1">tp.enumfields():</span>
+                <span class="s2">if </span><span class="s1">fbitsize &gt;= </span><span class="s4">0</span><span class="s1">:</span>
+                    <span class="s2">continue        </span><span class="s0"># xxx ignore fbitsize for now</span>
+                <span class="s1">check(layout[i]</span><span class="s2">, </span><span class="s1">ffi.offsetof(BStruct</span><span class="s2">, </span><span class="s1">fname)</span><span class="s2">,</span>
+                      <span class="s3">&quot;wrong offset for field %r&quot; </span><span class="s1">% (fname</span><span class="s2">,</span><span class="s1">))</span>
+                <span class="s2">if </span><span class="s1">layout[i+</span><span class="s4">1</span><span class="s1">] != </span><span class="s4">0</span><span class="s1">:</span>
+                    <span class="s1">BField = ffi._get_cached_btype(ftype)</span>
+                    <span class="s1">check(layout[i+</span><span class="s4">1</span><span class="s1">]</span><span class="s2">, </span><span class="s1">ffi.sizeof(BField)</span><span class="s2">,</span>
+                          <span class="s3">&quot;wrong size for field %r&quot; </span><span class="s1">% (fname</span><span class="s2">,</span><span class="s1">))</span>
+                <span class="s1">i += </span><span class="s4">2</span>
+            <span class="s2">assert </span><span class="s1">i == len(layout)</span>
+
+    <span class="s0"># ----------</span>
+    <span class="s0"># 'anonymous' declarations.  These are produced for anonymous structs</span>
+    <span class="s0"># or unions; the 'name' is obtained by a typedef.</span>
+
+    <span class="s2">def </span><span class="s1">_generate_gen_anonymous_decl(self</span><span class="s2">, </span><span class="s1">tp</span><span class="s2">, </span><span class="s1">name):</span>
+        <span class="s2">if </span><span class="s1">isinstance(tp</span><span class="s2">, </span><span class="s1">model.EnumType):</span>
+            <span class="s1">self._generate_gen_enum_decl(tp</span><span class="s2">, </span><span class="s1">name</span><span class="s2">, </span><span class="s3">''</span><span class="s1">)</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">self._generate_struct_or_union_decl(tp</span><span class="s2">, </span><span class="s3">''</span><span class="s2">, </span><span class="s1">name)</span>
+
+    <span class="s2">def </span><span class="s1">_loading_gen_anonymous(self</span><span class="s2">, </span><span class="s1">tp</span><span class="s2">, </span><span class="s1">name</span><span class="s2">, </span><span class="s1">module):</span>
+        <span class="s2">if </span><span class="s1">isinstance(tp</span><span class="s2">, </span><span class="s1">model.EnumType):</span>
+            <span class="s1">self._loading_gen_enum(tp</span><span class="s2">, </span><span class="s1">name</span><span class="s2">, </span><span class="s1">module</span><span class="s2">, </span><span class="s3">''</span><span class="s1">)</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">self._loading_struct_or_union(tp</span><span class="s2">, </span><span class="s3">''</span><span class="s2">, </span><span class="s1">name</span><span class="s2">, </span><span class="s1">module)</span>
+
+    <span class="s2">def </span><span class="s1">_loaded_gen_anonymous(self</span><span class="s2">, </span><span class="s1">tp</span><span class="s2">, </span><span class="s1">name</span><span class="s2">, </span><span class="s1">module</span><span class="s2">, </span><span class="s1">**kwds):</span>
+        <span class="s2">if </span><span class="s1">isinstance(tp</span><span class="s2">, </span><span class="s1">model.EnumType):</span>
+            <span class="s1">self._loaded_gen_enum(tp</span><span class="s2">, </span><span class="s1">name</span><span class="s2">, </span><span class="s1">module</span><span class="s2">, </span><span class="s1">**kwds)</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">self._loaded_struct_or_union(tp)</span>
+
+    <span class="s0"># ----------</span>
+    <span class="s0"># constants, likely declared with '#define'</span>
+
+    <span class="s2">def </span><span class="s1">_generate_gen_const(self</span><span class="s2">, </span><span class="s1">is_int</span><span class="s2">, </span><span class="s1">name</span><span class="s2">, </span><span class="s1">tp=</span><span class="s2">None, </span><span class="s1">category=</span><span class="s3">'const'</span><span class="s2">,</span>
+                            <span class="s1">check_value=</span><span class="s2">None</span><span class="s1">):</span>
+        <span class="s1">prnt = self._prnt</span>
+        <span class="s1">funcname = </span><span class="s3">'_cffi_%s_%s' </span><span class="s1">% (category</span><span class="s2">, </span><span class="s1">name)</span>
+        <span class="s1">self.export_symbols.append(funcname)</span>
+        <span class="s2">if </span><span class="s1">check_value </span><span class="s2">is not None</span><span class="s1">:</span>
+            <span class="s2">assert </span><span class="s1">is_int</span>
+            <span class="s2">assert </span><span class="s1">category == </span><span class="s3">'const'</span>
+            <span class="s1">prnt(</span><span class="s3">'int %s(char *out_error)' </span><span class="s1">% funcname)</span>
+            <span class="s1">prnt(</span><span class="s3">'{'</span><span class="s1">)</span>
+            <span class="s1">self._check_int_constant_value(name</span><span class="s2">, </span><span class="s1">check_value)</span>
+            <span class="s1">prnt(</span><span class="s3">'  return 0;'</span><span class="s1">)</span>
+            <span class="s1">prnt(</span><span class="s3">'}'</span><span class="s1">)</span>
+        <span class="s2">elif </span><span class="s1">is_int:</span>
+            <span class="s2">assert </span><span class="s1">category == </span><span class="s3">'const'</span>
+            <span class="s1">prnt(</span><span class="s3">'int %s(long long *out_value)' </span><span class="s1">% funcname)</span>
+            <span class="s1">prnt(</span><span class="s3">'{'</span><span class="s1">)</span>
+            <span class="s1">prnt(</span><span class="s3">'  *out_value = (long long)(%s);' </span><span class="s1">% (name</span><span class="s2">,</span><span class="s1">))</span>
+            <span class="s1">prnt(</span><span class="s3">'  return (%s) &lt;= 0;' </span><span class="s1">% (name</span><span class="s2">,</span><span class="s1">))</span>
+            <span class="s1">prnt(</span><span class="s3">'}'</span><span class="s1">)</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s2">assert </span><span class="s1">tp </span><span class="s2">is not None</span>
+            <span class="s2">assert </span><span class="s1">check_value </span><span class="s2">is None</span>
+            <span class="s2">if </span><span class="s1">category == </span><span class="s3">'var'</span><span class="s1">:</span>
+                <span class="s1">ampersand = </span><span class="s3">'&amp;'</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s1">ampersand = </span><span class="s3">''</span>
+            <span class="s1">extra = </span><span class="s3">''</span>
+            <span class="s2">if </span><span class="s1">category == </span><span class="s3">'const' </span><span class="s2">and </span><span class="s1">isinstance(tp</span><span class="s2">, </span><span class="s1">model.StructOrUnion):</span>
+                <span class="s1">extra = </span><span class="s3">'const *'</span>
+                <span class="s1">ampersand = </span><span class="s3">'&amp;'</span>
+            <span class="s1">prnt(tp.get_c_name(</span><span class="s3">' %s%s(void)' </span><span class="s1">% (extra</span><span class="s2">, </span><span class="s1">funcname)</span><span class="s2">, </span><span class="s1">name))</span>
+            <span class="s1">prnt(</span><span class="s3">'{'</span><span class="s1">)</span>
+            <span class="s1">prnt(</span><span class="s3">'  return (%s%s);' </span><span class="s1">% (ampersand</span><span class="s2">, </span><span class="s1">name))</span>
+            <span class="s1">prnt(</span><span class="s3">'}'</span><span class="s1">)</span>
+        <span class="s1">prnt()</span>
+
+    <span class="s2">def </span><span class="s1">_generate_gen_constant_decl(self</span><span class="s2">, </span><span class="s1">tp</span><span class="s2">, </span><span class="s1">name):</span>
+        <span class="s1">is_int = isinstance(tp</span><span class="s2">, </span><span class="s1">model.PrimitiveType) </span><span class="s2">and </span><span class="s1">tp.is_integer_type()</span>
+        <span class="s1">self._generate_gen_const(is_int</span><span class="s2">, </span><span class="s1">name</span><span class="s2">, </span><span class="s1">tp)</span>
+
+    <span class="s1">_loading_gen_constant = _loaded_noop</span>
+
+    <span class="s2">def </span><span class="s1">_load_constant(self</span><span class="s2">, </span><span class="s1">is_int</span><span class="s2">, </span><span class="s1">tp</span><span class="s2">, </span><span class="s1">name</span><span class="s2">, </span><span class="s1">module</span><span class="s2">, </span><span class="s1">check_value=</span><span class="s2">None</span><span class="s1">):</span>
+        <span class="s1">funcname = </span><span class="s3">'_cffi_const_%s' </span><span class="s1">% name</span>
+        <span class="s2">if </span><span class="s1">check_value </span><span class="s2">is not None</span><span class="s1">:</span>
+            <span class="s2">assert </span><span class="s1">is_int</span>
+            <span class="s1">self._load_known_int_constant(module</span><span class="s2">, </span><span class="s1">funcname)</span>
+            <span class="s1">value = check_value</span>
+        <span class="s2">elif </span><span class="s1">is_int:</span>
+            <span class="s1">BType = self.ffi._typeof_locked(</span><span class="s3">&quot;long long*&quot;</span><span class="s1">)[</span><span class="s4">0</span><span class="s1">]</span>
+            <span class="s1">BFunc = self.ffi._typeof_locked(</span><span class="s3">&quot;int(*)(long long*)&quot;</span><span class="s1">)[</span><span class="s4">0</span><span class="s1">]</span>
+            <span class="s1">function = module.load_function(BFunc</span><span class="s2">, </span><span class="s1">funcname)</span>
+            <span class="s1">p = self.ffi.new(BType)</span>
+            <span class="s1">negative = function(p)</span>
+            <span class="s1">value = int(p[</span><span class="s4">0</span><span class="s1">])</span>
+            <span class="s2">if </span><span class="s1">value &lt; </span><span class="s4">0 </span><span class="s2">and not </span><span class="s1">negative:</span>
+                <span class="s1">BLongLong = self.ffi._typeof_locked(</span><span class="s3">&quot;long long&quot;</span><span class="s1">)[</span><span class="s4">0</span><span class="s1">]</span>
+                <span class="s1">value += (</span><span class="s4">1 </span><span class="s1">&lt;&lt; (</span><span class="s4">8</span><span class="s1">*self.ffi.sizeof(BLongLong)))</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s2">assert </span><span class="s1">check_value </span><span class="s2">is None</span>
+            <span class="s1">fntypeextra = </span><span class="s3">'(*)(void)'</span>
+            <span class="s2">if </span><span class="s1">isinstance(tp</span><span class="s2">, </span><span class="s1">model.StructOrUnion):</span>
+                <span class="s1">fntypeextra = </span><span class="s3">'*' </span><span class="s1">+ fntypeextra</span>
+            <span class="s1">BFunc = self.ffi._typeof_locked(tp.get_c_name(fntypeextra</span><span class="s2">, </span><span class="s1">name))[</span><span class="s4">0</span><span class="s1">]</span>
+            <span class="s1">function = module.load_function(BFunc</span><span class="s2">, </span><span class="s1">funcname)</span>
+            <span class="s1">value = function()</span>
+            <span class="s2">if </span><span class="s1">isinstance(tp</span><span class="s2">, </span><span class="s1">model.StructOrUnion):</span>
+                <span class="s1">value = value[</span><span class="s4">0</span><span class="s1">]</span>
+        <span class="s2">return </span><span class="s1">value</span>
+
+    <span class="s2">def </span><span class="s1">_loaded_gen_constant(self</span><span class="s2">, </span><span class="s1">tp</span><span class="s2">, </span><span class="s1">name</span><span class="s2">, </span><span class="s1">module</span><span class="s2">, </span><span class="s1">library):</span>
+        <span class="s1">is_int = isinstance(tp</span><span class="s2">, </span><span class="s1">model.PrimitiveType) </span><span class="s2">and </span><span class="s1">tp.is_integer_type()</span>
+        <span class="s1">value = self._load_constant(is_int</span><span class="s2">, </span><span class="s1">tp</span><span class="s2">, </span><span class="s1">name</span><span class="s2">, </span><span class="s1">module)</span>
+        <span class="s1">setattr(library</span><span class="s2">, </span><span class="s1">name</span><span class="s2">, </span><span class="s1">value)</span>
+        <span class="s1">type(library)._cffi_dir.append(name)</span>
+
+    <span class="s0"># ----------</span>
+    <span class="s0"># enums</span>
+
+    <span class="s2">def </span><span class="s1">_check_int_constant_value(self</span><span class="s2">, </span><span class="s1">name</span><span class="s2">, </span><span class="s1">value):</span>
+        <span class="s1">prnt = self._prnt</span>
+        <span class="s2">if </span><span class="s1">value &lt;= </span><span class="s4">0</span><span class="s1">:</span>
+            <span class="s1">prnt(</span><span class="s3">'  if ((%s) &gt; 0 || (long)(%s) != %dL) {' </span><span class="s1">% (</span>
+                <span class="s1">name</span><span class="s2">, </span><span class="s1">name</span><span class="s2">, </span><span class="s1">value))</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">prnt(</span><span class="s3">'  if ((%s) &lt;= 0 || (unsigned long)(%s) != %dUL) {' </span><span class="s1">% (</span>
+                <span class="s1">name</span><span class="s2">, </span><span class="s1">name</span><span class="s2">, </span><span class="s1">value))</span>
+        <span class="s1">prnt(</span><span class="s3">'    char buf[64];'</span><span class="s1">)</span>
+        <span class="s1">prnt(</span><span class="s3">'    if ((%s) &lt;= 0)' </span><span class="s1">% name)</span>
+        <span class="s1">prnt(</span><span class="s3">'        sprintf(buf, &quot;%%ld&quot;, (long)(%s));' </span><span class="s1">% name)</span>
+        <span class="s1">prnt(</span><span class="s3">'    else'</span><span class="s1">)</span>
+        <span class="s1">prnt(</span><span class="s3">'        sprintf(buf, &quot;%%lu&quot;, (unsigned long)(%s));' </span><span class="s1">%</span>
+             <span class="s1">name)</span>
+        <span class="s1">prnt(</span><span class="s3">'    sprintf(out_error, &quot;%s has the real value %s, not %s&quot;,'</span><span class="s1">)</span>
+        <span class="s1">prnt(</span><span class="s3">'            &quot;%s&quot;, buf, &quot;%d&quot;);' </span><span class="s1">% (name[:</span><span class="s4">100</span><span class="s1">]</span><span class="s2">, </span><span class="s1">value))</span>
+        <span class="s1">prnt(</span><span class="s3">'    return -1;'</span><span class="s1">)</span>
+        <span class="s1">prnt(</span><span class="s3">'  }'</span><span class="s1">)</span>
+
+    <span class="s2">def </span><span class="s1">_load_known_int_constant(self</span><span class="s2">, </span><span class="s1">module</span><span class="s2">, </span><span class="s1">funcname):</span>
+        <span class="s1">BType = self.ffi._typeof_locked(</span><span class="s3">&quot;char[]&quot;</span><span class="s1">)[</span><span class="s4">0</span><span class="s1">]</span>
+        <span class="s1">BFunc = self.ffi._typeof_locked(</span><span class="s3">&quot;int(*)(char*)&quot;</span><span class="s1">)[</span><span class="s4">0</span><span class="s1">]</span>
+        <span class="s1">function = module.load_function(BFunc</span><span class="s2">, </span><span class="s1">funcname)</span>
+        <span class="s1">p = self.ffi.new(BType</span><span class="s2">, </span><span class="s4">256</span><span class="s1">)</span>
+        <span class="s2">if </span><span class="s1">function(p) &lt; </span><span class="s4">0</span><span class="s1">:</span>
+            <span class="s1">error = self.ffi.string(p)</span>
+            <span class="s2">if </span><span class="s1">sys.version_info &gt;= (</span><span class="s4">3</span><span class="s2">,</span><span class="s1">):</span>
+                <span class="s1">error = str(error</span><span class="s2">, </span><span class="s3">'utf-8'</span><span class="s1">)</span>
+            <span class="s2">raise </span><span class="s1">VerificationError(error)</span>
+
+    <span class="s2">def </span><span class="s1">_enum_funcname(self</span><span class="s2">, </span><span class="s1">prefix</span><span class="s2">, </span><span class="s1">name):</span>
+        <span class="s0"># &quot;$enum_$1&quot; =&gt; &quot;___D_enum____D_1&quot;</span>
+        <span class="s1">name = name.replace(</span><span class="s3">'$'</span><span class="s2">, </span><span class="s3">'___D_'</span><span class="s1">)</span>
+        <span class="s2">return </span><span class="s3">'_cffi_e_%s_%s' </span><span class="s1">% (prefix</span><span class="s2">, </span><span class="s1">name)</span>
+
+    <span class="s2">def </span><span class="s1">_generate_gen_enum_decl(self</span><span class="s2">, </span><span class="s1">tp</span><span class="s2">, </span><span class="s1">name</span><span class="s2">, </span><span class="s1">prefix=</span><span class="s3">'enum'</span><span class="s1">):</span>
+        <span class="s2">if </span><span class="s1">tp.partial:</span>
+            <span class="s2">for </span><span class="s1">enumerator </span><span class="s2">in </span><span class="s1">tp.enumerators:</span>
+                <span class="s1">self._generate_gen_const(</span><span class="s2">True, </span><span class="s1">enumerator)</span>
+            <span class="s2">return</span>
+        <span class="s0">#</span>
+        <span class="s1">funcname = self._enum_funcname(prefix</span><span class="s2">, </span><span class="s1">name)</span>
+        <span class="s1">self.export_symbols.append(funcname)</span>
+        <span class="s1">prnt = self._prnt</span>
+        <span class="s1">prnt(</span><span class="s3">'int %s(char *out_error)' </span><span class="s1">% funcname)</span>
+        <span class="s1">prnt(</span><span class="s3">'{'</span><span class="s1">)</span>
+        <span class="s2">for </span><span class="s1">enumerator</span><span class="s2">, </span><span class="s1">enumvalue </span><span class="s2">in </span><span class="s1">zip(tp.enumerators</span><span class="s2">, </span><span class="s1">tp.enumvalues):</span>
+            <span class="s1">self._check_int_constant_value(enumerator</span><span class="s2">, </span><span class="s1">enumvalue)</span>
+        <span class="s1">prnt(</span><span class="s3">'  return 0;'</span><span class="s1">)</span>
+        <span class="s1">prnt(</span><span class="s3">'}'</span><span class="s1">)</span>
+        <span class="s1">prnt()</span>
+
+    <span class="s2">def </span><span class="s1">_loading_gen_enum(self</span><span class="s2">, </span><span class="s1">tp</span><span class="s2">, </span><span class="s1">name</span><span class="s2">, </span><span class="s1">module</span><span class="s2">, </span><span class="s1">prefix=</span><span class="s3">'enum'</span><span class="s1">):</span>
+        <span class="s2">if </span><span class="s1">tp.partial:</span>
+            <span class="s1">enumvalues = [self._load_constant(</span><span class="s2">True, </span><span class="s1">tp</span><span class="s2">, </span><span class="s1">enumerator</span><span class="s2">, </span><span class="s1">module)</span>
+                          <span class="s2">for </span><span class="s1">enumerator </span><span class="s2">in </span><span class="s1">tp.enumerators]</span>
+            <span class="s1">tp.enumvalues = tuple(enumvalues)</span>
+            <span class="s1">tp.partial_resolved = </span><span class="s2">True</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">funcname = self._enum_funcname(prefix</span><span class="s2">, </span><span class="s1">name)</span>
+            <span class="s1">self._load_known_int_constant(module</span><span class="s2">, </span><span class="s1">funcname)</span>
+
+    <span class="s2">def </span><span class="s1">_loaded_gen_enum(self</span><span class="s2">, </span><span class="s1">tp</span><span class="s2">, </span><span class="s1">name</span><span class="s2">, </span><span class="s1">module</span><span class="s2">, </span><span class="s1">library):</span>
+        <span class="s2">for </span><span class="s1">enumerator</span><span class="s2">, </span><span class="s1">enumvalue </span><span class="s2">in </span><span class="s1">zip(tp.enumerators</span><span class="s2">, </span><span class="s1">tp.enumvalues):</span>
+            <span class="s1">setattr(library</span><span class="s2">, </span><span class="s1">enumerator</span><span class="s2">, </span><span class="s1">enumvalue)</span>
+            <span class="s1">type(library)._cffi_dir.append(enumerator)</span>
+
+    <span class="s0"># ----------</span>
+    <span class="s0"># macros: for now only for integers</span>
+
+    <span class="s2">def </span><span class="s1">_generate_gen_macro_decl(self</span><span class="s2">, </span><span class="s1">tp</span><span class="s2">, </span><span class="s1">name):</span>
+        <span class="s2">if </span><span class="s1">tp == </span><span class="s3">'...'</span><span class="s1">:</span>
+            <span class="s1">check_value = </span><span class="s2">None</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">check_value = tp     </span><span class="s0"># an integer</span>
+        <span class="s1">self._generate_gen_const(</span><span class="s2">True, </span><span class="s1">name</span><span class="s2">, </span><span class="s1">check_value=check_value)</span>
+
+    <span class="s1">_loading_gen_macro = _loaded_noop</span>
+
+    <span class="s2">def </span><span class="s1">_loaded_gen_macro(self</span><span class="s2">, </span><span class="s1">tp</span><span class="s2">, </span><span class="s1">name</span><span class="s2">, </span><span class="s1">module</span><span class="s2">, </span><span class="s1">library):</span>
+        <span class="s2">if </span><span class="s1">tp == </span><span class="s3">'...'</span><span class="s1">:</span>
+            <span class="s1">check_value = </span><span class="s2">None</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">check_value = tp     </span><span class="s0"># an integer</span>
+        <span class="s1">value = self._load_constant(</span><span class="s2">True, </span><span class="s1">tp</span><span class="s2">, </span><span class="s1">name</span><span class="s2">, </span><span class="s1">module</span><span class="s2">,</span>
+                                    <span class="s1">check_value=check_value)</span>
+        <span class="s1">setattr(library</span><span class="s2">, </span><span class="s1">name</span><span class="s2">, </span><span class="s1">value)</span>
+        <span class="s1">type(library)._cffi_dir.append(name)</span>
+
+    <span class="s0"># ----------</span>
+    <span class="s0"># global variables</span>
+
+    <span class="s2">def </span><span class="s1">_generate_gen_variable_decl(self</span><span class="s2">, </span><span class="s1">tp</span><span class="s2">, </span><span class="s1">name):</span>
+        <span class="s2">if </span><span class="s1">isinstance(tp</span><span class="s2">, </span><span class="s1">model.ArrayType):</span>
+            <span class="s2">if </span><span class="s1">tp.length_is_unknown():</span>
+                <span class="s1">prnt = self._prnt</span>
+                <span class="s1">funcname = </span><span class="s3">'_cffi_sizeof_%s' </span><span class="s1">% (name</span><span class="s2">,</span><span class="s1">)</span>
+                <span class="s1">self.export_symbols.append(funcname)</span>
+                <span class="s1">prnt(</span><span class="s3">&quot;size_t %s(void)&quot; </span><span class="s1">% funcname)</span>
+                <span class="s1">prnt(</span><span class="s3">&quot;{&quot;</span><span class="s1">)</span>
+                <span class="s1">prnt(</span><span class="s3">&quot;  return sizeof(%s);&quot; </span><span class="s1">% (name</span><span class="s2">,</span><span class="s1">))</span>
+                <span class="s1">prnt(</span><span class="s3">&quot;}&quot;</span><span class="s1">)</span>
+            <span class="s1">tp_ptr = model.PointerType(tp.item)</span>
+            <span class="s1">self._generate_gen_const(</span><span class="s2">False, </span><span class="s1">name</span><span class="s2">, </span><span class="s1">tp_ptr)</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">tp_ptr = model.PointerType(tp)</span>
+            <span class="s1">self._generate_gen_const(</span><span class="s2">False, </span><span class="s1">name</span><span class="s2">, </span><span class="s1">tp_ptr</span><span class="s2">, </span><span class="s1">category=</span><span class="s3">'var'</span><span class="s1">)</span>
+
+    <span class="s1">_loading_gen_variable = _loaded_noop</span>
+
+    <span class="s2">def </span><span class="s1">_loaded_gen_variable(self</span><span class="s2">, </span><span class="s1">tp</span><span class="s2">, </span><span class="s1">name</span><span class="s2">, </span><span class="s1">module</span><span class="s2">, </span><span class="s1">library):</span>
+        <span class="s2">if </span><span class="s1">isinstance(tp</span><span class="s2">, </span><span class="s1">model.ArrayType):   </span><span class="s0"># int a[5] is &quot;constant&quot; in the</span>
+                                              <span class="s0"># sense that &quot;a=...&quot; is forbidden</span>
+            <span class="s2">if </span><span class="s1">tp.length_is_unknown():</span>
+                <span class="s1">funcname = </span><span class="s3">'_cffi_sizeof_%s' </span><span class="s1">% (name</span><span class="s2">,</span><span class="s1">)</span>
+                <span class="s1">BFunc = self.ffi._typeof_locked(</span><span class="s3">'size_t(*)(void)'</span><span class="s1">)[</span><span class="s4">0</span><span class="s1">]</span>
+                <span class="s1">function = module.load_function(BFunc</span><span class="s2">, </span><span class="s1">funcname)</span>
+                <span class="s1">size = function()</span>
+                <span class="s1">BItemType = self.ffi._get_cached_btype(tp.item)</span>
+                <span class="s1">length</span><span class="s2">, </span><span class="s1">rest = divmod(size</span><span class="s2">, </span><span class="s1">self.ffi.sizeof(BItemType))</span>
+                <span class="s2">if </span><span class="s1">rest != </span><span class="s4">0</span><span class="s1">:</span>
+                    <span class="s2">raise </span><span class="s1">VerificationError(</span>
+                        <span class="s3">&quot;bad size: %r does not seem to be an array of %s&quot; </span><span class="s1">%</span>
+                        <span class="s1">(name</span><span class="s2">, </span><span class="s1">tp.item))</span>
+                <span class="s1">tp = tp.resolve_length(length)</span>
+            <span class="s1">tp_ptr = model.PointerType(tp.item)</span>
+            <span class="s1">value = self._load_constant(</span><span class="s2">False, </span><span class="s1">tp_ptr</span><span class="s2">, </span><span class="s1">name</span><span class="s2">, </span><span class="s1">module)</span>
+            <span class="s0"># 'value' is a &lt;cdata 'type *'&gt; which we have to replace with</span>
+            <span class="s0"># a &lt;cdata 'type[N]'&gt; if the N is actually known</span>
+            <span class="s2">if </span><span class="s1">tp.length </span><span class="s2">is not None</span><span class="s1">:</span>
+                <span class="s1">BArray = self.ffi._get_cached_btype(tp)</span>
+                <span class="s1">value = self.ffi.cast(BArray</span><span class="s2">, </span><span class="s1">value)</span>
+            <span class="s1">setattr(library</span><span class="s2">, </span><span class="s1">name</span><span class="s2">, </span><span class="s1">value)</span>
+            <span class="s1">type(library)._cffi_dir.append(name)</span>
+            <span class="s2">return</span>
+        <span class="s0"># remove ptr=&lt;cdata 'int *'&gt; from the library instance, and replace</span>
+        <span class="s0"># it by a property on the class, which reads/writes into ptr[0].</span>
+        <span class="s1">funcname = </span><span class="s3">'_cffi_var_%s' </span><span class="s1">% name</span>
+        <span class="s1">BFunc = self.ffi._typeof_locked(tp.get_c_name(</span><span class="s3">'*(*)(void)'</span><span class="s2">, </span><span class="s1">name))[</span><span class="s4">0</span><span class="s1">]</span>
+        <span class="s1">function = module.load_function(BFunc</span><span class="s2">, </span><span class="s1">funcname)</span>
+        <span class="s1">ptr = function()</span>
+        <span class="s2">def </span><span class="s1">getter(library):</span>
+            <span class="s2">return </span><span class="s1">ptr[</span><span class="s4">0</span><span class="s1">]</span>
+        <span class="s2">def </span><span class="s1">setter(library</span><span class="s2">, </span><span class="s1">value):</span>
+            <span class="s1">ptr[</span><span class="s4">0</span><span class="s1">] = value</span>
+        <span class="s1">setattr(type(library)</span><span class="s2">, </span><span class="s1">name</span><span class="s2">, </span><span class="s1">property(getter</span><span class="s2">, </span><span class="s1">setter))</span>
+        <span class="s1">type(library)._cffi_dir.append(name)</span>
+
+<span class="s1">cffimod_header = </span><span class="s3">r''' 
+#include &lt;stdio.h&gt; 
+#include &lt;stddef.h&gt; 
+#include &lt;stdarg.h&gt; 
+#include &lt;errno.h&gt; 
+#include &lt;sys/types.h&gt;   /* XXX for ssize_t on some platforms */ 
+ 
+/* this block of #ifs should be kept exactly identical between 
+   c/_cffi_backend.c, cffi/vengine_cpy.py, cffi/vengine_gen.py 
+   and cffi/_cffi_include.h */ 
+#if defined(_MSC_VER) 
+# include &lt;malloc.h&gt;   /* for alloca() */ 
+# if _MSC_VER &lt; 1600   /* MSVC &lt; 2010 */ 
+   typedef __int8 int8_t; 
+   typedef __int16 int16_t; 
+   typedef __int32 int32_t; 
+   typedef __int64 int64_t; 
+   typedef unsigned __int8 uint8_t; 
+   typedef unsigned __int16 uint16_t; 
+   typedef unsigned __int32 uint32_t; 
+   typedef unsigned __int64 uint64_t; 
+   typedef __int8 int_least8_t; 
+   typedef __int16 int_least16_t; 
+   typedef __int32 int_least32_t; 
+   typedef __int64 int_least64_t; 
+   typedef unsigned __int8 uint_least8_t; 
+   typedef unsigned __int16 uint_least16_t; 
+   typedef unsigned __int32 uint_least32_t; 
+   typedef unsigned __int64 uint_least64_t; 
+   typedef __int8 int_fast8_t; 
+   typedef __int16 int_fast16_t; 
+   typedef __int32 int_fast32_t; 
+   typedef __int64 int_fast64_t; 
+   typedef unsigned __int8 uint_fast8_t; 
+   typedef unsigned __int16 uint_fast16_t; 
+   typedef unsigned __int32 uint_fast32_t; 
+   typedef unsigned __int64 uint_fast64_t; 
+   typedef __int64 intmax_t; 
+   typedef unsigned __int64 uintmax_t; 
+# else 
+#  include &lt;stdint.h&gt; 
+# endif 
+# if _MSC_VER &lt; 1800   /* MSVC &lt; 2013 */ 
+#  ifndef __cplusplus 
+    typedef unsigned char _Bool; 
+#  endif 
+# endif 
+#else 
+# include &lt;stdint.h&gt; 
+# if (defined (__SVR4) &amp;&amp; defined (__sun)) || defined(_AIX) || defined(__hpux) 
+#  include &lt;alloca.h&gt; 
+# endif 
+#endif 
+'''</span>
+</pre>
+</body>
+</html>

@@ -1,0 +1,240 @@
+<html>
+<head>
+<title>verify.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #629755; font-style: italic;}
+.s3 { color: #cc7832;}
+.s4 { color: #6a8759;}
+.s5 { color: #6897bb;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+verify.py</font>
+</center></td></tr></table>
+<pre><span class="s0">##############################################################################</span>
+<span class="s0">#</span>
+<span class="s0"># Copyright (c) 2001, 2002 Zope Foundation and Contributors.</span>
+<span class="s0"># All Rights Reserved.</span>
+<span class="s0">#</span>
+<span class="s0"># This software is subject to the provisions of the Zope Public License,</span>
+<span class="s0"># Version 2.1 (ZPL).  A copy of the ZPL should accompany this distribution.</span>
+<span class="s0"># THIS SOFTWARE IS PROVIDED &quot;AS IS&quot; AND ANY AND ALL EXPRESS OR IMPLIED</span>
+<span class="s0"># WARRANTIES ARE DISCLAIMED, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED</span>
+<span class="s0"># WARRANTIES OF TITLE, MERCHANTABILITY, AGAINST INFRINGEMENT, AND FITNESS</span>
+<span class="s0"># FOR A PARTICULAR PURPOSE.</span>
+<span class="s0">#</span>
+<span class="s0">##############################################################################</span>
+<span class="s2">&quot;&quot;&quot;Verify interface implementations 
+&quot;&quot;&quot;</span>
+<span class="s3">from </span><span class="s1">__future__ </span><span class="s3">import </span><span class="s1">print_function</span>
+<span class="s3">import </span><span class="s1">inspect</span>
+<span class="s3">import </span><span class="s1">sys</span>
+<span class="s3">from </span><span class="s1">types </span><span class="s3">import </span><span class="s1">FunctionType</span>
+<span class="s3">from </span><span class="s1">types </span><span class="s3">import </span><span class="s1">MethodType</span>
+
+<span class="s3">from </span><span class="s1">zope.interface._compat </span><span class="s3">import </span><span class="s1">PYPY2</span>
+
+<span class="s3">from </span><span class="s1">zope.interface.exceptions </span><span class="s3">import </span><span class="s1">BrokenImplementation</span>
+<span class="s3">from </span><span class="s1">zope.interface.exceptions </span><span class="s3">import </span><span class="s1">BrokenMethodImplementation</span>
+<span class="s3">from </span><span class="s1">zope.interface.exceptions </span><span class="s3">import </span><span class="s1">DoesNotImplement</span>
+<span class="s3">from </span><span class="s1">zope.interface.exceptions </span><span class="s3">import </span><span class="s1">Invalid</span>
+<span class="s3">from </span><span class="s1">zope.interface.exceptions </span><span class="s3">import </span><span class="s1">MultipleInvalid</span>
+
+<span class="s3">from </span><span class="s1">zope.interface.interface </span><span class="s3">import </span><span class="s1">fromMethod</span><span class="s3">, </span><span class="s1">fromFunction</span><span class="s3">, </span><span class="s1">Method</span>
+
+<span class="s1">__all__ = [</span>
+    <span class="s4">'verifyObject'</span><span class="s3">,</span>
+    <span class="s4">'verifyClass'</span><span class="s3">,</span>
+<span class="s1">]</span>
+
+<span class="s0"># This will be monkey-patched when running under Zope 2, so leave this</span>
+<span class="s0"># here:</span>
+<span class="s1">MethodTypes = (MethodType</span><span class="s3">, </span><span class="s1">)</span>
+
+
+<span class="s3">def </span><span class="s1">_verify(iface</span><span class="s3">, </span><span class="s1">candidate</span><span class="s3">, </span><span class="s1">tentative=</span><span class="s3">False, </span><span class="s1">vtype=</span><span class="s3">None</span><span class="s1">):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Verify that *candidate* might correctly provide *iface*. 
+ 
+    This involves: 
+ 
+    - Making sure the candidate claims that it provides the 
+      interface using ``iface.providedBy`` (unless *tentative* is `True`, 
+      in which case this step is skipped). This means that the candidate's class 
+      declares that it `implements &lt;zope.interface.implementer&gt;` the interface, 
+      or the candidate itself declares that it `provides &lt;zope.interface.provider&gt;` 
+      the interface 
+ 
+    - Making sure the candidate defines all the necessary methods 
+ 
+    - Making sure the methods have the correct signature (to the 
+      extent possible) 
+ 
+    - Making sure the candidate defines all the necessary attributes 
+ 
+    :return bool: Returns a true value if everything that could be 
+       checked passed. 
+    :raises zope.interface.Invalid: If any of the previous 
+       conditions does not hold. 
+ 
+    .. versionchanged:: 5.0 
+        If multiple methods or attributes are invalid, all such errors 
+        are collected and reported. Previously, only the first error was reported. 
+        As a special case, if only one such error is present, it is raised 
+        alone, like before. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s3">if </span><span class="s1">vtype == </span><span class="s4">'c'</span><span class="s1">:</span>
+        <span class="s1">tester = iface.implementedBy</span>
+    <span class="s3">else</span><span class="s1">:</span>
+        <span class="s1">tester = iface.providedBy</span>
+
+    <span class="s1">excs = []</span>
+    <span class="s3">if not </span><span class="s1">tentative </span><span class="s3">and not </span><span class="s1">tester(candidate):</span>
+        <span class="s1">excs.append(DoesNotImplement(iface</span><span class="s3">, </span><span class="s1">candidate))</span>
+
+    <span class="s3">for </span><span class="s1">name</span><span class="s3">, </span><span class="s1">desc </span><span class="s3">in </span><span class="s1">iface.namesAndDescriptions(all=</span><span class="s3">True</span><span class="s1">):</span>
+        <span class="s3">try</span><span class="s1">:</span>
+            <span class="s1">_verify_element(iface</span><span class="s3">, </span><span class="s1">name</span><span class="s3">, </span><span class="s1">desc</span><span class="s3">, </span><span class="s1">candidate</span><span class="s3">, </span><span class="s1">vtype)</span>
+        <span class="s3">except </span><span class="s1">Invalid </span><span class="s3">as </span><span class="s1">e:</span>
+            <span class="s1">excs.append(e)</span>
+
+    <span class="s3">if </span><span class="s1">excs:</span>
+        <span class="s3">if </span><span class="s1">len(excs) == </span><span class="s5">1</span><span class="s1">:</span>
+            <span class="s3">raise </span><span class="s1">excs[</span><span class="s5">0</span><span class="s1">]</span>
+        <span class="s3">raise </span><span class="s1">MultipleInvalid(iface</span><span class="s3">, </span><span class="s1">candidate</span><span class="s3">, </span><span class="s1">excs)</span>
+
+    <span class="s3">return True</span>
+
+<span class="s3">def </span><span class="s1">_verify_element(iface</span><span class="s3">, </span><span class="s1">name</span><span class="s3">, </span><span class="s1">desc</span><span class="s3">, </span><span class="s1">candidate</span><span class="s3">, </span><span class="s1">vtype):</span>
+    <span class="s0"># Here the `desc` is either an `Attribute` or `Method` instance</span>
+    <span class="s3">try</span><span class="s1">:</span>
+        <span class="s1">attr = getattr(candidate</span><span class="s3">, </span><span class="s1">name)</span>
+    <span class="s3">except </span><span class="s1">AttributeError:</span>
+        <span class="s3">if </span><span class="s1">(</span><span class="s3">not </span><span class="s1">isinstance(desc</span><span class="s3">, </span><span class="s1">Method)) </span><span class="s3">and </span><span class="s1">vtype == </span><span class="s4">'c'</span><span class="s1">:</span>
+            <span class="s0"># We can't verify non-methods on classes, since the</span>
+            <span class="s0"># class may provide attrs in it's __init__.</span>
+            <span class="s3">return</span>
+        <span class="s0"># TODO: On Python 3, this should use ``raise...from``</span>
+        <span class="s3">raise </span><span class="s1">BrokenImplementation(iface</span><span class="s3">, </span><span class="s1">desc</span><span class="s3">, </span><span class="s1">candidate)</span>
+
+    <span class="s3">if not </span><span class="s1">isinstance(desc</span><span class="s3">, </span><span class="s1">Method):</span>
+        <span class="s0"># If it's not a method, there's nothing else we can test</span>
+        <span class="s3">return</span>
+
+    <span class="s3">if </span><span class="s1">inspect.ismethoddescriptor(attr) </span><span class="s3">or </span><span class="s1">inspect.isbuiltin(attr):</span>
+        <span class="s0"># The first case is what you get for things like ``dict.pop``</span>
+        <span class="s0"># on CPython (e.g., ``verifyClass(IFullMapping, dict))``). The</span>
+        <span class="s0"># second case is what you get for things like ``dict().pop`` on</span>
+        <span class="s0"># CPython (e.g., ``verifyObject(IFullMapping, dict()))``.</span>
+        <span class="s0"># In neither case can we get a signature, so there's nothing</span>
+        <span class="s0"># to verify. Even the inspect module gives up and raises</span>
+        <span class="s0"># ValueError: no signature found. The ``__text_signature__`` attribute</span>
+        <span class="s0"># isn't typically populated either.</span>
+        <span class="s0">#</span>
+        <span class="s0"># Note that on PyPy 2 or 3 (up through 7.3 at least), these are</span>
+        <span class="s0"># not true for things like ``dict.pop`` (but might be true for C extensions?)</span>
+        <span class="s3">return</span>
+
+    <span class="s3">if </span><span class="s1">isinstance(attr</span><span class="s3">, </span><span class="s1">FunctionType):</span>
+        <span class="s3">if </span><span class="s1">sys.version_info[</span><span class="s5">0</span><span class="s1">] &gt;= </span><span class="s5">3 </span><span class="s3">and </span><span class="s1">isinstance(candidate</span><span class="s3">, </span><span class="s1">type) </span><span class="s3">and </span><span class="s1">vtype == </span><span class="s4">'c'</span><span class="s1">:</span>
+            <span class="s0"># This is an &quot;unbound method&quot; in Python 3.</span>
+            <span class="s0"># Only unwrap this if we're verifying implementedBy;</span>
+            <span class="s0"># otherwise we can unwrap @staticmethod on classes that directly</span>
+            <span class="s0"># provide an interface.</span>
+            <span class="s1">meth = fromFunction(attr</span><span class="s3">, </span><span class="s1">iface</span><span class="s3">, </span><span class="s1">name=name</span><span class="s3">,</span>
+                                <span class="s1">imlevel=</span><span class="s5">1</span><span class="s1">)</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s0"># Nope, just a normal function</span>
+            <span class="s1">meth = fromFunction(attr</span><span class="s3">, </span><span class="s1">iface</span><span class="s3">, </span><span class="s1">name=name)</span>
+    <span class="s3">elif </span><span class="s1">(isinstance(attr</span><span class="s3">, </span><span class="s1">MethodTypes)</span>
+          <span class="s3">and </span><span class="s1">type(attr.__func__) </span><span class="s3">is </span><span class="s1">FunctionType):</span>
+        <span class="s1">meth = fromMethod(attr</span><span class="s3">, </span><span class="s1">iface</span><span class="s3">, </span><span class="s1">name)</span>
+    <span class="s3">elif </span><span class="s1">isinstance(attr</span><span class="s3">, </span><span class="s1">property) </span><span class="s3">and </span><span class="s1">vtype == </span><span class="s4">'c'</span><span class="s1">:</span>
+        <span class="s0"># Without an instance we cannot be sure it's not a</span>
+        <span class="s0"># callable.</span>
+        <span class="s0"># TODO: This should probably check inspect.isdatadescriptor(),</span>
+        <span class="s0"># a more general form than ``property``</span>
+        <span class="s3">return</span>
+
+    <span class="s3">else</span><span class="s1">:</span>
+        <span class="s3">if not </span><span class="s1">callable(attr):</span>
+            <span class="s3">raise </span><span class="s1">BrokenMethodImplementation(desc</span><span class="s3">, </span><span class="s4">&quot;implementation is not a method&quot;</span><span class="s3">,</span>
+                                             <span class="s1">attr</span><span class="s3">, </span><span class="s1">iface</span><span class="s3">, </span><span class="s1">candidate)</span>
+        <span class="s0"># sigh, it's callable, but we don't know how to introspect it, so</span>
+        <span class="s0"># we have to give it a pass.</span>
+        <span class="s3">return</span>
+
+    <span class="s0"># Make sure that the required and implemented method signatures are</span>
+    <span class="s0"># the same.</span>
+    <span class="s1">mess = _incompat(desc.getSignatureInfo()</span><span class="s3">, </span><span class="s1">meth.getSignatureInfo())</span>
+    <span class="s3">if </span><span class="s1">mess:</span>
+        <span class="s3">if </span><span class="s1">PYPY2 </span><span class="s3">and </span><span class="s1">_pypy2_false_positive(mess</span><span class="s3">, </span><span class="s1">candidate</span><span class="s3">, </span><span class="s1">vtype):</span>
+            <span class="s3">return</span>
+        <span class="s3">raise </span><span class="s1">BrokenMethodImplementation(desc</span><span class="s3">, </span><span class="s1">mess</span><span class="s3">, </span><span class="s1">attr</span><span class="s3">, </span><span class="s1">iface</span><span class="s3">, </span><span class="s1">candidate)</span>
+
+
+
+<span class="s3">def </span><span class="s1">verifyClass(iface</span><span class="s3">, </span><span class="s1">candidate</span><span class="s3">, </span><span class="s1">tentative=</span><span class="s3">False</span><span class="s1">):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Verify that the *candidate* might correctly provide *iface*. 
+    &quot;&quot;&quot;</span>
+    <span class="s3">return </span><span class="s1">_verify(iface</span><span class="s3">, </span><span class="s1">candidate</span><span class="s3">, </span><span class="s1">tentative</span><span class="s3">, </span><span class="s1">vtype=</span><span class="s4">'c'</span><span class="s1">)</span>
+
+<span class="s3">def </span><span class="s1">verifyObject(iface</span><span class="s3">, </span><span class="s1">candidate</span><span class="s3">, </span><span class="s1">tentative=</span><span class="s3">False</span><span class="s1">):</span>
+    <span class="s3">return </span><span class="s1">_verify(iface</span><span class="s3">, </span><span class="s1">candidate</span><span class="s3">, </span><span class="s1">tentative</span><span class="s3">, </span><span class="s1">vtype=</span><span class="s4">'o'</span><span class="s1">)</span>
+
+<span class="s1">verifyObject.__doc__ = _verify.__doc__</span>
+
+<span class="s1">_MSG_TOO_MANY = </span><span class="s4">'implementation requires too many arguments'</span>
+<span class="s1">_KNOWN_PYPY2_FALSE_POSITIVES = frozenset((</span>
+    <span class="s1">_MSG_TOO_MANY</span><span class="s3">,</span>
+<span class="s1">))</span>
+
+
+<span class="s3">def </span><span class="s1">_pypy2_false_positive(msg</span><span class="s3">, </span><span class="s1">candidate</span><span class="s3">, </span><span class="s1">vtype):</span>
+    <span class="s0"># On PyPy2, builtin methods and functions like</span>
+    <span class="s0"># ``dict.pop`` that take pseudo-optional arguments</span>
+    <span class="s0"># (those with no default, something you can't express in Python 2</span>
+    <span class="s0"># syntax; CPython uses special internal APIs to implement these methods)</span>
+    <span class="s0"># return false failures because PyPy2 doesn't expose any way</span>
+    <span class="s0"># to detect this pseudo-optional status. PyPy3 doesn't have this problem</span>
+    <span class="s0"># because of __defaults_count__, and CPython never gets here because it</span>
+    <span class="s0"># returns true for ``ismethoddescriptor`` or ``isbuiltin``.</span>
+    <span class="s0">#</span>
+    <span class="s0"># We can't catch all such cases, but we can handle the common ones.</span>
+    <span class="s0">#</span>
+    <span class="s3">if </span><span class="s1">msg </span><span class="s3">not in </span><span class="s1">_KNOWN_PYPY2_FALSE_POSITIVES:</span>
+        <span class="s3">return False</span>
+
+    <span class="s1">known_builtin_types = vars(__builtins__).values()</span>
+    <span class="s1">candidate_type = candidate </span><span class="s3">if </span><span class="s1">vtype == </span><span class="s4">'c' </span><span class="s3">else </span><span class="s1">type(candidate)</span>
+    <span class="s3">if </span><span class="s1">candidate_type </span><span class="s3">in </span><span class="s1">known_builtin_types:</span>
+        <span class="s3">return True</span>
+
+    <span class="s3">return False</span>
+
+
+<span class="s3">def </span><span class="s1">_incompat(required</span><span class="s3">, </span><span class="s1">implemented):</span>
+    <span class="s0">#if (required['positional'] !=</span>
+    <span class="s0">#    implemented['positional'][:len(required['positional'])]</span>
+    <span class="s0">#    and implemented['kwargs'] is None):</span>
+    <span class="s0">#    return 'imlementation has different argument names'</span>
+    <span class="s3">if </span><span class="s1">len(implemented[</span><span class="s4">'required'</span><span class="s1">]) &gt; len(required[</span><span class="s4">'required'</span><span class="s1">]):</span>
+        <span class="s3">return </span><span class="s1">_MSG_TOO_MANY</span>
+    <span class="s3">if </span><span class="s1">((len(implemented[</span><span class="s4">'positional'</span><span class="s1">]) &lt; len(required[</span><span class="s4">'positional'</span><span class="s1">]))</span>
+        <span class="s3">and not </span><span class="s1">implemented[</span><span class="s4">'varargs'</span><span class="s1">]):</span>
+        <span class="s3">return </span><span class="s4">&quot;implementation doesn't allow enough arguments&quot;</span>
+    <span class="s3">if </span><span class="s1">required[</span><span class="s4">'kwargs'</span><span class="s1">] </span><span class="s3">and not </span><span class="s1">implemented[</span><span class="s4">'kwargs'</span><span class="s1">]:</span>
+        <span class="s3">return </span><span class="s4">&quot;implementation doesn't support keyword arguments&quot;</span>
+    <span class="s3">if </span><span class="s1">required[</span><span class="s4">'varargs'</span><span class="s1">] </span><span class="s3">and not </span><span class="s1">implemented[</span><span class="s4">'varargs'</span><span class="s1">]:</span>
+        <span class="s3">return </span><span class="s4">&quot;implementation doesn't support variable arguments&quot;</span>
+</pre>
+</body>
+</html>

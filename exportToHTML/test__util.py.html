@@ -1,0 +1,325 @@
+<html>
+<head>
+<title>test__util.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #cc7832;}
+.s3 { color: #6a8759;}
+.s4 { color: #6897bb;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+test__util.py</font>
+</center></td></tr></table>
+<pre><span class="s0"># -*- coding: utf-8 -*-</span>
+<span class="s0"># Copyright 2018 gevent contributes</span>
+<span class="s0"># See LICENSE for details.</span>
+
+<span class="s2">from </span><span class="s1">__future__ </span><span class="s2">import </span><span class="s1">absolute_import</span>
+<span class="s2">from </span><span class="s1">__future__ </span><span class="s2">import </span><span class="s1">division</span>
+<span class="s2">from </span><span class="s1">__future__ </span><span class="s2">import </span><span class="s1">print_function</span>
+
+<span class="s2">import </span><span class="s1">gc</span>
+<span class="s2">import </span><span class="s1">unittest</span>
+
+<span class="s2">import </span><span class="s1">gevent.testing </span><span class="s2">as </span><span class="s1">greentest</span>
+
+<span class="s2">import </span><span class="s1">gevent</span>
+<span class="s2">from </span><span class="s1">gevent </span><span class="s2">import </span><span class="s1">util</span>
+<span class="s2">from </span><span class="s1">gevent </span><span class="s2">import </span><span class="s1">local</span>
+<span class="s2">from </span><span class="s1">greenlet </span><span class="s2">import </span><span class="s1">getcurrent</span>
+
+<span class="s2">from </span><span class="s1">gevent._compat </span><span class="s2">import </span><span class="s1">NativeStrIO</span>
+
+<span class="s2">class </span><span class="s1">MyLocal(local.local):</span>
+    <span class="s0"># pylint:disable=disallowed-name</span>
+    <span class="s2">def </span><span class="s1">__init__(self</span><span class="s2">, </span><span class="s1">foo):</span>
+        <span class="s1">self.foo = foo</span>
+
+<span class="s1">@greentest.skipOnPyPy(</span><span class="s3">&quot;5.10.x is *very* slow formatting stacks&quot;</span><span class="s1">)</span>
+<span class="s2">class </span><span class="s1">TestFormat(greentest.TestCase):</span>
+
+    <span class="s2">def </span><span class="s1">test_basic(self):</span>
+        <span class="s1">lines = util.format_run_info()</span>
+
+        <span class="s1">value = </span><span class="s3">'</span><span class="s2">\n</span><span class="s3">'</span><span class="s1">.join(lines)</span>
+        <span class="s1">self.assertIn(</span><span class="s3">'Threads'</span><span class="s2">, </span><span class="s1">value)</span>
+        <span class="s1">self.assertIn(</span><span class="s3">'Greenlets'</span><span class="s2">, </span><span class="s1">value)</span>
+
+        <span class="s0"># because it's a raw greenlet, we have no data for it.</span>
+        <span class="s1">self.assertNotIn(</span><span class="s3">&quot;Spawned at&quot;</span><span class="s2">, </span><span class="s1">value)</span>
+        <span class="s1">self.assertNotIn(</span><span class="s3">&quot;Parent greenlet&quot;</span><span class="s2">, </span><span class="s1">value)</span>
+        <span class="s1">self.assertNotIn(</span><span class="s3">&quot;Spawn Tree Locals&quot;</span><span class="s2">, </span><span class="s1">value)</span>
+
+    <span class="s2">def </span><span class="s1">test_with_Greenlet(self):</span>
+        <span class="s1">rl = local.local()</span>
+        <span class="s1">rl.foo = </span><span class="s4">1</span>
+        <span class="s2">def </span><span class="s1">root():</span>
+            <span class="s1">l = MyLocal(</span><span class="s4">42</span><span class="s1">)</span>
+            <span class="s2">assert </span><span class="s1">l</span>
+            <span class="s0"># And an empty local.</span>
+            <span class="s1">l2 = local.local()</span>
+            <span class="s2">assert </span><span class="s1">l2</span>
+            <span class="s1">gevent.getcurrent().spawn_tree_locals[</span><span class="s3">'a value'</span><span class="s1">] = </span><span class="s4">42</span>
+            <span class="s1">io = NativeStrIO()</span>
+            <span class="s1">g = gevent.spawn(util.print_run_info</span><span class="s2">, </span><span class="s1">file=io)</span>
+            <span class="s1">g.join()</span>
+            <span class="s2">return </span><span class="s1">io.getvalue()</span>
+
+        <span class="s1">g = gevent.spawn(root)</span>
+        <span class="s1">g.name = </span><span class="s3">'Printer'</span>
+        <span class="s1">g.join()</span>
+        <span class="s1">value = g.value</span>
+
+
+        <span class="s1">self.assertIn(</span><span class="s3">&quot;Spawned at&quot;</span><span class="s2">, </span><span class="s1">value)</span>
+        <span class="s1">self.assertIn(</span><span class="s3">&quot;Parent:&quot;</span><span class="s2">, </span><span class="s1">value)</span>
+        <span class="s1">self.assertIn(</span><span class="s3">&quot;Spawn Tree Locals&quot;</span><span class="s2">, </span><span class="s1">value)</span>
+        <span class="s1">self.assertIn(</span><span class="s3">&quot;Greenlet Locals:&quot;</span><span class="s2">, </span><span class="s1">value)</span>
+        <span class="s1">self.assertIn(</span><span class="s3">'MyLocal'</span><span class="s2">, </span><span class="s1">value)</span>
+        <span class="s1">self.assertIn(</span><span class="s3">&quot;Printer&quot;</span><span class="s2">, </span><span class="s1">value) </span><span class="s0"># The name is printed</span>
+        <span class="s0"># Empty locals should not be printed</span>
+        <span class="s1">self.assertNotIn(</span><span class="s3">'{}'</span><span class="s2">, </span><span class="s1">value)</span>
+
+<span class="s1">@greentest.skipOnPyPy(</span><span class="s3">&quot;See TestFormat&quot;</span><span class="s1">)</span>
+<span class="s2">class </span><span class="s1">TestTree(greentest.TestCase):</span>
+
+    <span class="s2">def </span><span class="s1">setUp(self):</span>
+        <span class="s1">super(TestTree</span><span class="s2">, </span><span class="s1">self).setUp()</span>
+        <span class="s1">self.track_greenlet_tree = gevent.config.track_greenlet_tree</span>
+        <span class="s1">gevent.config.track_greenlet_tree = </span><span class="s2">True</span>
+        <span class="s1">self.maxDiff = </span><span class="s2">None</span>
+
+    <span class="s2">def </span><span class="s1">tearDown(self):</span>
+        <span class="s1">gevent.config.track_greenlet_tree = self.track_greenlet_tree</span>
+        <span class="s1">super(TestTree</span><span class="s2">, </span><span class="s1">self).tearDown()</span>
+
+    <span class="s2">def </span><span class="s1">_build_tree(self):</span>
+        <span class="s0"># pylint:disable=too-many-locals</span>
+        <span class="s0"># Python 2.7 on Travis seems to show unexpected greenlet objects</span>
+        <span class="s0"># so perhaps we need a GC?</span>
+        <span class="s2">for </span><span class="s1">_ </span><span class="s2">in </span><span class="s1">range(</span><span class="s4">3</span><span class="s1">):</span>
+            <span class="s1">gc.collect()</span>
+        <span class="s1">gevent.get_hub().resolver = </span><span class="s2">None </span><span class="s0"># Reset resolver, don't need to see it</span>
+        <span class="s1">gevent.get_hub().threadpool = </span><span class="s2">None </span><span class="s0"># ditto the pool</span>
+        <span class="s1">glets = []</span>
+        <span class="s1">l = MyLocal(</span><span class="s4">42</span><span class="s1">)</span>
+        <span class="s2">assert </span><span class="s1">l</span>
+
+        <span class="s2">def </span><span class="s1">s(f):</span>
+            <span class="s1">str(getcurrent())</span>
+            <span class="s1">g = gevent.spawn(f)</span>
+            <span class="s0"># Access this in spawning order for consistent sorting</span>
+            <span class="s0"># at print time in the test case.</span>
+            <span class="s1">getattr(g</span><span class="s2">, </span><span class="s3">'minimal_ident'</span><span class="s1">)</span>
+            <span class="s1">str(g)</span>
+            <span class="s2">return </span><span class="s1">g</span>
+
+        <span class="s2">def </span><span class="s1">t1():</span>
+            <span class="s2">raise </span><span class="s1">greentest.ExpectedException()</span>
+
+        <span class="s2">def </span><span class="s1">t2():</span>
+            <span class="s1">l = MyLocal(</span><span class="s4">16</span><span class="s1">)</span>
+            <span class="s2">assert </span><span class="s1">l</span>
+            <span class="s1">g = s(t1)</span>
+            <span class="s1">g.name = </span><span class="s3">'CustomName-' </span><span class="s1">+ str(g.minimal_ident)</span>
+            <span class="s2">return </span><span class="s1">g</span>
+
+        <span class="s1">s1 = s(t2)</span>
+        <span class="s0">#self.assertEqual(0, s1.minimal_ident)</span>
+        <span class="s1">s1.join()</span>
+
+        <span class="s1">glets.append(s(t2))</span>
+
+        <span class="s2">def </span><span class="s1">t3():</span>
+            <span class="s2">return </span><span class="s1">s(t2)</span>
+
+        <span class="s1">s3 = s(t3)</span>
+        <span class="s2">if </span><span class="s1">s3.spawn_tree_locals </span><span class="s2">is not None</span><span class="s1">:</span>
+            <span class="s0"># Can only do this if we're tracking spawn trees</span>
+            <span class="s1">s3.spawn_tree_locals[</span><span class="s3">'stl'</span><span class="s1">] = </span><span class="s3">'STL'</span>
+        <span class="s1">s3.join()</span>
+
+        <span class="s1">s4 = s(util.GreenletTree.current_tree)</span>
+        <span class="s1">s4.join()</span>
+
+        <span class="s1">tree = s4.value</span>
+        <span class="s2">return </span><span class="s1">tree</span><span class="s2">, </span><span class="s1">str(tree)</span><span class="s2">, </span><span class="s1">tree.format(details={</span><span class="s3">'running_stacks'</span><span class="s1">: </span><span class="s2">False,</span>
+                                                     <span class="s3">'spawning_stacks'</span><span class="s1">: </span><span class="s2">False</span><span class="s1">})</span>
+
+    <span class="s2">def </span><span class="s1">_normalize_tree_format(self</span><span class="s2">, </span><span class="s1">value):</span>
+        <span class="s2">import </span><span class="s1">re</span>
+        <span class="s1">hexobj = re.compile(</span><span class="s3">'0x[0123456789abcdef]+L?'</span><span class="s2">, </span><span class="s1">re.I)</span>
+
+        <span class="s1">hub_repr = repr(gevent.get_hub())</span>
+        <span class="s1">value = value.replace(hub_repr</span><span class="s2">, </span><span class="s3">&quot;&lt;HUB&gt;&quot;</span><span class="s1">)</span>
+
+        <span class="s1">value = hexobj.sub(</span><span class="s3">'X'</span><span class="s2">, </span><span class="s1">value)</span>
+        <span class="s1">value = value.replace(</span><span class="s3">'epoll'</span><span class="s2">, </span><span class="s3">'select'</span><span class="s1">)</span>
+        <span class="s1">value = value.replace(</span><span class="s3">'select'</span><span class="s2">, </span><span class="s3">'default'</span><span class="s1">)</span>
+        <span class="s1">value = value.replace(</span><span class="s3">'test__util'</span><span class="s2">, </span><span class="s3">'__main__'</span><span class="s1">)</span>
+        <span class="s1">value = re.compile(</span><span class="s3">' fileno=.'</span><span class="s1">).sub(</span><span class="s3">''</span><span class="s2">, </span><span class="s1">value)</span>
+        <span class="s1">value = value.replace(</span><span class="s3">'ref=-1'</span><span class="s2">, </span><span class="s3">'ref=0'</span><span class="s1">)</span>
+        <span class="s1">value = value.replace(</span><span class="s3">&quot;type.current_tree&quot;</span><span class="s2">, </span><span class="s3">'GreenletTree.current_tree'</span><span class="s1">)</span>
+        <span class="s1">value = value.replace(</span><span class="s3">'gevent.tests.__main__.MyLocal'</span><span class="s2">, </span><span class="s3">'__main__.MyLocal'</span><span class="s1">)</span>
+        <span class="s0"># The repr in CPython greenlet 1.0a1 added extra info</span>
+        <span class="s1">value = value.replace(</span><span class="s3">'(otid=X) '</span><span class="s2">, </span><span class="s3">''</span><span class="s1">)</span>
+        <span class="s1">value = value.replace(</span><span class="s3">' dead&gt;'</span><span class="s2">, </span><span class="s3">'&gt;'</span><span class="s1">)</span>
+        <span class="s1">value = value.replace(</span><span class="s3">' current active started main&gt;'</span><span class="s2">, </span><span class="s3">'&gt;'</span><span class="s1">)</span>
+        <span class="s2">return </span><span class="s1">value</span>
+
+    <span class="s1">@greentest.ignores_leakcheck</span>
+    <span class="s2">def </span><span class="s1">test_tree(self):</span>
+        <span class="s2">with </span><span class="s1">gevent.get_hub().ignoring_expected_test_error():</span>
+            <span class="s1">tree</span><span class="s2">, </span><span class="s1">str_tree</span><span class="s2">, </span><span class="s1">tree_format = self._build_tree()</span>
+
+        <span class="s1">self.assertTrue(tree.root)</span>
+
+        <span class="s1">self.assertNotIn(</span><span class="s3">'Parent'</span><span class="s2">, </span><span class="s1">str_tree) </span><span class="s0"># Simple output</span>
+        <span class="s1">value = self._normalize_tree_format(tree_format)</span>
+
+        <span class="s1">expected = </span><span class="s3">&quot;&quot;&quot;</span><span class="s2">\ 
+</span><span class="s3">&lt;greenlet.greenlet object at X&gt; 
+ :    Parent: None 
+ :    Greenlet Locals: 
+ :      Local &lt;class '__main__.MyLocal'&gt; at X 
+ :        {'foo': 42} 
+ +--- &lt;HUB&gt; 
+ :          Parent: &lt;greenlet.greenlet object at X&gt; 
+ +--- &lt;Greenlet &quot;Greenlet-1&quot; at X: t2&gt;; finished with value &lt;Greenlet &quot;CustomName-0&quot; at 0x 
+ :          Parent: &lt;HUB&gt; 
+ |    +--- &lt;Greenlet &quot;CustomName-0&quot; at X: t1&gt;; finished with exception ExpectedException() 
+ :                Parent: &lt;HUB&gt; 
+ +--- &lt;Greenlet &quot;Greenlet-2&quot; at X: t2&gt;; finished with value &lt;Greenlet &quot;CustomName-4&quot; at 0x 
+ :          Parent: &lt;HUB&gt; 
+ |    +--- &lt;Greenlet &quot;CustomName-4&quot; at X: t1&gt;; finished with exception ExpectedException() 
+ :                Parent: &lt;HUB&gt; 
+ +--- &lt;Greenlet &quot;Greenlet-3&quot; at X: t3&gt;; finished with value &lt;Greenlet &quot;Greenlet-5&quot; at X 
+ :          Parent: &lt;HUB&gt; 
+ :          Spawn Tree Locals 
+ :          {'stl': 'STL'} 
+ |    +--- &lt;Greenlet &quot;Greenlet-5&quot; at X: t2&gt;; finished with value &lt;Greenlet &quot;CustomName-6&quot; at 0x 
+ :                Parent: &lt;HUB&gt; 
+ |         +--- &lt;Greenlet &quot;CustomName-6&quot; at X: t1&gt;; finished with exception ExpectedException() 
+ :                      Parent: &lt;HUB&gt; 
+ +--- &lt;Greenlet &quot;Greenlet-7&quot; at X: &lt;bound method GreenletTree.current_tree of &lt;class 'gevent.util.GreenletTree'&gt;&gt;&gt;; finished with value &lt;gevent.util.GreenletTree obje 
+            Parent: &lt;HUB&gt; 
+        &quot;&quot;&quot;</span><span class="s1">.strip()</span>
+        <span class="s1">self.assertEqual(expected</span><span class="s2">, </span><span class="s1">value)</span>
+
+    <span class="s1">@greentest.ignores_leakcheck</span>
+    <span class="s2">def </span><span class="s1">test_tree_no_track(self):</span>
+        <span class="s1">gevent.config.track_greenlet_tree = </span><span class="s2">False</span>
+        <span class="s2">with </span><span class="s1">gevent.get_hub().ignoring_expected_test_error():</span>
+            <span class="s1">self._build_tree()</span>
+
+    <span class="s1">@greentest.ignores_leakcheck</span>
+    <span class="s2">def </span><span class="s1">test_forest_fake_parent(self):</span>
+        <span class="s2">from </span><span class="s1">greenlet </span><span class="s2">import </span><span class="s1">greenlet </span><span class="s2">as </span><span class="s1">RawGreenlet</span>
+
+        <span class="s2">def </span><span class="s1">t4():</span>
+            <span class="s0"># Ignore this one, make the child the parent,</span>
+            <span class="s0"># and don't be a child of the hub.</span>
+            <span class="s1">c = RawGreenlet(util.GreenletTree.current_tree)</span>
+            <span class="s1">c.parent.greenlet_tree_is_ignored = </span><span class="s2">True</span>
+            <span class="s1">c.greenlet_tree_is_root = </span><span class="s2">True</span>
+            <span class="s2">return </span><span class="s1">c.switch()</span>
+
+
+        <span class="s1">g = RawGreenlet(t4)</span>
+        <span class="s1">tree = g.switch()</span>
+
+        <span class="s1">tree_format = tree.format(details={</span><span class="s3">'running_stacks'</span><span class="s1">: </span><span class="s2">False,</span>
+                                           <span class="s3">'spawning_stacks'</span><span class="s1">: </span><span class="s2">False</span><span class="s1">})</span>
+        <span class="s1">value = self._normalize_tree_format(tree_format)</span>
+
+        <span class="s1">expected = </span><span class="s3">&quot;&quot;&quot;</span><span class="s2">\ 
+</span><span class="s3">&lt;greenlet.greenlet object at X&gt;; not running 
+ :    Parent: &lt;greenlet.greenlet object at X&gt; 
+        &quot;&quot;&quot;</span><span class="s1">.strip()</span>
+
+        <span class="s1">self.assertEqual(expected</span><span class="s2">, </span><span class="s1">value)</span>
+
+
+<span class="s2">class </span><span class="s1">TestAssertSwitches(unittest.TestCase):</span>
+
+    <span class="s2">def </span><span class="s1">test_time_sleep(self):</span>
+        <span class="s0"># A real blocking function</span>
+        <span class="s2">from </span><span class="s1">time </span><span class="s2">import </span><span class="s1">sleep</span>
+
+        <span class="s0"># No time given, we detect the failure to switch immediately</span>
+        <span class="s2">with </span><span class="s1">self.assertRaises(util._FailedToSwitch) </span><span class="s2">as </span><span class="s1">exc:</span>
+            <span class="s2">with </span><span class="s1">util.assert_switches():</span>
+                <span class="s1">sleep(</span><span class="s4">0.001</span><span class="s1">)</span>
+
+        <span class="s1">message = str(exc.exception)</span>
+        <span class="s1">self.assertIn(</span><span class="s3">'To any greenlet in'</span><span class="s2">, </span><span class="s1">message)</span>
+
+        <span class="s0"># Supply a max blocking allowed and exceed it</span>
+        <span class="s2">with </span><span class="s1">self.assertRaises(util._FailedToSwitch):</span>
+            <span class="s2">with </span><span class="s1">util.assert_switches(</span><span class="s4">0.001</span><span class="s1">):</span>
+                <span class="s1">sleep(</span><span class="s4">0.1</span><span class="s1">)</span>
+
+
+        <span class="s0"># Supply a max blocking allowed, and exit before that happens,</span>
+        <span class="s0"># but don't switch to the hub as requested</span>
+        <span class="s2">with </span><span class="s1">self.assertRaises(util._FailedToSwitch) </span><span class="s2">as </span><span class="s1">exc:</span>
+            <span class="s2">with </span><span class="s1">util.assert_switches(</span><span class="s4">0.001</span><span class="s2">, </span><span class="s1">hub_only=</span><span class="s2">True</span><span class="s1">):</span>
+                <span class="s1">sleep(</span><span class="s4">0</span><span class="s1">)</span>
+
+        <span class="s1">message = str(exc.exception)</span>
+        <span class="s1">self.assertIn(</span><span class="s3">'To the hub in'</span><span class="s2">, </span><span class="s1">message)</span>
+        <span class="s1">self.assertIn(</span><span class="s3">'(max allowed 0.0010 seconds)'</span><span class="s2">, </span><span class="s1">message)</span>
+
+        <span class="s0"># Supply a max blocking allowed, and exit before that happens,</span>
+        <span class="s0"># and allow any switch (or no switch).</span>
+        <span class="s0"># Note that we need to use a relatively long duration;</span>
+        <span class="s0"># sleep(0) on Windows can actually take a substantial amount of time</span>
+        <span class="s0"># sometimes (more than 0.001s)</span>
+        <span class="s2">with </span><span class="s1">util.assert_switches(</span><span class="s4">1.0</span><span class="s2">, </span><span class="s1">hub_only=</span><span class="s2">False</span><span class="s1">):</span>
+            <span class="s1">sleep(</span><span class="s4">0</span><span class="s1">)</span>
+
+
+    <span class="s2">def </span><span class="s1">test_no_switches_no_function(self):</span>
+        <span class="s0"># No blocking time given, no switch performed: exception</span>
+        <span class="s2">with </span><span class="s1">self.assertRaises(util._FailedToSwitch):</span>
+            <span class="s2">with </span><span class="s1">util.assert_switches():</span>
+                <span class="s2">pass</span>
+
+        <span class="s0"># blocking time given, for all greenlets, no switch performed: nothing</span>
+        <span class="s2">with </span><span class="s1">util.assert_switches(max_blocking_time=</span><span class="s4">1</span><span class="s2">, </span><span class="s1">hub_only=</span><span class="s2">False</span><span class="s1">):</span>
+            <span class="s2">pass</span>
+
+    <span class="s2">def </span><span class="s1">test_exception_not_supressed(self):</span>
+
+        <span class="s2">with </span><span class="s1">self.assertRaises(NameError):</span>
+            <span class="s2">with </span><span class="s1">util.assert_switches():</span>
+                <span class="s2">raise </span><span class="s1">NameError()</span>
+
+    <span class="s2">def </span><span class="s1">test_nested(self):</span>
+        <span class="s2">from </span><span class="s1">greenlet </span><span class="s2">import </span><span class="s1">gettrace</span>
+        <span class="s2">with </span><span class="s1">util.assert_switches() </span><span class="s2">as </span><span class="s1">outer:</span>
+            <span class="s1">self.assertEqual(gettrace()</span><span class="s2">, </span><span class="s1">outer.tracer)</span>
+            <span class="s1">self.assertIsNotNone(outer.tracer.active_greenlet)</span>
+
+            <span class="s2">with </span><span class="s1">util.assert_switches() </span><span class="s2">as </span><span class="s1">inner:</span>
+                <span class="s1">self.assertEqual(gettrace()</span><span class="s2">, </span><span class="s1">inner.tracer)</span>
+                <span class="s1">self.assertEqual(inner.tracer.previous_trace_function</span><span class="s2">, </span><span class="s1">outer.tracer)</span>
+
+                <span class="s1">inner.tracer(</span><span class="s3">'switch'</span><span class="s2">, </span><span class="s1">(self</span><span class="s2">, </span><span class="s1">self))</span>
+
+                <span class="s1">self.assertIs(self</span><span class="s2">, </span><span class="s1">inner.tracer.active_greenlet)</span>
+                <span class="s1">self.assertIs(self</span><span class="s2">, </span><span class="s1">outer.tracer.active_greenlet)</span>
+
+            <span class="s1">self.assertEqual(gettrace()</span><span class="s2">, </span><span class="s1">outer.tracer)</span>
+
+<span class="s2">if </span><span class="s1">__name__ == </span><span class="s3">'__main__'</span><span class="s1">:</span>
+    <span class="s1">greentest.main()</span>
+</pre>
+</body>
+</html>

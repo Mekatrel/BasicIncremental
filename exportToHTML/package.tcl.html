@@ -1,0 +1,764 @@
+<html>
+<head>
+<title>package.tcl</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #a9b7c6;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+package.tcl</font>
+</center></td></tr></table>
+<pre><span class="s0"># package.tcl --</span>
+<span class="s0">#</span>
+<span class="s0"># utility procs formerly in init.tcl which can be loaded on demand</span>
+<span class="s0"># for package management.</span>
+<span class="s0">#</span>
+<span class="s0"># Copyright (c) 1991-1993 The Regents of the University of California.</span>
+<span class="s0"># Copyright (c) 1994-1998 Sun Microsystems, Inc.</span>
+<span class="s0">#</span>
+<span class="s0"># See the file &quot;license.terms&quot; for information on usage and redistribution</span>
+<span class="s0"># of this file, and for a DISCLAIMER OF ALL WARRANTIES.</span>
+<span class="s0">#</span>
+
+<span class="s0">namespace eval tcl::Pkg {}</span>
+
+<span class="s0"># ::tcl::Pkg::CompareExtension --</span>
+<span class="s0">#</span>
+<span class="s0"># Used internally by pkg_mkIndex to compare the extension of a file to a given</span>
+<span class="s0"># extension. On Windows, it uses a case-insensitive comparison because the</span>
+<span class="s0"># file system can be file insensitive.</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0">#  fileName	name of a file whose extension is compared</span>
+<span class="s0">#  ext		(optional) The extension to compare against; you must</span>
+<span class="s0">#		provide the starting dot.</span>
+<span class="s0">#		Defaults to [info sharedlibextension]</span>
+<span class="s0">#</span>
+<span class="s0"># Results:</span>
+<span class="s0">#  Returns 1 if the extension matches, 0 otherwise</span>
+
+<span class="s0">proc tcl::Pkg::CompareExtension {fileName {ext {}}} {</span>
+    <span class="s0">global tcl_platform</span>
+    <span class="s0">if {$ext eq &quot;&quot;} {set ext [info sharedlibextension]}</span>
+    <span class="s0">if {$tcl_platform(platform) eq &quot;windows&quot;} {</span>
+        <span class="s0">return [string equal -nocase [file extension $fileName] $ext]</span>
+    <span class="s0">} else {</span>
+        <span class="s0"># Some unices add trailing numbers after the .so, so</span>
+        <span class="s0"># we could have something like '.so.1.2'.</span>
+        <span class="s0">set root $fileName</span>
+        <span class="s0">while {1} {</span>
+            <span class="s0">set currExt [file extension $root]</span>
+            <span class="s0">if {$currExt eq $ext} {</span>
+                <span class="s0">return 1</span>
+            <span class="s0">}</span>
+
+	    <span class="s0"># The current extension does not match; if it is not a numeric</span>
+	    <span class="s0"># value, quit, as we are only looking to ignore version number</span>
+	    <span class="s0"># extensions.  Otherwise we might return 1 in this case:</span>
+	    <span class="s0">#		tcl::Pkg::CompareExtension foo.so.bar .so</span>
+	    <span class="s0"># which should not match.</span>
+
+	    <span class="s0">if {![string is integer -strict [string range $currExt 1 end]]} {</span>
+		<span class="s0">return 0</span>
+	    <span class="s0">}</span>
+            <span class="s0">set root [file rootname $root]</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+
+<span class="s0"># pkg_mkIndex --</span>
+<span class="s0"># This procedure creates a package index in a given directory.  The package</span>
+<span class="s0"># index consists of a &quot;pkgIndex.tcl&quot; file whose contents are a Tcl script that</span>
+<span class="s0"># sets up package information with &quot;package require&quot; commands.  The commands</span>
+<span class="s0"># describe all of the packages defined by the files given as arguments.</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0"># -direct		(optional) If this flag is present, the generated</span>
+<span class="s0">#			code in pkgMkIndex.tcl will cause the package to be</span>
+<span class="s0">#			loaded when &quot;package require&quot; is executed, rather</span>
+<span class="s0">#			than lazily when the first reference to an exported</span>
+<span class="s0">#			procedure in the package is made.</span>
+<span class="s0"># -verbose		(optional) Verbose output; the name of each file that</span>
+<span class="s0">#			was successfully rocessed is printed out. Additionally,</span>
+<span class="s0">#			if processing of a file failed a message is printed.</span>
+<span class="s0"># -load pat		(optional) Preload any packages whose names match</span>
+<span class="s0">#			the pattern.  Used to handle DLLs that depend on</span>
+<span class="s0">#			other packages during their Init procedure.</span>
+<span class="s0"># dir -			Name of the directory in which to create the index.</span>
+<span class="s0"># args -		Any number of additional arguments, each giving</span>
+<span class="s0">#			a glob pattern that matches the names of one or</span>
+<span class="s0">#			more shared libraries or Tcl script files in</span>
+<span class="s0">#			dir.</span>
+
+<span class="s0">proc pkg_mkIndex {args} {</span>
+    <span class="s0">set usage {&quot;pkg_mkIndex ?-direct? ?-lazy? ?-load pattern? ?-verbose? ?--? dir ?pattern ...?&quot;}</span>
+
+    <span class="s0">set argCount [llength $args]</span>
+    <span class="s0">if {$argCount &lt; 1} {</span>
+	<span class="s0">return -code error &quot;wrong # args: should be\n$usage&quot;</span>
+    <span class="s0">}</span>
+
+    <span class="s0">set more &quot;&quot;</span>
+    <span class="s0">set direct 1</span>
+    <span class="s0">set doVerbose 0</span>
+    <span class="s0">set loadPat &quot;&quot;</span>
+    <span class="s0">for {set idx 0} {$idx &lt; $argCount} {incr idx} {</span>
+	<span class="s0">set flag [lindex $args $idx]</span>
+	<span class="s0">switch -glob -- $flag {</span>
+	    <span class="s0">-- {</span>
+		<span class="s0"># done with the flags</span>
+		<span class="s0">incr idx</span>
+		<span class="s0">break</span>
+	    <span class="s0">}</span>
+	    <span class="s0">-verbose {</span>
+		<span class="s0">set doVerbose 1</span>
+	    <span class="s0">}</span>
+	    <span class="s0">-lazy {</span>
+		<span class="s0">set direct 0</span>
+		<span class="s0">append more &quot; -lazy&quot;</span>
+	    <span class="s0">}</span>
+	    <span class="s0">-direct {</span>
+		<span class="s0">append more &quot; -direct&quot;</span>
+	    <span class="s0">}</span>
+	    <span class="s0">-load {</span>
+		<span class="s0">incr idx</span>
+		<span class="s0">set loadPat [lindex $args $idx]</span>
+		<span class="s0">append more &quot; -load $loadPat&quot;</span>
+	    <span class="s0">}</span>
+	    <span class="s0">-* {</span>
+		<span class="s0">return -code error &quot;unknown flag $flag: should be\n$usage&quot;</span>
+	    <span class="s0">}</span>
+	    <span class="s0">default {</span>
+		<span class="s0"># done with the flags</span>
+		<span class="s0">break</span>
+	    <span class="s0">}</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+
+    <span class="s0">set dir [lindex $args $idx]</span>
+    <span class="s0">set patternList [lrange $args [expr {$idx + 1}] end]</span>
+    <span class="s0">if {![llength $patternList]} {</span>
+	<span class="s0">set patternList [list &quot;*.tcl&quot; &quot;*[info sharedlibextension]&quot;]</span>
+    <span class="s0">}</span>
+
+    <span class="s0">try {</span>
+	<span class="s0">set fileList [glob -directory $dir -tails -types {r f} -- \</span>
+		<span class="s0">{*}$patternList]</span>
+    <span class="s0">} on error {msg opt} {</span>
+	<span class="s0">return -options $opt $msg</span>
+    <span class="s0">}</span>
+    <span class="s0">foreach file $fileList {</span>
+	<span class="s0"># For each file, figure out what commands and packages it provides.</span>
+	<span class="s0"># To do this, create a child interpreter, load the file into the</span>
+	<span class="s0"># interpreter, and get a list of the new commands and packages that</span>
+	<span class="s0"># are defined.</span>
+
+	<span class="s0">if {$file eq &quot;pkgIndex.tcl&quot;} {</span>
+	    <span class="s0">continue</span>
+	<span class="s0">}</span>
+
+	<span class="s0">set c [interp create]</span>
+
+	<span class="s0"># Load into the child any packages currently loaded in the parent</span>
+	<span class="s0"># interpreter that match the -load pattern.</span>
+
+	<span class="s0">if {$loadPat ne &quot;&quot;} {</span>
+	    <span class="s0">if {$doVerbose} {</span>
+		<span class="s0">tclLog &quot;currently loaded packages: '[info loaded]'&quot;</span>
+		<span class="s0">tclLog &quot;trying to load all packages matching $loadPat&quot;</span>
+	    <span class="s0">}</span>
+	    <span class="s0">if {![llength [info loaded]]} {</span>
+		<span class="s0">tclLog &quot;warning: no packages are currently loaded, nothing&quot;</span>
+		<span class="s0">tclLog &quot;can possibly match '$loadPat'&quot;</span>
+	    <span class="s0">}</span>
+	<span class="s0">}</span>
+	<span class="s0">foreach pkg [info loaded] {</span>
+	    <span class="s0">if {![string match -nocase $loadPat [lindex $pkg 1]]} {</span>
+		<span class="s0">continue</span>
+	    <span class="s0">}</span>
+	    <span class="s0">if {$doVerbose} {</span>
+		<span class="s0">tclLog &quot;package [lindex $pkg 1] matches '$loadPat'&quot;</span>
+	    <span class="s0">}</span>
+	    <span class="s0">try {</span>
+		<span class="s0">load [lindex $pkg 0] [lindex $pkg 1] $c</span>
+	    <span class="s0">} on error err {</span>
+		<span class="s0">if {$doVerbose} {</span>
+		    <span class="s0">tclLog &quot;warning: load [lindex $pkg 0]\</span>
+			    <span class="s0">[lindex $pkg 1]\nfailed with: $err&quot;</span>
+		<span class="s0">}</span>
+	    <span class="s0">} on ok {} {</span>
+		<span class="s0">if {$doVerbose} {</span>
+		    <span class="s0">tclLog &quot;loaded [lindex $pkg 0] [lindex $pkg 1]&quot;</span>
+		<span class="s0">}</span>
+	    <span class="s0">}</span>
+	    <span class="s0">if {[lindex $pkg 1] eq &quot;Tk&quot;} {</span>
+		<span class="s0"># Withdraw . if Tk was loaded, to avoid showing a window.</span>
+		<span class="s0">$c eval [list wm withdraw .]</span>
+	    <span class="s0">}</span>
+	<span class="s0">}</span>
+
+	<span class="s0">$c eval {</span>
+	    <span class="s0"># Stub out the package command so packages can require other</span>
+	    <span class="s0"># packages.</span>
+
+	    <span class="s0">rename package __package_orig</span>
+	    <span class="s0">proc package {what args} {</span>
+		<span class="s0">switch -- $what {</span>
+		    <span class="s0">require {</span>
+			<span class="s0">return;		# Ignore transitive requires</span>
+		    <span class="s0">}</span>
+		    <span class="s0">default {</span>
+			<span class="s0">__package_orig $what {*}$args</span>
+		    <span class="s0">}</span>
+		<span class="s0">}</span>
+	    <span class="s0">}</span>
+	    <span class="s0">proc tclPkgUnknown args {}</span>
+	    <span class="s0">package unknown tclPkgUnknown</span>
+
+	    <span class="s0"># Stub out the unknown command so package can call into each other</span>
+	    <span class="s0"># during their initialilzation.</span>
+
+	    <span class="s0">proc unknown {args} {}</span>
+
+	    <span class="s0"># Stub out the auto_import mechanism</span>
+
+	    <span class="s0">proc auto_import {args} {}</span>
+
+	    <span class="s0"># reserve the ::tcl namespace for support procs and temporary</span>
+	    <span class="s0"># variables.  This might make it awkward to generate a</span>
+	    <span class="s0"># pkgIndex.tcl file for the ::tcl namespace.</span>
+
+	    <span class="s0">namespace eval ::tcl {</span>
+		<span class="s0">variable dir		;# Current directory being processed</span>
+		<span class="s0">variable file		;# Current file being processed</span>
+		<span class="s0">variable direct		;# -direct flag value</span>
+		<span class="s0">variable x		;# Loop variable</span>
+		<span class="s0">variable debug		;# For debugging</span>
+		<span class="s0">variable type		;# &quot;load&quot; or &quot;source&quot;, for -direct</span>
+		<span class="s0">variable namespaces	;# Existing namespaces (e.g., ::tcl)</span>
+		<span class="s0">variable packages	;# Existing packages (e.g., Tcl)</span>
+		<span class="s0">variable origCmds	;# Existing commands</span>
+		<span class="s0">variable newCmds	;# Newly created commands</span>
+		<span class="s0">variable newPkgs {}	;# Newly created packages</span>
+	    <span class="s0">}</span>
+	<span class="s0">}</span>
+
+	<span class="s0">$c eval [list set ::tcl::dir $dir]</span>
+	<span class="s0">$c eval [list set ::tcl::file $file]</span>
+	<span class="s0">$c eval [list set ::tcl::direct $direct]</span>
+
+	<span class="s0"># Download needed procedures into the slave because we've just deleted</span>
+	<span class="s0"># the unknown procedure.  This doesn't handle procedures with default</span>
+	<span class="s0"># arguments.</span>
+
+	<span class="s0">foreach p {::tcl::Pkg::CompareExtension} {</span>
+	    <span class="s0">$c eval [list namespace eval [namespace qualifiers $p] {}]</span>
+	    <span class="s0">$c eval [list proc $p [info args $p] [info body $p]]</span>
+	<span class="s0">}</span>
+
+	<span class="s0">try {</span>
+	    <span class="s0">$c eval {</span>
+		<span class="s0">set ::tcl::debug &quot;loading or sourcing&quot;</span>
+
+		<span class="s0"># we need to track command defined by each package even in the</span>
+		<span class="s0"># -direct case, because they are needed internally by the</span>
+		<span class="s0"># &quot;partial pkgIndex.tcl&quot; step above.</span>
+
+		<span class="s0">proc ::tcl::GetAllNamespaces {{root ::}} {</span>
+		    <span class="s0">set list $root</span>
+		    <span class="s0">foreach ns [namespace children $root] {</span>
+			<span class="s0">lappend list {*}[::tcl::GetAllNamespaces $ns]</span>
+		    <span class="s0">}</span>
+		    <span class="s0">return $list</span>
+		<span class="s0">}</span>
+
+		<span class="s0"># init the list of existing namespaces, packages, commands</span>
+
+		<span class="s0">foreach ::tcl::x [::tcl::GetAllNamespaces] {</span>
+		    <span class="s0">set ::tcl::namespaces($::tcl::x) 1</span>
+		<span class="s0">}</span>
+		<span class="s0">foreach ::tcl::x [package names] {</span>
+		    <span class="s0">if {[package provide $::tcl::x] ne &quot;&quot;} {</span>
+			<span class="s0">set ::tcl::packages($::tcl::x) 1</span>
+		    <span class="s0">}</span>
+		<span class="s0">}</span>
+		<span class="s0">set ::tcl::origCmds [info commands]</span>
+
+		<span class="s0"># Try to load the file if it has the shared library extension,</span>
+		<span class="s0"># otherwise source it.  It's important not to try to load</span>
+		<span class="s0"># files that aren't shared libraries, because on some systems</span>
+		<span class="s0"># (like SunOS) the loader will abort the whole application</span>
+		<span class="s0"># when it gets an error.</span>
+
+		<span class="s0">if {[::tcl::Pkg::CompareExtension $::tcl::file [info sharedlibextension]]} {</span>
+		    <span class="s0"># The &quot;file join .&quot; command below is necessary.  Without</span>
+		    <span class="s0"># it, if the file name has no \'s and we're on UNIX, the</span>
+		    <span class="s0"># load command will invoke the LD_LIBRARY_PATH search</span>
+		    <span class="s0"># mechanism, which could cause the wrong file to be used.</span>
+
+		    <span class="s0">set ::tcl::debug loading</span>
+		    <span class="s0">load [file join $::tcl::dir $::tcl::file]</span>
+		    <span class="s0">set ::tcl::type load</span>
+		<span class="s0">} else {</span>
+		    <span class="s0">set ::tcl::debug sourcing</span>
+		    <span class="s0">source [file join $::tcl::dir $::tcl::file]</span>
+		    <span class="s0">set ::tcl::type source</span>
+		<span class="s0">}</span>
+
+		<span class="s0"># As a performance optimization, if we are creating direct</span>
+		<span class="s0"># load packages, don't bother figuring out the set of commands</span>
+		<span class="s0"># created by the new packages.  We only need that list for</span>
+		<span class="s0"># setting up the autoloading used in the non-direct case.</span>
+		<span class="s0">if {!$::tcl::direct} {</span>
+		    <span class="s0"># See what new namespaces appeared, and import commands</span>
+		    <span class="s0"># from them.  Only exported commands go into the index.</span>
+
+		    <span class="s0">foreach ::tcl::x [::tcl::GetAllNamespaces] {</span>
+			<span class="s0">if {![info exists ::tcl::namespaces($::tcl::x)]} {</span>
+			    <span class="s0">namespace import -force ${::tcl::x}::*</span>
+			<span class="s0">}</span>
+
+			<span class="s0"># Figure out what commands appeared</span>
+
+			<span class="s0">foreach ::tcl::x [info commands] {</span>
+			    <span class="s0">set ::tcl::newCmds($::tcl::x) 1</span>
+			<span class="s0">}</span>
+			<span class="s0">foreach ::tcl::x $::tcl::origCmds {</span>
+			    <span class="s0">unset -nocomplain ::tcl::newCmds($::tcl::x)</span>
+			<span class="s0">}</span>
+			<span class="s0">foreach ::tcl::x [array names ::tcl::newCmds] {</span>
+			    <span class="s0"># determine which namespace a command comes from</span>
+
+			    <span class="s0">set ::tcl::abs [namespace origin $::tcl::x]</span>
+
+			    <span class="s0"># special case so that global names have no</span>
+			    <span class="s0"># leading ::, this is required by the unknown</span>
+			    <span class="s0"># command</span>
+
+			    <span class="s0">set ::tcl::abs \</span>
+				    <span class="s0">[lindex [auto_qualify $::tcl::abs ::] 0]</span>
+
+			    <span class="s0">if {$::tcl::x ne $::tcl::abs} {</span>
+				<span class="s0"># Name changed during qualification</span>
+
+				<span class="s0">set ::tcl::newCmds($::tcl::abs) 1</span>
+				<span class="s0">unset ::tcl::newCmds($::tcl::x)</span>
+			    <span class="s0">}</span>
+			<span class="s0">}</span>
+		    <span class="s0">}</span>
+		<span class="s0">}</span>
+
+		<span class="s0"># Look through the packages that appeared, and if there is a</span>
+		<span class="s0"># version provided, then record it</span>
+
+		<span class="s0">foreach ::tcl::x [package names] {</span>
+		    <span class="s0">if {[package provide $::tcl::x] ne &quot;&quot;</span>
+			    <span class="s0">&amp;&amp; ![info exists ::tcl::packages($::tcl::x)]} {</span>
+			<span class="s0">lappend ::tcl::newPkgs \</span>
+			    <span class="s0">[list $::tcl::x [package provide $::tcl::x]]</span>
+		    <span class="s0">}</span>
+		<span class="s0">}</span>
+	    <span class="s0">}</span>
+	<span class="s0">} on error msg {</span>
+	    <span class="s0">set what [$c eval set ::tcl::debug]</span>
+	    <span class="s0">if {$doVerbose} {</span>
+		<span class="s0">tclLog &quot;warning: error while $what $file: $msg&quot;</span>
+	    <span class="s0">}</span>
+	<span class="s0">} on ok {} {</span>
+	    <span class="s0">set what [$c eval set ::tcl::debug]</span>
+	    <span class="s0">if {$doVerbose} {</span>
+		<span class="s0">tclLog &quot;successful $what of $file&quot;</span>
+	    <span class="s0">}</span>
+	    <span class="s0">set type [$c eval set ::tcl::type]</span>
+	    <span class="s0">set cmds [lsort [$c eval array names ::tcl::newCmds]]</span>
+	    <span class="s0">set pkgs [$c eval set ::tcl::newPkgs]</span>
+	    <span class="s0">if {$doVerbose} {</span>
+		<span class="s0">if {!$direct} {</span>
+		    <span class="s0">tclLog &quot;commands provided were $cmds&quot;</span>
+		<span class="s0">}</span>
+		<span class="s0">tclLog &quot;packages provided were $pkgs&quot;</span>
+	    <span class="s0">}</span>
+	    <span class="s0">if {[llength $pkgs] &gt; 1} {</span>
+		<span class="s0">tclLog &quot;warning: \&quot;$file\&quot; provides more than one package ($pkgs)&quot;</span>
+	    <span class="s0">}</span>
+	    <span class="s0">foreach pkg $pkgs {</span>
+		<span class="s0"># cmds is empty/not used in the direct case</span>
+		<span class="s0">lappend files($pkg) [list $file $type $cmds]</span>
+	    <span class="s0">}</span>
+
+	    <span class="s0">if {$doVerbose} {</span>
+		<span class="s0">tclLog &quot;processed $file&quot;</span>
+	    <span class="s0">}</span>
+	<span class="s0">}</span>
+	<span class="s0">interp delete $c</span>
+    <span class="s0">}</span>
+
+    <span class="s0">append index &quot;# Tcl package index file, version 1.1\n&quot;</span>
+    <span class="s0">append index &quot;# This file is generated by the \&quot;pkg_mkIndex$more\&quot; command\n&quot;</span>
+    <span class="s0">append index &quot;# and sourced either when an application starts up or\n&quot;</span>
+    <span class="s0">append index &quot;# by a \&quot;package unknown\&quot; script.  It invokes the\n&quot;</span>
+    <span class="s0">append index &quot;# \&quot;package ifneeded\&quot; command to set up package-related\n&quot;</span>
+    <span class="s0">append index &quot;# information so that packages will be loaded automatically\n&quot;</span>
+    <span class="s0">append index &quot;# in response to \&quot;package require\&quot; commands.  When this\n&quot;</span>
+    <span class="s0">append index &quot;# script is sourced, the variable \$dir must contain the\n&quot;</span>
+    <span class="s0">append index &quot;# full path name of this file's directory.\n&quot;</span>
+
+    <span class="s0">foreach pkg [lsort [array names files]] {</span>
+	<span class="s0">set cmd {}</span>
+	<span class="s0">lassign $pkg name version</span>
+	<span class="s0">lappend cmd ::tcl::Pkg::Create -name $name -version $version</span>
+	<span class="s0">foreach spec [lsort -index 0 $files($pkg)] {</span>
+	    <span class="s0">foreach {file type procs} $spec {</span>
+		<span class="s0">if {$direct} {</span>
+		    <span class="s0">set procs {}</span>
+		<span class="s0">}</span>
+		<span class="s0">lappend cmd &quot;-$type&quot; [list $file $procs]</span>
+	    <span class="s0">}</span>
+	<span class="s0">}</span>
+	<span class="s0">append index &quot;\n[eval $cmd]&quot;</span>
+    <span class="s0">}</span>
+
+    <span class="s0">set f [open [file join $dir pkgIndex.tcl] w]</span>
+    <span class="s0">puts $f $index</span>
+    <span class="s0">close $f</span>
+<span class="s0">}</span>
+
+<span class="s0"># tclPkgSetup --</span>
+<span class="s0"># This is a utility procedure use by pkgIndex.tcl files.  It is invoked as</span>
+<span class="s0"># part of a &quot;package ifneeded&quot; script.  It calls &quot;package provide&quot; to indicate</span>
+<span class="s0"># that a package is available, then sets entries in the auto_index array so</span>
+<span class="s0"># that the package's files will be auto-loaded when the commands are used.</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0"># dir -			Directory containing all the files for this package.</span>
+<span class="s0"># pkg -			Name of the package (no version number).</span>
+<span class="s0"># version -		Version number for the package, such as 2.1.3.</span>
+<span class="s0"># files -		List of files that constitute the package.  Each</span>
+<span class="s0">#			element is a sub-list with three elements.  The first</span>
+<span class="s0">#			is the name of a file relative to $dir, the second is</span>
+<span class="s0">#			&quot;load&quot; or &quot;source&quot;, indicating whether the file is a</span>
+<span class="s0">#			loadable binary or a script to source, and the third</span>
+<span class="s0">#			is a list of commands defined by this file.</span>
+
+<span class="s0">proc tclPkgSetup {dir pkg version files} {</span>
+    <span class="s0">global auto_index</span>
+
+    <span class="s0">package provide $pkg $version</span>
+    <span class="s0">foreach fileInfo $files {</span>
+	<span class="s0">set f [lindex $fileInfo 0]</span>
+	<span class="s0">set type [lindex $fileInfo 1]</span>
+	<span class="s0">foreach cmd [lindex $fileInfo 2] {</span>
+	    <span class="s0">if {$type eq &quot;load&quot;} {</span>
+		<span class="s0">set auto_index($cmd) [list load [file join $dir $f] $pkg]</span>
+	    <span class="s0">} else {</span>
+		<span class="s0">set auto_index($cmd) [list source [file join $dir $f]]</span>
+	    <span class="s0">}</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+
+<span class="s0"># tclPkgUnknown --</span>
+<span class="s0"># This procedure provides the default for the &quot;package unknown&quot; function.  It</span>
+<span class="s0"># is invoked when a package that's needed can't be found.  It scans the</span>
+<span class="s0"># auto_path directories and their immediate children looking for pkgIndex.tcl</span>
+<span class="s0"># files and sources any such files that are found to setup the package</span>
+<span class="s0"># database. As it searches, it will recognize changes to the auto_path and</span>
+<span class="s0"># scan any new directories.</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0"># name -		Name of desired package.  Not used.</span>
+<span class="s0"># version -		Version of desired package.  Not used.</span>
+<span class="s0"># exact -		Either &quot;-exact&quot; or omitted.  Not used.</span>
+
+<span class="s0">proc tclPkgUnknown {name args} {</span>
+    <span class="s0">global auto_path env</span>
+
+    <span class="s0">if {![info exists auto_path]} {</span>
+	<span class="s0">return</span>
+    <span class="s0">}</span>
+    <span class="s0"># Cache the auto_path, because it may change while we run through the</span>
+    <span class="s0"># first set of pkgIndex.tcl files</span>
+    <span class="s0">set old_path [set use_path $auto_path]</span>
+    <span class="s0">while {[llength $use_path]} {</span>
+	<span class="s0">set dir [lindex $use_path end]</span>
+
+	<span class="s0"># Make sure we only scan each directory one time.</span>
+	<span class="s0">if {[info exists tclSeenPath($dir)]} {</span>
+	    <span class="s0">set use_path [lrange $use_path 0 end-1]</span>
+	    <span class="s0">continue</span>
+	<span class="s0">}</span>
+	<span class="s0">set tclSeenPath($dir) 1</span>
+
+	<span class="s0"># we can't use glob in safe interps, so enclose the following in a</span>
+	<span class="s0"># catch statement, where we get the pkgIndex files out of the</span>
+	<span class="s0"># subdirectories</span>
+	<span class="s0">catch {</span>
+	    <span class="s0">foreach file [glob -directory $dir -join -nocomplain \</span>
+		    <span class="s0">* pkgIndex.tcl] {</span>
+		<span class="s0">set dir [file dirname $file]</span>
+		<span class="s0">if {![info exists procdDirs($dir)]} {</span>
+		    <span class="s0">try {</span>
+			<span class="s0">source $file</span>
+		    <span class="s0">} trap {POSIX EACCES} {} {</span>
+			<span class="s0"># $file was not readable; silently ignore</span>
+			<span class="s0">continue</span>
+		    <span class="s0">} on error msg {</span>
+			<span class="s0">tclLog &quot;error reading package index file $file: $msg&quot;</span>
+		    <span class="s0">} on ok {} {</span>
+			<span class="s0">set procdDirs($dir) 1</span>
+		    <span class="s0">}</span>
+		<span class="s0">}</span>
+	    <span class="s0">}</span>
+	<span class="s0">}</span>
+	<span class="s0">set dir [lindex $use_path end]</span>
+	<span class="s0">if {![info exists procdDirs($dir)]} {</span>
+	    <span class="s0">set file [file join $dir pkgIndex.tcl]</span>
+	    <span class="s0"># safe interps usually don't have &quot;file exists&quot;,</span>
+	    <span class="s0">if {([interp issafe] || [file exists $file])} {</span>
+		<span class="s0">try {</span>
+		    <span class="s0">source $file</span>
+		<span class="s0">} trap {POSIX EACCES} {} {</span>
+		    <span class="s0"># $file was not readable; silently ignore</span>
+		    <span class="s0">continue</span>
+		<span class="s0">} on error msg {</span>
+		    <span class="s0">tclLog &quot;error reading package index file $file: $msg&quot;</span>
+		<span class="s0">} on ok {} {</span>
+		    <span class="s0">set procdDirs($dir) 1</span>
+		<span class="s0">}</span>
+	    <span class="s0">}</span>
+	<span class="s0">}</span>
+
+	<span class="s0">set use_path [lrange $use_path 0 end-1]</span>
+
+	<span class="s0"># Check whether any of the index scripts we [source]d above set a new</span>
+	<span class="s0"># value for $::auto_path.  If so, then find any new directories on the</span>
+	<span class="s0"># $::auto_path, and lappend them to the $use_path we are working from.</span>
+	<span class="s0"># This gives index scripts the (arguably unwise) power to expand the</span>
+	<span class="s0"># index script search path while the search is in progress.</span>
+	<span class="s0">set index 0</span>
+	<span class="s0">if {[llength $old_path] == [llength $auto_path]} {</span>
+	    <span class="s0">foreach dir $auto_path old $old_path {</span>
+		<span class="s0">if {$dir ne $old} {</span>
+		    <span class="s0"># This entry in $::auto_path has changed.</span>
+		    <span class="s0">break</span>
+		<span class="s0">}</span>
+		<span class="s0">incr index</span>
+	    <span class="s0">}</span>
+	<span class="s0">}</span>
+
+	<span class="s0"># $index now points to the first element of $auto_path that has</span>
+	<span class="s0"># changed, or the beginning if $auto_path has changed length Scan the</span>
+	<span class="s0"># new elements of $auto_path for directories to add to $use_path.</span>
+	<span class="s0"># Don't add directories we've already seen, or ones already on the</span>
+	<span class="s0"># $use_path.</span>
+	<span class="s0">foreach dir [lrange $auto_path $index end] {</span>
+	    <span class="s0">if {![info exists tclSeenPath($dir)] &amp;&amp; ($dir ni $use_path)} {</span>
+		<span class="s0">lappend use_path $dir</span>
+	    <span class="s0">}</span>
+	<span class="s0">}</span>
+	<span class="s0">set old_path $auto_path</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+
+<span class="s0"># tcl::MacOSXPkgUnknown --</span>
+<span class="s0"># This procedure extends the &quot;package unknown&quot; function for MacOSX.  It scans</span>
+<span class="s0"># the Resources/Scripts directories of the immediate children of the auto_path</span>
+<span class="s0"># directories for pkgIndex files.</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0"># original -		original [package unknown] procedure</span>
+<span class="s0"># name -		Name of desired package.  Not used.</span>
+<span class="s0"># version -		Version of desired package.  Not used.</span>
+<span class="s0"># exact -		Either &quot;-exact&quot; or omitted.  Not used.</span>
+
+<span class="s0">proc tcl::MacOSXPkgUnknown {original name args} {</span>
+    <span class="s0">#  First do the cross-platform default search</span>
+    <span class="s0">uplevel 1 $original [linsert $args 0 $name]</span>
+
+    <span class="s0"># Now do MacOSX specific searching</span>
+    <span class="s0">global auto_path</span>
+
+    <span class="s0">if {![info exists auto_path]} {</span>
+	<span class="s0">return</span>
+    <span class="s0">}</span>
+    <span class="s0"># Cache the auto_path, because it may change while we run through the</span>
+    <span class="s0"># first set of pkgIndex.tcl files</span>
+    <span class="s0">set old_path [set use_path $auto_path]</span>
+    <span class="s0">while {[llength $use_path]} {</span>
+	<span class="s0">set dir [lindex $use_path end]</span>
+
+	<span class="s0"># Make sure we only scan each directory one time.</span>
+	<span class="s0">if {[info exists tclSeenPath($dir)]} {</span>
+	    <span class="s0">set use_path [lrange $use_path 0 end-1]</span>
+	    <span class="s0">continue</span>
+	<span class="s0">}</span>
+	<span class="s0">set tclSeenPath($dir) 1</span>
+
+	<span class="s0"># get the pkgIndex files out of the subdirectories</span>
+	<span class="s0">foreach file [glob -directory $dir -join -nocomplain \</span>
+		<span class="s0">* Resources Scripts pkgIndex.tcl] {</span>
+	    <span class="s0">set dir [file dirname $file]</span>
+	    <span class="s0">if {![info exists procdDirs($dir)]} {</span>
+		<span class="s0">try {</span>
+		    <span class="s0">source $file</span>
+		<span class="s0">} trap {POSIX EACCES} {} {</span>
+		    <span class="s0"># $file was not readable; silently ignore</span>
+		    <span class="s0">continue</span>
+		<span class="s0">} on error msg {</span>
+		    <span class="s0">tclLog &quot;error reading package index file $file: $msg&quot;</span>
+		<span class="s0">} on ok {} {</span>
+		    <span class="s0">set procdDirs($dir) 1</span>
+		<span class="s0">}</span>
+	    <span class="s0">}</span>
+	<span class="s0">}</span>
+	<span class="s0">set use_path [lrange $use_path 0 end-1]</span>
+
+	<span class="s0"># Check whether any of the index scripts we [source]d above set a new</span>
+	<span class="s0"># value for $::auto_path.  If so, then find any new directories on the</span>
+	<span class="s0"># $::auto_path, and lappend them to the $use_path we are working from.</span>
+	<span class="s0"># This gives index scripts the (arguably unwise) power to expand the</span>
+	<span class="s0"># index script search path while the search is in progress.</span>
+	<span class="s0">set index 0</span>
+	<span class="s0">if {[llength $old_path] == [llength $auto_path]} {</span>
+	    <span class="s0">foreach dir $auto_path old $old_path {</span>
+		<span class="s0">if {$dir ne $old} {</span>
+		    <span class="s0"># This entry in $::auto_path has changed.</span>
+		    <span class="s0">break</span>
+		<span class="s0">}</span>
+		<span class="s0">incr index</span>
+	    <span class="s0">}</span>
+	<span class="s0">}</span>
+
+	<span class="s0"># $index now points to the first element of $auto_path that has</span>
+	<span class="s0"># changed, or the beginning if $auto_path has changed length Scan the</span>
+	<span class="s0"># new elements of $auto_path for directories to add to $use_path.</span>
+	<span class="s0"># Don't add directories we've already seen, or ones already on the</span>
+	<span class="s0"># $use_path.</span>
+	<span class="s0">foreach dir [lrange $auto_path $index end] {</span>
+	    <span class="s0">if {![info exists tclSeenPath($dir)] &amp;&amp; ($dir ni $use_path)} {</span>
+		<span class="s0">lappend use_path $dir</span>
+	    <span class="s0">}</span>
+	<span class="s0">}</span>
+	<span class="s0">set old_path $auto_path</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+
+<span class="s0"># ::tcl::Pkg::Create --</span>
+<span class="s0">#</span>
+<span class="s0">#	Given a package specification generate a &quot;package ifneeded&quot; statement</span>
+<span class="s0">#	for the package, suitable for inclusion in a pkgIndex.tcl file.</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0">#	args		arguments used by the Create function:</span>
+<span class="s0">#			-name		packageName</span>
+<span class="s0">#			-version	packageVersion</span>
+<span class="s0">#			-load		{filename ?{procs}?}</span>
+<span class="s0">#			...</span>
+<span class="s0">#			-source		{filename ?{procs}?}</span>
+<span class="s0">#			...</span>
+<span class="s0">#</span>
+<span class="s0">#			Any number of -load and -source parameters may be</span>
+<span class="s0">#			specified, so long as there is at least one -load or</span>
+<span class="s0">#			-source parameter.  If the procs component of a module</span>
+<span class="s0">#			specifier is left off, that module will be set up for</span>
+<span class="s0">#			direct loading; otherwise, it will be set up for lazy</span>
+<span class="s0">#			loading.  If both -source and -load are specified, the</span>
+<span class="s0">#			-load'ed files will be loaded first, followed by the</span>
+<span class="s0">#			-source'd files.</span>
+<span class="s0">#</span>
+<span class="s0"># Results:</span>
+<span class="s0">#	An appropriate &quot;package ifneeded&quot; statement for the package.</span>
+
+<span class="s0">proc ::tcl::Pkg::Create {args} {</span>
+    <span class="s0">append err(usage) &quot;[lindex [info level 0] 0] &quot;</span>
+    <span class="s0">append err(usage) &quot;-name packageName -version packageVersion&quot;</span>
+    <span class="s0">append err(usage) &quot;?-load {filename ?{procs}?}? ... &quot;</span>
+    <span class="s0">append err(usage) &quot;?-source {filename ?{procs}?}? ...&quot;</span>
+
+    <span class="s0">set err(wrongNumArgs) &quot;wrong # args: should be \&quot;$err(usage)\&quot;&quot;</span>
+    <span class="s0">set err(valueMissing) &quot;value for \&quot;%s\&quot; missing: should be \&quot;$err(usage)\&quot;&quot;</span>
+    <span class="s0">set err(unknownOpt)   &quot;unknown option \&quot;%s\&quot;: should be \&quot;$err(usage)\&quot;&quot;</span>
+    <span class="s0">set err(noLoadOrSource) &quot;at least one of -load and -source must be given&quot;</span>
+
+    <span class="s0"># process arguments</span>
+    <span class="s0">set len [llength $args]</span>
+    <span class="s0">if {$len &lt; 6} {</span>
+	<span class="s0">error $err(wrongNumArgs)</span>
+    <span class="s0">}</span>
+
+    <span class="s0"># Initialize parameters</span>
+    <span class="s0">array set opts {-name {} -version {} -source {} -load {}}</span>
+
+    <span class="s0"># process parameters</span>
+    <span class="s0">for {set i 0} {$i &lt; $len} {incr i} {</span>
+	<span class="s0">set flag [lindex $args $i]</span>
+	<span class="s0">incr i</span>
+	<span class="s0">switch -glob -- $flag {</span>
+	    <span class="s0">&quot;-name&quot;		-</span>
+	    <span class="s0">&quot;-version&quot;		{</span>
+		<span class="s0">if {$i &gt;= $len} {</span>
+		    <span class="s0">error [format $err(valueMissing) $flag]</span>
+		<span class="s0">}</span>
+		<span class="s0">set opts($flag) [lindex $args $i]</span>
+	    <span class="s0">}</span>
+	    <span class="s0">&quot;-source&quot;		-</span>
+	    <span class="s0">&quot;-load&quot;		{</span>
+		<span class="s0">if {$i &gt;= $len} {</span>
+		    <span class="s0">error [format $err(valueMissing) $flag]</span>
+		<span class="s0">}</span>
+		<span class="s0">lappend opts($flag) [lindex $args $i]</span>
+	    <span class="s0">}</span>
+	    <span class="s0">default {</span>
+		<span class="s0">error [format $err(unknownOpt) [lindex $args $i]]</span>
+	    <span class="s0">}</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+
+    <span class="s0"># Validate the parameters</span>
+    <span class="s0">if {![llength $opts(-name)]} {</span>
+	<span class="s0">error [format $err(valueMissing) &quot;-name&quot;]</span>
+    <span class="s0">}</span>
+    <span class="s0">if {![llength $opts(-version)]} {</span>
+	<span class="s0">error [format $err(valueMissing) &quot;-version&quot;]</span>
+    <span class="s0">}</span>
+
+    <span class="s0">if {!([llength $opts(-source)] || [llength $opts(-load)])} {</span>
+	<span class="s0">error $err(noLoadOrSource)</span>
+    <span class="s0">}</span>
+
+    <span class="s0"># OK, now everything is good.  Generate the package ifneeded statment.</span>
+    <span class="s0">set cmdline &quot;package ifneeded $opts(-name) $opts(-version) &quot;</span>
+
+    <span class="s0">set cmdList {}</span>
+    <span class="s0">set lazyFileList {}</span>
+
+    <span class="s0"># Handle -load and -source specs</span>
+    <span class="s0">foreach key {load source} {</span>
+	<span class="s0">foreach filespec $opts(-$key) {</span>
+	    <span class="s0">lassign $filespec filename proclist</span>
+
+	    <span class="s0">if { [llength $proclist] == 0 } {</span>
+		<span class="s0">set cmd &quot;\[list $key \[file join \$dir [list $filename]\]\]&quot;</span>
+		<span class="s0">lappend cmdList $cmd</span>
+	    <span class="s0">} else {</span>
+		<span class="s0">lappend lazyFileList [list $filename $key $proclist]</span>
+	    <span class="s0">}</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+
+    <span class="s0">if {[llength $lazyFileList]} {</span>
+	<span class="s0">lappend cmdList &quot;\[list tclPkgSetup \$dir $opts(-name)\</span>
+		<span class="s0">$opts(-version) [list $lazyFileList]\]&quot;</span>
+    <span class="s0">}</span>
+    <span class="s0">append cmdline [join $cmdList &quot;\\n&quot;]</span>
+    <span class="s0">return $cmdline</span>
+<span class="s0">}</span>
+
+<span class="s0">interp alias {} ::pkg::create {} ::tcl::Pkg::Create</span>
+</pre>
+</body>
+</html>

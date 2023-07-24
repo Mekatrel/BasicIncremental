@@ -1,0 +1,614 @@
+<html>
+<head>
+<title>headerregistry.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #629755; font-style: italic;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #cc7832;}
+.s3 { color: #6a8759;}
+.s4 { color: #808080;}
+.s5 { color: #6897bb;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+headerregistry.py</font>
+</center></td></tr></table>
+<pre><span class="s0">&quot;&quot;&quot;Representing and manipulating email headers via custom objects. 
+ 
+This module provides an implementation of the HeaderRegistry API. 
+The implementation is designed to flexibly follow RFC5322 rules. 
+ 
+Eventually HeaderRegistry will be a public API, but it isn't yet, 
+and will probably change some before that happens. 
+ 
+&quot;&quot;&quot;</span>
+<span class="s2">from </span><span class="s1">__future__ </span><span class="s2">import </span><span class="s1">unicode_literals</span>
+<span class="s2">from </span><span class="s1">__future__ </span><span class="s2">import </span><span class="s1">division</span>
+<span class="s2">from </span><span class="s1">__future__ </span><span class="s2">import </span><span class="s1">absolute_import</span>
+
+<span class="s2">from </span><span class="s1">future.builtins </span><span class="s2">import </span><span class="s1">super</span>
+<span class="s2">from </span><span class="s1">future.builtins </span><span class="s2">import </span><span class="s1">str</span>
+<span class="s2">from </span><span class="s1">future.utils </span><span class="s2">import </span><span class="s1">text_to_native_str</span>
+<span class="s2">from </span><span class="s1">future.backports.email </span><span class="s2">import </span><span class="s1">utils</span>
+<span class="s2">from </span><span class="s1">future.backports.email </span><span class="s2">import </span><span class="s1">errors</span>
+<span class="s2">from </span><span class="s1">future.backports.email </span><span class="s2">import </span><span class="s1">_header_value_parser </span><span class="s2">as </span><span class="s1">parser</span>
+
+<span class="s2">class </span><span class="s1">Address(object):</span>
+
+    <span class="s2">def </span><span class="s1">__init__(self</span><span class="s2">, </span><span class="s1">display_name=</span><span class="s3">''</span><span class="s2">, </span><span class="s1">username=</span><span class="s3">''</span><span class="s2">, </span><span class="s1">domain=</span><span class="s3">''</span><span class="s2">, </span><span class="s1">addr_spec=</span><span class="s2">None</span><span class="s1">):</span>
+        <span class="s0">&quot;&quot;&quot;Create an object represeting a full email address. 
+ 
+        An address can have a 'display_name', a 'username', and a 'domain'.  In 
+        addition to specifying the username and domain separately, they may be 
+        specified together by using the addr_spec keyword *instead of* the 
+        username and domain keywords.  If an addr_spec string is specified it 
+        must be properly quoted according to RFC 5322 rules; an error will be 
+        raised if it is not. 
+ 
+        An Address object has display_name, username, domain, and addr_spec 
+        attributes, all of which are read-only.  The addr_spec and the string 
+        value of the object are both quoted according to RFC5322 rules, but 
+        without any Content Transfer Encoding. 
+ 
+        &quot;&quot;&quot;</span>
+        <span class="s4"># This clause with its potential 'raise' may only happen when an</span>
+        <span class="s4"># application program creates an Address object using an addr_spec</span>
+        <span class="s4"># keyword.  The email library code itself must always supply username</span>
+        <span class="s4"># and domain.</span>
+        <span class="s2">if </span><span class="s1">addr_spec </span><span class="s2">is not None</span><span class="s1">:</span>
+            <span class="s2">if </span><span class="s1">username </span><span class="s2">or </span><span class="s1">domain:</span>
+                <span class="s2">raise </span><span class="s1">TypeError(</span><span class="s3">&quot;addrspec specified when username and/or &quot;</span>
+                                <span class="s3">&quot;domain also specified&quot;</span><span class="s1">)</span>
+            <span class="s1">a_s</span><span class="s2">, </span><span class="s1">rest = parser.get_addr_spec(addr_spec)</span>
+            <span class="s2">if </span><span class="s1">rest:</span>
+                <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s3">&quot;Invalid addr_spec; only '{}' &quot;</span>
+                                 <span class="s3">&quot;could be parsed from '{}'&quot;</span><span class="s1">.format(</span>
+                                    <span class="s1">a_s</span><span class="s2">, </span><span class="s1">addr_spec))</span>
+            <span class="s2">if </span><span class="s1">a_s.all_defects:</span>
+                <span class="s2">raise </span><span class="s1">a_s.all_defects[</span><span class="s5">0</span><span class="s1">]</span>
+            <span class="s1">username = a_s.local_part</span>
+            <span class="s1">domain = a_s.domain</span>
+        <span class="s1">self._display_name = display_name</span>
+        <span class="s1">self._username = username</span>
+        <span class="s1">self._domain = domain</span>
+
+    <span class="s1">@property</span>
+    <span class="s2">def </span><span class="s1">display_name(self):</span>
+        <span class="s2">return </span><span class="s1">self._display_name</span>
+
+    <span class="s1">@property</span>
+    <span class="s2">def </span><span class="s1">username(self):</span>
+        <span class="s2">return </span><span class="s1">self._username</span>
+
+    <span class="s1">@property</span>
+    <span class="s2">def </span><span class="s1">domain(self):</span>
+        <span class="s2">return </span><span class="s1">self._domain</span>
+
+    <span class="s1">@property</span>
+    <span class="s2">def </span><span class="s1">addr_spec(self):</span>
+        <span class="s0">&quot;&quot;&quot;The addr_spec (username@domain) portion of the address, quoted 
+        according to RFC 5322 rules, but with no Content Transfer Encoding. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">nameset = set(self.username)</span>
+        <span class="s2">if </span><span class="s1">len(nameset) &gt; len(nameset-parser.DOT_ATOM_ENDS):</span>
+            <span class="s1">lp = parser.quote_string(self.username)</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">lp = self.username</span>
+        <span class="s2">if </span><span class="s1">self.domain:</span>
+            <span class="s2">return </span><span class="s1">lp + </span><span class="s3">'@' </span><span class="s1">+ self.domain</span>
+        <span class="s2">if not </span><span class="s1">lp:</span>
+            <span class="s2">return </span><span class="s3">'&lt;&gt;'</span>
+        <span class="s2">return </span><span class="s1">lp</span>
+
+    <span class="s2">def </span><span class="s1">__repr__(self):</span>
+        <span class="s2">return </span><span class="s3">&quot;Address(display_name={!r}, username={!r}, domain={!r})&quot;</span><span class="s1">.format(</span>
+                        <span class="s1">self.display_name</span><span class="s2">, </span><span class="s1">self.username</span><span class="s2">, </span><span class="s1">self.domain)</span>
+
+    <span class="s2">def </span><span class="s1">__str__(self):</span>
+        <span class="s1">nameset = set(self.display_name)</span>
+        <span class="s2">if </span><span class="s1">len(nameset) &gt; len(nameset-parser.SPECIALS):</span>
+            <span class="s1">disp = parser.quote_string(self.display_name)</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">disp = self.display_name</span>
+        <span class="s2">if </span><span class="s1">disp:</span>
+            <span class="s1">addr_spec = </span><span class="s3">'' </span><span class="s2">if </span><span class="s1">self.addr_spec==</span><span class="s3">'&lt;&gt;' </span><span class="s2">else </span><span class="s1">self.addr_spec</span>
+            <span class="s2">return </span><span class="s3">&quot;{} &lt;{}&gt;&quot;</span><span class="s1">.format(disp</span><span class="s2">, </span><span class="s1">addr_spec)</span>
+        <span class="s2">return </span><span class="s1">self.addr_spec</span>
+
+    <span class="s2">def </span><span class="s1">__eq__(self</span><span class="s2">, </span><span class="s1">other):</span>
+        <span class="s2">if </span><span class="s1">type(other) != type(self):</span>
+            <span class="s2">return False</span>
+        <span class="s2">return </span><span class="s1">(self.display_name == other.display_name </span><span class="s2">and</span>
+                <span class="s1">self.username == other.username </span><span class="s2">and</span>
+                <span class="s1">self.domain == other.domain)</span>
+
+
+<span class="s2">class </span><span class="s1">Group(object):</span>
+
+    <span class="s2">def </span><span class="s1">__init__(self</span><span class="s2">, </span><span class="s1">display_name=</span><span class="s2">None, </span><span class="s1">addresses=</span><span class="s2">None</span><span class="s1">):</span>
+        <span class="s0">&quot;&quot;&quot;Create an object representing an address group. 
+ 
+        An address group consists of a display_name followed by colon and an 
+        list of addresses (see Address) terminated by a semi-colon.  The Group 
+        is created by specifying a display_name and a possibly empty list of 
+        Address objects.  A Group can also be used to represent a single 
+        address that is not in a group, which is convenient when manipulating 
+        lists that are a combination of Groups and individual Addresses.  In 
+        this case the display_name should be set to None.  In particular, the 
+        string representation of a Group whose display_name is None is the same 
+        as the Address object, if there is one and only one Address object in 
+        the addresses list. 
+ 
+        &quot;&quot;&quot;</span>
+        <span class="s1">self._display_name = display_name</span>
+        <span class="s1">self._addresses = tuple(addresses) </span><span class="s2">if </span><span class="s1">addresses </span><span class="s2">else </span><span class="s1">tuple()</span>
+
+    <span class="s1">@property</span>
+    <span class="s2">def </span><span class="s1">display_name(self):</span>
+        <span class="s2">return </span><span class="s1">self._display_name</span>
+
+    <span class="s1">@property</span>
+    <span class="s2">def </span><span class="s1">addresses(self):</span>
+        <span class="s2">return </span><span class="s1">self._addresses</span>
+
+    <span class="s2">def </span><span class="s1">__repr__(self):</span>
+        <span class="s2">return </span><span class="s3">&quot;Group(display_name={!r}, addresses={!r}&quot;</span><span class="s1">.format(</span>
+                 <span class="s1">self.display_name</span><span class="s2">, </span><span class="s1">self.addresses)</span>
+
+    <span class="s2">def </span><span class="s1">__str__(self):</span>
+        <span class="s2">if </span><span class="s1">self.display_name </span><span class="s2">is None and </span><span class="s1">len(self.addresses)==</span><span class="s5">1</span><span class="s1">:</span>
+            <span class="s2">return </span><span class="s1">str(self.addresses[</span><span class="s5">0</span><span class="s1">])</span>
+        <span class="s1">disp = self.display_name</span>
+        <span class="s2">if </span><span class="s1">disp </span><span class="s2">is not None</span><span class="s1">:</span>
+            <span class="s1">nameset = set(disp)</span>
+            <span class="s2">if </span><span class="s1">len(nameset) &gt; len(nameset-parser.SPECIALS):</span>
+                <span class="s1">disp = parser.quote_string(disp)</span>
+        <span class="s1">adrstr = </span><span class="s3">&quot;, &quot;</span><span class="s1">.join(str(x) </span><span class="s2">for </span><span class="s1">x </span><span class="s2">in </span><span class="s1">self.addresses)</span>
+        <span class="s1">adrstr = </span><span class="s3">' ' </span><span class="s1">+ adrstr </span><span class="s2">if </span><span class="s1">adrstr </span><span class="s2">else </span><span class="s1">adrstr</span>
+        <span class="s2">return </span><span class="s3">&quot;{}:{};&quot;</span><span class="s1">.format(disp</span><span class="s2">, </span><span class="s1">adrstr)</span>
+
+    <span class="s2">def </span><span class="s1">__eq__(self</span><span class="s2">, </span><span class="s1">other):</span>
+        <span class="s2">if </span><span class="s1">type(other) != type(self):</span>
+            <span class="s2">return False</span>
+        <span class="s2">return </span><span class="s1">(self.display_name == other.display_name </span><span class="s2">and</span>
+                <span class="s1">self.addresses == other.addresses)</span>
+
+
+<span class="s4"># Header Classes #</span>
+
+<span class="s2">class </span><span class="s1">BaseHeader(str):</span>
+
+    <span class="s0">&quot;&quot;&quot;Base class for message headers. 
+ 
+    Implements generic behavior and provides tools for subclasses. 
+ 
+    A subclass must define a classmethod named 'parse' that takes an unfolded 
+    value string and a dictionary as its arguments.  The dictionary will 
+    contain one key, 'defects', initialized to an empty list.  After the call 
+    the dictionary must contain two additional keys: parse_tree, set to the 
+    parse tree obtained from parsing the header, and 'decoded', set to the 
+    string value of the idealized representation of the data from the value. 
+    (That is, encoded words are decoded, and values that have canonical 
+    representations are so represented.) 
+ 
+    The defects key is intended to collect parsing defects, which the message 
+    parser will subsequently dispose of as appropriate.  The parser should not, 
+    insofar as practical, raise any errors.  Defects should be added to the 
+    list instead.  The standard header parsers register defects for RFC 
+    compliance issues, for obsolete RFC syntax, and for unrecoverable parsing 
+    errors. 
+ 
+    The parse method may add additional keys to the dictionary.  In this case 
+    the subclass must define an 'init' method, which will be passed the 
+    dictionary as its keyword arguments.  The method should use (usually by 
+    setting them as the value of similarly named attributes) and remove all the 
+    extra keys added by its parse method, and then use super to call its parent 
+    class with the remaining arguments and keywords. 
+ 
+    The subclass should also make sure that a 'max_count' attribute is defined 
+    that is either None or 1. XXX: need to better define this API. 
+ 
+    &quot;&quot;&quot;</span>
+
+    <span class="s2">def </span><span class="s1">__new__(cls</span><span class="s2">, </span><span class="s1">name</span><span class="s2">, </span><span class="s1">value):</span>
+        <span class="s1">kwds = {</span><span class="s3">'defects'</span><span class="s1">: []}</span>
+        <span class="s1">cls.parse(value</span><span class="s2">, </span><span class="s1">kwds)</span>
+        <span class="s2">if </span><span class="s1">utils._has_surrogates(kwds[</span><span class="s3">'decoded'</span><span class="s1">]):</span>
+            <span class="s1">kwds[</span><span class="s3">'decoded'</span><span class="s1">] = utils._sanitize(kwds[</span><span class="s3">'decoded'</span><span class="s1">])</span>
+        <span class="s1">self = str.__new__(cls</span><span class="s2">, </span><span class="s1">kwds[</span><span class="s3">'decoded'</span><span class="s1">])</span>
+        <span class="s4"># del kwds['decoded']</span>
+        <span class="s1">self.init(name</span><span class="s2">, </span><span class="s1">**kwds)</span>
+        <span class="s2">return </span><span class="s1">self</span>
+
+    <span class="s2">def </span><span class="s1">init(self</span><span class="s2">, </span><span class="s1">name</span><span class="s2">, </span><span class="s1">**_3to2kwargs):</span>
+        <span class="s1">defects = _3to2kwargs[</span><span class="s3">'defects'</span><span class="s1">]; </span><span class="s2">del </span><span class="s1">_3to2kwargs[</span><span class="s3">'defects'</span><span class="s1">]</span>
+        <span class="s1">parse_tree = _3to2kwargs[</span><span class="s3">'parse_tree'</span><span class="s1">]; </span><span class="s2">del </span><span class="s1">_3to2kwargs[</span><span class="s3">'parse_tree'</span><span class="s1">]</span>
+        <span class="s1">self._name = name</span>
+        <span class="s1">self._parse_tree = parse_tree</span>
+        <span class="s1">self._defects = defects</span>
+
+    <span class="s1">@property</span>
+    <span class="s2">def </span><span class="s1">name(self):</span>
+        <span class="s2">return </span><span class="s1">self._name</span>
+
+    <span class="s1">@property</span>
+    <span class="s2">def </span><span class="s1">defects(self):</span>
+        <span class="s2">return </span><span class="s1">tuple(self._defects)</span>
+
+    <span class="s2">def </span><span class="s1">__reduce__(self):</span>
+        <span class="s2">return </span><span class="s1">(</span>
+            <span class="s1">_reconstruct_header</span><span class="s2">,</span>
+            <span class="s1">(</span>
+                <span class="s1">self.__class__.__name__</span><span class="s2">,</span>
+                <span class="s1">self.__class__.__bases__</span><span class="s2">,</span>
+                <span class="s1">str(self)</span><span class="s2">,</span>
+            <span class="s1">)</span><span class="s2">,</span>
+            <span class="s1">self.__dict__)</span>
+
+    <span class="s1">@classmethod</span>
+    <span class="s2">def </span><span class="s1">_reconstruct(cls</span><span class="s2">, </span><span class="s1">value):</span>
+        <span class="s2">return </span><span class="s1">str.__new__(cls</span><span class="s2">, </span><span class="s1">value)</span>
+
+    <span class="s2">def </span><span class="s1">fold(self</span><span class="s2">, </span><span class="s1">**_3to2kwargs):</span>
+        <span class="s1">policy = _3to2kwargs[</span><span class="s3">'policy'</span><span class="s1">]; </span><span class="s2">del </span><span class="s1">_3to2kwargs[</span><span class="s3">'policy'</span><span class="s1">]</span>
+        <span class="s3">&quot;&quot;&quot;Fold header according to policy. 
+ 
+        The parsed representation of the header is folded according to 
+        RFC5322 rules, as modified by the policy.  If the parse tree 
+        contains surrogateescaped bytes, the bytes are CTE encoded using 
+        the charset 'unknown-8bit&quot;. 
+ 
+        Any non-ASCII characters in the parse tree are CTE encoded using 
+        charset utf-8. XXX: make this a policy setting. 
+ 
+        The returned value is an ASCII-only string possibly containing linesep 
+        characters, and ending with a linesep character.  The string includes 
+        the header name and the ': ' separator. 
+ 
+        &quot;&quot;&quot;</span>
+        <span class="s4"># At some point we need to only put fws here if it was in the source.</span>
+        <span class="s1">header = parser.Header([</span>
+            <span class="s1">parser.HeaderLabel([</span>
+                <span class="s1">parser.ValueTerminal(self.name</span><span class="s2">, </span><span class="s3">'header-name'</span><span class="s1">)</span><span class="s2">,</span>
+                <span class="s1">parser.ValueTerminal(</span><span class="s3">':'</span><span class="s2">, </span><span class="s3">'header-sep'</span><span class="s1">)])</span><span class="s2">,</span>
+            <span class="s1">parser.CFWSList([parser.WhiteSpaceTerminal(</span><span class="s3">' '</span><span class="s2">, </span><span class="s3">'fws'</span><span class="s1">)])</span><span class="s2">,</span>
+                             <span class="s1">self._parse_tree])</span>
+        <span class="s2">return </span><span class="s1">header.fold(policy=policy)</span>
+
+
+<span class="s2">def </span><span class="s1">_reconstruct_header(cls_name</span><span class="s2">, </span><span class="s1">bases</span><span class="s2">, </span><span class="s1">value):</span>
+    <span class="s2">return </span><span class="s1">type(text_to_native_str(cls_name)</span><span class="s2">, </span><span class="s1">bases</span><span class="s2">, </span><span class="s1">{})._reconstruct(value)</span>
+
+
+<span class="s2">class </span><span class="s1">UnstructuredHeader(object):</span>
+
+    <span class="s1">max_count = </span><span class="s2">None</span>
+    <span class="s1">value_parser = staticmethod(parser.get_unstructured)</span>
+
+    <span class="s1">@classmethod</span>
+    <span class="s2">def </span><span class="s1">parse(cls</span><span class="s2">, </span><span class="s1">value</span><span class="s2">, </span><span class="s1">kwds):</span>
+        <span class="s1">kwds[</span><span class="s3">'parse_tree'</span><span class="s1">] = cls.value_parser(value)</span>
+        <span class="s1">kwds[</span><span class="s3">'decoded'</span><span class="s1">] = str(kwds[</span><span class="s3">'parse_tree'</span><span class="s1">])</span>
+
+
+<span class="s2">class </span><span class="s1">UniqueUnstructuredHeader(UnstructuredHeader):</span>
+
+    <span class="s1">max_count = </span><span class="s5">1</span>
+
+
+<span class="s2">class </span><span class="s1">DateHeader(object):</span>
+
+    <span class="s0">&quot;&quot;&quot;Header whose value consists of a single timestamp. 
+ 
+    Provides an additional attribute, datetime, which is either an aware 
+    datetime using a timezone, or a naive datetime if the timezone 
+    in the input string is -0000.  Also accepts a datetime as input. 
+    The 'value' attribute is the normalized form of the timestamp, 
+    which means it is the output of format_datetime on the datetime. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s1">max_count = </span><span class="s2">None</span>
+
+    <span class="s4"># This is used only for folding, not for creating 'decoded'.</span>
+    <span class="s1">value_parser = staticmethod(parser.get_unstructured)</span>
+
+    <span class="s1">@classmethod</span>
+    <span class="s2">def </span><span class="s1">parse(cls</span><span class="s2">, </span><span class="s1">value</span><span class="s2">, </span><span class="s1">kwds):</span>
+        <span class="s2">if not </span><span class="s1">value:</span>
+            <span class="s1">kwds[</span><span class="s3">'defects'</span><span class="s1">].append(errors.HeaderMissingRequiredValue())</span>
+            <span class="s1">kwds[</span><span class="s3">'datetime'</span><span class="s1">] = </span><span class="s2">None</span>
+            <span class="s1">kwds[</span><span class="s3">'decoded'</span><span class="s1">] = </span><span class="s3">''</span>
+            <span class="s1">kwds[</span><span class="s3">'parse_tree'</span><span class="s1">] = parser.TokenList()</span>
+            <span class="s2">return</span>
+        <span class="s2">if </span><span class="s1">isinstance(value</span><span class="s2">, </span><span class="s1">str):</span>
+            <span class="s1">value = utils.parsedate_to_datetime(value)</span>
+        <span class="s1">kwds[</span><span class="s3">'datetime'</span><span class="s1">] = value</span>
+        <span class="s1">kwds[</span><span class="s3">'decoded'</span><span class="s1">] = utils.format_datetime(kwds[</span><span class="s3">'datetime'</span><span class="s1">])</span>
+        <span class="s1">kwds[</span><span class="s3">'parse_tree'</span><span class="s1">] = cls.value_parser(kwds[</span><span class="s3">'decoded'</span><span class="s1">])</span>
+
+    <span class="s2">def </span><span class="s1">init(self</span><span class="s2">, </span><span class="s1">*args</span><span class="s2">, </span><span class="s1">**kw):</span>
+        <span class="s1">self._datetime = kw.pop(</span><span class="s3">'datetime'</span><span class="s1">)</span>
+        <span class="s1">super().init(*args</span><span class="s2">, </span><span class="s1">**kw)</span>
+
+    <span class="s1">@property</span>
+    <span class="s2">def </span><span class="s1">datetime(self):</span>
+        <span class="s2">return </span><span class="s1">self._datetime</span>
+
+
+<span class="s2">class </span><span class="s1">UniqueDateHeader(DateHeader):</span>
+
+    <span class="s1">max_count = </span><span class="s5">1</span>
+
+
+<span class="s2">class </span><span class="s1">AddressHeader(object):</span>
+
+    <span class="s1">max_count = </span><span class="s2">None</span>
+
+    <span class="s1">@staticmethod</span>
+    <span class="s2">def </span><span class="s1">value_parser(value):</span>
+        <span class="s1">address_list</span><span class="s2">, </span><span class="s1">value = parser.get_address_list(value)</span>
+        <span class="s2">assert not </span><span class="s1">value</span><span class="s2">, </span><span class="s3">'this should not happen'</span>
+        <span class="s2">return </span><span class="s1">address_list</span>
+
+    <span class="s1">@classmethod</span>
+    <span class="s2">def </span><span class="s1">parse(cls</span><span class="s2">, </span><span class="s1">value</span><span class="s2">, </span><span class="s1">kwds):</span>
+        <span class="s2">if </span><span class="s1">isinstance(value</span><span class="s2">, </span><span class="s1">str):</span>
+            <span class="s4"># We are translating here from the RFC language (address/mailbox)</span>
+            <span class="s4"># to our API language (group/address).</span>
+            <span class="s1">kwds[</span><span class="s3">'parse_tree'</span><span class="s1">] = address_list = cls.value_parser(value)</span>
+            <span class="s1">groups = []</span>
+            <span class="s2">for </span><span class="s1">addr </span><span class="s2">in </span><span class="s1">address_list.addresses:</span>
+                <span class="s1">groups.append(Group(addr.display_name</span><span class="s2">,</span>
+                                    <span class="s1">[Address(mb.display_name </span><span class="s2">or </span><span class="s3">''</span><span class="s2">,</span>
+                                             <span class="s1">mb.local_part </span><span class="s2">or </span><span class="s3">''</span><span class="s2">,</span>
+                                             <span class="s1">mb.domain </span><span class="s2">or </span><span class="s3">''</span><span class="s1">)</span>
+                                     <span class="s2">for </span><span class="s1">mb </span><span class="s2">in </span><span class="s1">addr.all_mailboxes]))</span>
+            <span class="s1">defects = list(address_list.all_defects)</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s4"># Assume it is Address/Group stuff</span>
+            <span class="s2">if not </span><span class="s1">hasattr(value</span><span class="s2">, </span><span class="s3">'__iter__'</span><span class="s1">):</span>
+                <span class="s1">value = [value]</span>
+            <span class="s1">groups = [Group(</span><span class="s2">None, </span><span class="s1">[item]) </span><span class="s2">if not </span><span class="s1">hasattr(item</span><span class="s2">, </span><span class="s3">'addresses'</span><span class="s1">)</span>
+                                          <span class="s2">else </span><span class="s1">item</span>
+                                    <span class="s2">for </span><span class="s1">item </span><span class="s2">in </span><span class="s1">value]</span>
+            <span class="s1">defects = []</span>
+        <span class="s1">kwds[</span><span class="s3">'groups'</span><span class="s1">] = groups</span>
+        <span class="s1">kwds[</span><span class="s3">'defects'</span><span class="s1">] = defects</span>
+        <span class="s1">kwds[</span><span class="s3">'decoded'</span><span class="s1">] = </span><span class="s3">', '</span><span class="s1">.join([str(item) </span><span class="s2">for </span><span class="s1">item </span><span class="s2">in </span><span class="s1">groups])</span>
+        <span class="s2">if </span><span class="s3">'parse_tree' </span><span class="s2">not in </span><span class="s1">kwds:</span>
+            <span class="s1">kwds[</span><span class="s3">'parse_tree'</span><span class="s1">] = cls.value_parser(kwds[</span><span class="s3">'decoded'</span><span class="s1">])</span>
+
+    <span class="s2">def </span><span class="s1">init(self</span><span class="s2">, </span><span class="s1">*args</span><span class="s2">, </span><span class="s1">**kw):</span>
+        <span class="s1">self._groups = tuple(kw.pop(</span><span class="s3">'groups'</span><span class="s1">))</span>
+        <span class="s1">self._addresses = </span><span class="s2">None</span>
+        <span class="s1">super().init(*args</span><span class="s2">, </span><span class="s1">**kw)</span>
+
+    <span class="s1">@property</span>
+    <span class="s2">def </span><span class="s1">groups(self):</span>
+        <span class="s2">return </span><span class="s1">self._groups</span>
+
+    <span class="s1">@property</span>
+    <span class="s2">def </span><span class="s1">addresses(self):</span>
+        <span class="s2">if </span><span class="s1">self._addresses </span><span class="s2">is None</span><span class="s1">:</span>
+            <span class="s1">self._addresses = tuple([address </span><span class="s2">for </span><span class="s1">group </span><span class="s2">in </span><span class="s1">self._groups</span>
+                                             <span class="s2">for </span><span class="s1">address </span><span class="s2">in </span><span class="s1">group.addresses])</span>
+        <span class="s2">return </span><span class="s1">self._addresses</span>
+
+
+<span class="s2">class </span><span class="s1">UniqueAddressHeader(AddressHeader):</span>
+
+    <span class="s1">max_count = </span><span class="s5">1</span>
+
+
+<span class="s2">class </span><span class="s1">SingleAddressHeader(AddressHeader):</span>
+
+    <span class="s1">@property</span>
+    <span class="s2">def </span><span class="s1">address(self):</span>
+        <span class="s2">if </span><span class="s1">len(self.addresses)!=</span><span class="s5">1</span><span class="s1">:</span>
+            <span class="s2">raise </span><span class="s1">ValueError((</span><span class="s3">&quot;value of single address header {} is not &quot;</span>
+                <span class="s3">&quot;a single address&quot;</span><span class="s1">).format(self.name))</span>
+        <span class="s2">return </span><span class="s1">self.addresses[</span><span class="s5">0</span><span class="s1">]</span>
+
+
+<span class="s2">class </span><span class="s1">UniqueSingleAddressHeader(SingleAddressHeader):</span>
+
+    <span class="s1">max_count = </span><span class="s5">1</span>
+
+
+<span class="s2">class </span><span class="s1">MIMEVersionHeader(object):</span>
+
+    <span class="s1">max_count = </span><span class="s5">1</span>
+
+    <span class="s1">value_parser = staticmethod(parser.parse_mime_version)</span>
+
+    <span class="s1">@classmethod</span>
+    <span class="s2">def </span><span class="s1">parse(cls</span><span class="s2">, </span><span class="s1">value</span><span class="s2">, </span><span class="s1">kwds):</span>
+        <span class="s1">kwds[</span><span class="s3">'parse_tree'</span><span class="s1">] = parse_tree = cls.value_parser(value)</span>
+        <span class="s1">kwds[</span><span class="s3">'decoded'</span><span class="s1">] = str(parse_tree)</span>
+        <span class="s1">kwds[</span><span class="s3">'defects'</span><span class="s1">].extend(parse_tree.all_defects)</span>
+        <span class="s1">kwds[</span><span class="s3">'major'</span><span class="s1">] = </span><span class="s2">None if </span><span class="s1">parse_tree.minor </span><span class="s2">is None else </span><span class="s1">parse_tree.major</span>
+        <span class="s1">kwds[</span><span class="s3">'minor'</span><span class="s1">] = parse_tree.minor</span>
+        <span class="s2">if </span><span class="s1">parse_tree.minor </span><span class="s2">is not None</span><span class="s1">:</span>
+            <span class="s1">kwds[</span><span class="s3">'version'</span><span class="s1">] = </span><span class="s3">'{}.{}'</span><span class="s1">.format(kwds[</span><span class="s3">'major'</span><span class="s1">]</span><span class="s2">, </span><span class="s1">kwds[</span><span class="s3">'minor'</span><span class="s1">])</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">kwds[</span><span class="s3">'version'</span><span class="s1">] = </span><span class="s2">None</span>
+
+    <span class="s2">def </span><span class="s1">init(self</span><span class="s2">, </span><span class="s1">*args</span><span class="s2">, </span><span class="s1">**kw):</span>
+        <span class="s1">self._version = kw.pop(</span><span class="s3">'version'</span><span class="s1">)</span>
+        <span class="s1">self._major = kw.pop(</span><span class="s3">'major'</span><span class="s1">)</span>
+        <span class="s1">self._minor = kw.pop(</span><span class="s3">'minor'</span><span class="s1">)</span>
+        <span class="s1">super().init(*args</span><span class="s2">, </span><span class="s1">**kw)</span>
+
+    <span class="s1">@property</span>
+    <span class="s2">def </span><span class="s1">major(self):</span>
+        <span class="s2">return </span><span class="s1">self._major</span>
+
+    <span class="s1">@property</span>
+    <span class="s2">def </span><span class="s1">minor(self):</span>
+        <span class="s2">return </span><span class="s1">self._minor</span>
+
+    <span class="s1">@property</span>
+    <span class="s2">def </span><span class="s1">version(self):</span>
+        <span class="s2">return </span><span class="s1">self._version</span>
+
+
+<span class="s2">class </span><span class="s1">ParameterizedMIMEHeader(object):</span>
+
+    <span class="s4"># Mixin that handles the params dict.  Must be subclassed and</span>
+    <span class="s4"># a property value_parser for the specific header provided.</span>
+
+    <span class="s1">max_count = </span><span class="s5">1</span>
+
+    <span class="s1">@classmethod</span>
+    <span class="s2">def </span><span class="s1">parse(cls</span><span class="s2">, </span><span class="s1">value</span><span class="s2">, </span><span class="s1">kwds):</span>
+        <span class="s1">kwds[</span><span class="s3">'parse_tree'</span><span class="s1">] = parse_tree = cls.value_parser(value)</span>
+        <span class="s1">kwds[</span><span class="s3">'decoded'</span><span class="s1">] = str(parse_tree)</span>
+        <span class="s1">kwds[</span><span class="s3">'defects'</span><span class="s1">].extend(parse_tree.all_defects)</span>
+        <span class="s2">if </span><span class="s1">parse_tree.params </span><span class="s2">is None</span><span class="s1">:</span>
+            <span class="s1">kwds[</span><span class="s3">'params'</span><span class="s1">] = {}</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s4"># The MIME RFCs specify that parameter ordering is arbitrary.</span>
+            <span class="s1">kwds[</span><span class="s3">'params'</span><span class="s1">] = dict((utils._sanitize(name).lower()</span><span class="s2">,</span>
+                                   <span class="s1">utils._sanitize(value))</span>
+                                  <span class="s2">for </span><span class="s1">name</span><span class="s2">, </span><span class="s1">value </span><span class="s2">in </span><span class="s1">parse_tree.params)</span>
+
+    <span class="s2">def </span><span class="s1">init(self</span><span class="s2">, </span><span class="s1">*args</span><span class="s2">, </span><span class="s1">**kw):</span>
+        <span class="s1">self._params = kw.pop(</span><span class="s3">'params'</span><span class="s1">)</span>
+        <span class="s1">super().init(*args</span><span class="s2">, </span><span class="s1">**kw)</span>
+
+    <span class="s1">@property</span>
+    <span class="s2">def </span><span class="s1">params(self):</span>
+        <span class="s2">return </span><span class="s1">self._params.copy()</span>
+
+
+<span class="s2">class </span><span class="s1">ContentTypeHeader(ParameterizedMIMEHeader):</span>
+
+    <span class="s1">value_parser = staticmethod(parser.parse_content_type_header)</span>
+
+    <span class="s2">def </span><span class="s1">init(self</span><span class="s2">, </span><span class="s1">*args</span><span class="s2">, </span><span class="s1">**kw):</span>
+        <span class="s1">super().init(*args</span><span class="s2">, </span><span class="s1">**kw)</span>
+        <span class="s1">self._maintype = utils._sanitize(self._parse_tree.maintype)</span>
+        <span class="s1">self._subtype = utils._sanitize(self._parse_tree.subtype)</span>
+
+    <span class="s1">@property</span>
+    <span class="s2">def </span><span class="s1">maintype(self):</span>
+        <span class="s2">return </span><span class="s1">self._maintype</span>
+
+    <span class="s1">@property</span>
+    <span class="s2">def </span><span class="s1">subtype(self):</span>
+        <span class="s2">return </span><span class="s1">self._subtype</span>
+
+    <span class="s1">@property</span>
+    <span class="s2">def </span><span class="s1">content_type(self):</span>
+        <span class="s2">return </span><span class="s1">self.maintype + </span><span class="s3">'/' </span><span class="s1">+ self.subtype</span>
+
+
+<span class="s2">class </span><span class="s1">ContentDispositionHeader(ParameterizedMIMEHeader):</span>
+
+    <span class="s1">value_parser = staticmethod(parser.parse_content_disposition_header)</span>
+
+    <span class="s2">def </span><span class="s1">init(self</span><span class="s2">, </span><span class="s1">*args</span><span class="s2">, </span><span class="s1">**kw):</span>
+        <span class="s1">super().init(*args</span><span class="s2">, </span><span class="s1">**kw)</span>
+        <span class="s1">cd = self._parse_tree.content_disposition</span>
+        <span class="s1">self._content_disposition = cd </span><span class="s2">if </span><span class="s1">cd </span><span class="s2">is None else </span><span class="s1">utils._sanitize(cd)</span>
+
+    <span class="s1">@property</span>
+    <span class="s2">def </span><span class="s1">content_disposition(self):</span>
+        <span class="s2">return </span><span class="s1">self._content_disposition</span>
+
+
+<span class="s2">class </span><span class="s1">ContentTransferEncodingHeader(object):</span>
+
+    <span class="s1">max_count = </span><span class="s5">1</span>
+
+    <span class="s1">value_parser = staticmethod(parser.parse_content_transfer_encoding_header)</span>
+
+    <span class="s1">@classmethod</span>
+    <span class="s2">def </span><span class="s1">parse(cls</span><span class="s2">, </span><span class="s1">value</span><span class="s2">, </span><span class="s1">kwds):</span>
+        <span class="s1">kwds[</span><span class="s3">'parse_tree'</span><span class="s1">] = parse_tree = cls.value_parser(value)</span>
+        <span class="s1">kwds[</span><span class="s3">'decoded'</span><span class="s1">] = str(parse_tree)</span>
+        <span class="s1">kwds[</span><span class="s3">'defects'</span><span class="s1">].extend(parse_tree.all_defects)</span>
+
+    <span class="s2">def </span><span class="s1">init(self</span><span class="s2">, </span><span class="s1">*args</span><span class="s2">, </span><span class="s1">**kw):</span>
+        <span class="s1">super().init(*args</span><span class="s2">, </span><span class="s1">**kw)</span>
+        <span class="s1">self._cte = utils._sanitize(self._parse_tree.cte)</span>
+
+    <span class="s1">@property</span>
+    <span class="s2">def </span><span class="s1">cte(self):</span>
+        <span class="s2">return </span><span class="s1">self._cte</span>
+
+
+<span class="s4"># The header factory #</span>
+
+<span class="s1">_default_header_map = {</span>
+    <span class="s3">'subject'</span><span class="s1">:                      UniqueUnstructuredHeader</span><span class="s2">,</span>
+    <span class="s3">'date'</span><span class="s1">:                         UniqueDateHeader</span><span class="s2">,</span>
+    <span class="s3">'resent-date'</span><span class="s1">:                  DateHeader</span><span class="s2">,</span>
+    <span class="s3">'orig-date'</span><span class="s1">:                    UniqueDateHeader</span><span class="s2">,</span>
+    <span class="s3">'sender'</span><span class="s1">:                       UniqueSingleAddressHeader</span><span class="s2">,</span>
+    <span class="s3">'resent-sender'</span><span class="s1">:                SingleAddressHeader</span><span class="s2">,</span>
+    <span class="s3">'to'</span><span class="s1">:                           UniqueAddressHeader</span><span class="s2">,</span>
+    <span class="s3">'resent-to'</span><span class="s1">:                    AddressHeader</span><span class="s2">,</span>
+    <span class="s3">'cc'</span><span class="s1">:                           UniqueAddressHeader</span><span class="s2">,</span>
+    <span class="s3">'resent-cc'</span><span class="s1">:                    AddressHeader</span><span class="s2">,</span>
+    <span class="s3">'bcc'</span><span class="s1">:                          UniqueAddressHeader</span><span class="s2">,</span>
+    <span class="s3">'resent-bcc'</span><span class="s1">:                   AddressHeader</span><span class="s2">,</span>
+    <span class="s3">'from'</span><span class="s1">:                         UniqueAddressHeader</span><span class="s2">,</span>
+    <span class="s3">'resent-from'</span><span class="s1">:                  AddressHeader</span><span class="s2">,</span>
+    <span class="s3">'reply-to'</span><span class="s1">:                     UniqueAddressHeader</span><span class="s2">,</span>
+    <span class="s3">'mime-version'</span><span class="s1">:                 MIMEVersionHeader</span><span class="s2">,</span>
+    <span class="s3">'content-type'</span><span class="s1">:                 ContentTypeHeader</span><span class="s2">,</span>
+    <span class="s3">'content-disposition'</span><span class="s1">:          ContentDispositionHeader</span><span class="s2">,</span>
+    <span class="s3">'content-transfer-encoding'</span><span class="s1">:    ContentTransferEncodingHeader</span><span class="s2">,</span>
+    <span class="s1">}</span>
+
+<span class="s2">class </span><span class="s1">HeaderRegistry(object):</span>
+
+    <span class="s0">&quot;&quot;&quot;A header_factory and header registry.&quot;&quot;&quot;</span>
+
+    <span class="s2">def </span><span class="s1">__init__(self</span><span class="s2">, </span><span class="s1">base_class=BaseHeader</span><span class="s2">, </span><span class="s1">default_class=UnstructuredHeader</span><span class="s2">,</span>
+                       <span class="s1">use_default_map=</span><span class="s2">True</span><span class="s1">):</span>
+        <span class="s0">&quot;&quot;&quot;Create a header_factory that works with the Policy API. 
+ 
+        base_class is the class that will be the last class in the created 
+        header class's __bases__ list.  default_class is the class that will be 
+        used if &quot;name&quot; (see __call__) does not appear in the registry. 
+        use_default_map controls whether or not the default mapping of names to 
+        specialized classes is copied in to the registry when the factory is 
+        created.  The default is True. 
+ 
+        &quot;&quot;&quot;</span>
+        <span class="s1">self.registry = {}</span>
+        <span class="s1">self.base_class = base_class</span>
+        <span class="s1">self.default_class = default_class</span>
+        <span class="s2">if </span><span class="s1">use_default_map:</span>
+            <span class="s1">self.registry.update(_default_header_map)</span>
+
+    <span class="s2">def </span><span class="s1">map_to_type(self</span><span class="s2">, </span><span class="s1">name</span><span class="s2">, </span><span class="s1">cls):</span>
+        <span class="s0">&quot;&quot;&quot;Register cls as the specialized class for handling &quot;name&quot; headers. 
+ 
+        &quot;&quot;&quot;</span>
+        <span class="s1">self.registry[name.lower()] = cls</span>
+
+    <span class="s2">def </span><span class="s1">__getitem__(self</span><span class="s2">, </span><span class="s1">name):</span>
+        <span class="s1">cls = self.registry.get(name.lower()</span><span class="s2">, </span><span class="s1">self.default_class)</span>
+        <span class="s2">return </span><span class="s1">type(text_to_native_str(</span><span class="s3">'_'</span><span class="s1">+cls.__name__)</span><span class="s2">, </span><span class="s1">(cls</span><span class="s2">, </span><span class="s1">self.base_class)</span><span class="s2">, </span><span class="s1">{})</span>
+
+    <span class="s2">def </span><span class="s1">__call__(self</span><span class="s2">, </span><span class="s1">name</span><span class="s2">, </span><span class="s1">value):</span>
+        <span class="s0">&quot;&quot;&quot;Create a header instance for header 'name' from 'value'. 
+ 
+        Creates a header instance by creating a specialized class for parsing 
+        and representing the specified header by combining the factory 
+        base_class with a specialized class from the registry or the 
+        default_class, and passing the name and value to the constructed 
+        class's constructor. 
+ 
+        &quot;&quot;&quot;</span>
+        <span class="s2">return </span><span class="s1">self[name](name</span><span class="s2">, </span><span class="s1">value)</span>
+</pre>
+</body>
+</html>

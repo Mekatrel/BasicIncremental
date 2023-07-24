@@ -1,0 +1,841 @@
+<html>
+<head>
+<title>threadpool.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #cc7832;}
+.s3 { color: #6a8759;}
+.s4 { color: #6897bb;}
+.s5 { color: #629755; font-style: italic;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+threadpool.py</font>
+</center></td></tr></table>
+<pre><span class="s0"># Copyright (c) 2012 Denis Bilenko. See LICENSE for details.</span>
+<span class="s2">from </span><span class="s1">__future__ </span><span class="s2">import </span><span class="s1">absolute_import</span>
+<span class="s2">from </span><span class="s1">__future__ </span><span class="s2">import </span><span class="s1">division</span>
+<span class="s2">from </span><span class="s1">__future__ </span><span class="s2">import </span><span class="s1">print_function</span>
+
+<span class="s2">import </span><span class="s1">os</span>
+<span class="s2">import </span><span class="s1">sys</span>
+
+
+<span class="s2">from </span><span class="s1">greenlet </span><span class="s2">import </span><span class="s1">greenlet </span><span class="s2">as </span><span class="s1">RawGreenlet</span>
+
+<span class="s2">from </span><span class="s1">gevent </span><span class="s2">import </span><span class="s1">monkey</span>
+<span class="s2">from </span><span class="s1">gevent._compat </span><span class="s2">import </span><span class="s1">integer_types</span>
+<span class="s2">from </span><span class="s1">gevent.event </span><span class="s2">import </span><span class="s1">AsyncResult</span>
+<span class="s2">from </span><span class="s1">gevent.exceptions </span><span class="s2">import </span><span class="s1">InvalidThreadUseError</span>
+<span class="s2">from </span><span class="s1">gevent.greenlet </span><span class="s2">import </span><span class="s1">Greenlet</span>
+
+<span class="s2">from </span><span class="s1">gevent._hub_local </span><span class="s2">import </span><span class="s1">get_hub_if_exists</span>
+<span class="s2">from </span><span class="s1">gevent.hub </span><span class="s2">import </span><span class="s1">_get_hub_noargs </span><span class="s2">as </span><span class="s1">get_hub</span>
+<span class="s2">from </span><span class="s1">gevent.hub </span><span class="s2">import </span><span class="s1">getcurrent</span>
+<span class="s2">from </span><span class="s1">gevent.hub </span><span class="s2">import </span><span class="s1">sleep</span>
+<span class="s2">from </span><span class="s1">gevent.lock </span><span class="s2">import </span><span class="s1">Semaphore</span>
+<span class="s2">from </span><span class="s1">gevent.pool </span><span class="s2">import </span><span class="s1">GroupMappingMixin</span>
+<span class="s2">from </span><span class="s1">gevent.util </span><span class="s2">import </span><span class="s1">clear_stack_frames</span>
+
+<span class="s2">from </span><span class="s1">gevent._threading </span><span class="s2">import </span><span class="s1">Queue</span>
+<span class="s2">from </span><span class="s1">gevent._threading </span><span class="s2">import </span><span class="s1">EmptyTimeout</span>
+<span class="s2">from </span><span class="s1">gevent._threading </span><span class="s2">import </span><span class="s1">start_new_thread</span>
+<span class="s2">from </span><span class="s1">gevent._threading </span><span class="s2">import </span><span class="s1">get_thread_ident</span>
+
+
+<span class="s1">__all__ = [</span>
+    <span class="s3">'ThreadPool'</span><span class="s2">,</span>
+    <span class="s3">'ThreadResult'</span><span class="s2">,</span>
+<span class="s1">]</span>
+
+<span class="s2">def </span><span class="s1">_format_hub(hub):</span>
+    <span class="s2">if </span><span class="s1">hub </span><span class="s2">is None</span><span class="s1">:</span>
+        <span class="s2">return </span><span class="s3">'&lt;missing&gt;'</span>
+    <span class="s2">return </span><span class="s3">'&lt;%s at 0x%x thread_ident=0x%x&gt;' </span><span class="s1">% (</span>
+        <span class="s1">hub.__class__.__name__</span><span class="s2">, </span><span class="s1">id(hub)</span><span class="s2">, </span><span class="s1">hub.thread_ident</span>
+    <span class="s1">)</span>
+
+
+<span class="s2">def </span><span class="s1">_get_thread_profile(_sys=sys):</span>
+    <span class="s2">if </span><span class="s3">'threading' </span><span class="s2">in </span><span class="s1">_sys.modules:</span>
+        <span class="s2">return </span><span class="s1">_sys.modules[</span><span class="s3">'threading'</span><span class="s1">]._profile_hook</span>
+
+
+<span class="s2">def </span><span class="s1">_get_thread_trace(_sys=sys):</span>
+    <span class="s2">if </span><span class="s3">'threading' </span><span class="s2">in </span><span class="s1">_sys.modules:</span>
+        <span class="s2">return </span><span class="s1">_sys.modules[</span><span class="s3">'threading'</span><span class="s1">]._trace_hook</span>
+
+
+<span class="s2">class </span><span class="s1">_WorkerGreenlet(RawGreenlet):</span>
+    <span class="s0"># Exists to produce a more useful repr for worker pool</span>
+    <span class="s0"># threads/greenlets, and manage the communication of the worker</span>
+    <span class="s0"># thread with the threadpool.</span>
+
+    <span class="s0"># Inform the gevent.util.GreenletTree that this should be</span>
+    <span class="s0"># considered the root (for printing purposes)</span>
+    <span class="s1">greenlet_tree_is_root = </span><span class="s2">True</span>
+
+    <span class="s1">_thread_ident = </span><span class="s4">0</span>
+    <span class="s1">_exc_info = sys.exc_info</span>
+    <span class="s1">_get_hub_if_exists = staticmethod(get_hub_if_exists)</span>
+    <span class="s0"># We capture the hub each time through the loop in case its created</span>
+    <span class="s0"># so we can destroy it after a fork.</span>
+    <span class="s1">_hub_of_worker = </span><span class="s2">None</span>
+    <span class="s0"># The hub of the threadpool we're working for. Just for info.</span>
+    <span class="s1">_hub = </span><span class="s2">None</span>
+
+    <span class="s0"># A cookie passed to task_queue.get()</span>
+    <span class="s1">_task_queue_cookie = </span><span class="s2">None</span>
+
+    <span class="s0"># If not -1, how long to block waiting for a task before we</span>
+    <span class="s0"># exit.</span>
+    <span class="s1">_idle_task_timeout = -</span><span class="s4">1</span>
+
+    <span class="s2">def </span><span class="s1">__init__(self</span><span class="s2">, </span><span class="s1">threadpool):</span>
+        <span class="s0"># Construct in the main thread (owner of the threadpool)</span>
+        <span class="s0"># The parent greenlet and thread identifier will be set once the</span>
+        <span class="s0"># new thread begins running.</span>
+        <span class="s1">RawGreenlet.__init__(self)</span>
+
+        <span class="s1">self._hub = threadpool.hub</span>
+        <span class="s0"># Avoid doing any imports in the background thread if it's not</span>
+        <span class="s0"># necessary (monkey.get_original imports if not patched).</span>
+        <span class="s0"># Background imports can hang Python 2 (gevent's thread resolver runs in the BG,</span>
+        <span class="s0"># and resolving may have to import the idna module, which needs an import lock, so</span>
+        <span class="s0"># resolving at module scope)</span>
+        <span class="s2">if </span><span class="s1">monkey.is_module_patched(</span><span class="s3">'sys'</span><span class="s1">):</span>
+            <span class="s1">stderr = monkey.get_original(</span><span class="s3">'sys'</span><span class="s2">, </span><span class="s3">'stderr'</span><span class="s1">)</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">stderr = sys.stderr</span>
+        <span class="s1">self._stderr = stderr</span>
+        <span class="s0"># We can capture the task_queue; even though it can change if the threadpool</span>
+        <span class="s0"># is re-innitted, we won't be running in that case</span>
+        <span class="s1">self._task_queue = threadpool.task_queue </span><span class="s0"># type:gevent._threading.Queue</span>
+        <span class="s1">self._task_queue_cookie = self._task_queue.allocate_cookie()</span>
+        <span class="s1">self._unregister_worker = threadpool._unregister_worker</span>
+        <span class="s1">self._idle_task_timeout = threadpool._idle_task_timeout</span>
+
+        <span class="s1">threadpool._register_worker(self)</span>
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s1">start_new_thread(self._begin</span><span class="s2">, </span><span class="s1">())</span>
+        <span class="s2">except</span><span class="s1">:</span>
+            <span class="s1">self._unregister_worker(self)</span>
+            <span class="s2">raise</span>
+
+    <span class="s2">def </span><span class="s1">_begin(self</span><span class="s2">, </span><span class="s1">_get_c=getcurrent</span><span class="s2">, </span><span class="s1">_get_ti=get_thread_ident):</span>
+        <span class="s0"># Pass arguments to avoid accessing globals during module shutdown.</span>
+
+        <span class="s0"># we're in the new thread (but its root greenlet). Establish invariants and get going</span>
+        <span class="s0"># by making this the current greenlet.</span>
+        <span class="s1">self.parent = _get_c() </span><span class="s0"># pylint:disable=attribute-defined-outside-init</span>
+        <span class="s1">self._thread_ident = _get_ti()</span>
+        <span class="s0"># ignore the parent attribute. (We can't set parent to None.)</span>
+        <span class="s1">self.parent.greenlet_tree_is_ignored = </span><span class="s2">True</span>
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s1">self.switch() </span><span class="s0"># goto run()</span>
+        <span class="s2">except</span><span class="s1">: </span><span class="s0"># pylint:disable=bare-except</span>
+            <span class="s0"># run() will attempt to print any exceptions, but that might</span>
+            <span class="s0"># not work during shutdown. sys.excepthook and such may be gone,</span>
+            <span class="s0"># so things might not get printed at all except for a cryptic</span>
+            <span class="s0"># message. This is especially true on Python 2 (doesn't seem to be</span>
+            <span class="s0"># an issue on Python 3).</span>
+            <span class="s2">pass</span>
+
+    <span class="s2">def </span><span class="s1">__fixup_hub_before_block(self):</span>
+        <span class="s1">hub = self._get_hub_if_exists() </span><span class="s0"># Don't create one; only set if a worker function did it</span>
+        <span class="s2">if </span><span class="s1">hub </span><span class="s2">is not None</span><span class="s1">:</span>
+            <span class="s1">hub.name = </span><span class="s3">'ThreadPool Worker Hub'</span>
+            <span class="s0"># While we block, don't let the monitoring thread, if any,</span>
+            <span class="s0"># report us as blocked. Indeed, so long as we never</span>
+            <span class="s0"># try to switch greenlets, don't report us as blocked---</span>
+            <span class="s0"># the threadpool is *meant* to run blocking tasks</span>
+            <span class="s2">if </span><span class="s1">hub </span><span class="s2">is not None and </span><span class="s1">hub.periodic_monitoring_thread </span><span class="s2">is not None</span><span class="s1">:</span>
+                <span class="s1">hub.periodic_monitoring_thread.ignore_current_greenlet_blocking()</span>
+            <span class="s1">self._hub_of_worker = hub</span>
+
+    <span class="s1">@staticmethod</span>
+    <span class="s2">def </span><span class="s1">__print_tb(tb</span><span class="s2">, </span><span class="s1">stderr):</span>
+        <span class="s0"># Extracted from traceback to avoid accessing any module</span>
+        <span class="s0"># globals (these sometimes happen during interpreter shutdown;</span>
+        <span class="s0"># see test__subprocess_interrupted)</span>
+        <span class="s2">while </span><span class="s1">tb </span><span class="s2">is not None</span><span class="s1">:</span>
+            <span class="s1">f = tb.tb_frame</span>
+            <span class="s1">lineno = tb.tb_lineno</span>
+            <span class="s1">co = f.f_code</span>
+            <span class="s1">filename = co.co_filename</span>
+            <span class="s1">name = co.co_name</span>
+            <span class="s1">print(</span><span class="s3">'  File &quot;%s&quot;, line %d, in %s' </span><span class="s1">% (filename</span><span class="s2">, </span><span class="s1">lineno</span><span class="s2">, </span><span class="s1">name)</span><span class="s2">,</span>
+                  <span class="s1">file=stderr)</span>
+            <span class="s1">tb = tb.tb_next</span>
+
+    <span class="s2">def </span><span class="s1">_before_run_task(self</span><span class="s2">, </span><span class="s1">func</span><span class="s2">, </span><span class="s1">args</span><span class="s2">, </span><span class="s1">kwargs</span><span class="s2">, </span><span class="s1">thread_result</span><span class="s2">,</span>
+                         <span class="s1">_sys=sys</span><span class="s2">,</span>
+                         <span class="s1">_get_thread_profile=_get_thread_profile</span><span class="s2">,</span>
+                         <span class="s1">_get_thread_trace=_get_thread_trace):</span>
+        <span class="s0"># pylint:disable=unused-argument</span>
+        <span class="s1">_sys.setprofile(_get_thread_profile())</span>
+        <span class="s1">_sys.settrace(_get_thread_trace())</span>
+
+    <span class="s2">def </span><span class="s1">_after_run_task(self</span><span class="s2">, </span><span class="s1">func</span><span class="s2">, </span><span class="s1">args</span><span class="s2">, </span><span class="s1">kwargs</span><span class="s2">, </span><span class="s1">thread_result</span><span class="s2">, </span><span class="s1">_sys=sys):</span>
+        <span class="s0"># pylint:disable=unused-argument</span>
+        <span class="s1">_sys.setprofile(</span><span class="s2">None</span><span class="s1">)</span>
+        <span class="s1">_sys.settrace(</span><span class="s2">None</span><span class="s1">)</span>
+
+    <span class="s2">def </span><span class="s1">__run_task(self</span><span class="s2">, </span><span class="s1">func</span><span class="s2">, </span><span class="s1">args</span><span class="s2">, </span><span class="s1">kwargs</span><span class="s2">, </span><span class="s1">thread_result):</span>
+        <span class="s1">self._before_run_task(func</span><span class="s2">, </span><span class="s1">args</span><span class="s2">, </span><span class="s1">kwargs</span><span class="s2">, </span><span class="s1">thread_result)</span>
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s1">thread_result.set(func(*args</span><span class="s2">, </span><span class="s1">**kwargs))</span>
+        <span class="s2">except</span><span class="s1">: </span><span class="s0"># pylint:disable=bare-except</span>
+            <span class="s1">thread_result.handle_error((self</span><span class="s2">, </span><span class="s1">func)</span><span class="s2">, </span><span class="s1">self._exc_info())</span>
+        <span class="s2">finally</span><span class="s1">:</span>
+            <span class="s1">self._after_run_task(func</span><span class="s2">, </span><span class="s1">args</span><span class="s2">, </span><span class="s1">kwargs</span><span class="s2">, </span><span class="s1">thread_result)</span>
+            <span class="s2">del </span><span class="s1">func</span><span class="s2">, </span><span class="s1">args</span><span class="s2">, </span><span class="s1">kwargs</span><span class="s2">, </span><span class="s1">thread_result</span>
+
+    <span class="s2">def </span><span class="s1">run(self):</span>
+        <span class="s0"># pylint:disable=too-many-branches</span>
+        <span class="s1">task = </span><span class="s2">None</span>
+        <span class="s1">exc_info = sys.exc_info</span>
+        <span class="s1">fixup_hub_before_block = self.__fixup_hub_before_block</span>
+        <span class="s1">task_queue_get = self._task_queue.get</span>
+        <span class="s1">task_queue_cookie = self._task_queue_cookie</span>
+        <span class="s1">run_task = self.__run_task</span>
+        <span class="s1">task_queue_done = self._task_queue.task_done</span>
+        <span class="s1">idle_task_timeout = self._idle_task_timeout</span>
+        <span class="s2">try</span><span class="s1">: </span><span class="s0"># pylint:disable=too-many-nested-blocks</span>
+            <span class="s2">while </span><span class="s4">1</span><span class="s1">: </span><span class="s0"># tiny bit faster than True on Py2</span>
+                <span class="s1">fixup_hub_before_block()</span>
+
+                <span class="s2">try</span><span class="s1">:</span>
+                    <span class="s1">task = task_queue_get(task_queue_cookie</span><span class="s2">, </span><span class="s1">idle_task_timeout)</span>
+                <span class="s2">except </span><span class="s1">EmptyTimeout:</span>
+                    <span class="s0"># Nothing to do, exit the thread. Do not</span>
+                    <span class="s0"># go into the next block where we would call</span>
+                    <span class="s0"># queue.task_done(), because we didn't actually</span>
+                    <span class="s0"># take a task.</span>
+                    <span class="s2">return</span>
+                <span class="s2">try</span><span class="s1">:</span>
+                    <span class="s2">if </span><span class="s1">task </span><span class="s2">is None</span><span class="s1">:</span>
+                        <span class="s2">return</span>
+
+                    <span class="s1">run_task(*task)</span>
+                <span class="s2">except</span><span class="s1">:</span>
+                    <span class="s1">task = repr(task)</span>
+                    <span class="s2">raise</span>
+                <span class="s2">finally</span><span class="s1">:</span>
+                    <span class="s1">task = </span><span class="s2">None if not </span><span class="s1">isinstance(task</span><span class="s2">, </span><span class="s1">str) </span><span class="s2">else </span><span class="s1">task</span>
+                    <span class="s1">task_queue_done()</span>
+        <span class="s2">except </span><span class="s1">Exception </span><span class="s2">as </span><span class="s1">e: </span><span class="s0"># pylint:disable=broad-except</span>
+            <span class="s1">print(</span>
+                <span class="s3">&quot;Failed to run worker thread. Task=%r Exception=%r&quot; </span><span class="s1">% (</span>
+                    <span class="s1">task</span><span class="s2">, </span><span class="s1">e</span>
+                <span class="s1">)</span><span class="s2">,</span>
+                <span class="s1">file=self._stderr)</span>
+            <span class="s1">self.__print_tb(exc_info()[-</span><span class="s4">1</span><span class="s1">]</span><span class="s2">, </span><span class="s1">self._stderr)</span>
+        <span class="s2">finally</span><span class="s1">:</span>
+            <span class="s0"># Re-check for the hub in case the task created it but then</span>
+            <span class="s0"># failed.</span>
+            <span class="s1">self.cleanup(self._get_hub_if_exists())</span>
+
+    <span class="s2">def </span><span class="s1">cleanup(self</span><span class="s2">, </span><span class="s1">hub_of_worker):</span>
+        <span class="s2">if </span><span class="s1">self._hub </span><span class="s2">is not None</span><span class="s1">:</span>
+            <span class="s1">self._hub = </span><span class="s2">None</span>
+            <span class="s1">self._unregister_worker(self)</span>
+            <span class="s1">self._unregister_worker = </span><span class="s2">lambda </span><span class="s1">_: </span><span class="s2">None</span>
+            <span class="s1">self._task_queue = </span><span class="s2">None</span>
+            <span class="s1">self._task_queue_cookie = </span><span class="s2">None</span>
+
+        <span class="s2">if </span><span class="s1">hub_of_worker </span><span class="s2">is not None</span><span class="s1">:</span>
+            <span class="s1">hub_of_worker.destroy(</span><span class="s2">True</span><span class="s1">)</span>
+
+    <span class="s2">def </span><span class="s1">__repr__(self</span><span class="s2">, </span><span class="s1">_format_hub=_format_hub):</span>
+        <span class="s2">return </span><span class="s3">&quot;&lt;ThreadPoolWorker at 0x%x thread_ident=0x%x threadpool-hub=%s&gt;&quot; </span><span class="s1">% (</span>
+            <span class="s1">id(self)</span><span class="s2">,</span>
+            <span class="s1">self._thread_ident</span><span class="s2">,</span>
+            <span class="s1">_format_hub(self._hub)</span>
+        <span class="s1">)</span>
+
+
+<span class="s2">class </span><span class="s1">ThreadPool(GroupMappingMixin):</span>
+    <span class="s5">&quot;&quot;&quot; 
+    A pool of native worker threads. 
+ 
+    This can be useful for CPU intensive functions, or those that 
+    otherwise will not cooperate with gevent. The best functions to execute 
+    in a thread pool are small functions with a single purpose; ideally they release 
+    the CPython GIL. Such functions are extension functions implemented in C. 
+ 
+    It implements the same operations as a :class:`gevent.pool.Pool`, 
+    but using threads instead of greenlets. 
+ 
+    .. note:: The method :meth:`apply_async` will always return a new 
+       greenlet, bypassing the threadpool entirely. 
+ 
+    Most users will not need to create instances of this class. Instead, 
+    use the threadpool already associated with gevent's hub:: 
+ 
+        pool = gevent.get_hub().threadpool 
+        result = pool.spawn(lambda: &quot;Some func&quot;).get() 
+ 
+    .. important:: It is only possible to use instances of this class from 
+       the thread running their hub. Typically that means from the thread that 
+       created them. Using the pattern shown above takes care of this. 
+ 
+       There is no gevent-provided way to have a single process-wide limit on the 
+       number of threads in various pools when doing that, however. The suggested 
+       way to use gevent and threadpools is to have a single gevent hub 
+       and its one threadpool (which is the default without doing any extra work). 
+       Only dispatch minimal blocking functions to the threadpool, functions that 
+       do not use the gevent hub. 
+ 
+    The `len` of instances of this class is the number of enqueued 
+    (unfinished) tasks. 
+ 
+    Just before a task starts running in a worker thread, 
+    the values of :func:`threading.setprofile` and :func:`threading.settrace` 
+    are consulted. Any values there are installed in that thread for the duration 
+    of the task (using :func:`sys.setprofile` and :func:`sys.settrace`, respectively). 
+    (Because worker threads are long-lived and outlast any given task, this arrangement 
+    lets the hook functions change between tasks, but does not let them see the 
+    bookkeeping done by the worker thread itself.) 
+ 
+    .. caution:: Instances of this class are only true if they have 
+       unfinished tasks. 
+ 
+    .. versionchanged:: 1.5a3 
+       The undocumented ``apply_e`` function, deprecated since 1.1, 
+       was removed. 
+    .. versionchanged:: 20.12.0 
+       Install the profile and trace functions in the worker thread while 
+       the worker thread is running the supplied task. 
+    .. versionchanged:: 22.08.0 
+       Add the option to let idle threads expire and be removed 
+       from the pool after *idle_task_timeout* seconds (-1 for no 
+       timeout) 
+    &quot;&quot;&quot;</span>
+
+    <span class="s1">__slots__ = (</span>
+        <span class="s3">'hub'</span><span class="s2">,</span>
+        <span class="s3">'_maxsize'</span><span class="s2">,</span>
+        <span class="s0"># A Greenlet that runs to adjust the number of worker</span>
+        <span class="s0"># threads.</span>
+        <span class="s3">'manager'</span><span class="s2">,</span>
+        <span class="s0"># The PID of the process we were created in.</span>
+        <span class="s0"># Used to help detect a fork and then re-create</span>
+        <span class="s0"># internal state.</span>
+        <span class="s3">'pid'</span><span class="s2">,</span>
+        <span class="s3">'fork_watcher'</span><span class="s2">,</span>
+        <span class="s0"># A semaphore initialized with ``maxsize`` counting the</span>
+        <span class="s0"># number of available worker threads we have. As a</span>
+        <span class="s0"># gevent.lock.Semaphore, this is only safe to use from a single</span>
+        <span class="s0"># native thread.</span>
+        <span class="s3">'_available_worker_threads_greenlet_sem'</span><span class="s2">,</span>
+        <span class="s0"># A set of running or pending _WorkerGreenlet objects;</span>
+        <span class="s0"># we rely on the GIL for thread safety.</span>
+        <span class="s3">'_worker_greenlets'</span><span class="s2">,</span>
+        <span class="s0"># The task queue is itself safe to use from multiple</span>
+        <span class="s0"># native threads.</span>
+        <span class="s3">'task_queue'</span><span class="s2">,</span>
+        <span class="s3">'_idle_task_timeout'</span><span class="s2">,</span>
+    <span class="s1">)</span>
+
+    <span class="s1">_WorkerGreenlet = _WorkerGreenlet</span>
+
+    <span class="s2">def </span><span class="s1">__init__(self</span><span class="s2">, </span><span class="s1">maxsize</span><span class="s2">, </span><span class="s1">hub=</span><span class="s2">None, </span><span class="s1">idle_task_timeout=-</span><span class="s4">1</span><span class="s1">):</span>
+        <span class="s2">if </span><span class="s1">hub </span><span class="s2">is None</span><span class="s1">:</span>
+            <span class="s1">hub = get_hub()</span>
+        <span class="s1">self.hub = hub</span>
+        <span class="s1">self.pid = os.getpid()</span>
+        <span class="s1">self.manager = </span><span class="s2">None</span>
+        <span class="s1">self.task_queue = Queue()</span>
+        <span class="s1">self.fork_watcher = </span><span class="s2">None</span>
+        <span class="s1">self._idle_task_timeout = idle_task_timeout</span>
+
+        <span class="s1">self._worker_greenlets = set()</span>
+        <span class="s1">self._maxsize = </span><span class="s4">0</span>
+        <span class="s0"># Note that by starting with 1, we actually allow</span>
+        <span class="s0"># maxsize + 1 tasks in the queue.</span>
+        <span class="s1">self._available_worker_threads_greenlet_sem = Semaphore(</span><span class="s4">1</span><span class="s2">, </span><span class="s1">hub)</span>
+        <span class="s1">self._set_maxsize(maxsize)</span>
+        <span class="s1">self.fork_watcher = hub.loop.fork(ref=</span><span class="s2">False</span><span class="s1">)</span>
+
+    <span class="s2">def </span><span class="s1">_register_worker(self</span><span class="s2">, </span><span class="s1">worker):</span>
+        <span class="s1">self._worker_greenlets.add(worker)</span>
+
+    <span class="s2">def </span><span class="s1">_unregister_worker(self</span><span class="s2">, </span><span class="s1">worker):</span>
+        <span class="s1">self._worker_greenlets.discard(worker)</span>
+
+    <span class="s2">def </span><span class="s1">_set_maxsize(self</span><span class="s2">, </span><span class="s1">maxsize):</span>
+        <span class="s2">if not </span><span class="s1">isinstance(maxsize</span><span class="s2">, </span><span class="s1">integer_types):</span>
+            <span class="s2">raise </span><span class="s1">TypeError(</span><span class="s3">'maxsize must be integer: %r' </span><span class="s1">% (maxsize</span><span class="s2">, </span><span class="s1">))</span>
+        <span class="s2">if </span><span class="s1">maxsize &lt; </span><span class="s4">0</span><span class="s1">:</span>
+            <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s3">'maxsize must not be negative: %r' </span><span class="s1">% (maxsize</span><span class="s2">, </span><span class="s1">))</span>
+        <span class="s1">difference = maxsize - self._maxsize</span>
+        <span class="s1">self._available_worker_threads_greenlet_sem.counter += difference</span>
+        <span class="s1">self._maxsize = maxsize</span>
+        <span class="s1">self.adjust()</span>
+        <span class="s0"># make sure all currently blocking spawn() start unlocking if maxsize increased</span>
+        <span class="s1">self._available_worker_threads_greenlet_sem._start_notify()</span>
+
+    <span class="s2">def </span><span class="s1">_get_maxsize(self):</span>
+        <span class="s2">return </span><span class="s1">self._maxsize</span>
+
+    <span class="s1">maxsize = property(_get_maxsize</span><span class="s2">, </span><span class="s1">_set_maxsize</span><span class="s2">, </span><span class="s1">doc=</span><span class="s3">&quot;&quot;&quot;</span><span class="s2">\ 
+    </span><span class="s3">The maximum allowed number of worker threads. 
+ 
+    This is also (approximately) a limit on the number of tasks that 
+    can be queued without blocking the waiting greenlet. If this many 
+    tasks are already running, then the next greenlet that submits a task 
+    will block waiting for a task to finish. 
+    &quot;&quot;&quot;</span><span class="s1">)</span>
+
+    <span class="s2">def </span><span class="s1">__repr__(self</span><span class="s2">, </span><span class="s1">_format_hub=_format_hub):</span>
+        <span class="s2">return </span><span class="s3">'&lt;%s at 0x%x tasks=%s size=%s maxsize=%s hub=%s&gt;' </span><span class="s1">% (</span>
+            <span class="s1">self.__class__.__name__</span><span class="s2">,</span>
+            <span class="s1">id(self)</span><span class="s2">,</span>
+            <span class="s1">len(self)</span><span class="s2">, </span><span class="s1">self.size</span><span class="s2">, </span><span class="s1">self.maxsize</span><span class="s2">,</span>
+            <span class="s1">_format_hub(self.hub)</span><span class="s2">,</span>
+        <span class="s1">)</span>
+
+    <span class="s2">def </span><span class="s1">__len__(self):</span>
+        <span class="s0"># XXX just do unfinished_tasks property</span>
+        <span class="s0"># Note that this becomes the boolean value of this class,</span>
+        <span class="s0"># that's probably not what we want!</span>
+        <span class="s2">return </span><span class="s1">self.task_queue.unfinished_tasks</span>
+
+    <span class="s2">def </span><span class="s1">_get_size(self):</span>
+        <span class="s2">return </span><span class="s1">len(self._worker_greenlets)</span>
+
+    <span class="s2">def </span><span class="s1">_set_size(self</span><span class="s2">, </span><span class="s1">size):</span>
+        <span class="s2">if </span><span class="s1">size &lt; </span><span class="s4">0</span><span class="s1">:</span>
+            <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s3">'Size of the pool cannot be negative: %r' </span><span class="s1">% (size</span><span class="s2">, </span><span class="s1">))</span>
+        <span class="s2">if </span><span class="s1">size &gt; self._maxsize:</span>
+            <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s3">'Size of the pool cannot be bigger than maxsize: %r &gt; %r' </span><span class="s1">% (size</span><span class="s2">, </span><span class="s1">self._maxsize))</span>
+        <span class="s2">if </span><span class="s1">self.manager:</span>
+            <span class="s1">self.manager.kill()</span>
+        <span class="s2">while </span><span class="s1">len(self._worker_greenlets) &lt; size:</span>
+            <span class="s1">self._add_thread()</span>
+        <span class="s1">delay = self.hub.loop.approx_timer_resolution</span>
+        <span class="s2">while </span><span class="s1">len(self._worker_greenlets) &gt; size:</span>
+            <span class="s2">while </span><span class="s1">len(self._worker_greenlets) - size &gt; self.task_queue.unfinished_tasks:</span>
+                <span class="s1">self.task_queue.put(</span><span class="s2">None</span><span class="s1">)</span>
+            <span class="s2">if </span><span class="s1">getcurrent() </span><span class="s2">is </span><span class="s1">self.hub:</span>
+                <span class="s2">break</span>
+            <span class="s1">sleep(delay)</span>
+            <span class="s1">delay = min(delay * </span><span class="s4">2</span><span class="s2">, </span><span class="s4">.05</span><span class="s1">)</span>
+        <span class="s2">if </span><span class="s1">self._worker_greenlets:</span>
+            <span class="s1">self.fork_watcher.start(self._on_fork)</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">self.fork_watcher.stop()</span>
+
+    <span class="s1">size = property(_get_size</span><span class="s2">, </span><span class="s1">_set_size</span><span class="s2">, </span><span class="s1">doc=</span><span class="s3">&quot;&quot;&quot;</span><span class="s2">\ 
+    </span><span class="s3">The number of running pooled worker threads. 
+ 
+    Setting this attribute will add or remove running 
+    worker threads, up to `maxsize`. 
+ 
+    Initially there are no pooled running worker threads, and 
+    threads are created on demand to satisfy concurrent 
+    requests up to `maxsize` threads. 
+    &quot;&quot;&quot;</span><span class="s1">)</span>
+
+
+    <span class="s2">def </span><span class="s1">_on_fork(self):</span>
+        <span class="s0"># fork() only leaves one thread; also screws up locks;</span>
+        <span class="s0"># let's re-create locks and threads, and do our best to</span>
+        <span class="s0"># clean up any worker threads left behind.</span>
+        <span class="s0"># NOTE: See comment in gevent.hub.reinit.</span>
+        <span class="s1">pid = os.getpid()</span>
+        <span class="s2">if </span><span class="s1">pid != self.pid:</span>
+            <span class="s0"># The OS threads have been destroyed, but the Python</span>
+            <span class="s0"># objects may live on, creating refcount &quot;leaks&quot;. Python 2</span>
+            <span class="s0"># leaves dead frames (those that are for dead OS threads)</span>
+            <span class="s0"># around; Python 3.8 does not.</span>
+            <span class="s1">thread_ident_to_frame = dict(sys._current_frames())</span>
+            <span class="s2">for </span><span class="s1">worker </span><span class="s2">in </span><span class="s1">list(self._worker_greenlets):</span>
+                <span class="s1">frame = thread_ident_to_frame.get(worker._thread_ident)</span>
+                <span class="s1">clear_stack_frames(frame)</span>
+                <span class="s1">worker.cleanup(worker._hub_of_worker)</span>
+                <span class="s0"># We can't throw anything to the greenlet, nor can we</span>
+                <span class="s0"># switch to it or set a parent. Those would all be cross-thread</span>
+                <span class="s0"># operations, which aren't allowed.</span>
+                <span class="s1">worker.__dict__.clear()</span>
+
+            <span class="s0"># We've cleared f_locals and on Python 3.4, possibly the actual</span>
+            <span class="s0"># array locals of the stack frame, but the task queue may still be</span>
+            <span class="s0"># referenced if we didn't actually get all the locals. Shut it down</span>
+            <span class="s0"># and clear it before we throw away our reference.</span>
+            <span class="s1">self.task_queue.kill()</span>
+            <span class="s1">self.__init__(self._maxsize)</span>
+
+
+    <span class="s2">def </span><span class="s1">join(self):</span>
+        <span class="s5">&quot;&quot;&quot;Waits until all outstanding tasks have been completed.&quot;&quot;&quot;</span>
+        <span class="s1">delay = max(</span><span class="s4">0.0005</span><span class="s2">, </span><span class="s1">self.hub.loop.approx_timer_resolution)</span>
+        <span class="s2">while </span><span class="s1">self.task_queue.unfinished_tasks &gt; </span><span class="s4">0</span><span class="s1">:</span>
+            <span class="s1">sleep(delay)</span>
+            <span class="s1">delay = min(delay * </span><span class="s4">2</span><span class="s2">, </span><span class="s4">.05</span><span class="s1">)</span>
+
+    <span class="s2">def </span><span class="s1">kill(self):</span>
+        <span class="s1">self.size = </span><span class="s4">0</span>
+        <span class="s1">self.fork_watcher.close()</span>
+
+    <span class="s2">def </span><span class="s1">_adjust_step(self):</span>
+        <span class="s0"># if there is a possibility &amp; necessity for adding a thread, do it</span>
+        <span class="s2">while </span><span class="s1">(len(self._worker_greenlets) &lt; self._maxsize</span>
+               <span class="s2">and </span><span class="s1">self.task_queue.unfinished_tasks &gt; len(self._worker_greenlets)):</span>
+            <span class="s1">self._add_thread()</span>
+        <span class="s0"># while the number of threads is more than maxsize, kill one</span>
+        <span class="s0"># we do not check what's already in task_queue - it could be all Nones</span>
+        <span class="s2">while </span><span class="s1">len(self._worker_greenlets) - self._maxsize &gt; self.task_queue.unfinished_tasks:</span>
+            <span class="s1">self.task_queue.put(</span><span class="s2">None</span><span class="s1">)</span>
+        <span class="s2">if </span><span class="s1">self._worker_greenlets:</span>
+            <span class="s1">self.fork_watcher.start(self._on_fork)</span>
+        <span class="s2">elif </span><span class="s1">self.fork_watcher </span><span class="s2">is not None</span><span class="s1">:</span>
+            <span class="s1">self.fork_watcher.stop()</span>
+
+    <span class="s2">def </span><span class="s1">_adjust_wait(self):</span>
+        <span class="s1">delay = self.hub.loop.approx_timer_resolution</span>
+        <span class="s2">while True</span><span class="s1">:</span>
+            <span class="s1">self._adjust_step()</span>
+            <span class="s2">if </span><span class="s1">len(self._worker_greenlets) &lt;= self._maxsize:</span>
+                <span class="s2">return</span>
+            <span class="s1">sleep(delay)</span>
+            <span class="s1">delay = min(delay * </span><span class="s4">2</span><span class="s2">, </span><span class="s4">.05</span><span class="s1">)</span>
+
+    <span class="s2">def </span><span class="s1">adjust(self):</span>
+        <span class="s1">self._adjust_step()</span>
+        <span class="s2">if not </span><span class="s1">self.manager </span><span class="s2">and </span><span class="s1">len(self._worker_greenlets) &gt; self._maxsize:</span>
+            <span class="s0"># might need to feed more Nones into the pool to shutdown</span>
+            <span class="s0"># threads.</span>
+            <span class="s1">self.manager = Greenlet.spawn(self._adjust_wait)</span>
+
+    <span class="s2">def </span><span class="s1">_add_thread(self):</span>
+        <span class="s1">self._WorkerGreenlet(self)</span>
+
+    <span class="s2">def </span><span class="s1">spawn(self</span><span class="s2">, </span><span class="s1">func</span><span class="s2">, </span><span class="s1">*args</span><span class="s2">, </span><span class="s1">**kwargs):</span>
+        <span class="s5">&quot;&quot;&quot; 
+        Add a new task to the threadpool that will run ``func(*args, 
+        **kwargs)``. 
+ 
+        Waits until a slot is available. Creates a new native thread 
+        if necessary. 
+ 
+        This must only be called from the native thread that owns this 
+        object's hub. This is because creating the necessary data 
+        structures to communicate back to this thread isn't thread 
+        safe, so the hub must not be running something else. Also, 
+        ensuring the pool size stays correct only works within a 
+        single thread. 
+ 
+        :return: A :class:`gevent.event.AsyncResult`. 
+        :raises InvalidThreadUseError: If called from a different thread. 
+ 
+        .. versionchanged:: 1.5 
+           Document the thread-safety requirements. 
+        &quot;&quot;&quot;</span>
+        <span class="s2">if </span><span class="s1">self.hub != get_hub():</span>
+            <span class="s2">raise </span><span class="s1">InvalidThreadUseError</span>
+
+        <span class="s2">while </span><span class="s4">1</span><span class="s1">:</span>
+            <span class="s1">semaphore = self._available_worker_threads_greenlet_sem</span>
+            <span class="s1">semaphore.acquire()</span>
+            <span class="s2">if </span><span class="s1">semaphore </span><span class="s2">is </span><span class="s1">self._available_worker_threads_greenlet_sem:</span>
+                <span class="s0"># If we were asked to change size or re-init we could have changed</span>
+                <span class="s0"># semaphore objects.</span>
+                <span class="s2">break</span>
+
+        <span class="s0"># Returned; lets a greenlet in this thread wait</span>
+        <span class="s0"># for the pool thread. Signaled when the async watcher</span>
+        <span class="s0"># is fired from the pool thread back into this thread.</span>
+        <span class="s1">result = AsyncResult()</span>
+        <span class="s1">task_queue = self.task_queue</span>
+        <span class="s0"># Encapsulates the async watcher the worker thread uses to</span>
+        <span class="s0"># call back into this thread. Immediately allocates and starts the</span>
+        <span class="s0"># async watcher in this thread, because it uses this hub/loop,</span>
+        <span class="s0"># which is not thread safe.</span>
+        <span class="s1">thread_result = </span><span class="s2">None</span>
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s1">thread_result = ThreadResult(result</span><span class="s2">, </span><span class="s1">self.hub</span><span class="s2">, </span><span class="s1">semaphore.release)</span>
+            <span class="s1">task_queue.put((func</span><span class="s2">, </span><span class="s1">args</span><span class="s2">, </span><span class="s1">kwargs</span><span class="s2">, </span><span class="s1">thread_result))</span>
+            <span class="s1">self.adjust()</span>
+        <span class="s2">except</span><span class="s1">:</span>
+            <span class="s2">if </span><span class="s1">thread_result </span><span class="s2">is not None</span><span class="s1">:</span>
+                <span class="s1">thread_result.destroy_in_main_thread()</span>
+            <span class="s1">semaphore.release()</span>
+            <span class="s2">raise</span>
+        <span class="s2">return </span><span class="s1">result</span>
+
+    <span class="s2">def </span><span class="s1">_apply_immediately(self):</span>
+        <span class="s0"># If we're being called from a different thread than the one that</span>
+        <span class="s0"># created us, e.g., because a worker task is trying to use apply()</span>
+        <span class="s0"># recursively, we have no choice but to run the task immediately;</span>
+        <span class="s0"># if we try to AsyncResult.get() in the worker thread, it's likely to have</span>
+        <span class="s0"># nothing to switch to and lead to a LoopExit.</span>
+        <span class="s2">return </span><span class="s1">get_hub() </span><span class="s2">is not </span><span class="s1">self.hub</span>
+
+    <span class="s2">def </span><span class="s1">_apply_async_cb_spawn(self</span><span class="s2">, </span><span class="s1">callback</span><span class="s2">, </span><span class="s1">result):</span>
+        <span class="s1">callback(result)</span>
+
+    <span class="s2">def </span><span class="s1">_apply_async_use_greenlet(self):</span>
+        <span class="s0"># Always go to Greenlet because our self.spawn uses threads</span>
+        <span class="s2">return True</span>
+
+<span class="s2">class </span><span class="s1">_FakeAsync(object):</span>
+
+    <span class="s2">def </span><span class="s1">send(self):</span>
+        <span class="s2">pass</span>
+    <span class="s1">close = stop = send</span>
+
+    <span class="s2">def </span><span class="s1">__call__(self</span><span class="s2">, </span><span class="s1">result):</span>
+        <span class="s5">&quot;fake out for 'receiver'&quot;</span>
+
+    <span class="s2">def </span><span class="s1">__bool__(self):</span>
+        <span class="s2">return False</span>
+
+    <span class="s1">__nonzero__ = __bool__</span>
+
+<span class="s1">_FakeAsync = _FakeAsync()</span>
+
+<span class="s2">class </span><span class="s1">ThreadResult(object):</span>
+    <span class="s5">&quot;&quot;&quot; 
+    A one-time event for cross-thread communication. 
+ 
+    Uses a hub's &quot;async&quot; watcher capability; it must be constructed and 
+    destroyed in the thread running the hub (because creating, starting, and 
+    destroying async watchers isn't guaranteed to be thread safe). 
+    &quot;&quot;&quot;</span>
+
+    <span class="s0"># Using slots here helps to debug reference cycles/leaks</span>
+    <span class="s1">__slots__ = (</span><span class="s3">'exc_info'</span><span class="s2">, </span><span class="s3">'async_watcher'</span><span class="s2">, </span><span class="s3">'_call_when_ready'</span><span class="s2">, </span><span class="s3">'value'</span><span class="s2">,</span>
+                 <span class="s3">'context'</span><span class="s2">, </span><span class="s3">'hub'</span><span class="s2">, </span><span class="s3">'receiver'</span><span class="s1">)</span>
+
+    <span class="s2">def </span><span class="s1">__init__(self</span><span class="s2">, </span><span class="s1">receiver</span><span class="s2">, </span><span class="s1">hub</span><span class="s2">, </span><span class="s1">call_when_ready):</span>
+        <span class="s1">self.receiver = receiver</span>
+        <span class="s1">self.hub = hub</span>
+        <span class="s1">self.context = </span><span class="s2">None</span>
+        <span class="s1">self.value = </span><span class="s2">None</span>
+        <span class="s1">self.exc_info = ()</span>
+        <span class="s1">self.async_watcher = hub.loop.async_()</span>
+        <span class="s1">self._call_when_ready = call_when_ready</span>
+        <span class="s1">self.async_watcher.start(self._on_async)</span>
+
+    <span class="s1">@property</span>
+    <span class="s2">def </span><span class="s1">exception(self):</span>
+        <span class="s2">return </span><span class="s1">self.exc_info[</span><span class="s4">1</span><span class="s1">] </span><span class="s2">if </span><span class="s1">self.exc_info </span><span class="s2">else None</span>
+
+    <span class="s2">def </span><span class="s1">_on_async(self):</span>
+        <span class="s0"># Called in the hub thread.</span>
+
+        <span class="s1">aw = self.async_watcher</span>
+        <span class="s1">self.async_watcher = _FakeAsync</span>
+
+        <span class="s1">aw.stop()</span>
+        <span class="s1">aw.close()</span>
+
+        <span class="s0"># Typically this is pool.semaphore.release and we have to</span>
+        <span class="s0"># call this in the Hub; if we don't we get the dreaded</span>
+        <span class="s0"># LoopExit (XXX: Why?)</span>
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s1">self._call_when_ready()</span>
+            <span class="s2">if </span><span class="s1">self.exc_info:</span>
+                <span class="s1">self.hub.handle_error(self.context</span><span class="s2">, </span><span class="s1">*self.exc_info)</span>
+            <span class="s1">self.context = </span><span class="s2">None</span>
+            <span class="s1">self.async_watcher = _FakeAsync</span>
+            <span class="s1">self.hub = </span><span class="s2">None</span>
+            <span class="s1">self._call_when_ready = _FakeAsync</span>
+
+            <span class="s1">self.receiver(self)</span>
+        <span class="s2">finally</span><span class="s1">:</span>
+            <span class="s1">self.receiver = _FakeAsync</span>
+            <span class="s1">self.value = </span><span class="s2">None</span>
+            <span class="s2">if </span><span class="s1">self.exc_info:</span>
+                <span class="s1">self.exc_info = (self.exc_info[</span><span class="s4">0</span><span class="s1">]</span><span class="s2">, </span><span class="s1">self.exc_info[</span><span class="s4">1</span><span class="s1">]</span><span class="s2">, None</span><span class="s1">)</span>
+
+    <span class="s2">def </span><span class="s1">destroy_in_main_thread(self):</span>
+        <span class="s5">&quot;&quot;&quot; 
+        This must only be called from the thread running the hub. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">self.async_watcher.stop()</span>
+        <span class="s1">self.async_watcher.close()</span>
+        <span class="s1">self.async_watcher = _FakeAsync</span>
+
+        <span class="s1">self.context = </span><span class="s2">None</span>
+        <span class="s1">self.hub = </span><span class="s2">None</span>
+        <span class="s1">self._call_when_ready = _FakeAsync</span>
+        <span class="s1">self.receiver = _FakeAsync</span>
+
+    <span class="s2">def </span><span class="s1">set(self</span><span class="s2">, </span><span class="s1">value):</span>
+        <span class="s1">self.value = value</span>
+        <span class="s1">self.async_watcher.send()</span>
+
+    <span class="s2">def </span><span class="s1">handle_error(self</span><span class="s2">, </span><span class="s1">context</span><span class="s2">, </span><span class="s1">exc_info):</span>
+        <span class="s1">self.context = context</span>
+        <span class="s1">self.exc_info = exc_info</span>
+        <span class="s1">self.async_watcher.send()</span>
+
+    <span class="s0"># link protocol:</span>
+    <span class="s2">def </span><span class="s1">successful(self):</span>
+        <span class="s2">return </span><span class="s1">self.exception </span><span class="s2">is None</span>
+
+
+<span class="s2">try</span><span class="s1">:</span>
+    <span class="s2">import </span><span class="s1">concurrent.futures</span>
+<span class="s2">except </span><span class="s1">ImportError:</span>
+    <span class="s2">pass</span>
+<span class="s2">else</span><span class="s1">:</span>
+    <span class="s1">__all__.append(</span><span class="s3">&quot;ThreadPoolExecutor&quot;</span><span class="s1">)</span>
+
+    <span class="s2">from </span><span class="s1">gevent.timeout </span><span class="s2">import </span><span class="s1">Timeout </span><span class="s2">as </span><span class="s1">GTimeout</span>
+    <span class="s2">from </span><span class="s1">gevent._util </span><span class="s2">import </span><span class="s1">Lazy</span>
+    <span class="s2">from </span><span class="s1">concurrent.futures </span><span class="s2">import </span><span class="s1">_base </span><span class="s2">as </span><span class="s1">cfb</span>
+
+    <span class="s2">def </span><span class="s1">_ignore_error(future_proxy</span><span class="s2">, </span><span class="s1">fn):</span>
+        <span class="s2">def </span><span class="s1">cbwrap(_):</span>
+            <span class="s2">del </span><span class="s1">_</span>
+            <span class="s0"># We're called with the async result (from the threadpool), but</span>
+            <span class="s0"># be sure to pass in the user-visible _FutureProxy object..</span>
+            <span class="s2">try</span><span class="s1">:</span>
+                <span class="s1">fn(future_proxy)</span>
+            <span class="s2">except </span><span class="s1">Exception: </span><span class="s0"># pylint: disable=broad-except</span>
+                <span class="s0"># Just print, don't raise to the hub's parent.</span>
+                <span class="s1">future_proxy.hub.print_exception((fn</span><span class="s2">, </span><span class="s1">future_proxy)</span><span class="s2">, None, None, None</span><span class="s1">)</span>
+        <span class="s2">return </span><span class="s1">cbwrap</span>
+
+    <span class="s2">def </span><span class="s1">_wrap(future_proxy</span><span class="s2">, </span><span class="s1">fn):</span>
+        <span class="s2">def </span><span class="s1">f(_):</span>
+            <span class="s1">fn(future_proxy)</span>
+        <span class="s2">return </span><span class="s1">f</span>
+
+    <span class="s2">class </span><span class="s1">_FutureProxy(object):</span>
+        <span class="s2">def </span><span class="s1">__init__(self</span><span class="s2">, </span><span class="s1">asyncresult):</span>
+            <span class="s1">self.asyncresult = asyncresult</span>
+
+        <span class="s0"># Internal implementation details of a c.f.Future</span>
+
+        <span class="s1">@Lazy</span>
+        <span class="s2">def </span><span class="s1">_condition(self):</span>
+            <span class="s2">if </span><span class="s1">monkey.is_module_patched(</span><span class="s3">'threading'</span><span class="s1">) </span><span class="s2">or </span><span class="s1">self.done():</span>
+                <span class="s2">import </span><span class="s1">threading</span>
+                <span class="s2">return </span><span class="s1">threading.Condition()</span>
+            <span class="s0"># We can only properly work with conditions</span>
+            <span class="s0"># when we've been monkey-patched. This is necessary</span>
+            <span class="s0"># for the wait/as_completed module functions.</span>
+            <span class="s2">raise </span><span class="s1">AttributeError(</span><span class="s3">&quot;_condition&quot;</span><span class="s1">)</span>
+
+        <span class="s1">@Lazy</span>
+        <span class="s2">def </span><span class="s1">_waiters(self):</span>
+            <span class="s1">self.asyncresult.rawlink(self.__when_done)</span>
+            <span class="s2">return </span><span class="s1">[]</span>
+
+        <span class="s2">def </span><span class="s1">__when_done(self</span><span class="s2">, </span><span class="s1">_):</span>
+            <span class="s0"># We should only be called when _waiters has</span>
+            <span class="s0"># already been accessed.</span>
+            <span class="s1">waiters = getattr(self</span><span class="s2">, </span><span class="s3">'_waiters'</span><span class="s1">)</span>
+            <span class="s2">for </span><span class="s1">w </span><span class="s2">in </span><span class="s1">waiters: </span><span class="s0"># pylint:disable=not-an-iterable</span>
+                <span class="s2">if </span><span class="s1">self.successful():</span>
+                    <span class="s1">w.add_result(self)</span>
+                <span class="s2">else</span><span class="s1">:</span>
+                    <span class="s1">w.add_exception(self)</span>
+
+        <span class="s1">@property</span>
+        <span class="s2">def </span><span class="s1">_state(self):</span>
+            <span class="s2">if </span><span class="s1">self.done():</span>
+                <span class="s2">return </span><span class="s1">cfb.FINISHED</span>
+            <span class="s2">return </span><span class="s1">cfb.RUNNING</span>
+
+        <span class="s2">def </span><span class="s1">set_running_or_notify_cancel(self):</span>
+            <span class="s0"># Does nothing, not even any consistency checks. It's</span>
+            <span class="s0"># meant to be internal to the executor and we don't use it.</span>
+            <span class="s2">return</span>
+
+        <span class="s2">def </span><span class="s1">result(self</span><span class="s2">, </span><span class="s1">timeout=</span><span class="s2">None</span><span class="s1">):</span>
+            <span class="s2">try</span><span class="s1">:</span>
+                <span class="s2">return </span><span class="s1">self.asyncresult.result(timeout=timeout)</span>
+            <span class="s2">except </span><span class="s1">GTimeout:</span>
+                <span class="s0"># XXX: Theoretically this could be a completely</span>
+                <span class="s0"># unrelated timeout instance. Do we care about that?</span>
+                <span class="s2">raise </span><span class="s1">concurrent.futures.TimeoutError()</span>
+
+        <span class="s2">def </span><span class="s1">exception(self</span><span class="s2">, </span><span class="s1">timeout=</span><span class="s2">None</span><span class="s1">):</span>
+            <span class="s2">try</span><span class="s1">:</span>
+                <span class="s1">self.asyncresult.get(timeout=timeout)</span>
+                <span class="s2">return </span><span class="s1">self.asyncresult.exception</span>
+            <span class="s2">except </span><span class="s1">GTimeout:</span>
+                <span class="s2">raise </span><span class="s1">concurrent.futures.TimeoutError()</span>
+
+        <span class="s2">def </span><span class="s1">add_done_callback(self</span><span class="s2">, </span><span class="s1">fn):</span>
+            <span class="s5">&quot;&quot;&quot;Exceptions raised by *fn* are ignored.&quot;&quot;&quot;</span>
+            <span class="s2">if </span><span class="s1">self.done():</span>
+                <span class="s1">fn(self)</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s1">self.asyncresult.rawlink(_ignore_error(self</span><span class="s2">, </span><span class="s1">fn))</span>
+
+        <span class="s2">def </span><span class="s1">rawlink(self</span><span class="s2">, </span><span class="s1">fn):</span>
+            <span class="s1">self.asyncresult.rawlink(_wrap(self</span><span class="s2">, </span><span class="s1">fn))</span>
+
+        <span class="s2">def </span><span class="s1">__str__(self):</span>
+            <span class="s2">return </span><span class="s1">str(self.asyncresult)</span>
+
+        <span class="s2">def </span><span class="s1">__getattr__(self</span><span class="s2">, </span><span class="s1">name):</span>
+            <span class="s2">return </span><span class="s1">getattr(self.asyncresult</span><span class="s2">, </span><span class="s1">name)</span>
+
+    <span class="s2">class </span><span class="s1">ThreadPoolExecutor(concurrent.futures.ThreadPoolExecutor):</span>
+        <span class="s5">&quot;&quot;&quot; 
+        A version of :class:`concurrent.futures.ThreadPoolExecutor` that 
+        always uses native threads, even when threading is monkey-patched. 
+ 
+        The ``Future`` objects returned from this object can be used 
+        with gevent waiting primitives like :func:`gevent.wait`. 
+ 
+        .. caution:: If threading is *not* monkey-patched, then the ``Future`` 
+           objects returned by this object are not guaranteed to work with 
+           :func:`~concurrent.futures.as_completed` and :func:`~concurrent.futures.wait`. 
+           The individual blocking methods like :meth:`~concurrent.futures.Future.result` 
+           and :meth:`~concurrent.futures.Future.exception` will always work. 
+ 
+        .. versionadded:: 1.2a1 
+           This is a provisional API. 
+        &quot;&quot;&quot;</span>
+
+        <span class="s2">def </span><span class="s1">__init__(self</span><span class="s2">, </span><span class="s1">*args</span><span class="s2">, </span><span class="s1">**kwargs):</span>
+            <span class="s5">&quot;&quot;&quot; 
+            Takes the same arguments as ``concurrent.futures.ThreadPoolExecuter``, which 
+            vary between Python versions. 
+ 
+            The first argument is always *max_workers*, the maximum number of 
+            threads to use. Most other arguments, while accepted, are ignored. 
+            &quot;&quot;&quot;</span>
+            <span class="s1">super(ThreadPoolExecutor</span><span class="s2">, </span><span class="s1">self).__init__(*args</span><span class="s2">, </span><span class="s1">**kwargs)</span>
+            <span class="s1">self._threadpool = ThreadPool(self._max_workers)</span>
+
+        <span class="s2">def </span><span class="s1">submit(self</span><span class="s2">, </span><span class="s1">fn</span><span class="s2">, </span><span class="s1">*args</span><span class="s2">, </span><span class="s1">**kwargs): </span><span class="s0"># pylint:disable=arguments-differ</span>
+            <span class="s2">with </span><span class="s1">self._shutdown_lock: </span><span class="s0"># pylint:disable=not-context-manager</span>
+                <span class="s2">if </span><span class="s1">self._shutdown:</span>
+                    <span class="s2">raise </span><span class="s1">RuntimeError(</span><span class="s3">'cannot schedule new futures after shutdown'</span><span class="s1">)</span>
+
+                <span class="s1">future = self._threadpool.spawn(fn</span><span class="s2">, </span><span class="s1">*args</span><span class="s2">, </span><span class="s1">**kwargs)</span>
+                <span class="s2">return </span><span class="s1">_FutureProxy(future)</span>
+
+        <span class="s2">def </span><span class="s1">shutdown(self</span><span class="s2">, </span><span class="s1">wait=</span><span class="s2">True, </span><span class="s1">**kwargs): </span><span class="s0"># pylint:disable=arguments-differ</span>
+            <span class="s0"># In 3.9, this added ``cancel_futures=False``</span>
+            <span class="s1">super(ThreadPoolExecutor</span><span class="s2">, </span><span class="s1">self).shutdown(wait</span><span class="s2">, </span><span class="s1">**kwargs)</span>
+            <span class="s0"># XXX: We don't implement wait properly</span>
+            <span class="s1">kill = getattr(self._threadpool</span><span class="s2">, </span><span class="s3">'kill'</span><span class="s2">, None</span><span class="s1">)</span>
+            <span class="s2">if </span><span class="s1">kill: </span><span class="s0"># pylint:disable=using-constant-test</span>
+                <span class="s1">self._threadpool.kill()</span>
+            <span class="s1">self._threadpool = </span><span class="s2">None</span>
+
+        <span class="s1">kill = shutdown </span><span class="s0"># greentest compat</span>
+
+        <span class="s2">def </span><span class="s1">_adjust_thread_count(self):</span>
+            <span class="s0"># Does nothing. We don't want to spawn any &quot;threads&quot;,</span>
+            <span class="s0"># let the threadpool handle that.</span>
+            <span class="s2">pass</span>
+</pre>
+</body>
+</html>

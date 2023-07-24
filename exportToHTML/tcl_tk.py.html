@@ -1,0 +1,275 @@
+<html>
+<head>
+<title>tcl_tk.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #cc7832;}
+.s3 { color: #6a8759;}
+.s4 { color: #629755; font-style: italic;}
+.s5 { color: #6897bb;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+tcl_tk.py</font>
+</center></td></tr></table>
+<pre><span class="s0">#-----------------------------------------------------------------------------</span>
+<span class="s0"># Copyright (c) 2013-2021, PyInstaller Development Team.</span>
+<span class="s0">#</span>
+<span class="s0"># Distributed under the terms of the GNU General Public License (version 2</span>
+<span class="s0"># or later) with exception for distributing the bootloader.</span>
+<span class="s0">#</span>
+<span class="s0"># The full license is in the file COPYING.txt, distributed with this software.</span>
+<span class="s0">#</span>
+<span class="s0"># SPDX-License-Identifier: (GPL-2.0-or-later WITH Bootloader-exception)</span>
+<span class="s0">#-----------------------------------------------------------------------------</span>
+
+<span class="s2">import </span><span class="s1">locale</span>
+<span class="s2">import </span><span class="s1">os</span>
+
+<span class="s2">from </span><span class="s1">PyInstaller </span><span class="s2">import </span><span class="s1">compat</span>
+<span class="s2">from </span><span class="s1">PyInstaller </span><span class="s2">import </span><span class="s1">log </span><span class="s2">as </span><span class="s1">logging</span>
+<span class="s2">from </span><span class="s1">PyInstaller.building.datastruct </span><span class="s2">import </span><span class="s1">Tree</span>
+<span class="s2">from </span><span class="s1">PyInstaller.depend </span><span class="s2">import </span><span class="s1">bindepend</span>
+<span class="s2">from </span><span class="s1">PyInstaller.utils </span><span class="s2">import </span><span class="s1">hooks </span><span class="s2">as </span><span class="s1">hookutils</span>
+
+<span class="s1">logger = logging.getLogger(__name__)</span>
+
+<span class="s1">TK_ROOTNAME = </span><span class="s3">'tk'</span>
+<span class="s1">TCL_ROOTNAME = </span><span class="s3">'tcl'</span>
+
+
+<span class="s2">def </span><span class="s1">_warn_if_activetcl_or_teapot_installed(tcl_root</span><span class="s2">, </span><span class="s1">tcltree):</span>
+    <span class="s4">&quot;&quot;&quot; 
+    If the current Tcl installation is a Teapot-distributed version of ActiveTcl *and* the current platform is macOS, 
+    log a non-fatal warning that the resulting executable will (probably) fail to run on non-host systems. 
+ 
+    PyInstaller does *not* freeze all ActiveTcl dependencies -- including Teapot, which is typically ignorable. Since 
+    Teapot is *not* ignorable in this case, this function warns of impending failure. 
+ 
+    See Also 
+    ------- 
+    https://github.com/pyinstaller/pyinstaller/issues/621 
+    &quot;&quot;&quot;</span>
+    <span class="s2">import </span><span class="s1">macholib.util</span>
+
+    <span class="s0"># System libraries do not experience this problem.</span>
+    <span class="s2">if </span><span class="s1">macholib.util.in_system_path(tcl_root):</span>
+        <span class="s2">return</span>
+
+    <span class="s0"># Absolute path of the &quot;init.tcl&quot; script.</span>
+    <span class="s2">try</span><span class="s1">:</span>
+        <span class="s1">init_resource = [r[</span><span class="s5">1</span><span class="s1">] </span><span class="s2">for </span><span class="s1">r </span><span class="s2">in </span><span class="s1">tcltree </span><span class="s2">if </span><span class="s1">r[</span><span class="s5">1</span><span class="s1">].endswith(</span><span class="s3">'init.tcl'</span><span class="s1">)][</span><span class="s5">0</span><span class="s1">]</span>
+    <span class="s2">except </span><span class="s1">IndexError:</span>
+        <span class="s0"># If such script could not be found, silently return.</span>
+        <span class="s2">return</span>
+
+    <span class="s1">mentions_activetcl = </span><span class="s2">False</span>
+    <span class="s1">mentions_teapot = </span><span class="s2">False</span>
+    <span class="s0"># TCL/TK reads files using the system encoding:</span>
+    <span class="s0"># https://www.tcl.tk/doc/howto/i18n.html#system_encoding</span>
+    <span class="s2">with </span><span class="s1">open(init_resource</span><span class="s2">, </span><span class="s3">'r'</span><span class="s2">, </span><span class="s1">encoding=locale.getpreferredencoding()) </span><span class="s2">as </span><span class="s1">init_file:</span>
+        <span class="s2">for </span><span class="s1">line </span><span class="s2">in </span><span class="s1">init_file.readlines():</span>
+            <span class="s1">line = line.strip().lower()</span>
+            <span class="s2">if </span><span class="s1">line.startswith(</span><span class="s3">'#'</span><span class="s1">):</span>
+                <span class="s2">continue</span>
+            <span class="s2">if </span><span class="s3">'activetcl' </span><span class="s2">in </span><span class="s1">line:</span>
+                <span class="s1">mentions_activetcl = </span><span class="s2">True</span>
+            <span class="s2">if </span><span class="s3">'teapot' </span><span class="s2">in </span><span class="s1">line:</span>
+                <span class="s1">mentions_teapot = </span><span class="s2">True</span>
+            <span class="s2">if </span><span class="s1">mentions_activetcl </span><span class="s2">and </span><span class="s1">mentions_teapot:</span>
+                <span class="s2">break</span>
+
+    <span class="s2">if </span><span class="s1">mentions_activetcl </span><span class="s2">and </span><span class="s1">mentions_teapot:</span>
+        <span class="s1">logger.warning(</span>
+            <span class="s3">&quot;&quot;&quot; 
+You appear to be using an ActiveTcl build of Tcl/Tk, which PyInstaller has 
+difficulty freezing. To fix this, comment out all references to &quot;teapot&quot; in: 
+ 
+     %s 
+ 
+See https://github.com/pyinstaller/pyinstaller/issues/621 for more information. 
+            &quot;&quot;&quot; </span><span class="s1">% init_resource</span>
+        <span class="s1">)</span>
+
+
+<span class="s2">def </span><span class="s1">_find_tcl_tk_dir():</span>
+    <span class="s4">&quot;&quot;&quot; 
+    Get a platform-agnostic 2-tuple of the absolute paths of the top-level external data directories for both 
+    Tcl and Tk, respectively. 
+ 
+    Returns 
+    ------- 
+    list 
+        2-tuple that contains the values of `${TCL_LIBRARY}` and `${TK_LIBRARY}`, respectively. 
+    &quot;&quot;&quot;</span>
+    <span class="s0"># Python code to get path to TCL_LIBRARY.</span>
+    <span class="s1">tcl_root = hookutils.exec_statement(</span><span class="s3">'from tkinter import Tcl; print(Tcl().eval(&quot;info library&quot;))'</span><span class="s1">)</span>
+    <span class="s1">tk_version = hookutils.exec_statement(</span><span class="s3">'from _tkinter import TK_VERSION; print(TK_VERSION)'</span><span class="s1">)</span>
+
+    <span class="s0"># TK_LIBRARY is in the same prefix as Tcl.</span>
+    <span class="s1">tk_root = os.path.join(os.path.dirname(tcl_root)</span><span class="s2">, </span><span class="s3">'tk%s' </span><span class="s1">% tk_version)</span>
+    <span class="s2">return </span><span class="s1">tcl_root</span><span class="s2">, </span><span class="s1">tk_root</span>
+
+
+<span class="s2">def </span><span class="s1">find_tcl_tk_shared_libs(tkinter_ext_file):</span>
+    <span class="s4">&quot;&quot;&quot; 
+    Find Tcl and Tk shared libraries against which the _tkinter module is linked. 
+ 
+    Returns 
+    ------- 
+    list 
+        list containing two tuples, one for Tcl and one for Tk library, where each tuple contains the library name and 
+        its full path, i.e., [(tcl_lib, tcl_libpath), (tk_lib, tk_libpath)]. If a library is not found, the 
+        corresponding tuple elements are set to None. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">tcl_lib = </span><span class="s2">None</span>
+    <span class="s1">tcl_libpath = </span><span class="s2">None</span>
+    <span class="s1">tk_lib = </span><span class="s2">None</span>
+    <span class="s1">tk_libpath = </span><span class="s2">None</span>
+
+    <span class="s0"># Do not use bindepend.selectImports, as it ignores libraries seen during previous invocations.</span>
+    <span class="s1">_tkinter_imports = bindepend.getImports(tkinter_ext_file)</span>
+
+    <span class="s2">def </span><span class="s1">_get_library_path(lib):</span>
+        <span class="s2">if not </span><span class="s1">compat.is_win </span><span class="s2">and not </span><span class="s1">compat.is_cygwin:</span>
+            <span class="s0"># Non-Windows systems return the path of the library.</span>
+            <span class="s1">path = lib</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s0"># We need to find the library.</span>
+            <span class="s1">path = bindepend.getfullnameof(lib)</span>
+        <span class="s2">return </span><span class="s1">path</span>
+
+    <span class="s2">for </span><span class="s1">lib </span><span class="s2">in </span><span class="s1">_tkinter_imports:</span>
+        <span class="s0"># On some platforms, full path to the shared library is returned. So check only basename to prevent false</span>
+        <span class="s0"># positive matches due to words tcl or tk being contained in the path.</span>
+        <span class="s1">lib_name = os.path.basename(lib)</span>
+        <span class="s1">lib_name_lower = lib_name.lower()  </span><span class="s0"># lower-case for comparisons</span>
+
+        <span class="s2">if </span><span class="s3">'tcl' </span><span class="s2">in </span><span class="s1">lib_name_lower:</span>
+            <span class="s1">tcl_lib = lib_name</span>
+            <span class="s1">tcl_libpath = _get_library_path(lib)</span>
+        <span class="s2">elif </span><span class="s3">'tk' </span><span class="s2">in </span><span class="s1">lib_name_lower:</span>
+            <span class="s1">tk_lib = lib_name</span>
+            <span class="s1">tk_libpath = _get_library_path(lib)</span>
+
+    <span class="s2">return </span><span class="s1">[(tcl_lib</span><span class="s2">, </span><span class="s1">tcl_libpath)</span><span class="s2">, </span><span class="s1">(tk_lib</span><span class="s2">, </span><span class="s1">tk_libpath)]</span>
+
+
+<span class="s2">def </span><span class="s1">_find_tcl_tk(tkinter_ext_file):</span>
+    <span class="s4">&quot;&quot;&quot; 
+    Get a platform-specific 2-tuple of the absolute paths of the top-level external data directories for both 
+    Tcl and Tk, respectively. 
+ 
+    Returns 
+    ------- 
+    list 
+        2-tuple that contains the values of `${TCL_LIBRARY}` and `${TK_LIBRARY}`, respectively. 
+    &quot;&quot;&quot;</span>
+    <span class="s2">if </span><span class="s1">compat.is_darwin:</span>
+        <span class="s0"># On macOS, _tkinter extension is linked either against the system Tcl/Tk framework (older homebrew python,</span>
+        <span class="s0"># python3 from XCode tools) or against bundled Tcl/Tk library (recent python.org builds, recent homebrew</span>
+        <span class="s0"># python with python-tk). PyInstaller does not bundle data from system frameworks (as it does not not collect</span>
+        <span class="s0"># shared libraries from them, either), so we need to determine what kind of Tcl/Tk we are dealing with.</span>
+        <span class="s1">libs = find_tcl_tk_shared_libs(tkinter_ext_file)</span>
+
+        <span class="s0"># Check the full path to the Tcl library.</span>
+        <span class="s1">path_to_tcl = libs[</span><span class="s5">0</span><span class="s1">][</span><span class="s5">1</span><span class="s1">]</span>
+
+        <span class="s0"># Starting with macOS 11, system libraries are hidden (unless both Python and PyInstaller's bootloader are built</span>
+        <span class="s0"># against MacOS 11.x SDK). Therefore, libs may end up empty; but that implicitly indicates that the system</span>
+        <span class="s0"># framework is used, so return (None, None) to inform the caller.</span>
+        <span class="s2">if </span><span class="s1">path_to_tcl </span><span class="s2">is None</span><span class="s1">:</span>
+            <span class="s2">return None, None</span>
+
+        <span class="s0"># Check if the path corresponds to the system framework, i.e., [/System]/Library/Frameworks/Tcl.framework/Tcl</span>
+        <span class="s2">if </span><span class="s3">'Library/Frameworks/Tcl.framework' </span><span class="s2">in </span><span class="s1">path_to_tcl:</span>
+            <span class="s2">return None, None  </span><span class="s0"># Do not collect system framework's data.</span>
+
+        <span class="s0"># Bundled copy of Tcl/Tk; in this case, the dynamic library is</span>
+        <span class="s0"># /Library/Frameworks/Python.framework/Versions/3.x/lib/libtcl8.6.dylib</span>
+        <span class="s0"># and the data directories have standard layout that is handled by _find_tcl_tk_dir().</span>
+        <span class="s2">return </span><span class="s1">_find_tcl_tk_dir()</span>
+    <span class="s2">else</span><span class="s1">:</span>
+        <span class="s0"># On Windows and linux, data directories have standard layout that is handled by _find_tcl_tk_dir().</span>
+        <span class="s2">return </span><span class="s1">_find_tcl_tk_dir()</span>
+
+
+<span class="s2">def </span><span class="s1">_collect_tcl_modules(tcl_root):</span>
+    <span class="s4">&quot;&quot;&quot; 
+    Get a list of TOC-style 3-tuples describing Tcl modules. The modules directory is separate from the library/data 
+    one, and is located at $tcl_root/../tclX, where X is the major Tcl version. 
+ 
+    Returns 
+    ------- 
+    Tree 
+        Such list, if the modules directory exists. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s0"># Obtain Tcl major version.</span>
+    <span class="s1">tcl_version = hookutils.exec_statement(</span><span class="s3">'from tkinter import Tcl; print(Tcl().eval(&quot;info tclversion&quot;))'</span><span class="s1">)</span>
+    <span class="s1">tcl_version = tcl_version.split(</span><span class="s3">'.'</span><span class="s1">)[</span><span class="s5">0</span><span class="s1">]</span>
+
+    <span class="s1">modules_dirname = </span><span class="s3">'tcl' </span><span class="s1">+ str(tcl_version)</span>
+    <span class="s1">modules_path = os.path.join(tcl_root</span><span class="s2">, </span><span class="s3">'..'</span><span class="s2">, </span><span class="s1">modules_dirname)</span>
+
+    <span class="s2">if not </span><span class="s1">os.path.isdir(modules_path):</span>
+        <span class="s1">logger.warning(</span><span class="s3">'Tcl modules directory %s does not exist.'</span><span class="s2">, </span><span class="s1">modules_path)</span>
+        <span class="s2">return </span><span class="s1">[]</span>
+
+    <span class="s2">return </span><span class="s1">Tree(modules_path</span><span class="s2">, </span><span class="s1">prefix=modules_dirname)</span>
+
+
+<span class="s2">def </span><span class="s1">collect_tcl_tk_files(tkinter_ext_file):</span>
+    <span class="s4">&quot;&quot;&quot; 
+    Get a list of TOC-style 3-tuples describing all external Tcl/Tk data files. 
+ 
+    Returns 
+    ------- 
+    Tree 
+        Such list. 
+    &quot;&quot;&quot;</span>
+    <span class="s0"># Find Tcl and Tk data directory by analyzing the _tkinter extension.</span>
+    <span class="s1">tcl_root</span><span class="s2">, </span><span class="s1">tk_root = _find_tcl_tk(tkinter_ext_file)</span>
+
+    <span class="s0"># On macOS, we do not collect system libraries. Therefore, if system Tcl/Tk framework is used, it makes no sense to</span>
+    <span class="s0"># collect its data, either. In this case, _find_tcl_tk() will return None, None - either deliberately (we found the</span>
+    <span class="s0"># data paths, but ignore them) or not (starting with macOS 11, the data path cannot be found until shared library</span>
+    <span class="s0"># discovery is fixed).</span>
+    <span class="s2">if </span><span class="s1">compat.is_darwin </span><span class="s2">and not </span><span class="s1">tcl_root </span><span class="s2">and not </span><span class="s1">tk_root:</span>
+        <span class="s1">logger.info(</span>
+            <span class="s3">&quot;Not collecting Tcl/Tk data - either python is using macOS</span><span class="s2">\' </span><span class="s3">system Tcl/Tk framework, or Tcl/Tk data &quot;</span>
+            <span class="s3">&quot;directories could not be found.&quot;</span>
+        <span class="s1">)</span>
+        <span class="s2">return </span><span class="s1">[]</span>
+
+    <span class="s0"># TODO Shouldn't these be fatal exceptions?</span>
+    <span class="s2">if not </span><span class="s1">tcl_root:</span>
+        <span class="s1">logger.error(</span><span class="s3">'Tcl/Tk improperly installed on this system.'</span><span class="s1">)</span>
+        <span class="s2">return </span><span class="s1">[]</span>
+    <span class="s2">if not </span><span class="s1">os.path.isdir(tcl_root):</span>
+        <span class="s1">logger.error(</span><span class="s3">'Tcl data directory &quot;%s&quot; not found.'</span><span class="s2">, </span><span class="s1">tcl_root)</span>
+        <span class="s2">return </span><span class="s1">[]</span>
+    <span class="s2">if not </span><span class="s1">os.path.isdir(tk_root):</span>
+        <span class="s1">logger.error(</span><span class="s3">'Tk data directory &quot;%s&quot; not found.'</span><span class="s2">, </span><span class="s1">tk_root)</span>
+        <span class="s2">return </span><span class="s1">[]</span>
+
+    <span class="s1">tcltree = Tree(tcl_root</span><span class="s2">, </span><span class="s1">prefix=</span><span class="s3">'tcl'</span><span class="s2">, </span><span class="s1">excludes=[</span><span class="s3">'demos'</span><span class="s2">, </span><span class="s3">'*.lib'</span><span class="s2">, </span><span class="s3">'tclConfig.sh'</span><span class="s1">])</span>
+    <span class="s1">tktree = Tree(tk_root</span><span class="s2">, </span><span class="s1">prefix=</span><span class="s3">'tk'</span><span class="s2">, </span><span class="s1">excludes=[</span><span class="s3">'demos'</span><span class="s2">, </span><span class="s3">'*.lib'</span><span class="s2">, </span><span class="s3">'tkConfig.sh'</span><span class="s1">])</span>
+
+    <span class="s0"># If the current Tcl installation is a Teapot-distributed version of ActiveTcl and the current platform is Mac OS,</span>
+    <span class="s0"># warn that this is bad.</span>
+    <span class="s2">if </span><span class="s1">compat.is_darwin:</span>
+        <span class="s1">_warn_if_activetcl_or_teapot_installed(tcl_root</span><span class="s2">, </span><span class="s1">tcltree)</span>
+
+    <span class="s0"># Collect Tcl modules.</span>
+    <span class="s1">tclmodulestree = _collect_tcl_modules(tcl_root)</span>
+
+    <span class="s2">return </span><span class="s1">tcltree + tktree + tclmodulestree</span>
+</pre>
+</body>
+</html>

@@ -1,0 +1,408 @@
+<html>
+<head>
+<title>test___monitor.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #cc7832;}
+.s3 { color: #6a8759;}
+.s4 { color: #629755; font-style: italic;}
+.s5 { color: #6897bb;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+test___monitor.py</font>
+</center></td></tr></table>
+<pre><span class="s0"># Copyright 2018 gevent contributors. See LICENSE for details.</span>
+
+<span class="s2">import </span><span class="s1">gc</span>
+<span class="s2">import </span><span class="s1">unittest</span>
+
+
+<span class="s2">from </span><span class="s1">greenlet </span><span class="s2">import </span><span class="s1">gettrace</span>
+<span class="s2">from </span><span class="s1">greenlet </span><span class="s2">import </span><span class="s1">settrace</span>
+
+<span class="s2">from </span><span class="s1">gevent.monkey </span><span class="s2">import </span><span class="s1">get_original</span>
+<span class="s2">from </span><span class="s1">gevent._compat </span><span class="s2">import </span><span class="s1">thread_mod_name</span>
+<span class="s2">from </span><span class="s1">gevent._compat </span><span class="s2">import </span><span class="s1">NativeStrIO</span>
+
+<span class="s2">from </span><span class="s1">gevent.testing </span><span class="s2">import </span><span class="s1">verify</span>
+<span class="s2">from </span><span class="s1">gevent.testing.skipping </span><span class="s2">import </span><span class="s1">skipWithoutPSUtil</span>
+
+<span class="s2">from </span><span class="s1">gevent </span><span class="s2">import </span><span class="s1">_monitor </span><span class="s2">as </span><span class="s1">monitor</span>
+<span class="s2">from </span><span class="s1">gevent </span><span class="s2">import </span><span class="s1">config </span><span class="s2">as </span><span class="s1">GEVENT_CONFIG</span>
+
+<span class="s1">get_ident = get_original(thread_mod_name</span><span class="s2">, </span><span class="s3">'get_ident'</span><span class="s1">)</span>
+
+<span class="s2">class </span><span class="s1">MockHub(object):</span>
+    <span class="s1">_threadpool = </span><span class="s2">None</span>
+    <span class="s1">_resolver = </span><span class="s2">None</span>
+
+    <span class="s2">def </span><span class="s1">__init__(self):</span>
+        <span class="s1">self.thread_ident = get_ident()</span>
+        <span class="s1">self.exception_stream = NativeStrIO()</span>
+        <span class="s1">self.dead = </span><span class="s2">False</span>
+
+    <span class="s2">def </span><span class="s1">__bool__(self):</span>
+        <span class="s2">return not </span><span class="s1">self.dead</span>
+
+    <span class="s1">__nonzero__ = __bool__</span>
+
+    <span class="s2">def </span><span class="s1">handle_error(self</span><span class="s2">, </span><span class="s1">*args): </span><span class="s0"># pylint:disable=unused-argument</span>
+        <span class="s2">raise </span><span class="s0"># pylint:disable=misplaced-bare-raise</span>
+
+    <span class="s1">@property</span>
+    <span class="s2">def </span><span class="s1">loop(self):</span>
+        <span class="s2">return </span><span class="s1">self</span>
+
+    <span class="s2">def </span><span class="s1">reinit(self):</span>
+        <span class="s4">&quot;mock loop.reinit&quot;</span>
+
+<span class="s2">class </span><span class="s1">_AbstractTestPeriodicMonitoringThread(object):</span>
+    <span class="s0"># Makes sure we don't actually spin up a new monitoring thread.</span>
+
+    <span class="s0"># pylint:disable=no-member</span>
+
+    <span class="s2">def </span><span class="s1">setUp(self):</span>
+        <span class="s1">super(_AbstractTestPeriodicMonitoringThread</span><span class="s2">, </span><span class="s1">self).setUp()</span>
+        <span class="s1">self._orig_start_new_thread = monitor.start_new_thread</span>
+        <span class="s1">self._orig_thread_sleep = monitor.thread_sleep</span>
+        <span class="s1">monitor.thread_sleep = </span><span class="s2">lambda </span><span class="s1">_s: gc.collect() </span><span class="s0"># For PyPy</span>
+        <span class="s1">self.tid = </span><span class="s5">0xDEADBEEF</span>
+        <span class="s2">def </span><span class="s1">start_new_thread(_f</span><span class="s2">, </span><span class="s1">_a):</span>
+            <span class="s1">r = self.tid</span>
+            <span class="s1">self.tid += </span><span class="s5">1</span>
+            <span class="s2">return </span><span class="s1">r</span>
+
+        <span class="s1">monitor.start_new_thread = start_new_thread</span>
+        <span class="s1">self.hub = MockHub()</span>
+        <span class="s1">self.pmt = monitor.PeriodicMonitoringThread(self.hub)</span>
+        <span class="s1">self.hub.periodic_monitoring_thread = self.pmt</span>
+        <span class="s1">self.pmt_default_funcs = self.pmt.monitoring_functions()[:]</span>
+        <span class="s1">self.len_pmt_default_funcs = len(self.pmt_default_funcs)</span>
+
+    <span class="s2">def </span><span class="s1">tearDown(self):</span>
+        <span class="s1">monitor.start_new_thread = self._orig_start_new_thread</span>
+        <span class="s1">monitor.thread_sleep = self._orig_thread_sleep</span>
+        <span class="s1">prev = self.pmt._greenlet_tracer.previous_trace_function</span>
+        <span class="s1">self.pmt.kill()</span>
+        <span class="s2">assert </span><span class="s1">gettrace() </span><span class="s2">is </span><span class="s1">prev</span><span class="s2">, </span><span class="s1">(gettrace()</span><span class="s2">, </span><span class="s1">prev)</span>
+        <span class="s1">settrace(</span><span class="s2">None</span><span class="s1">)</span>
+        <span class="s1">super(_AbstractTestPeriodicMonitoringThread</span><span class="s2">, </span><span class="s1">self).tearDown()</span>
+
+
+<span class="s2">class </span><span class="s1">TestPeriodicMonitoringThread(_AbstractTestPeriodicMonitoringThread</span><span class="s2">,</span>
+                                   <span class="s1">unittest.TestCase):</span>
+
+    <span class="s2">def </span><span class="s1">test_constructor(self):</span>
+        <span class="s1">self.assertEqual(</span><span class="s5">0xDEADBEEF</span><span class="s2">, </span><span class="s1">self.pmt.monitor_thread_ident)</span>
+        <span class="s1">self.assertEqual(gettrace()</span><span class="s2">, </span><span class="s1">self.pmt._greenlet_tracer)</span>
+
+    <span class="s1">@skipWithoutPSUtil(</span><span class="s3">&quot;Verifies the process&quot;</span><span class="s1">)</span>
+    <span class="s2">def </span><span class="s1">test_get_process(self):</span>
+        <span class="s1">proc = self.pmt._get_process()</span>
+        <span class="s1">self.assertIsNotNone(proc)</span>
+        <span class="s0"># Same object is returned each time.</span>
+        <span class="s1">self.assertIs(proc</span><span class="s2">, </span><span class="s1">self.pmt._get_process())</span>
+
+    <span class="s2">def </span><span class="s1">test_hub_wref(self):</span>
+        <span class="s1">self.assertIs(self.hub</span><span class="s2">, </span><span class="s1">self.pmt.hub)</span>
+        <span class="s2">del </span><span class="s1">self.hub</span>
+
+        <span class="s1">gc.collect()</span>
+        <span class="s1">self.assertIsNone(self.pmt.hub)</span>
+
+        <span class="s0"># And it killed itself.</span>
+        <span class="s1">self.assertFalse(self.pmt.should_run)</span>
+        <span class="s1">self.assertIsNone(gettrace())</span>
+
+
+    <span class="s2">def </span><span class="s1">test_add_monitoring_function(self):</span>
+
+        <span class="s1">self.assertRaises(ValueError</span><span class="s2">, </span><span class="s1">self.pmt.add_monitoring_function</span><span class="s2">, None, </span><span class="s5">1</span><span class="s1">)</span>
+        <span class="s1">self.assertRaises(ValueError</span><span class="s2">, </span><span class="s1">self.pmt.add_monitoring_function</span><span class="s2">, lambda</span><span class="s1">: </span><span class="s2">None, </span><span class="s1">-</span><span class="s5">1</span><span class="s1">)</span>
+
+        <span class="s2">def </span><span class="s1">f():</span>
+            <span class="s4">&quot;Does nothing&quot;</span>
+
+        <span class="s0"># Add</span>
+        <span class="s1">self.pmt.add_monitoring_function(f</span><span class="s2">, </span><span class="s5">1</span><span class="s1">)</span>
+        <span class="s1">self.assertEqual(self.len_pmt_default_funcs + </span><span class="s5">1</span><span class="s2">, </span><span class="s1">len(self.pmt.monitoring_functions()))</span>
+        <span class="s1">self.assertEqual(</span><span class="s5">1</span><span class="s2">, </span><span class="s1">self.pmt.monitoring_functions()[</span><span class="s5">1</span><span class="s1">].period)</span>
+
+        <span class="s0"># Update</span>
+        <span class="s1">self.pmt.add_monitoring_function(f</span><span class="s2">, </span><span class="s5">2</span><span class="s1">)</span>
+        <span class="s1">self.assertEqual(self.len_pmt_default_funcs + </span><span class="s5">1</span><span class="s2">, </span><span class="s1">len(self.pmt.monitoring_functions()))</span>
+        <span class="s1">self.assertEqual(</span><span class="s5">2</span><span class="s2">, </span><span class="s1">self.pmt.monitoring_functions()[</span><span class="s5">1</span><span class="s1">].period)</span>
+
+        <span class="s0"># Remove</span>
+        <span class="s1">self.pmt.add_monitoring_function(f</span><span class="s2">, None</span><span class="s1">)</span>
+        <span class="s1">self.assertEqual(self.len_pmt_default_funcs</span><span class="s2">, </span><span class="s1">len(self.pmt.monitoring_functions()))</span>
+
+    <span class="s2">def </span><span class="s1">test_calculate_sleep_time(self):</span>
+        <span class="s1">self.assertEqual(</span>
+            <span class="s1">self.pmt.monitoring_functions()[</span><span class="s5">0</span><span class="s1">].period</span><span class="s2">,</span>
+            <span class="s1">self.pmt.calculate_sleep_time())</span>
+
+        <span class="s0"># Pretend that GEVENT_CONFIG.max_blocking_time was set to 0,</span>
+        <span class="s0"># to disable this monitor.</span>
+        <span class="s1">self.pmt._calculated_sleep_time = </span><span class="s5">0</span>
+        <span class="s1">self.assertEqual(</span>
+            <span class="s1">self.pmt.inactive_sleep_time</span><span class="s2">,</span>
+            <span class="s1">self.pmt.calculate_sleep_time()</span>
+        <span class="s1">)</span>
+
+        <span class="s0"># Getting the list of monitoring functions will also</span>
+        <span class="s0"># do this, if it looks like it has changed</span>
+        <span class="s1">self.pmt.monitoring_functions()[</span><span class="s5">0</span><span class="s1">].period = -</span><span class="s5">1</span>
+        <span class="s1">self.pmt._calculated_sleep_time = </span><span class="s5">0</span>
+        <span class="s1">self.pmt.monitoring_functions()</span>
+        <span class="s1">self.assertEqual(</span>
+            <span class="s1">self.pmt.monitoring_functions()[</span><span class="s5">0</span><span class="s1">].period</span><span class="s2">,</span>
+            <span class="s1">self.pmt.calculate_sleep_time())</span>
+        <span class="s1">self.assertEqual(</span>
+            <span class="s1">self.pmt.monitoring_functions()[</span><span class="s5">0</span><span class="s1">].period</span><span class="s2">,</span>
+            <span class="s1">self.pmt._calculated_sleep_time)</span>
+
+    <span class="s2">def </span><span class="s1">test_call_destroyed_hub(self):</span>
+        <span class="s0"># Add a function that destroys the hub so we break out (eventually)</span>
+        <span class="s0"># This clears the wref, which eventually calls kill()</span>
+        <span class="s2">def </span><span class="s1">f(_hub):</span>
+            <span class="s1">_hub = </span><span class="s2">None</span>
+            <span class="s1">self.hub = </span><span class="s2">None</span>
+            <span class="s1">gc.collect()</span>
+
+        <span class="s1">self.pmt.add_monitoring_function(f</span><span class="s2">, </span><span class="s5">0.1</span><span class="s1">)</span>
+        <span class="s1">self.pmt()</span>
+        <span class="s1">self.assertFalse(self.pmt.should_run)</span>
+
+    <span class="s2">def </span><span class="s1">test_call_dead_hub(self):</span>
+        <span class="s0"># Add a function that makes the hub go false (e.g., it quit)</span>
+        <span class="s0"># This causes the function to kill itself.</span>
+        <span class="s2">def </span><span class="s1">f(hub):</span>
+            <span class="s1">hub.dead = </span><span class="s2">True</span>
+        <span class="s1">self.pmt.add_monitoring_function(f</span><span class="s2">, </span><span class="s5">0.1</span><span class="s1">)</span>
+        <span class="s1">self.pmt()</span>
+        <span class="s1">self.assertFalse(self.pmt.should_run)</span>
+
+    <span class="s2">def </span><span class="s1">test_call_SystemExit(self):</span>
+        <span class="s0"># breaks the loop</span>
+        <span class="s2">def </span><span class="s1">f(_hub):</span>
+            <span class="s2">raise </span><span class="s1">SystemExit()</span>
+
+        <span class="s1">self.pmt.add_monitoring_function(f</span><span class="s2">, </span><span class="s5">0.1</span><span class="s1">)</span>
+        <span class="s1">self.pmt()</span>
+
+    <span class="s2">def </span><span class="s1">test_call_other_error(self):</span>
+        <span class="s2">class </span><span class="s1">MyException(Exception):</span>
+            <span class="s2">pass</span>
+
+        <span class="s2">def </span><span class="s1">f(_hub):</span>
+            <span class="s2">raise </span><span class="s1">MyException()</span>
+
+        <span class="s1">self.pmt.add_monitoring_function(f</span><span class="s2">, </span><span class="s5">0.1</span><span class="s1">)</span>
+        <span class="s2">with </span><span class="s1">self.assertRaises(MyException):</span>
+            <span class="s1">self.pmt()</span>
+
+    <span class="s2">def </span><span class="s1">test_hub_reinit(self):</span>
+        <span class="s2">import </span><span class="s1">os</span>
+        <span class="s2">from </span><span class="s1">gevent.hub </span><span class="s2">import </span><span class="s1">reinit</span>
+        <span class="s1">self.pmt.pid = -</span><span class="s5">1</span>
+        <span class="s1">old_tid = self.pmt.monitor_thread_ident</span>
+
+        <span class="s1">reinit(self.hub)</span>
+
+        <span class="s1">self.assertEqual(os.getpid()</span><span class="s2">, </span><span class="s1">self.pmt.pid)</span>
+        <span class="s1">self.assertEqual(old_tid + </span><span class="s5">1</span><span class="s2">, </span><span class="s1">self.pmt.monitor_thread_ident)</span>
+
+
+
+<span class="s2">class </span><span class="s1">TestPeriodicMonitorBlocking(_AbstractTestPeriodicMonitoringThread</span><span class="s2">,</span>
+                                  <span class="s1">unittest.TestCase):</span>
+
+    <span class="s2">def </span><span class="s1">test_previous_trace(self):</span>
+        <span class="s1">self.pmt.kill()</span>
+        <span class="s1">self.assertIsNone(gettrace())</span>
+
+        <span class="s1">called = []</span>
+        <span class="s2">def </span><span class="s1">f(*args):</span>
+            <span class="s1">called.append(args)</span>
+
+        <span class="s1">settrace(f)</span>
+
+        <span class="s1">self.pmt = monitor.PeriodicMonitoringThread(self.hub)</span>
+        <span class="s1">self.assertEqual(gettrace()</span><span class="s2">, </span><span class="s1">self.pmt._greenlet_tracer)</span>
+        <span class="s1">self.assertIs(self.pmt._greenlet_tracer.previous_trace_function</span><span class="s2">, </span><span class="s1">f)</span>
+
+        <span class="s1">self.pmt._greenlet_tracer(</span><span class="s3">'event'</span><span class="s2">, </span><span class="s1">(</span><span class="s3">'args'</span><span class="s2">,</span><span class="s1">))</span>
+
+        <span class="s1">self.assertEqual([(</span><span class="s3">'event'</span><span class="s2">, </span><span class="s1">(</span><span class="s3">'args'</span><span class="s2">,</span><span class="s1">))]</span><span class="s2">, </span><span class="s1">called)</span>
+
+    <span class="s2">def </span><span class="s1">test__greenlet_tracer(self):</span>
+        <span class="s1">self.assertEqual(</span><span class="s5">0</span><span class="s2">, </span><span class="s1">self.pmt._greenlet_tracer.greenlet_switch_counter)</span>
+        <span class="s0"># Unknown event still counts as a switch (should it?)</span>
+        <span class="s1">self.pmt._greenlet_tracer(</span><span class="s3">'unknown'</span><span class="s2">, None</span><span class="s1">)</span>
+        <span class="s1">self.assertEqual(</span><span class="s5">1</span><span class="s2">, </span><span class="s1">self.pmt._greenlet_tracer.greenlet_switch_counter)</span>
+        <span class="s1">self.assertIsNone(self.pmt._greenlet_tracer.active_greenlet)</span>
+
+        <span class="s1">origin = object()</span>
+        <span class="s1">target = object()</span>
+
+        <span class="s1">self.pmt._greenlet_tracer(</span><span class="s3">'switch'</span><span class="s2">, </span><span class="s1">(origin</span><span class="s2">, </span><span class="s1">target))</span>
+        <span class="s1">self.assertEqual(</span><span class="s5">2</span><span class="s2">, </span><span class="s1">self.pmt._greenlet_tracer.greenlet_switch_counter)</span>
+        <span class="s1">self.assertIs(target</span><span class="s2">, </span><span class="s1">self.pmt._greenlet_tracer.active_greenlet)</span>
+
+        <span class="s0"># Unknown event removes active greenlet</span>
+        <span class="s1">self.pmt._greenlet_tracer(</span><span class="s3">'unknown'</span><span class="s2">, </span><span class="s1">())</span>
+        <span class="s1">self.assertEqual(</span><span class="s5">3</span><span class="s2">, </span><span class="s1">self.pmt._greenlet_tracer.greenlet_switch_counter)</span>
+        <span class="s1">self.assertIsNone(self.pmt._greenlet_tracer.active_greenlet)</span>
+
+    <span class="s2">def </span><span class="s1">test_monitor_blocking(self):</span>
+        <span class="s0"># Initially there's no active greenlet and no switches,</span>
+        <span class="s0"># so nothing is considered blocked</span>
+        <span class="s2">from </span><span class="s1">gevent.events </span><span class="s2">import </span><span class="s1">subscribers</span>
+        <span class="s2">from </span><span class="s1">gevent.events </span><span class="s2">import </span><span class="s1">IEventLoopBlocked</span>
+        <span class="s1">events = []</span>
+        <span class="s1">subscribers.append(events.append)</span>
+
+        <span class="s1">self.assertFalse(self.pmt.monitor_blocking(self.hub))</span>
+
+        <span class="s0"># Give it an active greenlet</span>
+        <span class="s1">origin = object()</span>
+        <span class="s1">target = object()</span>
+        <span class="s1">self.pmt._greenlet_tracer(</span><span class="s3">'switch'</span><span class="s2">, </span><span class="s1">(origin</span><span class="s2">, </span><span class="s1">target))</span>
+
+        <span class="s0"># We've switched, so we're not blocked</span>
+        <span class="s1">self.assertFalse(self.pmt.monitor_blocking(self.hub))</span>
+        <span class="s1">self.assertFalse(events)</span>
+
+        <span class="s0"># Again without switching is a problem.</span>
+        <span class="s1">self.assertTrue(self.pmt.monitor_blocking(self.hub))</span>
+        <span class="s1">self.assertTrue(events)</span>
+        <span class="s1">verify.verifyObject(IEventLoopBlocked</span><span class="s2">, </span><span class="s1">events[</span><span class="s5">0</span><span class="s1">])</span>
+        <span class="s2">del </span><span class="s1">events[:]</span>
+
+        <span class="s0"># But we can order it not to be a problem</span>
+        <span class="s1">self.pmt.ignore_current_greenlet_blocking()</span>
+        <span class="s1">self.assertFalse(self.pmt.monitor_blocking(self.hub))</span>
+        <span class="s1">self.assertFalse(events)</span>
+
+        <span class="s0"># And back again</span>
+        <span class="s1">self.pmt.monitor_current_greenlet_blocking()</span>
+        <span class="s1">self.assertTrue(self.pmt.monitor_blocking(self.hub))</span>
+
+        <span class="s0"># A bad thread_ident in the hub doesn't mess things up</span>
+        <span class="s1">self.hub.thread_ident = -</span><span class="s5">1</span>
+        <span class="s1">self.assertTrue(self.pmt.monitor_blocking(self.hub))</span>
+
+
+<span class="s2">class </span><span class="s1">MockProcess(object):</span>
+
+    <span class="s2">def </span><span class="s1">__init__(self</span><span class="s2">, </span><span class="s1">rss):</span>
+        <span class="s1">self.rss = rss</span>
+
+    <span class="s2">def </span><span class="s1">memory_full_info(self):</span>
+        <span class="s2">return </span><span class="s1">self</span>
+
+
+<span class="s1">@skipWithoutPSUtil(</span><span class="s3">&quot;Accessess memory info&quot;</span><span class="s1">)</span>
+<span class="s2">class </span><span class="s1">TestPeriodicMonitorMemory(_AbstractTestPeriodicMonitoringThread</span><span class="s2">,</span>
+                                <span class="s1">unittest.TestCase):</span>
+
+    <span class="s1">rss = </span><span class="s5">0</span>
+
+    <span class="s2">def </span><span class="s1">setUp(self):</span>
+        <span class="s1">_AbstractTestPeriodicMonitoringThread.setUp(self)</span>
+        <span class="s1">self._old_max = GEVENT_CONFIG.max_memory_usage</span>
+        <span class="s1">GEVENT_CONFIG.max_memory_usage = </span><span class="s2">None</span>
+
+        <span class="s1">self.pmt._get_process = </span><span class="s2">lambda</span><span class="s1">: MockProcess(self.rss)</span>
+
+    <span class="s2">def </span><span class="s1">tearDown(self):</span>
+        <span class="s1">GEVENT_CONFIG.max_memory_usage = self._old_max</span>
+        <span class="s1">_AbstractTestPeriodicMonitoringThread.tearDown(self)</span>
+
+    <span class="s2">def </span><span class="s1">test_can_monitor_and_install(self):</span>
+        <span class="s0"># We run tests with psutil installed, and we have access to our</span>
+        <span class="s0"># process.</span>
+        <span class="s1">self.assertTrue(self.pmt.can_monitor_memory_usage())</span>
+        <span class="s0"># No warning, adds a function</span>
+
+        <span class="s1">self.pmt.install_monitor_memory_usage()</span>
+        <span class="s1">self.assertEqual(self.len_pmt_default_funcs + </span><span class="s5">1</span><span class="s2">, </span><span class="s1">len(self.pmt.monitoring_functions()))</span>
+
+    <span class="s2">def </span><span class="s1">test_cannot_monitor_and_install(self):</span>
+        <span class="s2">import </span><span class="s1">warnings</span>
+        <span class="s1">self.pmt._get_process = </span><span class="s2">lambda</span><span class="s1">: </span><span class="s2">None</span>
+        <span class="s1">self.assertFalse(self.pmt.can_monitor_memory_usage())</span>
+
+        <span class="s0"># This emits a warning, visible by default</span>
+        <span class="s2">with </span><span class="s1">warnings.catch_warnings(record=</span><span class="s2">True</span><span class="s1">) </span><span class="s2">as </span><span class="s1">ws:</span>
+            <span class="s1">self.pmt.install_monitor_memory_usage()</span>
+
+        <span class="s1">self.assertEqual(</span><span class="s5">1</span><span class="s2">, </span><span class="s1">len(ws))</span>
+        <span class="s1">self.assertIs(monitor.MonitorWarning</span><span class="s2">, </span><span class="s1">ws[</span><span class="s5">0</span><span class="s1">].category)</span>
+
+    <span class="s2">def </span><span class="s1">test_monitor_no_allowed(self):</span>
+        <span class="s1">self.assertEqual(-</span><span class="s5">1</span><span class="s2">, </span><span class="s1">self.pmt.monitor_memory_usage(</span><span class="s2">None</span><span class="s1">))</span>
+
+    <span class="s2">def </span><span class="s1">test_monitor_greater(self):</span>
+        <span class="s2">from </span><span class="s1">gevent </span><span class="s2">import </span><span class="s1">events</span>
+
+        <span class="s1">self.rss = </span><span class="s5">2</span>
+        <span class="s1">GEVENT_CONFIG.max_memory_usage = </span><span class="s5">1</span>
+
+        <span class="s0"># Initial event</span>
+        <span class="s1">event = self.pmt.monitor_memory_usage(</span><span class="s2">None</span><span class="s1">)</span>
+        <span class="s1">self.assertIsInstance(event</span><span class="s2">, </span><span class="s1">events.MemoryUsageThresholdExceeded)</span>
+        <span class="s1">self.assertEqual(</span><span class="s5">2</span><span class="s2">, </span><span class="s1">event.mem_usage)</span>
+        <span class="s1">self.assertEqual(</span><span class="s5">1</span><span class="s2">, </span><span class="s1">event.max_allowed) </span><span class="s0"># pylint:disable=no-member</span>
+        <span class="s1">self.assertIsInstance(event.memory_info</span><span class="s2">, </span><span class="s1">MockProcess) </span><span class="s0"># pylint:disable=no-member</span>
+
+        <span class="s0"># No growth, no event</span>
+        <span class="s1">event = self.pmt.monitor_memory_usage(</span><span class="s2">None</span><span class="s1">)</span>
+        <span class="s1">self.assertIsNone(event)</span>
+
+        <span class="s0"># Growth, event</span>
+        <span class="s1">self.rss = </span><span class="s5">3</span>
+        <span class="s1">event = self.pmt.monitor_memory_usage(</span><span class="s2">None</span><span class="s1">)</span>
+        <span class="s1">self.assertIsInstance(event</span><span class="s2">, </span><span class="s1">events.MemoryUsageThresholdExceeded)</span>
+        <span class="s1">self.assertEqual(</span><span class="s5">3</span><span class="s2">, </span><span class="s1">event.mem_usage)</span>
+
+        <span class="s0"># Shrinking below gets us back</span>
+        <span class="s1">self.rss = </span><span class="s5">1</span>
+        <span class="s1">event = self.pmt.monitor_memory_usage(</span><span class="s2">None</span><span class="s1">)</span>
+        <span class="s1">self.assertIsInstance(event</span><span class="s2">, </span><span class="s1">events.MemoryUsageUnderThreshold)</span>
+        <span class="s1">self.assertEqual(</span><span class="s5">1</span><span class="s2">, </span><span class="s1">event.mem_usage)</span>
+
+        <span class="s0"># coverage</span>
+        <span class="s1">repr(event)</span>
+
+        <span class="s0"># No change, no event</span>
+        <span class="s1">event = self.pmt.monitor_memory_usage(</span><span class="s2">None</span><span class="s1">)</span>
+        <span class="s1">self.assertIsNone(event)</span>
+
+        <span class="s0"># Growth, event</span>
+        <span class="s1">self.rss = </span><span class="s5">3</span>
+        <span class="s1">event = self.pmt.monitor_memory_usage(</span><span class="s2">None</span><span class="s1">)</span>
+        <span class="s1">self.assertIsInstance(event</span><span class="s2">, </span><span class="s1">events.MemoryUsageThresholdExceeded)</span>
+        <span class="s1">self.assertEqual(</span><span class="s5">3</span><span class="s2">, </span><span class="s1">event.mem_usage)</span>
+
+
+    <span class="s2">def </span><span class="s1">test_monitor_initial_below(self):</span>
+        <span class="s1">self.rss = </span><span class="s5">1</span>
+        <span class="s1">GEVENT_CONFIG.max_memory_usage = </span><span class="s5">10</span>
+
+
+        <span class="s1">event = self.pmt.monitor_memory_usage(</span><span class="s2">None</span><span class="s1">)</span>
+        <span class="s1">self.assertIsNone(event)</span>
+
+<span class="s2">if </span><span class="s1">__name__ == </span><span class="s3">'__main__'</span><span class="s1">:</span>
+    <span class="s1">unittest.main()</span>
+</pre>
+</body>
+</html>

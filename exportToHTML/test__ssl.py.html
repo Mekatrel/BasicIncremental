@@ -1,0 +1,150 @@
+<html>
+<head>
+<title>test__ssl.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #cc7832;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #808080;}
+.s3 { color: #6a8759;}
+.s4 { color: #a5c261;}
+.s5 { color: #6897bb;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+test__ssl.py</font>
+</center></td></tr></table>
+<pre><span class="s0">from </span><span class="s1">__future__ </span><span class="s0">import </span><span class="s1">print_function</span><span class="s0">, </span><span class="s1">division</span><span class="s0">, </span><span class="s1">absolute_import</span>
+<span class="s0">from </span><span class="s1">gevent </span><span class="s0">import </span><span class="s1">monkey</span>
+<span class="s1">monkey.patch_all()</span>
+<span class="s0">import </span><span class="s1">os</span>
+
+<span class="s0">import </span><span class="s1">socket</span>
+<span class="s0">import </span><span class="s1">gevent.testing </span><span class="s0">as </span><span class="s1">greentest</span>
+<span class="s2"># Be careful not to have TestTCP as a bare attribute in this module,</span>
+<span class="s2"># even aliased, to avoid running duplicate tests</span>
+<span class="s0">from </span><span class="s1">gevent.tests </span><span class="s0">import </span><span class="s1">test__socket</span>
+<span class="s0">import </span><span class="s1">ssl</span>
+
+<span class="s0">from </span><span class="s1">gevent.testing </span><span class="s0">import </span><span class="s1">PY2</span>
+
+<span class="s0">def </span><span class="s1">ssl_listener(private_key</span><span class="s0">, </span><span class="s1">certificate):</span>
+    <span class="s1">raw_listener = socket.socket()</span>
+    <span class="s1">greentest.bind_and_listen(raw_listener)</span>
+    <span class="s2"># pylint:disable=deprecated-method</span>
+    <span class="s1">sock = ssl.wrap_socket(raw_listener</span><span class="s0">, </span><span class="s1">private_key</span><span class="s0">, </span><span class="s1">certificate</span><span class="s0">, </span><span class="s1">server_side=</span><span class="s0">True</span><span class="s1">)</span>
+    <span class="s0">return </span><span class="s1">sock</span><span class="s0">, </span><span class="s1">raw_listener</span>
+
+
+<span class="s0">class </span><span class="s1">TestSSL(test__socket.TestTCP):</span>
+
+    <span class="s2"># To generate:</span>
+    <span class="s2"># openssl req -x509 -newkey rsa:4096 -keyout test_server.key -out test_server.crt -days 36500 -nodes -subj '/CN=localhost'</span>
+    <span class="s1">certfile = os.path.join(os.path.dirname(__file__)</span><span class="s0">, </span><span class="s3">'test_server.crt'</span><span class="s1">)</span>
+    <span class="s1">privfile = os.path.join(os.path.dirname(__file__)</span><span class="s0">, </span><span class="s3">'test_server.key'</span><span class="s1">)</span>
+    <span class="s2"># Python 2.x has socket.sslerror (which  is an alias for</span>
+    <span class="s2"># ssl.SSLError); That's gone in Py3 though. In Python 2, most timeouts are raised</span>
+    <span class="s2"># as SSLError, but Python 3 raises the normal socket.timeout instead. So this has</span>
+    <span class="s2"># the effect of making TIMEOUT_ERROR be SSLError on Py2 and socket.timeout on Py3</span>
+    <span class="s2"># See https://bugs.python.org/issue10272.</span>
+    <span class="s2"># PyPy3 7.2 has a bug, though: it shares much of the SSL implementation with Python 2,</span>
+    <span class="s2"># and it unconditionally does `socket.sslerror = SSLError` when ssl is imported.</span>
+    <span class="s2"># So we can't rely on getattr/hasattr tests, we must be explicit.</span>
+    <span class="s1">TIMEOUT_ERROR = socket.sslerror </span><span class="s0">if </span><span class="s1">PY2 </span><span class="s0">else </span><span class="s1">socket.timeout </span><span class="s2"># pylint:disable=no-member</span>
+
+    <span class="s0">def </span><span class="s1">_setup_listener(self):</span>
+        <span class="s1">listener</span><span class="s0">, </span><span class="s1">raw_listener = ssl_listener(self.privfile</span><span class="s0">, </span><span class="s1">self.certfile)</span>
+        <span class="s1">self._close_on_teardown(raw_listener)</span>
+        <span class="s0">return </span><span class="s1">listener</span>
+
+    <span class="s0">def </span><span class="s1">create_connection(self</span><span class="s0">, </span><span class="s1">*args</span><span class="s0">, </span><span class="s1">**kwargs): </span><span class="s2"># pylint:disable=signature-differs</span>
+        <span class="s0">return </span><span class="s1">self._close_on_teardown(</span>
+            <span class="s2"># pylint:disable=deprecated-method</span>
+            <span class="s1">ssl.wrap_socket(super(TestSSL</span><span class="s0">, </span><span class="s1">self).create_connection(*args</span><span class="s0">, </span><span class="s1">**kwargs)))</span>
+
+    <span class="s2"># The SSL library can take a long time to buffer the large amount of data we're trying</span>
+    <span class="s2"># to send, so we can't compare to the timeout values</span>
+    <span class="s1">_test_sendall_timeout_check_time = </span><span class="s0">False</span>
+
+    <span class="s2"># The SSL layer has extra buffering, so test_sendall needs</span>
+    <span class="s2"># to send a very large amount to make it timeout</span>
+    <span class="s1">_test_sendall_data = data_sent = </span><span class="s4">b'hello' </span><span class="s1">* </span><span class="s5">100000000</span>
+
+    <span class="s1">test_sendall_array = greentest.skipOnMacOnCI(</span><span class="s3">&quot;Sometimes misses data&quot;</span><span class="s1">)(</span>
+        <span class="s1">greentest.skipOnManylinux(</span><span class="s3">&quot;Sometimes misses data&quot;</span><span class="s1">)(</span>
+            <span class="s1">test__socket.TestTCP.test_sendall_array</span>
+        <span class="s1">)</span>
+    <span class="s1">)</span>
+
+    <span class="s1">test_sendall_str = greentest.skipOnMacOnCI(</span><span class="s3">&quot;Sometimes misses data&quot;</span><span class="s1">)(</span>
+        <span class="s1">greentest.skipOnManylinux(</span><span class="s3">&quot;Sometimes misses data&quot;</span><span class="s1">)(</span>
+            <span class="s1">test__socket.TestTCP.test_sendall_str</span>
+        <span class="s1">)</span>
+    <span class="s1">)</span>
+
+    <span class="s1">@greentest.skipOnWindows(</span><span class="s3">&quot;Not clear why we're skipping&quot;</span><span class="s1">)</span>
+    <span class="s0">def </span><span class="s1">test_ssl_sendall_timeout0(self):</span>
+        <span class="s2"># Issue #317: SSL_WRITE_PENDING in some corner cases</span>
+
+        <span class="s1">server_sock = []</span>
+        <span class="s1">acceptor = test__socket.Thread(target=</span><span class="s0">lambda</span><span class="s1">: server_sock.append(</span>
+            <span class="s2"># pylint:disable=no-member</span>
+            <span class="s1">self.listener.accept()))</span>
+        <span class="s1">client = self.create_connection()</span>
+        <span class="s1">client.setblocking(</span><span class="s0">False</span><span class="s1">)</span>
+        <span class="s0">try</span><span class="s1">:</span>
+            <span class="s2"># Python 3 raises ssl.SSLWantWriteError; Python 2 simply *hangs*</span>
+            <span class="s2"># on non-blocking sockets because it's a simple loop around</span>
+            <span class="s2"># send(). Python 2.6 doesn't have SSLWantWriteError</span>
+            <span class="s1">expected = getattr(ssl</span><span class="s0">, </span><span class="s3">'SSLWantWriteError'</span><span class="s0">, </span><span class="s1">ssl.SSLError)</span>
+            <span class="s0">with </span><span class="s1">self.assertRaises(expected):</span>
+                <span class="s1">client.sendall(self._test_sendall_data)</span>
+        <span class="s0">finally</span><span class="s1">:</span>
+            <span class="s1">acceptor.join()</span>
+            <span class="s1">client.close()</span>
+            <span class="s1">server_sock[</span><span class="s5">0</span><span class="s1">][</span><span class="s5">0</span><span class="s1">].close()</span>
+
+    <span class="s2"># def test_fullduplex(self):</span>
+    <span class="s2">#     try:</span>
+    <span class="s2">#         super(TestSSL, self).test_fullduplex()</span>
+    <span class="s2">#     except LoopExit:</span>
+    <span class="s2">#         if greentest.LIBUV and greentest.WIN:</span>
+    <span class="s2">#             # XXX: Unable to duplicate locally</span>
+    <span class="s2">#             raise greentest.SkipTest(&quot;libuv on Windows sometimes raises LoopExit&quot;)</span>
+    <span class="s2">#         raise</span>
+
+    <span class="s1">@greentest.ignores_leakcheck</span>
+    <span class="s1">@greentest.skipOnPy310(</span><span class="s3">&quot;No longer raises SSLError&quot;</span><span class="s1">)</span>
+    <span class="s0">def </span><span class="s1">test_empty_send(self):</span>
+        <span class="s2"># Issue 719</span>
+        <span class="s2"># Sending empty bytes with the 'send' method raises</span>
+        <span class="s2"># ssl.SSLEOFError in the stdlib. PyPy 4.0 and CPython 2.6</span>
+        <span class="s2"># both just raise the superclass, ssl.SSLError.</span>
+
+        <span class="s2"># Ignored during leakchecks because the third or fourth iteration of the</span>
+        <span class="s2"># test hangs on CPython 2/posix for some reason, likely due to</span>
+        <span class="s2"># the use of _close_on_teardown keeping something alive longer than intended.</span>
+        <span class="s2"># cf test__makefile_ref</span>
+        <span class="s0">with </span><span class="s1">self.assertRaises(ssl.SSLError):</span>
+            <span class="s1">super(TestSSL</span><span class="s0">, </span><span class="s1">self).test_empty_send()</span>
+
+    <span class="s1">@greentest.ignores_leakcheck</span>
+    <span class="s0">def </span><span class="s1">test_sendall_nonblocking(self):</span>
+        <span class="s2"># Override; doesn't work with SSL sockets.</span>
+        <span class="s0">pass</span>
+
+    <span class="s1">@greentest.ignores_leakcheck</span>
+    <span class="s0">def </span><span class="s1">test_connect_with_type_flags_ignored(self):</span>
+        <span class="s2"># Override; doesn't work with SSL sockets.</span>
+        <span class="s0">pass</span>
+
+
+
+<span class="s0">if </span><span class="s1">__name__ == </span><span class="s3">'__main__'</span><span class="s1">:</span>
+    <span class="s1">greentest.main()</span>
+</pre>
+</body>
+</html>

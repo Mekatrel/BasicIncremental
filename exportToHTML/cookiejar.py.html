@@ -1,0 +1,2138 @@
+<html>
+<head>
+<title>cookiejar.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #629755; font-style: italic;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #cc7832;}
+.s3 { color: #6a8759;}
+.s4 { color: #6897bb;}
+.s5 { color: #808080;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+cookiejar.py</font>
+</center></td></tr></table>
+<pre><span class="s0">r&quot;&quot;&quot;HTTP cookie handling for web clients. 
+ 
+This is a backport of the Py3.3 ``http.cookiejar`` module for 
+python-future. 
+ 
+This module has (now fairly distant) origins in Gisle Aas' Perl module 
+HTTP::Cookies, from the libwww-perl library. 
+ 
+Docstrings, comments and debug strings in this code refer to the 
+attributes of the HTTP cookie system as cookie-attributes, to distinguish 
+them clearly from Python attributes. 
+ 
+Class diagram (note that BSDDBCookieJar and the MSIE* classes are not 
+distributed with the Python standard library, but are available from 
+http://wwwsearch.sf.net/): 
+ 
+                        CookieJar____ 
+                        /     \      \ 
+            FileCookieJar      \      \ 
+             /    |   \         \      \ 
+ MozillaCookieJar | LWPCookieJar \      \ 
+                  |               |      \ 
+                  |   ---MSIEBase |       \ 
+                  |  /      |     |        \ 
+                  | /   MSIEDBCookieJar BSDDBCookieJar 
+                  |/ 
+               MSIECookieJar 
+ 
+&quot;&quot;&quot;</span>
+
+<span class="s2">from </span><span class="s1">__future__ </span><span class="s2">import </span><span class="s1">unicode_literals</span>
+<span class="s2">from </span><span class="s1">__future__ </span><span class="s2">import </span><span class="s1">print_function</span>
+<span class="s2">from </span><span class="s1">__future__ </span><span class="s2">import </span><span class="s1">division</span>
+<span class="s2">from </span><span class="s1">__future__ </span><span class="s2">import </span><span class="s1">absolute_import</span>
+<span class="s2">from </span><span class="s1">future.builtins </span><span class="s2">import </span><span class="s1">filter</span><span class="s2">, </span><span class="s1">int</span><span class="s2">, </span><span class="s1">map</span><span class="s2">, </span><span class="s1">open</span><span class="s2">, </span><span class="s1">str</span>
+<span class="s2">from </span><span class="s1">future.utils </span><span class="s2">import </span><span class="s1">as_native_str</span><span class="s2">, </span><span class="s1">PY2</span>
+
+<span class="s1">__all__ = [</span><span class="s3">'Cookie'</span><span class="s2">, </span><span class="s3">'CookieJar'</span><span class="s2">, </span><span class="s3">'CookiePolicy'</span><span class="s2">, </span><span class="s3">'DefaultCookiePolicy'</span><span class="s2">,</span>
+           <span class="s3">'FileCookieJar'</span><span class="s2">, </span><span class="s3">'LWPCookieJar'</span><span class="s2">, </span><span class="s3">'LoadError'</span><span class="s2">, </span><span class="s3">'MozillaCookieJar'</span><span class="s1">]</span>
+
+<span class="s2">import </span><span class="s1">copy</span>
+<span class="s2">import </span><span class="s1">datetime</span>
+<span class="s2">import </span><span class="s1">re</span>
+<span class="s2">if </span><span class="s1">PY2:</span>
+    <span class="s1">re.ASCII = </span><span class="s4">0</span>
+<span class="s2">import </span><span class="s1">time</span>
+<span class="s2">from </span><span class="s1">future.backports.urllib.parse </span><span class="s2">import </span><span class="s1">urlparse</span><span class="s2">, </span><span class="s1">urlsplit</span><span class="s2">, </span><span class="s1">quote</span>
+<span class="s2">from </span><span class="s1">future.backports.http.client </span><span class="s2">import </span><span class="s1">HTTP_PORT</span>
+<span class="s2">try</span><span class="s1">:</span>
+    <span class="s2">import </span><span class="s1">threading </span><span class="s2">as </span><span class="s1">_threading</span>
+<span class="s2">except </span><span class="s1">ImportError:</span>
+    <span class="s2">import </span><span class="s1">dummy_threading </span><span class="s2">as </span><span class="s1">_threading</span>
+<span class="s2">from </span><span class="s1">calendar </span><span class="s2">import </span><span class="s1">timegm</span>
+
+<span class="s1">debug = </span><span class="s2">False   </span><span class="s5"># set to True to enable debugging via the logging module</span>
+<span class="s1">logger = </span><span class="s2">None</span>
+
+<span class="s2">def </span><span class="s1">_debug(*args):</span>
+    <span class="s2">if not </span><span class="s1">debug:</span>
+        <span class="s2">return</span>
+    <span class="s2">global </span><span class="s1">logger</span>
+    <span class="s2">if not </span><span class="s1">logger:</span>
+        <span class="s2">import </span><span class="s1">logging</span>
+        <span class="s1">logger = logging.getLogger(</span><span class="s3">&quot;http.cookiejar&quot;</span><span class="s1">)</span>
+    <span class="s2">return </span><span class="s1">logger.debug(*args)</span>
+
+
+<span class="s1">DEFAULT_HTTP_PORT = str(HTTP_PORT)</span>
+<span class="s1">MISSING_FILENAME_TEXT = (</span><span class="s3">&quot;a filename was not supplied (nor was the CookieJar &quot;</span>
+                         <span class="s3">&quot;instance initialised with one)&quot;</span><span class="s1">)</span>
+
+<span class="s2">def </span><span class="s1">_warn_unhandled_exception():</span>
+    <span class="s5"># There are a few catch-all except: statements in this module, for</span>
+    <span class="s5"># catching input that's bad in unexpected ways.  Warn if any</span>
+    <span class="s5"># exceptions are caught there.</span>
+    <span class="s2">import </span><span class="s1">io</span><span class="s2">, </span><span class="s1">warnings</span><span class="s2">, </span><span class="s1">traceback</span>
+    <span class="s1">f = io.StringIO()</span>
+    <span class="s1">traceback.print_exc(</span><span class="s2">None, </span><span class="s1">f)</span>
+    <span class="s1">msg = f.getvalue()</span>
+    <span class="s1">warnings.warn(</span><span class="s3">&quot;http.cookiejar bug!</span><span class="s2">\n</span><span class="s3">%s&quot; </span><span class="s1">% msg</span><span class="s2">, </span><span class="s1">stacklevel=</span><span class="s4">2</span><span class="s1">)</span>
+
+
+<span class="s5"># Date/time conversion</span>
+<span class="s5"># -----------------------------------------------------------------------------</span>
+
+<span class="s1">EPOCH_YEAR = </span><span class="s4">1970</span>
+<span class="s2">def </span><span class="s1">_timegm(tt):</span>
+    <span class="s1">year</span><span class="s2">, </span><span class="s1">month</span><span class="s2">, </span><span class="s1">mday</span><span class="s2">, </span><span class="s1">hour</span><span class="s2">, </span><span class="s1">min</span><span class="s2">, </span><span class="s1">sec = tt[:</span><span class="s4">6</span><span class="s1">]</span>
+    <span class="s2">if </span><span class="s1">((year &gt;= EPOCH_YEAR) </span><span class="s2">and </span><span class="s1">(</span><span class="s4">1 </span><span class="s1">&lt;= month &lt;= </span><span class="s4">12</span><span class="s1">) </span><span class="s2">and </span><span class="s1">(</span><span class="s4">1 </span><span class="s1">&lt;= mday &lt;= </span><span class="s4">31</span><span class="s1">) </span><span class="s2">and</span>
+        <span class="s1">(</span><span class="s4">0 </span><span class="s1">&lt;= hour &lt;= </span><span class="s4">24</span><span class="s1">) </span><span class="s2">and </span><span class="s1">(</span><span class="s4">0 </span><span class="s1">&lt;= min &lt;= </span><span class="s4">59</span><span class="s1">) </span><span class="s2">and </span><span class="s1">(</span><span class="s4">0 </span><span class="s1">&lt;= sec &lt;= </span><span class="s4">61</span><span class="s1">)):</span>
+        <span class="s2">return </span><span class="s1">timegm(tt)</span>
+    <span class="s2">else</span><span class="s1">:</span>
+        <span class="s2">return None</span>
+
+<span class="s1">DAYS = [</span><span class="s3">&quot;Mon&quot;</span><span class="s2">, </span><span class="s3">&quot;Tue&quot;</span><span class="s2">, </span><span class="s3">&quot;Wed&quot;</span><span class="s2">, </span><span class="s3">&quot;Thu&quot;</span><span class="s2">, </span><span class="s3">&quot;Fri&quot;</span><span class="s2">, </span><span class="s3">&quot;Sat&quot;</span><span class="s2">, </span><span class="s3">&quot;Sun&quot;</span><span class="s1">]</span>
+<span class="s1">MONTHS = [</span><span class="s3">&quot;Jan&quot;</span><span class="s2">, </span><span class="s3">&quot;Feb&quot;</span><span class="s2">, </span><span class="s3">&quot;Mar&quot;</span><span class="s2">, </span><span class="s3">&quot;Apr&quot;</span><span class="s2">, </span><span class="s3">&quot;May&quot;</span><span class="s2">, </span><span class="s3">&quot;Jun&quot;</span><span class="s2">,</span>
+          <span class="s3">&quot;Jul&quot;</span><span class="s2">, </span><span class="s3">&quot;Aug&quot;</span><span class="s2">, </span><span class="s3">&quot;Sep&quot;</span><span class="s2">, </span><span class="s3">&quot;Oct&quot;</span><span class="s2">, </span><span class="s3">&quot;Nov&quot;</span><span class="s2">, </span><span class="s3">&quot;Dec&quot;</span><span class="s1">]</span>
+<span class="s1">MONTHS_LOWER = []</span>
+<span class="s2">for </span><span class="s1">month </span><span class="s2">in </span><span class="s1">MONTHS: MONTHS_LOWER.append(month.lower())</span>
+
+<span class="s2">def </span><span class="s1">time2isoz(t=</span><span class="s2">None</span><span class="s1">):</span>
+    <span class="s0">&quot;&quot;&quot;Return a string representing time in seconds since epoch, t. 
+ 
+    If the function is called without an argument, it will use the current 
+    time. 
+ 
+    The format of the returned string is like &quot;YYYY-MM-DD hh:mm:ssZ&quot;, 
+    representing Universal Time (UTC, aka GMT).  An example of this format is: 
+ 
+    1994-11-24 08:49:37Z 
+ 
+    &quot;&quot;&quot;</span>
+    <span class="s2">if </span><span class="s1">t </span><span class="s2">is None</span><span class="s1">:</span>
+        <span class="s1">dt = datetime.datetime.utcnow()</span>
+    <span class="s2">else</span><span class="s1">:</span>
+        <span class="s1">dt = datetime.datetime.utcfromtimestamp(t)</span>
+    <span class="s2">return </span><span class="s3">&quot;%04d-%02d-%02d %02d:%02d:%02dZ&quot; </span><span class="s1">% (</span>
+        <span class="s1">dt.year</span><span class="s2">, </span><span class="s1">dt.month</span><span class="s2">, </span><span class="s1">dt.day</span><span class="s2">, </span><span class="s1">dt.hour</span><span class="s2">, </span><span class="s1">dt.minute</span><span class="s2">, </span><span class="s1">dt.second)</span>
+
+<span class="s2">def </span><span class="s1">time2netscape(t=</span><span class="s2">None</span><span class="s1">):</span>
+    <span class="s0">&quot;&quot;&quot;Return a string representing time in seconds since epoch, t. 
+ 
+    If the function is called without an argument, it will use the current 
+    time. 
+ 
+    The format of the returned string is like this: 
+ 
+    Wed, DD-Mon-YYYY HH:MM:SS GMT 
+ 
+    &quot;&quot;&quot;</span>
+    <span class="s2">if </span><span class="s1">t </span><span class="s2">is None</span><span class="s1">:</span>
+        <span class="s1">dt = datetime.datetime.utcnow()</span>
+    <span class="s2">else</span><span class="s1">:</span>
+        <span class="s1">dt = datetime.datetime.utcfromtimestamp(t)</span>
+    <span class="s2">return </span><span class="s3">&quot;%s %02d-%s-%04d %02d:%02d:%02d GMT&quot; </span><span class="s1">% (</span>
+        <span class="s1">DAYS[dt.weekday()]</span><span class="s2">, </span><span class="s1">dt.day</span><span class="s2">, </span><span class="s1">MONTHS[dt.month-</span><span class="s4">1</span><span class="s1">]</span><span class="s2">,</span>
+        <span class="s1">dt.year</span><span class="s2">, </span><span class="s1">dt.hour</span><span class="s2">, </span><span class="s1">dt.minute</span><span class="s2">, </span><span class="s1">dt.second)</span>
+
+
+<span class="s1">UTC_ZONES = {</span><span class="s3">&quot;GMT&quot;</span><span class="s1">: </span><span class="s2">None, </span><span class="s3">&quot;UTC&quot;</span><span class="s1">: </span><span class="s2">None, </span><span class="s3">&quot;UT&quot;</span><span class="s1">: </span><span class="s2">None, </span><span class="s3">&quot;Z&quot;</span><span class="s1">: </span><span class="s2">None</span><span class="s1">}</span>
+
+<span class="s1">TIMEZONE_RE = re.compile(</span><span class="s3">r&quot;^([-+])?(\d\d?):?(\d\d)?$&quot;</span><span class="s2">, </span><span class="s1">re.ASCII)</span>
+<span class="s2">def </span><span class="s1">offset_from_tz_string(tz):</span>
+    <span class="s1">offset = </span><span class="s2">None</span>
+    <span class="s2">if </span><span class="s1">tz </span><span class="s2">in </span><span class="s1">UTC_ZONES:</span>
+        <span class="s1">offset = </span><span class="s4">0</span>
+    <span class="s2">else</span><span class="s1">:</span>
+        <span class="s1">m = TIMEZONE_RE.search(tz)</span>
+        <span class="s2">if </span><span class="s1">m:</span>
+            <span class="s1">offset = </span><span class="s4">3600 </span><span class="s1">* int(m.group(</span><span class="s4">2</span><span class="s1">))</span>
+            <span class="s2">if </span><span class="s1">m.group(</span><span class="s4">3</span><span class="s1">):</span>
+                <span class="s1">offset = offset + </span><span class="s4">60 </span><span class="s1">* int(m.group(</span><span class="s4">3</span><span class="s1">))</span>
+            <span class="s2">if </span><span class="s1">m.group(</span><span class="s4">1</span><span class="s1">) == </span><span class="s3">'-'</span><span class="s1">:</span>
+                <span class="s1">offset = -offset</span>
+    <span class="s2">return </span><span class="s1">offset</span>
+
+<span class="s2">def </span><span class="s1">_str2time(day</span><span class="s2">, </span><span class="s1">mon</span><span class="s2">, </span><span class="s1">yr</span><span class="s2">, </span><span class="s1">hr</span><span class="s2">, </span><span class="s1">min</span><span class="s2">, </span><span class="s1">sec</span><span class="s2">, </span><span class="s1">tz):</span>
+    <span class="s5"># translate month name to number</span>
+    <span class="s5"># month numbers start with 1 (January)</span>
+    <span class="s2">try</span><span class="s1">:</span>
+        <span class="s1">mon = MONTHS_LOWER.index(mon.lower())+</span><span class="s4">1</span>
+    <span class="s2">except </span><span class="s1">ValueError:</span>
+        <span class="s5"># maybe it's already a number</span>
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s1">imon = int(mon)</span>
+        <span class="s2">except </span><span class="s1">ValueError:</span>
+            <span class="s2">return None</span>
+        <span class="s2">if </span><span class="s4">1 </span><span class="s1">&lt;= imon &lt;= </span><span class="s4">12</span><span class="s1">:</span>
+            <span class="s1">mon = imon</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s2">return None</span>
+
+    <span class="s5"># make sure clock elements are defined</span>
+    <span class="s2">if </span><span class="s1">hr </span><span class="s2">is None</span><span class="s1">: hr = </span><span class="s4">0</span>
+    <span class="s2">if </span><span class="s1">min </span><span class="s2">is None</span><span class="s1">: min = </span><span class="s4">0</span>
+    <span class="s2">if </span><span class="s1">sec </span><span class="s2">is None</span><span class="s1">: sec = </span><span class="s4">0</span>
+
+    <span class="s1">yr = int(yr)</span>
+    <span class="s1">day = int(day)</span>
+    <span class="s1">hr = int(hr)</span>
+    <span class="s1">min = int(min)</span>
+    <span class="s1">sec = int(sec)</span>
+
+    <span class="s2">if </span><span class="s1">yr &lt; </span><span class="s4">1000</span><span class="s1">:</span>
+        <span class="s5"># find &quot;obvious&quot; year</span>
+        <span class="s1">cur_yr = time.localtime(time.time())[</span><span class="s4">0</span><span class="s1">]</span>
+        <span class="s1">m = cur_yr % </span><span class="s4">100</span>
+        <span class="s1">tmp = yr</span>
+        <span class="s1">yr = yr + cur_yr - m</span>
+        <span class="s1">m = m - tmp</span>
+        <span class="s2">if </span><span class="s1">abs(m) &gt; </span><span class="s4">50</span><span class="s1">:</span>
+            <span class="s2">if </span><span class="s1">m &gt; </span><span class="s4">0</span><span class="s1">: yr = yr + </span><span class="s4">100</span>
+            <span class="s2">else</span><span class="s1">: yr = yr - </span><span class="s4">100</span>
+
+    <span class="s5"># convert UTC time tuple to seconds since epoch (not timezone-adjusted)</span>
+    <span class="s1">t = _timegm((yr</span><span class="s2">, </span><span class="s1">mon</span><span class="s2">, </span><span class="s1">day</span><span class="s2">, </span><span class="s1">hr</span><span class="s2">, </span><span class="s1">min</span><span class="s2">, </span><span class="s1">sec</span><span class="s2">, </span><span class="s1">tz))</span>
+
+    <span class="s2">if </span><span class="s1">t </span><span class="s2">is not None</span><span class="s1">:</span>
+        <span class="s5"># adjust time using timezone string, to get absolute time since epoch</span>
+        <span class="s2">if </span><span class="s1">tz </span><span class="s2">is None</span><span class="s1">:</span>
+            <span class="s1">tz = </span><span class="s3">&quot;UTC&quot;</span>
+        <span class="s1">tz = tz.upper()</span>
+        <span class="s1">offset = offset_from_tz_string(tz)</span>
+        <span class="s2">if </span><span class="s1">offset </span><span class="s2">is None</span><span class="s1">:</span>
+            <span class="s2">return None</span>
+        <span class="s1">t = t - offset</span>
+
+    <span class="s2">return </span><span class="s1">t</span>
+
+<span class="s1">STRICT_DATE_RE = re.compile(</span>
+    <span class="s3">r&quot;^[SMTWF][a-z][a-z], (\d\d) ([JFMASOND][a-z][a-z]) &quot;</span>
+    <span class="s3">&quot;(\d\d\d\d) (\d\d):(\d\d):(\d\d) GMT$&quot;</span><span class="s2">, </span><span class="s1">re.ASCII)</span>
+<span class="s1">WEEKDAY_RE = re.compile(</span>
+    <span class="s3">r&quot;^(?:Sun|Mon|Tue|Wed|Thu|Fri|Sat)[a-z]*,?\s*&quot;</span><span class="s2">, </span><span class="s1">re.I | re.ASCII)</span>
+<span class="s1">LOOSE_HTTP_DATE_RE = re.compile(</span>
+    <span class="s3">r&quot;&quot;&quot;^ 
+    (\d\d?)            # day 
+       (?:\s+|[-\/]) 
+    (\w+)              # month 
+        (?:\s+|[-\/]) 
+    (\d+)              # year 
+    (?: 
+          (?:\s+|:)    # separator before clock 
+       (\d\d?):(\d\d)  # hour:min 
+       (?::(\d\d))?    # optional seconds 
+    )?                 # optional clock 
+       \s* 
+    (?: 
+       ([-+]?\d{2,4}|(?![APap][Mm]\b)[A-Za-z]+) # timezone 
+       \s* 
+    )? 
+    (?: 
+       \(\w+\)         # ASCII representation of timezone in parens. 
+       \s* 
+    )?$&quot;&quot;&quot;</span><span class="s2">, </span><span class="s1">re.X | re.ASCII)</span>
+<span class="s2">def </span><span class="s1">http2time(text):</span>
+    <span class="s0">&quot;&quot;&quot;Returns time in seconds since epoch of time represented by a string. 
+ 
+    Return value is an integer. 
+ 
+    None is returned if the format of str is unrecognized, the time is outside 
+    the representable range, or the timezone string is not recognized.  If the 
+    string contains no timezone, UTC is assumed. 
+ 
+    The timezone in the string may be numerical (like &quot;-0800&quot; or &quot;+0100&quot;) or a 
+    string timezone (like &quot;UTC&quot;, &quot;GMT&quot;, &quot;BST&quot; or &quot;EST&quot;).  Currently, only the 
+    timezone strings equivalent to UTC (zero offset) are known to the function. 
+ 
+    The function loosely parses the following formats: 
+ 
+    Wed, 09 Feb 1994 22:23:32 GMT       -- HTTP format 
+    Tuesday, 08-Feb-94 14:15:29 GMT     -- old rfc850 HTTP format 
+    Tuesday, 08-Feb-1994 14:15:29 GMT   -- broken rfc850 HTTP format 
+    09 Feb 1994 22:23:32 GMT            -- HTTP format (no weekday) 
+    08-Feb-94 14:15:29 GMT              -- rfc850 format (no weekday) 
+    08-Feb-1994 14:15:29 GMT            -- broken rfc850 format (no weekday) 
+ 
+    The parser ignores leading and trailing whitespace.  The time may be 
+    absent. 
+ 
+    If the year is given with only 2 digits, the function will select the 
+    century that makes the year closest to the current date. 
+ 
+    &quot;&quot;&quot;</span>
+    <span class="s5"># fast exit for strictly conforming string</span>
+    <span class="s1">m = STRICT_DATE_RE.search(text)</span>
+    <span class="s2">if </span><span class="s1">m:</span>
+        <span class="s1">g = m.groups()</span>
+        <span class="s1">mon = MONTHS_LOWER.index(g[</span><span class="s4">1</span><span class="s1">].lower()) + </span><span class="s4">1</span>
+        <span class="s1">tt = (int(g[</span><span class="s4">2</span><span class="s1">])</span><span class="s2">, </span><span class="s1">mon</span><span class="s2">, </span><span class="s1">int(g[</span><span class="s4">0</span><span class="s1">])</span><span class="s2">,</span>
+              <span class="s1">int(g[</span><span class="s4">3</span><span class="s1">])</span><span class="s2">, </span><span class="s1">int(g[</span><span class="s4">4</span><span class="s1">])</span><span class="s2">, </span><span class="s1">float(g[</span><span class="s4">5</span><span class="s1">]))</span>
+        <span class="s2">return </span><span class="s1">_timegm(tt)</span>
+
+    <span class="s5"># No, we need some messy parsing...</span>
+
+    <span class="s5"># clean up</span>
+    <span class="s1">text = text.lstrip()</span>
+    <span class="s1">text = WEEKDAY_RE.sub(</span><span class="s3">&quot;&quot;</span><span class="s2">, </span><span class="s1">text</span><span class="s2">, </span><span class="s4">1</span><span class="s1">)  </span><span class="s5"># Useless weekday</span>
+
+    <span class="s5"># tz is time zone specifier string</span>
+    <span class="s1">day</span><span class="s2">, </span><span class="s1">mon</span><span class="s2">, </span><span class="s1">yr</span><span class="s2">, </span><span class="s1">hr</span><span class="s2">, </span><span class="s1">min</span><span class="s2">, </span><span class="s1">sec</span><span class="s2">, </span><span class="s1">tz = [</span><span class="s2">None</span><span class="s1">]*</span><span class="s4">7</span>
+
+    <span class="s5"># loose regexp parse</span>
+    <span class="s1">m = LOOSE_HTTP_DATE_RE.search(text)</span>
+    <span class="s2">if </span><span class="s1">m </span><span class="s2">is not None</span><span class="s1">:</span>
+        <span class="s1">day</span><span class="s2">, </span><span class="s1">mon</span><span class="s2">, </span><span class="s1">yr</span><span class="s2">, </span><span class="s1">hr</span><span class="s2">, </span><span class="s1">min</span><span class="s2">, </span><span class="s1">sec</span><span class="s2">, </span><span class="s1">tz = m.groups()</span>
+    <span class="s2">else</span><span class="s1">:</span>
+        <span class="s2">return None  </span><span class="s5"># bad format</span>
+
+    <span class="s2">return </span><span class="s1">_str2time(day</span><span class="s2">, </span><span class="s1">mon</span><span class="s2">, </span><span class="s1">yr</span><span class="s2">, </span><span class="s1">hr</span><span class="s2">, </span><span class="s1">min</span><span class="s2">, </span><span class="s1">sec</span><span class="s2">, </span><span class="s1">tz)</span>
+
+<span class="s1">ISO_DATE_RE = re.compile(</span>
+    <span class="s3">&quot;&quot;&quot;^ 
+    (\d{4})              # year 
+       [-\/]? 
+    (\d\d?)              # numerical month 
+       [-\/]? 
+    (\d\d?)              # day 
+   (?: 
+         (?:\s+|[-:Tt])  # separator before clock 
+      (\d\d?):?(\d\d)    # hour:min 
+      (?::?(\d\d(?:\.\d*)?))?  # optional seconds (and fractional) 
+   )?                    # optional clock 
+      \s* 
+   (?: 
+      ([-+]?\d\d?:?(:?\d\d)? 
+       |Z|z)             # timezone  (Z is &quot;zero meridian&quot;, i.e. GMT) 
+      \s* 
+   )?$&quot;&quot;&quot;</span><span class="s2">, </span><span class="s1">re.X | re. ASCII)</span>
+<span class="s2">def </span><span class="s1">iso2time(text):</span>
+    <span class="s0">&quot;&quot;&quot; 
+    As for http2time, but parses the ISO 8601 formats: 
+ 
+    1994-02-03 14:15:29 -0100    -- ISO 8601 format 
+    1994-02-03 14:15:29          -- zone is optional 
+    1994-02-03                   -- only date 
+    1994-02-03T14:15:29          -- Use T as separator 
+    19940203T141529Z             -- ISO 8601 compact format 
+    19940203                     -- only date 
+ 
+    &quot;&quot;&quot;</span>
+    <span class="s5"># clean up</span>
+    <span class="s1">text = text.lstrip()</span>
+
+    <span class="s5"># tz is time zone specifier string</span>
+    <span class="s1">day</span><span class="s2">, </span><span class="s1">mon</span><span class="s2">, </span><span class="s1">yr</span><span class="s2">, </span><span class="s1">hr</span><span class="s2">, </span><span class="s1">min</span><span class="s2">, </span><span class="s1">sec</span><span class="s2">, </span><span class="s1">tz = [</span><span class="s2">None</span><span class="s1">]*</span><span class="s4">7</span>
+
+    <span class="s5"># loose regexp parse</span>
+    <span class="s1">m = ISO_DATE_RE.search(text)</span>
+    <span class="s2">if </span><span class="s1">m </span><span class="s2">is not None</span><span class="s1">:</span>
+        <span class="s5"># XXX there's an extra bit of the timezone I'm ignoring here: is</span>
+        <span class="s5">#   this the right thing to do?</span>
+        <span class="s1">yr</span><span class="s2">, </span><span class="s1">mon</span><span class="s2">, </span><span class="s1">day</span><span class="s2">, </span><span class="s1">hr</span><span class="s2">, </span><span class="s1">min</span><span class="s2">, </span><span class="s1">sec</span><span class="s2">, </span><span class="s1">tz</span><span class="s2">, </span><span class="s1">_ = m.groups()</span>
+    <span class="s2">else</span><span class="s1">:</span>
+        <span class="s2">return None  </span><span class="s5"># bad format</span>
+
+    <span class="s2">return </span><span class="s1">_str2time(day</span><span class="s2">, </span><span class="s1">mon</span><span class="s2">, </span><span class="s1">yr</span><span class="s2">, </span><span class="s1">hr</span><span class="s2">, </span><span class="s1">min</span><span class="s2">, </span><span class="s1">sec</span><span class="s2">, </span><span class="s1">tz)</span>
+
+
+<span class="s5"># Header parsing</span>
+<span class="s5"># -----------------------------------------------------------------------------</span>
+
+<span class="s2">def </span><span class="s1">unmatched(match):</span>
+    <span class="s0">&quot;&quot;&quot;Return unmatched part of re.Match object.&quot;&quot;&quot;</span>
+    <span class="s1">start</span><span class="s2">, </span><span class="s1">end = match.span(</span><span class="s4">0</span><span class="s1">)</span>
+    <span class="s2">return </span><span class="s1">match.string[:start]+match.string[end:]</span>
+
+<span class="s1">HEADER_TOKEN_RE =        re.compile(</span><span class="s3">r&quot;^\s*([^=\s;,]+)&quot;</span><span class="s1">)</span>
+<span class="s1">HEADER_QUOTED_VALUE_RE = re.compile(</span><span class="s3">r&quot;^\s*=\s*\&quot;([^\&quot;\\]*(?:\\.[^\&quot;\\]*)*)\&quot;&quot;</span><span class="s1">)</span>
+<span class="s1">HEADER_VALUE_RE =        re.compile(</span><span class="s3">r&quot;^\s*=\s*([^\s;,]*)&quot;</span><span class="s1">)</span>
+<span class="s1">HEADER_ESCAPE_RE = re.compile(</span><span class="s3">r&quot;\\(.)&quot;</span><span class="s1">)</span>
+<span class="s2">def </span><span class="s1">split_header_words(header_values):</span>
+    <span class="s0">r&quot;&quot;&quot;Parse header values into a list of lists containing key,value pairs. 
+ 
+    The function knows how to deal with &quot;,&quot;, &quot;;&quot; and &quot;=&quot; as well as quoted 
+    values after &quot;=&quot;.  A list of space separated tokens are parsed as if they 
+    were separated by &quot;;&quot;. 
+ 
+    If the header_values passed as argument contains multiple values, then they 
+    are treated as if they were a single value separated by comma &quot;,&quot;. 
+ 
+    This means that this function is useful for parsing header fields that 
+    follow this syntax (BNF as from the HTTP/1.1 specification, but we relax 
+    the requirement for tokens). 
+ 
+      headers           = #header 
+      header            = (token | parameter) *( [&quot;;&quot;] (token | parameter)) 
+ 
+      token             = 1*&lt;any CHAR except CTLs or separators&gt; 
+      separators        = &quot;(&quot; | &quot;)&quot; | &quot;&lt;&quot; | &quot;&gt;&quot; | &quot;@&quot; 
+                        | &quot;,&quot; | &quot;;&quot; | &quot;:&quot; | &quot;\&quot; | &lt;&quot;&gt; 
+                        | &quot;/&quot; | &quot;[&quot; | &quot;]&quot; | &quot;?&quot; | &quot;=&quot; 
+                        | &quot;{&quot; | &quot;}&quot; | SP | HT 
+ 
+      quoted-string     = ( &lt;&quot;&gt; *(qdtext | quoted-pair ) &lt;&quot;&gt; ) 
+      qdtext            = &lt;any TEXT except &lt;&quot;&gt;&gt; 
+      quoted-pair       = &quot;\&quot; CHAR 
+ 
+      parameter         = attribute &quot;=&quot; value 
+      attribute         = token 
+      value             = token | quoted-string 
+ 
+    Each header is represented by a list of key/value pairs.  The value for a 
+    simple token (not part of a parameter) is None.  Syntactically incorrect 
+    headers will not necessarily be parsed as you would want. 
+ 
+    This is easier to describe with some examples: 
+ 
+    &gt;&gt;&gt; split_header_words(['foo=&quot;bar&quot;; port=&quot;80,81&quot;; discard, bar=baz']) 
+    [[('foo', 'bar'), ('port', '80,81'), ('discard', None)], [('bar', 'baz')]] 
+    &gt;&gt;&gt; split_header_words(['text/html; charset=&quot;iso-8859-1&quot;']) 
+    [[('text/html', None), ('charset', 'iso-8859-1')]] 
+    &gt;&gt;&gt; split_header_words([r'Basic realm=&quot;\&quot;foo\bar\&quot;&quot;']) 
+    [[('Basic', None), ('realm', '&quot;foobar&quot;')]] 
+ 
+    &quot;&quot;&quot;</span>
+    <span class="s2">assert not </span><span class="s1">isinstance(header_values</span><span class="s2">, </span><span class="s1">str)</span>
+    <span class="s1">result = []</span>
+    <span class="s2">for </span><span class="s1">text </span><span class="s2">in </span><span class="s1">header_values:</span>
+        <span class="s1">orig_text = text</span>
+        <span class="s1">pairs = []</span>
+        <span class="s2">while </span><span class="s1">text:</span>
+            <span class="s1">m = HEADER_TOKEN_RE.search(text)</span>
+            <span class="s2">if </span><span class="s1">m:</span>
+                <span class="s1">text = unmatched(m)</span>
+                <span class="s1">name = m.group(</span><span class="s4">1</span><span class="s1">)</span>
+                <span class="s1">m = HEADER_QUOTED_VALUE_RE.search(text)</span>
+                <span class="s2">if </span><span class="s1">m:  </span><span class="s5"># quoted value</span>
+                    <span class="s1">text = unmatched(m)</span>
+                    <span class="s1">value = m.group(</span><span class="s4">1</span><span class="s1">)</span>
+                    <span class="s1">value = HEADER_ESCAPE_RE.sub(</span><span class="s3">r&quot;\1&quot;</span><span class="s2">, </span><span class="s1">value)</span>
+                <span class="s2">else</span><span class="s1">:</span>
+                    <span class="s1">m = HEADER_VALUE_RE.search(text)</span>
+                    <span class="s2">if </span><span class="s1">m:  </span><span class="s5"># unquoted value</span>
+                        <span class="s1">text = unmatched(m)</span>
+                        <span class="s1">value = m.group(</span><span class="s4">1</span><span class="s1">)</span>
+                        <span class="s1">value = value.rstrip()</span>
+                    <span class="s2">else</span><span class="s1">:</span>
+                        <span class="s5"># no value, a lone token</span>
+                        <span class="s1">value = </span><span class="s2">None</span>
+                <span class="s1">pairs.append((name</span><span class="s2">, </span><span class="s1">value))</span>
+            <span class="s2">elif </span><span class="s1">text.lstrip().startswith(</span><span class="s3">&quot;,&quot;</span><span class="s1">):</span>
+                <span class="s5"># concatenated headers, as per RFC 2616 section 4.2</span>
+                <span class="s1">text = text.lstrip()[</span><span class="s4">1</span><span class="s1">:]</span>
+                <span class="s2">if </span><span class="s1">pairs: result.append(pairs)</span>
+                <span class="s1">pairs = []</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s5"># skip junk</span>
+                <span class="s1">non_junk</span><span class="s2">, </span><span class="s1">nr_junk_chars = re.subn(</span><span class="s3">&quot;^[=\s;]*&quot;</span><span class="s2">, </span><span class="s3">&quot;&quot;</span><span class="s2">, </span><span class="s1">text)</span>
+                <span class="s2">assert </span><span class="s1">nr_junk_chars &gt; </span><span class="s4">0</span><span class="s2">, </span><span class="s1">(</span>
+                    <span class="s3">&quot;split_header_words bug: '%s', '%s', %s&quot; </span><span class="s1">%</span>
+                    <span class="s1">(orig_text</span><span class="s2">, </span><span class="s1">text</span><span class="s2">, </span><span class="s1">pairs))</span>
+                <span class="s1">text = non_junk</span>
+        <span class="s2">if </span><span class="s1">pairs: result.append(pairs)</span>
+    <span class="s2">return </span><span class="s1">result</span>
+
+<span class="s1">HEADER_JOIN_ESCAPE_RE = re.compile(</span><span class="s3">r&quot;([\&quot;\\])&quot;</span><span class="s1">)</span>
+<span class="s2">def </span><span class="s1">join_header_words(lists):</span>
+    <span class="s0">&quot;&quot;&quot;Do the inverse (almost) of the conversion done by split_header_words. 
+ 
+    Takes a list of lists of (key, value) pairs and produces a single header 
+    value.  Attribute values are quoted if needed. 
+ 
+    &gt;&gt;&gt; join_header_words([[(&quot;text/plain&quot;, None), (&quot;charset&quot;, &quot;iso-8859/1&quot;)]]) 
+    'text/plain; charset=&quot;iso-8859/1&quot;' 
+    &gt;&gt;&gt; join_header_words([[(&quot;text/plain&quot;, None)], [(&quot;charset&quot;, &quot;iso-8859/1&quot;)]]) 
+    'text/plain, charset=&quot;iso-8859/1&quot;' 
+ 
+    &quot;&quot;&quot;</span>
+    <span class="s1">headers = []</span>
+    <span class="s2">for </span><span class="s1">pairs </span><span class="s2">in </span><span class="s1">lists:</span>
+        <span class="s1">attr = []</span>
+        <span class="s2">for </span><span class="s1">k</span><span class="s2">, </span><span class="s1">v </span><span class="s2">in </span><span class="s1">pairs:</span>
+            <span class="s2">if </span><span class="s1">v </span><span class="s2">is not None</span><span class="s1">:</span>
+                <span class="s2">if not </span><span class="s1">re.search(</span><span class="s3">r&quot;^\w+$&quot;</span><span class="s2">, </span><span class="s1">v):</span>
+                    <span class="s1">v = HEADER_JOIN_ESCAPE_RE.sub(</span><span class="s3">r&quot;\\\1&quot;</span><span class="s2">, </span><span class="s1">v)  </span><span class="s5"># escape &quot; and \</span>
+                    <span class="s1">v = </span><span class="s3">'&quot;%s&quot;' </span><span class="s1">% v</span>
+                <span class="s1">k = </span><span class="s3">&quot;%s=%s&quot; </span><span class="s1">% (k</span><span class="s2">, </span><span class="s1">v)</span>
+            <span class="s1">attr.append(k)</span>
+        <span class="s2">if </span><span class="s1">attr: headers.append(</span><span class="s3">&quot;; &quot;</span><span class="s1">.join(attr))</span>
+    <span class="s2">return </span><span class="s3">&quot;, &quot;</span><span class="s1">.join(headers)</span>
+
+<span class="s2">def </span><span class="s1">strip_quotes(text):</span>
+    <span class="s2">if </span><span class="s1">text.startswith(</span><span class="s3">'&quot;'</span><span class="s1">):</span>
+        <span class="s1">text = text[</span><span class="s4">1</span><span class="s1">:]</span>
+    <span class="s2">if </span><span class="s1">text.endswith(</span><span class="s3">'&quot;'</span><span class="s1">):</span>
+        <span class="s1">text = text[:-</span><span class="s4">1</span><span class="s1">]</span>
+    <span class="s2">return </span><span class="s1">text</span>
+
+<span class="s2">def </span><span class="s1">parse_ns_headers(ns_headers):</span>
+    <span class="s0">&quot;&quot;&quot;Ad-hoc parser for Netscape protocol cookie-attributes. 
+ 
+    The old Netscape cookie format for Set-Cookie can for instance contain 
+    an unquoted &quot;,&quot; in the expires field, so we have to use this ad-hoc 
+    parser instead of split_header_words. 
+ 
+    XXX This may not make the best possible effort to parse all the crap 
+    that Netscape Cookie headers contain.  Ronald Tschalar's HTTPClient 
+    parser is probably better, so could do worse than following that if 
+    this ever gives any trouble. 
+ 
+    Currently, this is also used for parsing RFC 2109 cookies. 
+ 
+    &quot;&quot;&quot;</span>
+    <span class="s1">known_attrs = (</span><span class="s3">&quot;expires&quot;</span><span class="s2">, </span><span class="s3">&quot;domain&quot;</span><span class="s2">, </span><span class="s3">&quot;path&quot;</span><span class="s2">, </span><span class="s3">&quot;secure&quot;</span><span class="s2">,</span>
+                   <span class="s5"># RFC 2109 attrs (may turn up in Netscape cookies, too)</span>
+                   <span class="s3">&quot;version&quot;</span><span class="s2">, </span><span class="s3">&quot;port&quot;</span><span class="s2">, </span><span class="s3">&quot;max-age&quot;</span><span class="s1">)</span>
+
+    <span class="s1">result = []</span>
+    <span class="s2">for </span><span class="s1">ns_header </span><span class="s2">in </span><span class="s1">ns_headers:</span>
+        <span class="s1">pairs = []</span>
+        <span class="s1">version_set = </span><span class="s2">False</span>
+        <span class="s2">for </span><span class="s1">ii</span><span class="s2">, </span><span class="s1">param </span><span class="s2">in </span><span class="s1">enumerate(re.split(</span><span class="s3">r&quot;;\s*&quot;</span><span class="s2">, </span><span class="s1">ns_header)):</span>
+            <span class="s1">param = param.rstrip()</span>
+            <span class="s2">if </span><span class="s1">param == </span><span class="s3">&quot;&quot;</span><span class="s1">: </span><span class="s2">continue</span>
+            <span class="s2">if </span><span class="s3">&quot;=&quot; </span><span class="s2">not in </span><span class="s1">param:</span>
+                <span class="s1">k</span><span class="s2">, </span><span class="s1">v = param</span><span class="s2">, None</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s1">k</span><span class="s2">, </span><span class="s1">v = re.split(</span><span class="s3">r&quot;\s*=\s*&quot;</span><span class="s2">, </span><span class="s1">param</span><span class="s2">, </span><span class="s4">1</span><span class="s1">)</span>
+                <span class="s1">k = k.lstrip()</span>
+            <span class="s2">if </span><span class="s1">ii != </span><span class="s4">0</span><span class="s1">:</span>
+                <span class="s1">lc = k.lower()</span>
+                <span class="s2">if </span><span class="s1">lc </span><span class="s2">in </span><span class="s1">known_attrs:</span>
+                    <span class="s1">k = lc</span>
+                <span class="s2">if </span><span class="s1">k == </span><span class="s3">&quot;version&quot;</span><span class="s1">:</span>
+                    <span class="s5"># This is an RFC 2109 cookie.</span>
+                    <span class="s1">v = strip_quotes(v)</span>
+                    <span class="s1">version_set = </span><span class="s2">True</span>
+                <span class="s2">if </span><span class="s1">k == </span><span class="s3">&quot;expires&quot;</span><span class="s1">:</span>
+                    <span class="s5"># convert expires date to seconds since epoch</span>
+                    <span class="s1">v = http2time(strip_quotes(v))  </span><span class="s5"># None if invalid</span>
+            <span class="s1">pairs.append((k</span><span class="s2">, </span><span class="s1">v))</span>
+
+        <span class="s2">if </span><span class="s1">pairs:</span>
+            <span class="s2">if not </span><span class="s1">version_set:</span>
+                <span class="s1">pairs.append((</span><span class="s3">&quot;version&quot;</span><span class="s2">, </span><span class="s3">&quot;0&quot;</span><span class="s1">))</span>
+            <span class="s1">result.append(pairs)</span>
+
+    <span class="s2">return </span><span class="s1">result</span>
+
+
+<span class="s1">IPV4_RE = re.compile(</span><span class="s3">r&quot;\.\d+$&quot;</span><span class="s2">, </span><span class="s1">re.ASCII)</span>
+<span class="s2">def </span><span class="s1">is_HDN(text):</span>
+    <span class="s0">&quot;&quot;&quot;Return True if text is a host domain name.&quot;&quot;&quot;</span>
+    <span class="s5"># XXX</span>
+    <span class="s5"># This may well be wrong.  Which RFC is HDN defined in, if any (for</span>
+    <span class="s5">#  the purposes of RFC 2965)?</span>
+    <span class="s5"># For the current implementation, what about IPv6?  Remember to look</span>
+    <span class="s5">#  at other uses of IPV4_RE also, if change this.</span>
+    <span class="s2">if </span><span class="s1">IPV4_RE.search(text):</span>
+        <span class="s2">return False</span>
+    <span class="s2">if </span><span class="s1">text == </span><span class="s3">&quot;&quot;</span><span class="s1">:</span>
+        <span class="s2">return False</span>
+    <span class="s2">if </span><span class="s1">text[</span><span class="s4">0</span><span class="s1">] == </span><span class="s3">&quot;.&quot; </span><span class="s2">or </span><span class="s1">text[-</span><span class="s4">1</span><span class="s1">] == </span><span class="s3">&quot;.&quot;</span><span class="s1">:</span>
+        <span class="s2">return False</span>
+    <span class="s2">return True</span>
+
+<span class="s2">def </span><span class="s1">domain_match(A</span><span class="s2">, </span><span class="s1">B):</span>
+    <span class="s0">&quot;&quot;&quot;Return True if domain A domain-matches domain B, according to RFC 2965. 
+ 
+    A and B may be host domain names or IP addresses. 
+ 
+    RFC 2965, section 1: 
+ 
+    Host names can be specified either as an IP address or a HDN string. 
+    Sometimes we compare one host name with another.  (Such comparisons SHALL 
+    be case-insensitive.)  Host A's name domain-matches host B's if 
+ 
+         *  their host name strings string-compare equal; or 
+ 
+         * A is a HDN string and has the form NB, where N is a non-empty 
+            name string, B has the form .B', and B' is a HDN string.  (So, 
+            x.y.com domain-matches .Y.com but not Y.com.) 
+ 
+    Note that domain-match is not a commutative operation: a.b.c.com 
+    domain-matches .c.com, but not the reverse. 
+ 
+    &quot;&quot;&quot;</span>
+    <span class="s5"># Note that, if A or B are IP addresses, the only relevant part of the</span>
+    <span class="s5"># definition of the domain-match algorithm is the direct string-compare.</span>
+    <span class="s1">A = A.lower()</span>
+    <span class="s1">B = B.lower()</span>
+    <span class="s2">if </span><span class="s1">A == B:</span>
+        <span class="s2">return True</span>
+    <span class="s2">if not </span><span class="s1">is_HDN(A):</span>
+        <span class="s2">return False</span>
+    <span class="s1">i = A.rfind(B)</span>
+    <span class="s2">if </span><span class="s1">i == -</span><span class="s4">1 </span><span class="s2">or </span><span class="s1">i == </span><span class="s4">0</span><span class="s1">:</span>
+        <span class="s5"># A does not have form NB, or N is the empty string</span>
+        <span class="s2">return False</span>
+    <span class="s2">if not </span><span class="s1">B.startswith(</span><span class="s3">&quot;.&quot;</span><span class="s1">):</span>
+        <span class="s2">return False</span>
+    <span class="s2">if not </span><span class="s1">is_HDN(B[</span><span class="s4">1</span><span class="s1">:]):</span>
+        <span class="s2">return False</span>
+    <span class="s2">return True</span>
+
+<span class="s2">def </span><span class="s1">liberal_is_HDN(text):</span>
+    <span class="s0">&quot;&quot;&quot;Return True if text is a sort-of-like a host domain name. 
+ 
+    For accepting/blocking domains. 
+ 
+    &quot;&quot;&quot;</span>
+    <span class="s2">if </span><span class="s1">IPV4_RE.search(text):</span>
+        <span class="s2">return False</span>
+    <span class="s2">return True</span>
+
+<span class="s2">def </span><span class="s1">user_domain_match(A</span><span class="s2">, </span><span class="s1">B):</span>
+    <span class="s0">&quot;&quot;&quot;For blocking/accepting domains. 
+ 
+    A and B may be host domain names or IP addresses. 
+ 
+    &quot;&quot;&quot;</span>
+    <span class="s1">A = A.lower()</span>
+    <span class="s1">B = B.lower()</span>
+    <span class="s2">if not </span><span class="s1">(liberal_is_HDN(A) </span><span class="s2">and </span><span class="s1">liberal_is_HDN(B)):</span>
+        <span class="s2">if </span><span class="s1">A == B:</span>
+            <span class="s5"># equal IP addresses</span>
+            <span class="s2">return True</span>
+        <span class="s2">return False</span>
+    <span class="s1">initial_dot = B.startswith(</span><span class="s3">&quot;.&quot;</span><span class="s1">)</span>
+    <span class="s2">if </span><span class="s1">initial_dot </span><span class="s2">and </span><span class="s1">A.endswith(B):</span>
+        <span class="s2">return True</span>
+    <span class="s2">if not </span><span class="s1">initial_dot </span><span class="s2">and </span><span class="s1">A == B:</span>
+        <span class="s2">return True</span>
+    <span class="s2">return False</span>
+
+<span class="s1">cut_port_re = re.compile(</span><span class="s3">r&quot;:\d+$&quot;</span><span class="s2">, </span><span class="s1">re.ASCII)</span>
+<span class="s2">def </span><span class="s1">request_host(request):</span>
+    <span class="s0">&quot;&quot;&quot;Return request-host, as defined by RFC 2965. 
+ 
+    Variation from RFC: returned value is lowercased, for convenient 
+    comparison. 
+ 
+    &quot;&quot;&quot;</span>
+    <span class="s1">url = request.get_full_url()</span>
+    <span class="s1">host = urlparse(url)[</span><span class="s4">1</span><span class="s1">]</span>
+    <span class="s2">if </span><span class="s1">host == </span><span class="s3">&quot;&quot;</span><span class="s1">:</span>
+        <span class="s1">host = request.get_header(</span><span class="s3">&quot;Host&quot;</span><span class="s2">, </span><span class="s3">&quot;&quot;</span><span class="s1">)</span>
+
+    <span class="s5"># remove port, if present</span>
+    <span class="s1">host = cut_port_re.sub(</span><span class="s3">&quot;&quot;</span><span class="s2">, </span><span class="s1">host</span><span class="s2">, </span><span class="s4">1</span><span class="s1">)</span>
+    <span class="s2">return </span><span class="s1">host.lower()</span>
+
+<span class="s2">def </span><span class="s1">eff_request_host(request):</span>
+    <span class="s0">&quot;&quot;&quot;Return a tuple (request-host, effective request-host name). 
+ 
+    As defined by RFC 2965, except both are lowercased. 
+ 
+    &quot;&quot;&quot;</span>
+    <span class="s1">erhn = req_host = request_host(request)</span>
+    <span class="s2">if </span><span class="s1">req_host.find(</span><span class="s3">&quot;.&quot;</span><span class="s1">) == -</span><span class="s4">1 </span><span class="s2">and not </span><span class="s1">IPV4_RE.search(req_host):</span>
+        <span class="s1">erhn = req_host + </span><span class="s3">&quot;.local&quot;</span>
+    <span class="s2">return </span><span class="s1">req_host</span><span class="s2">, </span><span class="s1">erhn</span>
+
+<span class="s2">def </span><span class="s1">request_path(request):</span>
+    <span class="s0">&quot;&quot;&quot;Path component of request-URI, as defined by RFC 2965.&quot;&quot;&quot;</span>
+    <span class="s1">url = request.get_full_url()</span>
+    <span class="s1">parts = urlsplit(url)</span>
+    <span class="s1">path = escape_path(parts.path)</span>
+    <span class="s2">if not </span><span class="s1">path.startswith(</span><span class="s3">&quot;/&quot;</span><span class="s1">):</span>
+        <span class="s5"># fix bad RFC 2396 absoluteURI</span>
+        <span class="s1">path = </span><span class="s3">&quot;/&quot; </span><span class="s1">+ path</span>
+    <span class="s2">return </span><span class="s1">path</span>
+
+<span class="s2">def </span><span class="s1">request_port(request):</span>
+    <span class="s1">host = request.host</span>
+    <span class="s1">i = host.find(</span><span class="s3">':'</span><span class="s1">)</span>
+    <span class="s2">if </span><span class="s1">i &gt;= </span><span class="s4">0</span><span class="s1">:</span>
+        <span class="s1">port = host[i+</span><span class="s4">1</span><span class="s1">:]</span>
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s1">int(port)</span>
+        <span class="s2">except </span><span class="s1">ValueError:</span>
+            <span class="s1">_debug(</span><span class="s3">&quot;nonnumeric port: '%s'&quot;</span><span class="s2">, </span><span class="s1">port)</span>
+            <span class="s2">return None</span>
+    <span class="s2">else</span><span class="s1">:</span>
+        <span class="s1">port = DEFAULT_HTTP_PORT</span>
+    <span class="s2">return </span><span class="s1">port</span>
+
+<span class="s5"># Characters in addition to A-Z, a-z, 0-9, '_', '.', and '-' that don't</span>
+<span class="s5"># need to be escaped to form a valid HTTP URL (RFCs 2396 and 1738).</span>
+<span class="s1">HTTP_PATH_SAFE = </span><span class="s3">&quot;%/;:@&amp;=+$,!~*'()&quot;</span>
+<span class="s1">ESCAPED_CHAR_RE = re.compile(</span><span class="s3">r&quot;%([0-9a-fA-F][0-9a-fA-F])&quot;</span><span class="s1">)</span>
+<span class="s2">def </span><span class="s1">uppercase_escaped_char(match):</span>
+    <span class="s2">return </span><span class="s3">&quot;%%%s&quot; </span><span class="s1">% match.group(</span><span class="s4">1</span><span class="s1">).upper()</span>
+<span class="s2">def </span><span class="s1">escape_path(path):</span>
+    <span class="s0">&quot;&quot;&quot;Escape any invalid characters in HTTP URL, and uppercase all escapes.&quot;&quot;&quot;</span>
+    <span class="s5"># There's no knowing what character encoding was used to create URLs</span>
+    <span class="s5"># containing %-escapes, but since we have to pick one to escape invalid</span>
+    <span class="s5"># path characters, we pick UTF-8, as recommended in the HTML 4.0</span>
+    <span class="s5"># specification:</span>
+    <span class="s5"># http://www.w3.org/TR/REC-html40/appendix/notes.html#h-B.2.1</span>
+    <span class="s5"># And here, kind of: draft-fielding-uri-rfc2396bis-03</span>
+    <span class="s5"># (And in draft IRI specification: draft-duerst-iri-05)</span>
+    <span class="s5"># (And here, for new URI schemes: RFC 2718)</span>
+    <span class="s1">path = quote(path</span><span class="s2">, </span><span class="s1">HTTP_PATH_SAFE)</span>
+    <span class="s1">path = ESCAPED_CHAR_RE.sub(uppercase_escaped_char</span><span class="s2">, </span><span class="s1">path)</span>
+    <span class="s2">return </span><span class="s1">path</span>
+
+<span class="s2">def </span><span class="s1">reach(h):</span>
+    <span class="s0">&quot;&quot;&quot;Return reach of host h, as defined by RFC 2965, section 1. 
+ 
+    The reach R of a host name H is defined as follows: 
+ 
+       *  If 
+ 
+          -  H is the host domain name of a host; and, 
+ 
+          -  H has the form A.B; and 
+ 
+          -  A has no embedded (that is, interior) dots; and 
+ 
+          -  B has at least one embedded dot, or B is the string &quot;local&quot;. 
+             then the reach of H is .B. 
+ 
+       *  Otherwise, the reach of H is H. 
+ 
+    &gt;&gt;&gt; reach(&quot;www.acme.com&quot;) 
+    '.acme.com' 
+    &gt;&gt;&gt; reach(&quot;acme.com&quot;) 
+    'acme.com' 
+    &gt;&gt;&gt; reach(&quot;acme.local&quot;) 
+    '.local' 
+ 
+    &quot;&quot;&quot;</span>
+    <span class="s1">i = h.find(</span><span class="s3">&quot;.&quot;</span><span class="s1">)</span>
+    <span class="s2">if </span><span class="s1">i &gt;= </span><span class="s4">0</span><span class="s1">:</span>
+        <span class="s5">#a = h[:i]  # this line is only here to show what a is</span>
+        <span class="s1">b = h[i+</span><span class="s4">1</span><span class="s1">:]</span>
+        <span class="s1">i = b.find(</span><span class="s3">&quot;.&quot;</span><span class="s1">)</span>
+        <span class="s2">if </span><span class="s1">is_HDN(h) </span><span class="s2">and </span><span class="s1">(i &gt;= </span><span class="s4">0 </span><span class="s2">or </span><span class="s1">b == </span><span class="s3">&quot;local&quot;</span><span class="s1">):</span>
+            <span class="s2">return </span><span class="s3">&quot;.&quot;</span><span class="s1">+b</span>
+    <span class="s2">return </span><span class="s1">h</span>
+
+<span class="s2">def </span><span class="s1">is_third_party(request):</span>
+    <span class="s0">&quot;&quot;&quot; 
+ 
+    RFC 2965, section 3.3.6: 
+ 
+        An unverifiable transaction is to a third-party host if its request- 
+        host U does not domain-match the reach R of the request-host O in the 
+        origin transaction. 
+ 
+    &quot;&quot;&quot;</span>
+    <span class="s1">req_host = request_host(request)</span>
+    <span class="s2">if not </span><span class="s1">domain_match(req_host</span><span class="s2">, </span><span class="s1">reach(request.get_origin_req_host())):</span>
+        <span class="s2">return True</span>
+    <span class="s2">else</span><span class="s1">:</span>
+        <span class="s2">return False</span>
+
+
+<span class="s2">class </span><span class="s1">Cookie(object):</span>
+    <span class="s0">&quot;&quot;&quot;HTTP Cookie. 
+ 
+    This class represents both Netscape and RFC 2965 cookies. 
+ 
+    This is deliberately a very simple class.  It just holds attributes.  It's 
+    possible to construct Cookie instances that don't comply with the cookie 
+    standards.  CookieJar.make_cookies is the factory function for Cookie 
+    objects -- it deals with cookie parsing, supplying defaults, and 
+    normalising to the representation used in this class.  CookiePolicy is 
+    responsible for checking them to see whether they should be accepted from 
+    and returned to the server. 
+ 
+    Note that the port may be present in the headers, but unspecified (&quot;Port&quot; 
+    rather than&quot;Port=80&quot;, for example); if this is the case, port is None. 
+ 
+    &quot;&quot;&quot;</span>
+
+    <span class="s2">def </span><span class="s1">__init__(self</span><span class="s2">, </span><span class="s1">version</span><span class="s2">, </span><span class="s1">name</span><span class="s2">, </span><span class="s1">value</span><span class="s2">,</span>
+                 <span class="s1">port</span><span class="s2">, </span><span class="s1">port_specified</span><span class="s2">,</span>
+                 <span class="s1">domain</span><span class="s2">, </span><span class="s1">domain_specified</span><span class="s2">, </span><span class="s1">domain_initial_dot</span><span class="s2">,</span>
+                 <span class="s1">path</span><span class="s2">, </span><span class="s1">path_specified</span><span class="s2">,</span>
+                 <span class="s1">secure</span><span class="s2">,</span>
+                 <span class="s1">expires</span><span class="s2">,</span>
+                 <span class="s1">discard</span><span class="s2">,</span>
+                 <span class="s1">comment</span><span class="s2">,</span>
+                 <span class="s1">comment_url</span><span class="s2">,</span>
+                 <span class="s1">rest</span><span class="s2">,</span>
+                 <span class="s1">rfc2109=</span><span class="s2">False,</span>
+                 <span class="s1">):</span>
+
+        <span class="s2">if </span><span class="s1">version </span><span class="s2">is not None</span><span class="s1">: version = int(version)</span>
+        <span class="s2">if </span><span class="s1">expires </span><span class="s2">is not None</span><span class="s1">: expires = int(expires)</span>
+        <span class="s2">if </span><span class="s1">port </span><span class="s2">is None and </span><span class="s1">port_specified </span><span class="s2">is True</span><span class="s1">:</span>
+            <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s3">&quot;if port is None, port_specified must be false&quot;</span><span class="s1">)</span>
+
+        <span class="s1">self.version = version</span>
+        <span class="s1">self.name = name</span>
+        <span class="s1">self.value = value</span>
+        <span class="s1">self.port = port</span>
+        <span class="s1">self.port_specified = port_specified</span>
+        <span class="s5"># normalise case, as per RFC 2965 section 3.3.3</span>
+        <span class="s1">self.domain = domain.lower()</span>
+        <span class="s1">self.domain_specified = domain_specified</span>
+        <span class="s5"># Sigh.  We need to know whether the domain given in the</span>
+        <span class="s5"># cookie-attribute had an initial dot, in order to follow RFC 2965</span>
+        <span class="s5"># (as clarified in draft errata).  Needed for the returned $Domain</span>
+        <span class="s5"># value.</span>
+        <span class="s1">self.domain_initial_dot = domain_initial_dot</span>
+        <span class="s1">self.path = path</span>
+        <span class="s1">self.path_specified = path_specified</span>
+        <span class="s1">self.secure = secure</span>
+        <span class="s1">self.expires = expires</span>
+        <span class="s1">self.discard = discard</span>
+        <span class="s1">self.comment = comment</span>
+        <span class="s1">self.comment_url = comment_url</span>
+        <span class="s1">self.rfc2109 = rfc2109</span>
+
+        <span class="s1">self._rest = copy.copy(rest)</span>
+
+    <span class="s2">def </span><span class="s1">has_nonstandard_attr(self</span><span class="s2">, </span><span class="s1">name):</span>
+        <span class="s2">return </span><span class="s1">name </span><span class="s2">in </span><span class="s1">self._rest</span>
+    <span class="s2">def </span><span class="s1">get_nonstandard_attr(self</span><span class="s2">, </span><span class="s1">name</span><span class="s2">, </span><span class="s1">default=</span><span class="s2">None</span><span class="s1">):</span>
+        <span class="s2">return </span><span class="s1">self._rest.get(name</span><span class="s2">, </span><span class="s1">default)</span>
+    <span class="s2">def </span><span class="s1">set_nonstandard_attr(self</span><span class="s2">, </span><span class="s1">name</span><span class="s2">, </span><span class="s1">value):</span>
+        <span class="s1">self._rest[name] = value</span>
+
+    <span class="s2">def </span><span class="s1">is_expired(self</span><span class="s2">, </span><span class="s1">now=</span><span class="s2">None</span><span class="s1">):</span>
+        <span class="s2">if </span><span class="s1">now </span><span class="s2">is None</span><span class="s1">: now = time.time()</span>
+        <span class="s2">if </span><span class="s1">(self.expires </span><span class="s2">is not None</span><span class="s1">) </span><span class="s2">and </span><span class="s1">(self.expires &lt;= now):</span>
+            <span class="s2">return True</span>
+        <span class="s2">return False</span>
+
+    <span class="s2">def </span><span class="s1">__str__(self):</span>
+        <span class="s2">if </span><span class="s1">self.port </span><span class="s2">is None</span><span class="s1">: p = </span><span class="s3">&quot;&quot;</span>
+        <span class="s2">else</span><span class="s1">: p = </span><span class="s3">&quot;:&quot;</span><span class="s1">+self.port</span>
+        <span class="s1">limit = self.domain + p + self.path</span>
+        <span class="s2">if </span><span class="s1">self.value </span><span class="s2">is not None</span><span class="s1">:</span>
+            <span class="s1">namevalue = </span><span class="s3">&quot;%s=%s&quot; </span><span class="s1">% (self.name</span><span class="s2">, </span><span class="s1">self.value)</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">namevalue = self.name</span>
+        <span class="s2">return </span><span class="s3">&quot;&lt;Cookie %s for %s&gt;&quot; </span><span class="s1">% (namevalue</span><span class="s2">, </span><span class="s1">limit)</span>
+
+    <span class="s1">@as_native_str()</span>
+    <span class="s2">def </span><span class="s1">__repr__(self):</span>
+        <span class="s1">args = []</span>
+        <span class="s2">for </span><span class="s1">name </span><span class="s2">in </span><span class="s1">(</span><span class="s3">&quot;version&quot;</span><span class="s2">, </span><span class="s3">&quot;name&quot;</span><span class="s2">, </span><span class="s3">&quot;value&quot;</span><span class="s2">,</span>
+                     <span class="s3">&quot;port&quot;</span><span class="s2">, </span><span class="s3">&quot;port_specified&quot;</span><span class="s2">,</span>
+                     <span class="s3">&quot;domain&quot;</span><span class="s2">, </span><span class="s3">&quot;domain_specified&quot;</span><span class="s2">, </span><span class="s3">&quot;domain_initial_dot&quot;</span><span class="s2">,</span>
+                     <span class="s3">&quot;path&quot;</span><span class="s2">, </span><span class="s3">&quot;path_specified&quot;</span><span class="s2">,</span>
+                     <span class="s3">&quot;secure&quot;</span><span class="s2">, </span><span class="s3">&quot;expires&quot;</span><span class="s2">, </span><span class="s3">&quot;discard&quot;</span><span class="s2">, </span><span class="s3">&quot;comment&quot;</span><span class="s2">, </span><span class="s3">&quot;comment_url&quot;</span><span class="s2">,</span>
+                     <span class="s1">):</span>
+            <span class="s1">attr = getattr(self</span><span class="s2">, </span><span class="s1">name)</span>
+            <span class="s5">### Python-Future:</span>
+            <span class="s5"># Avoid u'...' prefixes for unicode strings:</span>
+            <span class="s2">if </span><span class="s1">isinstance(attr</span><span class="s2">, </span><span class="s1">str):</span>
+                <span class="s1">attr = str(attr)</span>
+            <span class="s5">###</span>
+            <span class="s1">args.append(str(</span><span class="s3">&quot;%s=%s&quot;</span><span class="s1">) % (name</span><span class="s2">, </span><span class="s1">repr(attr)))</span>
+        <span class="s1">args.append(</span><span class="s3">&quot;rest=%s&quot; </span><span class="s1">% repr(self._rest))</span>
+        <span class="s1">args.append(</span><span class="s3">&quot;rfc2109=%s&quot; </span><span class="s1">% repr(self.rfc2109))</span>
+        <span class="s2">return </span><span class="s3">&quot;Cookie(%s)&quot; </span><span class="s1">% </span><span class="s3">&quot;, &quot;</span><span class="s1">.join(args)</span>
+
+
+<span class="s2">class </span><span class="s1">CookiePolicy(object):</span>
+    <span class="s0">&quot;&quot;&quot;Defines which cookies get accepted from and returned to server. 
+ 
+    May also modify cookies, though this is probably a bad idea. 
+ 
+    The subclass DefaultCookiePolicy defines the standard rules for Netscape 
+    and RFC 2965 cookies -- override that if you want a customised policy. 
+ 
+    &quot;&quot;&quot;</span>
+    <span class="s2">def </span><span class="s1">set_ok(self</span><span class="s2">, </span><span class="s1">cookie</span><span class="s2">, </span><span class="s1">request):</span>
+        <span class="s0">&quot;&quot;&quot;Return true if (and only if) cookie should be accepted from server. 
+ 
+        Currently, pre-expired cookies never get this far -- the CookieJar 
+        class deletes such cookies itself. 
+ 
+        &quot;&quot;&quot;</span>
+        <span class="s2">raise </span><span class="s1">NotImplementedError()</span>
+
+    <span class="s2">def </span><span class="s1">return_ok(self</span><span class="s2">, </span><span class="s1">cookie</span><span class="s2">, </span><span class="s1">request):</span>
+        <span class="s0">&quot;&quot;&quot;Return true if (and only if) cookie should be returned to server.&quot;&quot;&quot;</span>
+        <span class="s2">raise </span><span class="s1">NotImplementedError()</span>
+
+    <span class="s2">def </span><span class="s1">domain_return_ok(self</span><span class="s2">, </span><span class="s1">domain</span><span class="s2">, </span><span class="s1">request):</span>
+        <span class="s0">&quot;&quot;&quot;Return false if cookies should not be returned, given cookie domain. 
+        &quot;&quot;&quot;</span>
+        <span class="s2">return True</span>
+
+    <span class="s2">def </span><span class="s1">path_return_ok(self</span><span class="s2">, </span><span class="s1">path</span><span class="s2">, </span><span class="s1">request):</span>
+        <span class="s0">&quot;&quot;&quot;Return false if cookies should not be returned, given cookie path. 
+        &quot;&quot;&quot;</span>
+        <span class="s2">return True</span>
+
+
+<span class="s2">class </span><span class="s1">DefaultCookiePolicy(CookiePolicy):</span>
+    <span class="s0">&quot;&quot;&quot;Implements the standard rules for accepting and returning cookies.&quot;&quot;&quot;</span>
+
+    <span class="s1">DomainStrictNoDots = </span><span class="s4">1</span>
+    <span class="s1">DomainStrictNonDomain = </span><span class="s4">2</span>
+    <span class="s1">DomainRFC2965Match = </span><span class="s4">4</span>
+
+    <span class="s1">DomainLiberal = </span><span class="s4">0</span>
+    <span class="s1">DomainStrict = DomainStrictNoDots|DomainStrictNonDomain</span>
+
+    <span class="s2">def </span><span class="s1">__init__(self</span><span class="s2">,</span>
+                 <span class="s1">blocked_domains=</span><span class="s2">None, </span><span class="s1">allowed_domains=</span><span class="s2">None,</span>
+                 <span class="s1">netscape=</span><span class="s2">True, </span><span class="s1">rfc2965=</span><span class="s2">False,</span>
+                 <span class="s1">rfc2109_as_netscape=</span><span class="s2">None,</span>
+                 <span class="s1">hide_cookie2=</span><span class="s2">False,</span>
+                 <span class="s1">strict_domain=</span><span class="s2">False,</span>
+                 <span class="s1">strict_rfc2965_unverifiable=</span><span class="s2">True,</span>
+                 <span class="s1">strict_ns_unverifiable=</span><span class="s2">False,</span>
+                 <span class="s1">strict_ns_domain=DomainLiberal</span><span class="s2">,</span>
+                 <span class="s1">strict_ns_set_initial_dollar=</span><span class="s2">False,</span>
+                 <span class="s1">strict_ns_set_path=</span><span class="s2">False,</span>
+                 <span class="s1">):</span>
+        <span class="s0">&quot;&quot;&quot;Constructor arguments should be passed as keyword arguments only.&quot;&quot;&quot;</span>
+        <span class="s1">self.netscape = netscape</span>
+        <span class="s1">self.rfc2965 = rfc2965</span>
+        <span class="s1">self.rfc2109_as_netscape = rfc2109_as_netscape</span>
+        <span class="s1">self.hide_cookie2 = hide_cookie2</span>
+        <span class="s1">self.strict_domain = strict_domain</span>
+        <span class="s1">self.strict_rfc2965_unverifiable = strict_rfc2965_unverifiable</span>
+        <span class="s1">self.strict_ns_unverifiable = strict_ns_unverifiable</span>
+        <span class="s1">self.strict_ns_domain = strict_ns_domain</span>
+        <span class="s1">self.strict_ns_set_initial_dollar = strict_ns_set_initial_dollar</span>
+        <span class="s1">self.strict_ns_set_path = strict_ns_set_path</span>
+
+        <span class="s2">if </span><span class="s1">blocked_domains </span><span class="s2">is not None</span><span class="s1">:</span>
+            <span class="s1">self._blocked_domains = tuple(blocked_domains)</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">self._blocked_domains = ()</span>
+
+        <span class="s2">if </span><span class="s1">allowed_domains </span><span class="s2">is not None</span><span class="s1">:</span>
+            <span class="s1">allowed_domains = tuple(allowed_domains)</span>
+        <span class="s1">self._allowed_domains = allowed_domains</span>
+
+    <span class="s2">def </span><span class="s1">blocked_domains(self):</span>
+        <span class="s0">&quot;&quot;&quot;Return the sequence of blocked domains (as a tuple).&quot;&quot;&quot;</span>
+        <span class="s2">return </span><span class="s1">self._blocked_domains</span>
+    <span class="s2">def </span><span class="s1">set_blocked_domains(self</span><span class="s2">, </span><span class="s1">blocked_domains):</span>
+        <span class="s0">&quot;&quot;&quot;Set the sequence of blocked domains.&quot;&quot;&quot;</span>
+        <span class="s1">self._blocked_domains = tuple(blocked_domains)</span>
+
+    <span class="s2">def </span><span class="s1">is_blocked(self</span><span class="s2">, </span><span class="s1">domain):</span>
+        <span class="s2">for </span><span class="s1">blocked_domain </span><span class="s2">in </span><span class="s1">self._blocked_domains:</span>
+            <span class="s2">if </span><span class="s1">user_domain_match(domain</span><span class="s2">, </span><span class="s1">blocked_domain):</span>
+                <span class="s2">return True</span>
+        <span class="s2">return False</span>
+
+    <span class="s2">def </span><span class="s1">allowed_domains(self):</span>
+        <span class="s0">&quot;&quot;&quot;Return None, or the sequence of allowed domains (as a tuple).&quot;&quot;&quot;</span>
+        <span class="s2">return </span><span class="s1">self._allowed_domains</span>
+    <span class="s2">def </span><span class="s1">set_allowed_domains(self</span><span class="s2">, </span><span class="s1">allowed_domains):</span>
+        <span class="s0">&quot;&quot;&quot;Set the sequence of allowed domains, or None.&quot;&quot;&quot;</span>
+        <span class="s2">if </span><span class="s1">allowed_domains </span><span class="s2">is not None</span><span class="s1">:</span>
+            <span class="s1">allowed_domains = tuple(allowed_domains)</span>
+        <span class="s1">self._allowed_domains = allowed_domains</span>
+
+    <span class="s2">def </span><span class="s1">is_not_allowed(self</span><span class="s2">, </span><span class="s1">domain):</span>
+        <span class="s2">if </span><span class="s1">self._allowed_domains </span><span class="s2">is None</span><span class="s1">:</span>
+            <span class="s2">return False</span>
+        <span class="s2">for </span><span class="s1">allowed_domain </span><span class="s2">in </span><span class="s1">self._allowed_domains:</span>
+            <span class="s2">if </span><span class="s1">user_domain_match(domain</span><span class="s2">, </span><span class="s1">allowed_domain):</span>
+                <span class="s2">return False</span>
+        <span class="s2">return True</span>
+
+    <span class="s2">def </span><span class="s1">set_ok(self</span><span class="s2">, </span><span class="s1">cookie</span><span class="s2">, </span><span class="s1">request):</span>
+        <span class="s0">&quot;&quot;&quot; 
+        If you override .set_ok(), be sure to call this method.  If it returns 
+        false, so should your subclass (assuming your subclass wants to be more 
+        strict about which cookies to accept). 
+ 
+        &quot;&quot;&quot;</span>
+        <span class="s1">_debug(</span><span class="s3">&quot; - checking cookie %s=%s&quot;</span><span class="s2">, </span><span class="s1">cookie.name</span><span class="s2">, </span><span class="s1">cookie.value)</span>
+
+        <span class="s2">assert </span><span class="s1">cookie.name </span><span class="s2">is not None</span>
+
+        <span class="s2">for </span><span class="s1">n </span><span class="s2">in </span><span class="s3">&quot;version&quot;</span><span class="s2">, </span><span class="s3">&quot;verifiability&quot;</span><span class="s2">, </span><span class="s3">&quot;name&quot;</span><span class="s2">, </span><span class="s3">&quot;path&quot;</span><span class="s2">, </span><span class="s3">&quot;domain&quot;</span><span class="s2">, </span><span class="s3">&quot;port&quot;</span><span class="s1">:</span>
+            <span class="s1">fn_name = </span><span class="s3">&quot;set_ok_&quot;</span><span class="s1">+n</span>
+            <span class="s1">fn = getattr(self</span><span class="s2">, </span><span class="s1">fn_name)</span>
+            <span class="s2">if not </span><span class="s1">fn(cookie</span><span class="s2">, </span><span class="s1">request):</span>
+                <span class="s2">return False</span>
+
+        <span class="s2">return True</span>
+
+    <span class="s2">def </span><span class="s1">set_ok_version(self</span><span class="s2">, </span><span class="s1">cookie</span><span class="s2">, </span><span class="s1">request):</span>
+        <span class="s2">if </span><span class="s1">cookie.version </span><span class="s2">is None</span><span class="s1">:</span>
+            <span class="s5"># Version is always set to 0 by parse_ns_headers if it's a Netscape</span>
+            <span class="s5"># cookie, so this must be an invalid RFC 2965 cookie.</span>
+            <span class="s1">_debug(</span><span class="s3">&quot;   Set-Cookie2 without version attribute (%s=%s)&quot;</span><span class="s2">,</span>
+                   <span class="s1">cookie.name</span><span class="s2">, </span><span class="s1">cookie.value)</span>
+            <span class="s2">return False</span>
+        <span class="s2">if </span><span class="s1">cookie.version &gt; </span><span class="s4">0 </span><span class="s2">and not </span><span class="s1">self.rfc2965:</span>
+            <span class="s1">_debug(</span><span class="s3">&quot;   RFC 2965 cookies are switched off&quot;</span><span class="s1">)</span>
+            <span class="s2">return False</span>
+        <span class="s2">elif </span><span class="s1">cookie.version == </span><span class="s4">0 </span><span class="s2">and not </span><span class="s1">self.netscape:</span>
+            <span class="s1">_debug(</span><span class="s3">&quot;   Netscape cookies are switched off&quot;</span><span class="s1">)</span>
+            <span class="s2">return False</span>
+        <span class="s2">return True</span>
+
+    <span class="s2">def </span><span class="s1">set_ok_verifiability(self</span><span class="s2">, </span><span class="s1">cookie</span><span class="s2">, </span><span class="s1">request):</span>
+        <span class="s2">if </span><span class="s1">request.unverifiable </span><span class="s2">and </span><span class="s1">is_third_party(request):</span>
+            <span class="s2">if </span><span class="s1">cookie.version &gt; </span><span class="s4">0 </span><span class="s2">and </span><span class="s1">self.strict_rfc2965_unverifiable:</span>
+                <span class="s1">_debug(</span><span class="s3">&quot;   third-party RFC 2965 cookie during &quot;</span>
+                             <span class="s3">&quot;unverifiable transaction&quot;</span><span class="s1">)</span>
+                <span class="s2">return False</span>
+            <span class="s2">elif </span><span class="s1">cookie.version == </span><span class="s4">0 </span><span class="s2">and </span><span class="s1">self.strict_ns_unverifiable:</span>
+                <span class="s1">_debug(</span><span class="s3">&quot;   third-party Netscape cookie during &quot;</span>
+                             <span class="s3">&quot;unverifiable transaction&quot;</span><span class="s1">)</span>
+                <span class="s2">return False</span>
+        <span class="s2">return True</span>
+
+    <span class="s2">def </span><span class="s1">set_ok_name(self</span><span class="s2">, </span><span class="s1">cookie</span><span class="s2">, </span><span class="s1">request):</span>
+        <span class="s5"># Try and stop servers setting V0 cookies designed to hack other</span>
+        <span class="s5"># servers that know both V0 and V1 protocols.</span>
+        <span class="s2">if </span><span class="s1">(cookie.version == </span><span class="s4">0 </span><span class="s2">and </span><span class="s1">self.strict_ns_set_initial_dollar </span><span class="s2">and</span>
+            <span class="s1">cookie.name.startswith(</span><span class="s3">&quot;$&quot;</span><span class="s1">)):</span>
+            <span class="s1">_debug(</span><span class="s3">&quot;   illegal name (starts with '$'): '%s'&quot;</span><span class="s2">, </span><span class="s1">cookie.name)</span>
+            <span class="s2">return False</span>
+        <span class="s2">return True</span>
+
+    <span class="s2">def </span><span class="s1">set_ok_path(self</span><span class="s2">, </span><span class="s1">cookie</span><span class="s2">, </span><span class="s1">request):</span>
+        <span class="s2">if </span><span class="s1">cookie.path_specified:</span>
+            <span class="s1">req_path = request_path(request)</span>
+            <span class="s2">if </span><span class="s1">((cookie.version &gt; </span><span class="s4">0 </span><span class="s2">or</span>
+                 <span class="s1">(cookie.version == </span><span class="s4">0 </span><span class="s2">and </span><span class="s1">self.strict_ns_set_path)) </span><span class="s2">and</span>
+                <span class="s2">not </span><span class="s1">req_path.startswith(cookie.path)):</span>
+                <span class="s1">_debug(</span><span class="s3">&quot;   path attribute %s is not a prefix of request &quot;</span>
+                       <span class="s3">&quot;path %s&quot;</span><span class="s2">, </span><span class="s1">cookie.path</span><span class="s2">, </span><span class="s1">req_path)</span>
+                <span class="s2">return False</span>
+        <span class="s2">return True</span>
+
+    <span class="s2">def </span><span class="s1">set_ok_domain(self</span><span class="s2">, </span><span class="s1">cookie</span><span class="s2">, </span><span class="s1">request):</span>
+        <span class="s2">if </span><span class="s1">self.is_blocked(cookie.domain):</span>
+            <span class="s1">_debug(</span><span class="s3">&quot;   domain %s is in user block-list&quot;</span><span class="s2">, </span><span class="s1">cookie.domain)</span>
+            <span class="s2">return False</span>
+        <span class="s2">if </span><span class="s1">self.is_not_allowed(cookie.domain):</span>
+            <span class="s1">_debug(</span><span class="s3">&quot;   domain %s is not in user allow-list&quot;</span><span class="s2">, </span><span class="s1">cookie.domain)</span>
+            <span class="s2">return False</span>
+        <span class="s2">if </span><span class="s1">cookie.domain_specified:</span>
+            <span class="s1">req_host</span><span class="s2">, </span><span class="s1">erhn = eff_request_host(request)</span>
+            <span class="s1">domain = cookie.domain</span>
+            <span class="s2">if </span><span class="s1">self.strict_domain </span><span class="s2">and </span><span class="s1">(domain.count(</span><span class="s3">&quot;.&quot;</span><span class="s1">) &gt;= </span><span class="s4">2</span><span class="s1">):</span>
+                <span class="s5"># XXX This should probably be compared with the Konqueror</span>
+                <span class="s5"># (kcookiejar.cpp) and Mozilla implementations, but it's a</span>
+                <span class="s5"># losing battle.</span>
+                <span class="s1">i = domain.rfind(</span><span class="s3">&quot;.&quot;</span><span class="s1">)</span>
+                <span class="s1">j = domain.rfind(</span><span class="s3">&quot;.&quot;</span><span class="s2">, </span><span class="s4">0</span><span class="s2">, </span><span class="s1">i)</span>
+                <span class="s2">if </span><span class="s1">j == </span><span class="s4">0</span><span class="s1">:  </span><span class="s5"># domain like .foo.bar</span>
+                    <span class="s1">tld = domain[i+</span><span class="s4">1</span><span class="s1">:]</span>
+                    <span class="s1">sld = domain[j+</span><span class="s4">1</span><span class="s1">:i]</span>
+                    <span class="s2">if </span><span class="s1">sld.lower() </span><span class="s2">in </span><span class="s1">(</span><span class="s3">&quot;co&quot;</span><span class="s2">, </span><span class="s3">&quot;ac&quot;</span><span class="s2">, </span><span class="s3">&quot;com&quot;</span><span class="s2">, </span><span class="s3">&quot;edu&quot;</span><span class="s2">, </span><span class="s3">&quot;org&quot;</span><span class="s2">, </span><span class="s3">&quot;net&quot;</span><span class="s2">,</span>
+                       <span class="s3">&quot;gov&quot;</span><span class="s2">, </span><span class="s3">&quot;mil&quot;</span><span class="s2">, </span><span class="s3">&quot;int&quot;</span><span class="s2">, </span><span class="s3">&quot;aero&quot;</span><span class="s2">, </span><span class="s3">&quot;biz&quot;</span><span class="s2">, </span><span class="s3">&quot;cat&quot;</span><span class="s2">, </span><span class="s3">&quot;coop&quot;</span><span class="s2">,</span>
+                       <span class="s3">&quot;info&quot;</span><span class="s2">, </span><span class="s3">&quot;jobs&quot;</span><span class="s2">, </span><span class="s3">&quot;mobi&quot;</span><span class="s2">, </span><span class="s3">&quot;museum&quot;</span><span class="s2">, </span><span class="s3">&quot;name&quot;</span><span class="s2">, </span><span class="s3">&quot;pro&quot;</span><span class="s2">,</span>
+                       <span class="s3">&quot;travel&quot;</span><span class="s2">, </span><span class="s3">&quot;eu&quot;</span><span class="s1">) </span><span class="s2">and </span><span class="s1">len(tld) == </span><span class="s4">2</span><span class="s1">:</span>
+                        <span class="s5"># domain like .co.uk</span>
+                        <span class="s1">_debug(</span><span class="s3">&quot;   country-code second level domain %s&quot;</span><span class="s2">, </span><span class="s1">domain)</span>
+                        <span class="s2">return False</span>
+            <span class="s2">if </span><span class="s1">domain.startswith(</span><span class="s3">&quot;.&quot;</span><span class="s1">):</span>
+                <span class="s1">undotted_domain = domain[</span><span class="s4">1</span><span class="s1">:]</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s1">undotted_domain = domain</span>
+            <span class="s1">embedded_dots = (undotted_domain.find(</span><span class="s3">&quot;.&quot;</span><span class="s1">) &gt;= </span><span class="s4">0</span><span class="s1">)</span>
+            <span class="s2">if not </span><span class="s1">embedded_dots </span><span class="s2">and </span><span class="s1">domain != </span><span class="s3">&quot;.local&quot;</span><span class="s1">:</span>
+                <span class="s1">_debug(</span><span class="s3">&quot;   non-local domain %s contains no embedded dot&quot;</span><span class="s2">,</span>
+                       <span class="s1">domain)</span>
+                <span class="s2">return False</span>
+            <span class="s2">if </span><span class="s1">cookie.version == </span><span class="s4">0</span><span class="s1">:</span>
+                <span class="s2">if </span><span class="s1">(</span><span class="s2">not </span><span class="s1">erhn.endswith(domain) </span><span class="s2">and</span>
+                    <span class="s1">(</span><span class="s2">not </span><span class="s1">erhn.startswith(</span><span class="s3">&quot;.&quot;</span><span class="s1">) </span><span class="s2">and</span>
+                     <span class="s2">not </span><span class="s1">(</span><span class="s3">&quot;.&quot;</span><span class="s1">+erhn).endswith(domain))):</span>
+                    <span class="s1">_debug(</span><span class="s3">&quot;   effective request-host %s (even with added &quot;</span>
+                           <span class="s3">&quot;initial dot) does not end with %s&quot;</span><span class="s2">,</span>
+                           <span class="s1">erhn</span><span class="s2">, </span><span class="s1">domain)</span>
+                    <span class="s2">return False</span>
+            <span class="s2">if </span><span class="s1">(cookie.version &gt; </span><span class="s4">0 </span><span class="s2">or</span>
+                <span class="s1">(self.strict_ns_domain &amp; self.DomainRFC2965Match)):</span>
+                <span class="s2">if not </span><span class="s1">domain_match(erhn</span><span class="s2">, </span><span class="s1">domain):</span>
+                    <span class="s1">_debug(</span><span class="s3">&quot;   effective request-host %s does not domain-match &quot;</span>
+                           <span class="s3">&quot;%s&quot;</span><span class="s2">, </span><span class="s1">erhn</span><span class="s2">, </span><span class="s1">domain)</span>
+                    <span class="s2">return False</span>
+            <span class="s2">if </span><span class="s1">(cookie.version &gt; </span><span class="s4">0 </span><span class="s2">or</span>
+                <span class="s1">(self.strict_ns_domain &amp; self.DomainStrictNoDots)):</span>
+                <span class="s1">host_prefix = req_host[:-len(domain)]</span>
+                <span class="s2">if </span><span class="s1">(host_prefix.find(</span><span class="s3">&quot;.&quot;</span><span class="s1">) &gt;= </span><span class="s4">0 </span><span class="s2">and</span>
+                    <span class="s2">not </span><span class="s1">IPV4_RE.search(req_host)):</span>
+                    <span class="s1">_debug(</span><span class="s3">&quot;   host prefix %s for domain %s contains a dot&quot;</span><span class="s2">,</span>
+                           <span class="s1">host_prefix</span><span class="s2">, </span><span class="s1">domain)</span>
+                    <span class="s2">return False</span>
+        <span class="s2">return True</span>
+
+    <span class="s2">def </span><span class="s1">set_ok_port(self</span><span class="s2">, </span><span class="s1">cookie</span><span class="s2">, </span><span class="s1">request):</span>
+        <span class="s2">if </span><span class="s1">cookie.port_specified:</span>
+            <span class="s1">req_port = request_port(request)</span>
+            <span class="s2">if </span><span class="s1">req_port </span><span class="s2">is None</span><span class="s1">:</span>
+                <span class="s1">req_port = </span><span class="s3">&quot;80&quot;</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s1">req_port = str(req_port)</span>
+            <span class="s2">for </span><span class="s1">p </span><span class="s2">in </span><span class="s1">cookie.port.split(</span><span class="s3">&quot;,&quot;</span><span class="s1">):</span>
+                <span class="s2">try</span><span class="s1">:</span>
+                    <span class="s1">int(p)</span>
+                <span class="s2">except </span><span class="s1">ValueError:</span>
+                    <span class="s1">_debug(</span><span class="s3">&quot;   bad port %s (not numeric)&quot;</span><span class="s2">, </span><span class="s1">p)</span>
+                    <span class="s2">return False</span>
+                <span class="s2">if </span><span class="s1">p == req_port:</span>
+                    <span class="s2">break</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s1">_debug(</span><span class="s3">&quot;   request port (%s) not found in %s&quot;</span><span class="s2">,</span>
+                       <span class="s1">req_port</span><span class="s2">, </span><span class="s1">cookie.port)</span>
+                <span class="s2">return False</span>
+        <span class="s2">return True</span>
+
+    <span class="s2">def </span><span class="s1">return_ok(self</span><span class="s2">, </span><span class="s1">cookie</span><span class="s2">, </span><span class="s1">request):</span>
+        <span class="s0">&quot;&quot;&quot; 
+        If you override .return_ok(), be sure to call this method.  If it 
+        returns false, so should your subclass (assuming your subclass wants to 
+        be more strict about which cookies to return). 
+ 
+        &quot;&quot;&quot;</span>
+        <span class="s5"># Path has already been checked by .path_return_ok(), and domain</span>
+        <span class="s5"># blocking done by .domain_return_ok().</span>
+        <span class="s1">_debug(</span><span class="s3">&quot; - checking cookie %s=%s&quot;</span><span class="s2">, </span><span class="s1">cookie.name</span><span class="s2">, </span><span class="s1">cookie.value)</span>
+
+        <span class="s2">for </span><span class="s1">n </span><span class="s2">in </span><span class="s3">&quot;version&quot;</span><span class="s2">, </span><span class="s3">&quot;verifiability&quot;</span><span class="s2">, </span><span class="s3">&quot;secure&quot;</span><span class="s2">, </span><span class="s3">&quot;expires&quot;</span><span class="s2">, </span><span class="s3">&quot;port&quot;</span><span class="s2">, </span><span class="s3">&quot;domain&quot;</span><span class="s1">:</span>
+            <span class="s1">fn_name = </span><span class="s3">&quot;return_ok_&quot;</span><span class="s1">+n</span>
+            <span class="s1">fn = getattr(self</span><span class="s2">, </span><span class="s1">fn_name)</span>
+            <span class="s2">if not </span><span class="s1">fn(cookie</span><span class="s2">, </span><span class="s1">request):</span>
+                <span class="s2">return False</span>
+        <span class="s2">return True</span>
+
+    <span class="s2">def </span><span class="s1">return_ok_version(self</span><span class="s2">, </span><span class="s1">cookie</span><span class="s2">, </span><span class="s1">request):</span>
+        <span class="s2">if </span><span class="s1">cookie.version &gt; </span><span class="s4">0 </span><span class="s2">and not </span><span class="s1">self.rfc2965:</span>
+            <span class="s1">_debug(</span><span class="s3">&quot;   RFC 2965 cookies are switched off&quot;</span><span class="s1">)</span>
+            <span class="s2">return False</span>
+        <span class="s2">elif </span><span class="s1">cookie.version == </span><span class="s4">0 </span><span class="s2">and not </span><span class="s1">self.netscape:</span>
+            <span class="s1">_debug(</span><span class="s3">&quot;   Netscape cookies are switched off&quot;</span><span class="s1">)</span>
+            <span class="s2">return False</span>
+        <span class="s2">return True</span>
+
+    <span class="s2">def </span><span class="s1">return_ok_verifiability(self</span><span class="s2">, </span><span class="s1">cookie</span><span class="s2">, </span><span class="s1">request):</span>
+        <span class="s2">if </span><span class="s1">request.unverifiable </span><span class="s2">and </span><span class="s1">is_third_party(request):</span>
+            <span class="s2">if </span><span class="s1">cookie.version &gt; </span><span class="s4">0 </span><span class="s2">and </span><span class="s1">self.strict_rfc2965_unverifiable:</span>
+                <span class="s1">_debug(</span><span class="s3">&quot;   third-party RFC 2965 cookie during unverifiable &quot;</span>
+                       <span class="s3">&quot;transaction&quot;</span><span class="s1">)</span>
+                <span class="s2">return False</span>
+            <span class="s2">elif </span><span class="s1">cookie.version == </span><span class="s4">0 </span><span class="s2">and </span><span class="s1">self.strict_ns_unverifiable:</span>
+                <span class="s1">_debug(</span><span class="s3">&quot;   third-party Netscape cookie during unverifiable &quot;</span>
+                       <span class="s3">&quot;transaction&quot;</span><span class="s1">)</span>
+                <span class="s2">return False</span>
+        <span class="s2">return True</span>
+
+    <span class="s2">def </span><span class="s1">return_ok_secure(self</span><span class="s2">, </span><span class="s1">cookie</span><span class="s2">, </span><span class="s1">request):</span>
+        <span class="s2">if </span><span class="s1">cookie.secure </span><span class="s2">and </span><span class="s1">request.type != </span><span class="s3">&quot;https&quot;</span><span class="s1">:</span>
+            <span class="s1">_debug(</span><span class="s3">&quot;   secure cookie with non-secure request&quot;</span><span class="s1">)</span>
+            <span class="s2">return False</span>
+        <span class="s2">return True</span>
+
+    <span class="s2">def </span><span class="s1">return_ok_expires(self</span><span class="s2">, </span><span class="s1">cookie</span><span class="s2">, </span><span class="s1">request):</span>
+        <span class="s2">if </span><span class="s1">cookie.is_expired(self._now):</span>
+            <span class="s1">_debug(</span><span class="s3">&quot;   cookie expired&quot;</span><span class="s1">)</span>
+            <span class="s2">return False</span>
+        <span class="s2">return True</span>
+
+    <span class="s2">def </span><span class="s1">return_ok_port(self</span><span class="s2">, </span><span class="s1">cookie</span><span class="s2">, </span><span class="s1">request):</span>
+        <span class="s2">if </span><span class="s1">cookie.port:</span>
+            <span class="s1">req_port = request_port(request)</span>
+            <span class="s2">if </span><span class="s1">req_port </span><span class="s2">is None</span><span class="s1">:</span>
+                <span class="s1">req_port = </span><span class="s3">&quot;80&quot;</span>
+            <span class="s2">for </span><span class="s1">p </span><span class="s2">in </span><span class="s1">cookie.port.split(</span><span class="s3">&quot;,&quot;</span><span class="s1">):</span>
+                <span class="s2">if </span><span class="s1">p == req_port:</span>
+                    <span class="s2">break</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s1">_debug(</span><span class="s3">&quot;   request port %s does not match cookie port %s&quot;</span><span class="s2">,</span>
+                       <span class="s1">req_port</span><span class="s2">, </span><span class="s1">cookie.port)</span>
+                <span class="s2">return False</span>
+        <span class="s2">return True</span>
+
+    <span class="s2">def </span><span class="s1">return_ok_domain(self</span><span class="s2">, </span><span class="s1">cookie</span><span class="s2">, </span><span class="s1">request):</span>
+        <span class="s1">req_host</span><span class="s2">, </span><span class="s1">erhn = eff_request_host(request)</span>
+        <span class="s1">domain = cookie.domain</span>
+
+        <span class="s5"># strict check of non-domain cookies: Mozilla does this, MSIE5 doesn't</span>
+        <span class="s2">if </span><span class="s1">(cookie.version == </span><span class="s4">0 </span><span class="s2">and</span>
+            <span class="s1">(self.strict_ns_domain &amp; self.DomainStrictNonDomain) </span><span class="s2">and</span>
+            <span class="s2">not </span><span class="s1">cookie.domain_specified </span><span class="s2">and </span><span class="s1">domain != erhn):</span>
+            <span class="s1">_debug(</span><span class="s3">&quot;   cookie with unspecified domain does not string-compare &quot;</span>
+                   <span class="s3">&quot;equal to request domain&quot;</span><span class="s1">)</span>
+            <span class="s2">return False</span>
+
+        <span class="s2">if </span><span class="s1">cookie.version &gt; </span><span class="s4">0 </span><span class="s2">and not </span><span class="s1">domain_match(erhn</span><span class="s2">, </span><span class="s1">domain):</span>
+            <span class="s1">_debug(</span><span class="s3">&quot;   effective request-host name %s does not domain-match &quot;</span>
+                   <span class="s3">&quot;RFC 2965 cookie domain %s&quot;</span><span class="s2">, </span><span class="s1">erhn</span><span class="s2">, </span><span class="s1">domain)</span>
+            <span class="s2">return False</span>
+        <span class="s2">if </span><span class="s1">cookie.version == </span><span class="s4">0 </span><span class="s2">and not </span><span class="s1">(</span><span class="s3">&quot;.&quot;</span><span class="s1">+erhn).endswith(domain):</span>
+            <span class="s1">_debug(</span><span class="s3">&quot;   request-host %s does not match Netscape cookie domain &quot;</span>
+                   <span class="s3">&quot;%s&quot;</span><span class="s2">, </span><span class="s1">req_host</span><span class="s2">, </span><span class="s1">domain)</span>
+            <span class="s2">return False</span>
+        <span class="s2">return True</span>
+
+    <span class="s2">def </span><span class="s1">domain_return_ok(self</span><span class="s2">, </span><span class="s1">domain</span><span class="s2">, </span><span class="s1">request):</span>
+        <span class="s5"># Liberal check of.  This is here as an optimization to avoid</span>
+        <span class="s5"># having to load lots of MSIE cookie files unless necessary.</span>
+        <span class="s1">req_host</span><span class="s2">, </span><span class="s1">erhn = eff_request_host(request)</span>
+        <span class="s2">if not </span><span class="s1">req_host.startswith(</span><span class="s3">&quot;.&quot;</span><span class="s1">):</span>
+            <span class="s1">req_host = </span><span class="s3">&quot;.&quot;</span><span class="s1">+req_host</span>
+        <span class="s2">if not </span><span class="s1">erhn.startswith(</span><span class="s3">&quot;.&quot;</span><span class="s1">):</span>
+            <span class="s1">erhn = </span><span class="s3">&quot;.&quot;</span><span class="s1">+erhn</span>
+        <span class="s2">if not </span><span class="s1">(req_host.endswith(domain) </span><span class="s2">or </span><span class="s1">erhn.endswith(domain)):</span>
+            <span class="s5">#_debug(&quot;   request domain %s does not match cookie domain %s&quot;,</span>
+            <span class="s5">#       req_host, domain)</span>
+            <span class="s2">return False</span>
+
+        <span class="s2">if </span><span class="s1">self.is_blocked(domain):</span>
+            <span class="s1">_debug(</span><span class="s3">&quot;   domain %s is in user block-list&quot;</span><span class="s2">, </span><span class="s1">domain)</span>
+            <span class="s2">return False</span>
+        <span class="s2">if </span><span class="s1">self.is_not_allowed(domain):</span>
+            <span class="s1">_debug(</span><span class="s3">&quot;   domain %s is not in user allow-list&quot;</span><span class="s2">, </span><span class="s1">domain)</span>
+            <span class="s2">return False</span>
+
+        <span class="s2">return True</span>
+
+    <span class="s2">def </span><span class="s1">path_return_ok(self</span><span class="s2">, </span><span class="s1">path</span><span class="s2">, </span><span class="s1">request):</span>
+        <span class="s1">_debug(</span><span class="s3">&quot;- checking cookie path=%s&quot;</span><span class="s2">, </span><span class="s1">path)</span>
+        <span class="s1">req_path = request_path(request)</span>
+        <span class="s2">if not </span><span class="s1">req_path.startswith(path):</span>
+            <span class="s1">_debug(</span><span class="s3">&quot;  %s does not path-match %s&quot;</span><span class="s2">, </span><span class="s1">req_path</span><span class="s2">, </span><span class="s1">path)</span>
+            <span class="s2">return False</span>
+        <span class="s2">return True</span>
+
+
+<span class="s2">def </span><span class="s1">vals_sorted_by_key(adict):</span>
+    <span class="s1">keys = sorted(adict.keys())</span>
+    <span class="s2">return </span><span class="s1">map(adict.get</span><span class="s2">, </span><span class="s1">keys)</span>
+
+<span class="s2">def </span><span class="s1">deepvalues(mapping):</span>
+    <span class="s0">&quot;&quot;&quot;Iterates over nested mapping, depth-first, in sorted order by key.&quot;&quot;&quot;</span>
+    <span class="s1">values = vals_sorted_by_key(mapping)</span>
+    <span class="s2">for </span><span class="s1">obj </span><span class="s2">in </span><span class="s1">values:</span>
+        <span class="s1">mapping = </span><span class="s2">False</span>
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s1">obj.items</span>
+        <span class="s2">except </span><span class="s1">AttributeError:</span>
+            <span class="s2">pass</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">mapping = </span><span class="s2">True</span>
+            <span class="s2">for </span><span class="s1">subobj </span><span class="s2">in </span><span class="s1">deepvalues(obj):</span>
+                <span class="s2">yield </span><span class="s1">subobj</span>
+        <span class="s2">if not </span><span class="s1">mapping:</span>
+            <span class="s2">yield </span><span class="s1">obj</span>
+
+
+<span class="s5"># Used as second parameter to dict.get() method, to distinguish absent</span>
+<span class="s5"># dict key from one with a None value.</span>
+<span class="s2">class </span><span class="s1">Absent(object): </span><span class="s2">pass</span>
+
+<span class="s2">class </span><span class="s1">CookieJar(object):</span>
+    <span class="s0">&quot;&quot;&quot;Collection of HTTP cookies. 
+ 
+    You may not need to know about this class: try 
+    urllib.request.build_opener(HTTPCookieProcessor).open(url). 
+    &quot;&quot;&quot;</span>
+
+    <span class="s1">non_word_re = re.compile(</span><span class="s3">r&quot;\W&quot;</span><span class="s1">)</span>
+    <span class="s1">quote_re = re.compile(</span><span class="s3">r&quot;([\&quot;\\])&quot;</span><span class="s1">)</span>
+    <span class="s1">strict_domain_re = re.compile(</span><span class="s3">r&quot;\.?[^.]*&quot;</span><span class="s1">)</span>
+    <span class="s1">domain_re = re.compile(</span><span class="s3">r&quot;[^.]*&quot;</span><span class="s1">)</span>
+    <span class="s1">dots_re = re.compile(</span><span class="s3">r&quot;^\.+&quot;</span><span class="s1">)</span>
+
+    <span class="s1">magic_re = re.compile(</span><span class="s3">r&quot;^\#LWP-Cookies-(\d+\.\d+)&quot;</span><span class="s2">, </span><span class="s1">re.ASCII)</span>
+
+    <span class="s2">def </span><span class="s1">__init__(self</span><span class="s2">, </span><span class="s1">policy=</span><span class="s2">None</span><span class="s1">):</span>
+        <span class="s2">if </span><span class="s1">policy </span><span class="s2">is None</span><span class="s1">:</span>
+            <span class="s1">policy = DefaultCookiePolicy()</span>
+        <span class="s1">self._policy = policy</span>
+
+        <span class="s1">self._cookies_lock = _threading.RLock()</span>
+        <span class="s1">self._cookies = {}</span>
+
+    <span class="s2">def </span><span class="s1">set_policy(self</span><span class="s2">, </span><span class="s1">policy):</span>
+        <span class="s1">self._policy = policy</span>
+
+    <span class="s2">def </span><span class="s1">_cookies_for_domain(self</span><span class="s2">, </span><span class="s1">domain</span><span class="s2">, </span><span class="s1">request):</span>
+        <span class="s1">cookies = []</span>
+        <span class="s2">if not </span><span class="s1">self._policy.domain_return_ok(domain</span><span class="s2">, </span><span class="s1">request):</span>
+            <span class="s2">return </span><span class="s1">[]</span>
+        <span class="s1">_debug(</span><span class="s3">&quot;Checking %s for cookies to return&quot;</span><span class="s2">, </span><span class="s1">domain)</span>
+        <span class="s1">cookies_by_path = self._cookies[domain]</span>
+        <span class="s2">for </span><span class="s1">path </span><span class="s2">in </span><span class="s1">cookies_by_path.keys():</span>
+            <span class="s2">if not </span><span class="s1">self._policy.path_return_ok(path</span><span class="s2">, </span><span class="s1">request):</span>
+                <span class="s2">continue</span>
+            <span class="s1">cookies_by_name = cookies_by_path[path]</span>
+            <span class="s2">for </span><span class="s1">cookie </span><span class="s2">in </span><span class="s1">cookies_by_name.values():</span>
+                <span class="s2">if not </span><span class="s1">self._policy.return_ok(cookie</span><span class="s2">, </span><span class="s1">request):</span>
+                    <span class="s1">_debug(</span><span class="s3">&quot;   not returning cookie&quot;</span><span class="s1">)</span>
+                    <span class="s2">continue</span>
+                <span class="s1">_debug(</span><span class="s3">&quot;   it's a match&quot;</span><span class="s1">)</span>
+                <span class="s1">cookies.append(cookie)</span>
+        <span class="s2">return </span><span class="s1">cookies</span>
+
+    <span class="s2">def </span><span class="s1">_cookies_for_request(self</span><span class="s2">, </span><span class="s1">request):</span>
+        <span class="s0">&quot;&quot;&quot;Return a list of cookies to be returned to server.&quot;&quot;&quot;</span>
+        <span class="s1">cookies = []</span>
+        <span class="s2">for </span><span class="s1">domain </span><span class="s2">in </span><span class="s1">self._cookies.keys():</span>
+            <span class="s1">cookies.extend(self._cookies_for_domain(domain</span><span class="s2">, </span><span class="s1">request))</span>
+        <span class="s2">return </span><span class="s1">cookies</span>
+
+    <span class="s2">def </span><span class="s1">_cookie_attrs(self</span><span class="s2">, </span><span class="s1">cookies):</span>
+        <span class="s0">&quot;&quot;&quot;Return a list of cookie-attributes to be returned to server. 
+ 
+        like ['foo=&quot;bar&quot;; $Path=&quot;/&quot;', ...] 
+ 
+        The $Version attribute is also added when appropriate (currently only 
+        once per request). 
+ 
+        &quot;&quot;&quot;</span>
+        <span class="s5"># add cookies in order of most specific (ie. longest) path first</span>
+        <span class="s1">cookies.sort(key=</span><span class="s2">lambda </span><span class="s1">a: len(a.path)</span><span class="s2">, </span><span class="s1">reverse=</span><span class="s2">True</span><span class="s1">)</span>
+
+        <span class="s1">version_set = </span><span class="s2">False</span>
+
+        <span class="s1">attrs = []</span>
+        <span class="s2">for </span><span class="s1">cookie </span><span class="s2">in </span><span class="s1">cookies:</span>
+            <span class="s5"># set version of Cookie header</span>
+            <span class="s5"># XXX</span>
+            <span class="s5"># What should it be if multiple matching Set-Cookie headers have</span>
+            <span class="s5">#  different versions themselves?</span>
+            <span class="s5"># Answer: there is no answer; was supposed to be settled by</span>
+            <span class="s5">#  RFC 2965 errata, but that may never appear...</span>
+            <span class="s1">version = cookie.version</span>
+            <span class="s2">if not </span><span class="s1">version_set:</span>
+                <span class="s1">version_set = </span><span class="s2">True</span>
+                <span class="s2">if </span><span class="s1">version &gt; </span><span class="s4">0</span><span class="s1">:</span>
+                    <span class="s1">attrs.append(</span><span class="s3">&quot;$Version=%s&quot; </span><span class="s1">% version)</span>
+
+            <span class="s5"># quote cookie value if necessary</span>
+            <span class="s5"># (not for Netscape protocol, which already has any quotes</span>
+            <span class="s5">#  intact, due to the poorly-specified Netscape Cookie: syntax)</span>
+            <span class="s2">if </span><span class="s1">((cookie.value </span><span class="s2">is not None</span><span class="s1">) </span><span class="s2">and</span>
+                <span class="s1">self.non_word_re.search(cookie.value) </span><span class="s2">and </span><span class="s1">version &gt; </span><span class="s4">0</span><span class="s1">):</span>
+                <span class="s1">value = self.quote_re.sub(</span><span class="s3">r&quot;\\\1&quot;</span><span class="s2">, </span><span class="s1">cookie.value)</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s1">value = cookie.value</span>
+
+            <span class="s5"># add cookie-attributes to be returned in Cookie header</span>
+            <span class="s2">if </span><span class="s1">cookie.value </span><span class="s2">is None</span><span class="s1">:</span>
+                <span class="s1">attrs.append(cookie.name)</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s1">attrs.append(</span><span class="s3">&quot;%s=%s&quot; </span><span class="s1">% (cookie.name</span><span class="s2">, </span><span class="s1">value))</span>
+            <span class="s2">if </span><span class="s1">version &gt; </span><span class="s4">0</span><span class="s1">:</span>
+                <span class="s2">if </span><span class="s1">cookie.path_specified:</span>
+                    <span class="s1">attrs.append(</span><span class="s3">'$Path=&quot;%s&quot;' </span><span class="s1">% cookie.path)</span>
+                <span class="s2">if </span><span class="s1">cookie.domain.startswith(</span><span class="s3">&quot;.&quot;</span><span class="s1">):</span>
+                    <span class="s1">domain = cookie.domain</span>
+                    <span class="s2">if </span><span class="s1">(</span><span class="s2">not </span><span class="s1">cookie.domain_initial_dot </span><span class="s2">and</span>
+                        <span class="s1">domain.startswith(</span><span class="s3">&quot;.&quot;</span><span class="s1">)):</span>
+                        <span class="s1">domain = domain[</span><span class="s4">1</span><span class="s1">:]</span>
+                    <span class="s1">attrs.append(</span><span class="s3">'$Domain=&quot;%s&quot;' </span><span class="s1">% domain)</span>
+                <span class="s2">if </span><span class="s1">cookie.port </span><span class="s2">is not None</span><span class="s1">:</span>
+                    <span class="s1">p = </span><span class="s3">&quot;$Port&quot;</span>
+                    <span class="s2">if </span><span class="s1">cookie.port_specified:</span>
+                        <span class="s1">p = p + (</span><span class="s3">'=&quot;%s&quot;' </span><span class="s1">% cookie.port)</span>
+                    <span class="s1">attrs.append(p)</span>
+
+        <span class="s2">return </span><span class="s1">attrs</span>
+
+    <span class="s2">def </span><span class="s1">add_cookie_header(self</span><span class="s2">, </span><span class="s1">request):</span>
+        <span class="s0">&quot;&quot;&quot;Add correct Cookie: header to request (urllib.request.Request object). 
+ 
+        The Cookie2 header is also added unless policy.hide_cookie2 is true. 
+ 
+        &quot;&quot;&quot;</span>
+        <span class="s1">_debug(</span><span class="s3">&quot;add_cookie_header&quot;</span><span class="s1">)</span>
+        <span class="s1">self._cookies_lock.acquire()</span>
+        <span class="s2">try</span><span class="s1">:</span>
+
+            <span class="s1">self._policy._now = self._now = int(time.time())</span>
+
+            <span class="s1">cookies = self._cookies_for_request(request)</span>
+
+            <span class="s1">attrs = self._cookie_attrs(cookies)</span>
+            <span class="s2">if </span><span class="s1">attrs:</span>
+                <span class="s2">if not </span><span class="s1">request.has_header(</span><span class="s3">&quot;Cookie&quot;</span><span class="s1">):</span>
+                    <span class="s1">request.add_unredirected_header(</span>
+                        <span class="s3">&quot;Cookie&quot;</span><span class="s2">, </span><span class="s3">&quot;; &quot;</span><span class="s1">.join(attrs))</span>
+
+            <span class="s5"># if necessary, advertise that we know RFC 2965</span>
+            <span class="s2">if </span><span class="s1">(self._policy.rfc2965 </span><span class="s2">and not </span><span class="s1">self._policy.hide_cookie2 </span><span class="s2">and</span>
+                <span class="s2">not </span><span class="s1">request.has_header(</span><span class="s3">&quot;Cookie2&quot;</span><span class="s1">)):</span>
+                <span class="s2">for </span><span class="s1">cookie </span><span class="s2">in </span><span class="s1">cookies:</span>
+                    <span class="s2">if </span><span class="s1">cookie.version != </span><span class="s4">1</span><span class="s1">:</span>
+                        <span class="s1">request.add_unredirected_header(</span><span class="s3">&quot;Cookie2&quot;</span><span class="s2">, </span><span class="s3">'$Version=&quot;1&quot;'</span><span class="s1">)</span>
+                        <span class="s2">break</span>
+
+        <span class="s2">finally</span><span class="s1">:</span>
+            <span class="s1">self._cookies_lock.release()</span>
+
+        <span class="s1">self.clear_expired_cookies()</span>
+
+    <span class="s2">def </span><span class="s1">_normalized_cookie_tuples(self</span><span class="s2">, </span><span class="s1">attrs_set):</span>
+        <span class="s0">&quot;&quot;&quot;Return list of tuples containing normalised cookie information. 
+ 
+        attrs_set is the list of lists of key,value pairs extracted from 
+        the Set-Cookie or Set-Cookie2 headers. 
+ 
+        Tuples are name, value, standard, rest, where name and value are the 
+        cookie name and value, standard is a dictionary containing the standard 
+        cookie-attributes (discard, secure, version, expires or max-age, 
+        domain, path and port) and rest is a dictionary containing the rest of 
+        the cookie-attributes. 
+ 
+        &quot;&quot;&quot;</span>
+        <span class="s1">cookie_tuples = []</span>
+
+        <span class="s1">boolean_attrs = </span><span class="s3">&quot;discard&quot;</span><span class="s2">, </span><span class="s3">&quot;secure&quot;</span>
+        <span class="s1">value_attrs = (</span><span class="s3">&quot;version&quot;</span><span class="s2">,</span>
+                       <span class="s3">&quot;expires&quot;</span><span class="s2">, </span><span class="s3">&quot;max-age&quot;</span><span class="s2">,</span>
+                       <span class="s3">&quot;domain&quot;</span><span class="s2">, </span><span class="s3">&quot;path&quot;</span><span class="s2">, </span><span class="s3">&quot;port&quot;</span><span class="s2">,</span>
+                       <span class="s3">&quot;comment&quot;</span><span class="s2">, </span><span class="s3">&quot;commenturl&quot;</span><span class="s1">)</span>
+
+        <span class="s2">for </span><span class="s1">cookie_attrs </span><span class="s2">in </span><span class="s1">attrs_set:</span>
+            <span class="s1">name</span><span class="s2">, </span><span class="s1">value = cookie_attrs[</span><span class="s4">0</span><span class="s1">]</span>
+
+            <span class="s5"># Build dictionary of standard cookie-attributes (standard) and</span>
+            <span class="s5"># dictionary of other cookie-attributes (rest).</span>
+
+            <span class="s5"># Note: expiry time is normalised to seconds since epoch.  V0</span>
+            <span class="s5"># cookies should have the Expires cookie-attribute, and V1 cookies</span>
+            <span class="s5"># should have Max-Age, but since V1 includes RFC 2109 cookies (and</span>
+            <span class="s5"># since V0 cookies may be a mish-mash of Netscape and RFC 2109), we</span>
+            <span class="s5"># accept either (but prefer Max-Age).</span>
+            <span class="s1">max_age_set = </span><span class="s2">False</span>
+
+            <span class="s1">bad_cookie = </span><span class="s2">False</span>
+
+            <span class="s1">standard = {}</span>
+            <span class="s1">rest = {}</span>
+            <span class="s2">for </span><span class="s1">k</span><span class="s2">, </span><span class="s1">v </span><span class="s2">in </span><span class="s1">cookie_attrs[</span><span class="s4">1</span><span class="s1">:]:</span>
+                <span class="s1">lc = k.lower()</span>
+                <span class="s5"># don't lose case distinction for unknown fields</span>
+                <span class="s2">if </span><span class="s1">lc </span><span class="s2">in </span><span class="s1">value_attrs </span><span class="s2">or </span><span class="s1">lc </span><span class="s2">in </span><span class="s1">boolean_attrs:</span>
+                    <span class="s1">k = lc</span>
+                <span class="s2">if </span><span class="s1">k </span><span class="s2">in </span><span class="s1">boolean_attrs </span><span class="s2">and </span><span class="s1">v </span><span class="s2">is None</span><span class="s1">:</span>
+                    <span class="s5"># boolean cookie-attribute is present, but has no value</span>
+                    <span class="s5"># (like &quot;discard&quot;, rather than &quot;port=80&quot;)</span>
+                    <span class="s1">v = </span><span class="s2">True</span>
+                <span class="s2">if </span><span class="s1">k </span><span class="s2">in </span><span class="s1">standard:</span>
+                    <span class="s5"># only first value is significant</span>
+                    <span class="s2">continue</span>
+                <span class="s2">if </span><span class="s1">k == </span><span class="s3">&quot;domain&quot;</span><span class="s1">:</span>
+                    <span class="s2">if </span><span class="s1">v </span><span class="s2">is None</span><span class="s1">:</span>
+                        <span class="s1">_debug(</span><span class="s3">&quot;   missing value for domain attribute&quot;</span><span class="s1">)</span>
+                        <span class="s1">bad_cookie = </span><span class="s2">True</span>
+                        <span class="s2">break</span>
+                    <span class="s5"># RFC 2965 section 3.3.3</span>
+                    <span class="s1">v = v.lower()</span>
+                <span class="s2">if </span><span class="s1">k == </span><span class="s3">&quot;expires&quot;</span><span class="s1">:</span>
+                    <span class="s2">if </span><span class="s1">max_age_set:</span>
+                        <span class="s5"># Prefer max-age to expires (like Mozilla)</span>
+                        <span class="s2">continue</span>
+                    <span class="s2">if </span><span class="s1">v </span><span class="s2">is None</span><span class="s1">:</span>
+                        <span class="s1">_debug(</span><span class="s3">&quot;   missing or invalid value for expires &quot;</span>
+                              <span class="s3">&quot;attribute: treating as session cookie&quot;</span><span class="s1">)</span>
+                        <span class="s2">continue</span>
+                <span class="s2">if </span><span class="s1">k == </span><span class="s3">&quot;max-age&quot;</span><span class="s1">:</span>
+                    <span class="s1">max_age_set = </span><span class="s2">True</span>
+                    <span class="s2">try</span><span class="s1">:</span>
+                        <span class="s1">v = int(v)</span>
+                    <span class="s2">except </span><span class="s1">ValueError:</span>
+                        <span class="s1">_debug(</span><span class="s3">&quot;   missing or invalid (non-numeric) value for &quot;</span>
+                              <span class="s3">&quot;max-age attribute&quot;</span><span class="s1">)</span>
+                        <span class="s1">bad_cookie = </span><span class="s2">True</span>
+                        <span class="s2">break</span>
+                    <span class="s5"># convert RFC 2965 Max-Age to seconds since epoch</span>
+                    <span class="s5"># XXX Strictly you're supposed to follow RFC 2616</span>
+                    <span class="s5">#   age-calculation rules.  Remember that zero Max-Age is a</span>
+                    <span class="s5">#   is a request to discard (old and new) cookie, though.</span>
+                    <span class="s1">k = </span><span class="s3">&quot;expires&quot;</span>
+                    <span class="s1">v = self._now + v</span>
+                <span class="s2">if </span><span class="s1">(k </span><span class="s2">in </span><span class="s1">value_attrs) </span><span class="s2">or </span><span class="s1">(k </span><span class="s2">in </span><span class="s1">boolean_attrs):</span>
+                    <span class="s2">if </span><span class="s1">(v </span><span class="s2">is None and</span>
+                        <span class="s1">k </span><span class="s2">not in </span><span class="s1">(</span><span class="s3">&quot;port&quot;</span><span class="s2">, </span><span class="s3">&quot;comment&quot;</span><span class="s2">, </span><span class="s3">&quot;commenturl&quot;</span><span class="s1">)):</span>
+                        <span class="s1">_debug(</span><span class="s3">&quot;   missing value for %s attribute&quot; </span><span class="s1">% k)</span>
+                        <span class="s1">bad_cookie = </span><span class="s2">True</span>
+                        <span class="s2">break</span>
+                    <span class="s1">standard[k] = v</span>
+                <span class="s2">else</span><span class="s1">:</span>
+                    <span class="s1">rest[k] = v</span>
+
+            <span class="s2">if </span><span class="s1">bad_cookie:</span>
+                <span class="s2">continue</span>
+
+            <span class="s1">cookie_tuples.append((name</span><span class="s2">, </span><span class="s1">value</span><span class="s2">, </span><span class="s1">standard</span><span class="s2">, </span><span class="s1">rest))</span>
+
+        <span class="s2">return </span><span class="s1">cookie_tuples</span>
+
+    <span class="s2">def </span><span class="s1">_cookie_from_cookie_tuple(self</span><span class="s2">, </span><span class="s1">tup</span><span class="s2">, </span><span class="s1">request):</span>
+        <span class="s5"># standard is dict of standard cookie-attributes, rest is dict of the</span>
+        <span class="s5"># rest of them</span>
+        <span class="s1">name</span><span class="s2">, </span><span class="s1">value</span><span class="s2">, </span><span class="s1">standard</span><span class="s2">, </span><span class="s1">rest = tup</span>
+
+        <span class="s1">domain = standard.get(</span><span class="s3">&quot;domain&quot;</span><span class="s2">, </span><span class="s1">Absent)</span>
+        <span class="s1">path = standard.get(</span><span class="s3">&quot;path&quot;</span><span class="s2">, </span><span class="s1">Absent)</span>
+        <span class="s1">port = standard.get(</span><span class="s3">&quot;port&quot;</span><span class="s2">, </span><span class="s1">Absent)</span>
+        <span class="s1">expires = standard.get(</span><span class="s3">&quot;expires&quot;</span><span class="s2">, </span><span class="s1">Absent)</span>
+
+        <span class="s5"># set the easy defaults</span>
+        <span class="s1">version = standard.get(</span><span class="s3">&quot;version&quot;</span><span class="s2">, None</span><span class="s1">)</span>
+        <span class="s2">if </span><span class="s1">version </span><span class="s2">is not None</span><span class="s1">:</span>
+            <span class="s2">try</span><span class="s1">:</span>
+                <span class="s1">version = int(version)</span>
+            <span class="s2">except </span><span class="s1">ValueError:</span>
+                <span class="s2">return None  </span><span class="s5"># invalid version, ignore cookie</span>
+        <span class="s1">secure = standard.get(</span><span class="s3">&quot;secure&quot;</span><span class="s2">, False</span><span class="s1">)</span>
+        <span class="s5"># (discard is also set if expires is Absent)</span>
+        <span class="s1">discard = standard.get(</span><span class="s3">&quot;discard&quot;</span><span class="s2">, False</span><span class="s1">)</span>
+        <span class="s1">comment = standard.get(</span><span class="s3">&quot;comment&quot;</span><span class="s2">, None</span><span class="s1">)</span>
+        <span class="s1">comment_url = standard.get(</span><span class="s3">&quot;commenturl&quot;</span><span class="s2">, None</span><span class="s1">)</span>
+
+        <span class="s5"># set default path</span>
+        <span class="s2">if </span><span class="s1">path </span><span class="s2">is not </span><span class="s1">Absent </span><span class="s2">and </span><span class="s1">path != </span><span class="s3">&quot;&quot;</span><span class="s1">:</span>
+            <span class="s1">path_specified = </span><span class="s2">True</span>
+            <span class="s1">path = escape_path(path)</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">path_specified = </span><span class="s2">False</span>
+            <span class="s1">path = request_path(request)</span>
+            <span class="s1">i = path.rfind(</span><span class="s3">&quot;/&quot;</span><span class="s1">)</span>
+            <span class="s2">if </span><span class="s1">i != -</span><span class="s4">1</span><span class="s1">:</span>
+                <span class="s2">if </span><span class="s1">version == </span><span class="s4">0</span><span class="s1">:</span>
+                    <span class="s5"># Netscape spec parts company from reality here</span>
+                    <span class="s1">path = path[:i]</span>
+                <span class="s2">else</span><span class="s1">:</span>
+                    <span class="s1">path = path[:i+</span><span class="s4">1</span><span class="s1">]</span>
+            <span class="s2">if </span><span class="s1">len(path) == </span><span class="s4">0</span><span class="s1">: path = </span><span class="s3">&quot;/&quot;</span>
+
+        <span class="s5"># set default domain</span>
+        <span class="s1">domain_specified = domain </span><span class="s2">is not </span><span class="s1">Absent</span>
+        <span class="s5"># but first we have to remember whether it starts with a dot</span>
+        <span class="s1">domain_initial_dot = </span><span class="s2">False</span>
+        <span class="s2">if </span><span class="s1">domain_specified:</span>
+            <span class="s1">domain_initial_dot = bool(domain.startswith(</span><span class="s3">&quot;.&quot;</span><span class="s1">))</span>
+        <span class="s2">if </span><span class="s1">domain </span><span class="s2">is </span><span class="s1">Absent:</span>
+            <span class="s1">req_host</span><span class="s2">, </span><span class="s1">erhn = eff_request_host(request)</span>
+            <span class="s1">domain = erhn</span>
+        <span class="s2">elif not </span><span class="s1">domain.startswith(</span><span class="s3">&quot;.&quot;</span><span class="s1">):</span>
+            <span class="s1">domain = </span><span class="s3">&quot;.&quot;</span><span class="s1">+domain</span>
+
+        <span class="s5"># set default port</span>
+        <span class="s1">port_specified = </span><span class="s2">False</span>
+        <span class="s2">if </span><span class="s1">port </span><span class="s2">is not </span><span class="s1">Absent:</span>
+            <span class="s2">if </span><span class="s1">port </span><span class="s2">is None</span><span class="s1">:</span>
+                <span class="s5"># Port attr present, but has no value: default to request port.</span>
+                <span class="s5"># Cookie should then only be sent back on that port.</span>
+                <span class="s1">port = request_port(request)</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s1">port_specified = </span><span class="s2">True</span>
+                <span class="s1">port = re.sub(</span><span class="s3">r&quot;\s+&quot;</span><span class="s2">, </span><span class="s3">&quot;&quot;</span><span class="s2">, </span><span class="s1">port)</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s5"># No port attr present.  Cookie can be sent back on any port.</span>
+            <span class="s1">port = </span><span class="s2">None</span>
+
+        <span class="s5"># set default expires and discard</span>
+        <span class="s2">if </span><span class="s1">expires </span><span class="s2">is </span><span class="s1">Absent:</span>
+            <span class="s1">expires = </span><span class="s2">None</span>
+            <span class="s1">discard = </span><span class="s2">True</span>
+        <span class="s2">elif </span><span class="s1">expires &lt;= self._now:</span>
+            <span class="s5"># Expiry date in past is request to delete cookie.  This can't be</span>
+            <span class="s5"># in DefaultCookiePolicy, because can't delete cookies there.</span>
+            <span class="s2">try</span><span class="s1">:</span>
+                <span class="s1">self.clear(domain</span><span class="s2">, </span><span class="s1">path</span><span class="s2">, </span><span class="s1">name)</span>
+            <span class="s2">except </span><span class="s1">KeyError:</span>
+                <span class="s2">pass</span>
+            <span class="s1">_debug(</span><span class="s3">&quot;Expiring cookie, domain='%s', path='%s', name='%s'&quot;</span><span class="s2">,</span>
+                   <span class="s1">domain</span><span class="s2">, </span><span class="s1">path</span><span class="s2">, </span><span class="s1">name)</span>
+            <span class="s2">return None</span>
+
+        <span class="s2">return </span><span class="s1">Cookie(version</span><span class="s2">,</span>
+                      <span class="s1">name</span><span class="s2">, </span><span class="s1">value</span><span class="s2">,</span>
+                      <span class="s1">port</span><span class="s2">, </span><span class="s1">port_specified</span><span class="s2">,</span>
+                      <span class="s1">domain</span><span class="s2">, </span><span class="s1">domain_specified</span><span class="s2">, </span><span class="s1">domain_initial_dot</span><span class="s2">,</span>
+                      <span class="s1">path</span><span class="s2">, </span><span class="s1">path_specified</span><span class="s2">,</span>
+                      <span class="s1">secure</span><span class="s2">,</span>
+                      <span class="s1">expires</span><span class="s2">,</span>
+                      <span class="s1">discard</span><span class="s2">,</span>
+                      <span class="s1">comment</span><span class="s2">,</span>
+                      <span class="s1">comment_url</span><span class="s2">,</span>
+                      <span class="s1">rest)</span>
+
+    <span class="s2">def </span><span class="s1">_cookies_from_attrs_set(self</span><span class="s2">, </span><span class="s1">attrs_set</span><span class="s2">, </span><span class="s1">request):</span>
+        <span class="s1">cookie_tuples = self._normalized_cookie_tuples(attrs_set)</span>
+
+        <span class="s1">cookies = []</span>
+        <span class="s2">for </span><span class="s1">tup </span><span class="s2">in </span><span class="s1">cookie_tuples:</span>
+            <span class="s1">cookie = self._cookie_from_cookie_tuple(tup</span><span class="s2">, </span><span class="s1">request)</span>
+            <span class="s2">if </span><span class="s1">cookie: cookies.append(cookie)</span>
+        <span class="s2">return </span><span class="s1">cookies</span>
+
+    <span class="s2">def </span><span class="s1">_process_rfc2109_cookies(self</span><span class="s2">, </span><span class="s1">cookies):</span>
+        <span class="s1">rfc2109_as_ns = getattr(self._policy</span><span class="s2">, </span><span class="s3">'rfc2109_as_netscape'</span><span class="s2">, None</span><span class="s1">)</span>
+        <span class="s2">if </span><span class="s1">rfc2109_as_ns </span><span class="s2">is None</span><span class="s1">:</span>
+            <span class="s1">rfc2109_as_ns = </span><span class="s2">not </span><span class="s1">self._policy.rfc2965</span>
+        <span class="s2">for </span><span class="s1">cookie </span><span class="s2">in </span><span class="s1">cookies:</span>
+            <span class="s2">if </span><span class="s1">cookie.version == </span><span class="s4">1</span><span class="s1">:</span>
+                <span class="s1">cookie.rfc2109 = </span><span class="s2">True</span>
+                <span class="s2">if </span><span class="s1">rfc2109_as_ns:</span>
+                    <span class="s5"># treat 2109 cookies as Netscape cookies rather than</span>
+                    <span class="s5"># as RFC2965 cookies</span>
+                    <span class="s1">cookie.version = </span><span class="s4">0</span>
+
+    <span class="s2">def </span><span class="s1">make_cookies(self</span><span class="s2">, </span><span class="s1">response</span><span class="s2">, </span><span class="s1">request):</span>
+        <span class="s0">&quot;&quot;&quot;Return sequence of Cookie objects extracted from response object.&quot;&quot;&quot;</span>
+        <span class="s5"># get cookie-attributes for RFC 2965 and Netscape protocols</span>
+        <span class="s1">headers = response.info()</span>
+        <span class="s1">rfc2965_hdrs = headers.get_all(</span><span class="s3">&quot;Set-Cookie2&quot;</span><span class="s2">, </span><span class="s1">[])</span>
+        <span class="s1">ns_hdrs = headers.get_all(</span><span class="s3">&quot;Set-Cookie&quot;</span><span class="s2">, </span><span class="s1">[])</span>
+
+        <span class="s1">rfc2965 = self._policy.rfc2965</span>
+        <span class="s1">netscape = self._policy.netscape</span>
+
+        <span class="s2">if </span><span class="s1">((</span><span class="s2">not </span><span class="s1">rfc2965_hdrs </span><span class="s2">and not </span><span class="s1">ns_hdrs) </span><span class="s2">or</span>
+            <span class="s1">(</span><span class="s2">not </span><span class="s1">ns_hdrs </span><span class="s2">and not </span><span class="s1">rfc2965) </span><span class="s2">or</span>
+            <span class="s1">(</span><span class="s2">not </span><span class="s1">rfc2965_hdrs </span><span class="s2">and not </span><span class="s1">netscape) </span><span class="s2">or</span>
+            <span class="s1">(</span><span class="s2">not </span><span class="s1">netscape </span><span class="s2">and not </span><span class="s1">rfc2965)):</span>
+            <span class="s2">return </span><span class="s1">[]  </span><span class="s5"># no relevant cookie headers: quick exit</span>
+
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s1">cookies = self._cookies_from_attrs_set(</span>
+                <span class="s1">split_header_words(rfc2965_hdrs)</span><span class="s2">, </span><span class="s1">request)</span>
+        <span class="s2">except </span><span class="s1">Exception:</span>
+            <span class="s1">_warn_unhandled_exception()</span>
+            <span class="s1">cookies = []</span>
+
+        <span class="s2">if </span><span class="s1">ns_hdrs </span><span class="s2">and </span><span class="s1">netscape:</span>
+            <span class="s2">try</span><span class="s1">:</span>
+                <span class="s5"># RFC 2109 and Netscape cookies</span>
+                <span class="s1">ns_cookies = self._cookies_from_attrs_set(</span>
+                    <span class="s1">parse_ns_headers(ns_hdrs)</span><span class="s2">, </span><span class="s1">request)</span>
+            <span class="s2">except </span><span class="s1">Exception:</span>
+                <span class="s1">_warn_unhandled_exception()</span>
+                <span class="s1">ns_cookies = []</span>
+            <span class="s1">self._process_rfc2109_cookies(ns_cookies)</span>
+
+            <span class="s5"># Look for Netscape cookies (from Set-Cookie headers) that match</span>
+            <span class="s5"># corresponding RFC 2965 cookies (from Set-Cookie2 headers).</span>
+            <span class="s5"># For each match, keep the RFC 2965 cookie and ignore the Netscape</span>
+            <span class="s5"># cookie (RFC 2965 section 9.1).  Actually, RFC 2109 cookies are</span>
+            <span class="s5"># bundled in with the Netscape cookies for this purpose, which is</span>
+            <span class="s5"># reasonable behaviour.</span>
+            <span class="s2">if </span><span class="s1">rfc2965:</span>
+                <span class="s1">lookup = {}</span>
+                <span class="s2">for </span><span class="s1">cookie </span><span class="s2">in </span><span class="s1">cookies:</span>
+                    <span class="s1">lookup[(cookie.domain</span><span class="s2">, </span><span class="s1">cookie.path</span><span class="s2">, </span><span class="s1">cookie.name)] = </span><span class="s2">None</span>
+
+                <span class="s2">def </span><span class="s1">no_matching_rfc2965(ns_cookie</span><span class="s2">, </span><span class="s1">lookup=lookup):</span>
+                    <span class="s1">key = ns_cookie.domain</span><span class="s2">, </span><span class="s1">ns_cookie.path</span><span class="s2">, </span><span class="s1">ns_cookie.name</span>
+                    <span class="s2">return </span><span class="s1">key </span><span class="s2">not in </span><span class="s1">lookup</span>
+                <span class="s1">ns_cookies = filter(no_matching_rfc2965</span><span class="s2">, </span><span class="s1">ns_cookies)</span>
+
+            <span class="s2">if </span><span class="s1">ns_cookies:</span>
+                <span class="s1">cookies.extend(ns_cookies)</span>
+
+        <span class="s2">return </span><span class="s1">cookies</span>
+
+    <span class="s2">def </span><span class="s1">set_cookie_if_ok(self</span><span class="s2">, </span><span class="s1">cookie</span><span class="s2">, </span><span class="s1">request):</span>
+        <span class="s0">&quot;&quot;&quot;Set a cookie if policy says it's OK to do so.&quot;&quot;&quot;</span>
+        <span class="s1">self._cookies_lock.acquire()</span>
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s1">self._policy._now = self._now = int(time.time())</span>
+
+            <span class="s2">if </span><span class="s1">self._policy.set_ok(cookie</span><span class="s2">, </span><span class="s1">request):</span>
+                <span class="s1">self.set_cookie(cookie)</span>
+
+
+        <span class="s2">finally</span><span class="s1">:</span>
+            <span class="s1">self._cookies_lock.release()</span>
+
+    <span class="s2">def </span><span class="s1">set_cookie(self</span><span class="s2">, </span><span class="s1">cookie):</span>
+        <span class="s0">&quot;&quot;&quot;Set a cookie, without checking whether or not it should be set.&quot;&quot;&quot;</span>
+        <span class="s1">c = self._cookies</span>
+        <span class="s1">self._cookies_lock.acquire()</span>
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s2">if </span><span class="s1">cookie.domain </span><span class="s2">not in </span><span class="s1">c: c[cookie.domain] = {}</span>
+            <span class="s1">c2 = c[cookie.domain]</span>
+            <span class="s2">if </span><span class="s1">cookie.path </span><span class="s2">not in </span><span class="s1">c2: c2[cookie.path] = {}</span>
+            <span class="s1">c3 = c2[cookie.path]</span>
+            <span class="s1">c3[cookie.name] = cookie</span>
+        <span class="s2">finally</span><span class="s1">:</span>
+            <span class="s1">self._cookies_lock.release()</span>
+
+    <span class="s2">def </span><span class="s1">extract_cookies(self</span><span class="s2">, </span><span class="s1">response</span><span class="s2">, </span><span class="s1">request):</span>
+        <span class="s0">&quot;&quot;&quot;Extract cookies from response, where allowable given the request.&quot;&quot;&quot;</span>
+        <span class="s1">_debug(</span><span class="s3">&quot;extract_cookies: %s&quot;</span><span class="s2">, </span><span class="s1">response.info())</span>
+        <span class="s1">self._cookies_lock.acquire()</span>
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s1">self._policy._now = self._now = int(time.time())</span>
+
+            <span class="s2">for </span><span class="s1">cookie </span><span class="s2">in </span><span class="s1">self.make_cookies(response</span><span class="s2">, </span><span class="s1">request):</span>
+                <span class="s2">if </span><span class="s1">self._policy.set_ok(cookie</span><span class="s2">, </span><span class="s1">request):</span>
+                    <span class="s1">_debug(</span><span class="s3">&quot; setting cookie: %s&quot;</span><span class="s2">, </span><span class="s1">cookie)</span>
+                    <span class="s1">self.set_cookie(cookie)</span>
+        <span class="s2">finally</span><span class="s1">:</span>
+            <span class="s1">self._cookies_lock.release()</span>
+
+    <span class="s2">def </span><span class="s1">clear(self</span><span class="s2">, </span><span class="s1">domain=</span><span class="s2">None, </span><span class="s1">path=</span><span class="s2">None, </span><span class="s1">name=</span><span class="s2">None</span><span class="s1">):</span>
+        <span class="s0">&quot;&quot;&quot;Clear some cookies. 
+ 
+        Invoking this method without arguments will clear all cookies.  If 
+        given a single argument, only cookies belonging to that domain will be 
+        removed.  If given two arguments, cookies belonging to the specified 
+        path within that domain are removed.  If given three arguments, then 
+        the cookie with the specified name, path and domain is removed. 
+ 
+        Raises KeyError if no matching cookie exists. 
+ 
+        &quot;&quot;&quot;</span>
+        <span class="s2">if </span><span class="s1">name </span><span class="s2">is not None</span><span class="s1">:</span>
+            <span class="s2">if </span><span class="s1">(domain </span><span class="s2">is None</span><span class="s1">) </span><span class="s2">or </span><span class="s1">(path </span><span class="s2">is None</span><span class="s1">):</span>
+                <span class="s2">raise </span><span class="s1">ValueError(</span>
+                    <span class="s3">&quot;domain and path must be given to remove a cookie by name&quot;</span><span class="s1">)</span>
+            <span class="s2">del </span><span class="s1">self._cookies[domain][path][name]</span>
+        <span class="s2">elif </span><span class="s1">path </span><span class="s2">is not None</span><span class="s1">:</span>
+            <span class="s2">if </span><span class="s1">domain </span><span class="s2">is None</span><span class="s1">:</span>
+                <span class="s2">raise </span><span class="s1">ValueError(</span>
+                    <span class="s3">&quot;domain must be given to remove cookies by path&quot;</span><span class="s1">)</span>
+            <span class="s2">del </span><span class="s1">self._cookies[domain][path]</span>
+        <span class="s2">elif </span><span class="s1">domain </span><span class="s2">is not None</span><span class="s1">:</span>
+            <span class="s2">del </span><span class="s1">self._cookies[domain]</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">self._cookies = {}</span>
+
+    <span class="s2">def </span><span class="s1">clear_session_cookies(self):</span>
+        <span class="s0">&quot;&quot;&quot;Discard all session cookies. 
+ 
+        Note that the .save() method won't save session cookies anyway, unless 
+        you ask otherwise by passing a true ignore_discard argument. 
+ 
+        &quot;&quot;&quot;</span>
+        <span class="s1">self._cookies_lock.acquire()</span>
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s2">for </span><span class="s1">cookie </span><span class="s2">in </span><span class="s1">self:</span>
+                <span class="s2">if </span><span class="s1">cookie.discard:</span>
+                    <span class="s1">self.clear(cookie.domain</span><span class="s2">, </span><span class="s1">cookie.path</span><span class="s2">, </span><span class="s1">cookie.name)</span>
+        <span class="s2">finally</span><span class="s1">:</span>
+            <span class="s1">self._cookies_lock.release()</span>
+
+    <span class="s2">def </span><span class="s1">clear_expired_cookies(self):</span>
+        <span class="s0">&quot;&quot;&quot;Discard all expired cookies. 
+ 
+        You probably don't need to call this method: expired cookies are never 
+        sent back to the server (provided you're using DefaultCookiePolicy), 
+        this method is called by CookieJar itself every so often, and the 
+        .save() method won't save expired cookies anyway (unless you ask 
+        otherwise by passing a true ignore_expires argument). 
+ 
+        &quot;&quot;&quot;</span>
+        <span class="s1">self._cookies_lock.acquire()</span>
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s1">now = time.time()</span>
+            <span class="s2">for </span><span class="s1">cookie </span><span class="s2">in </span><span class="s1">self:</span>
+                <span class="s2">if </span><span class="s1">cookie.is_expired(now):</span>
+                    <span class="s1">self.clear(cookie.domain</span><span class="s2">, </span><span class="s1">cookie.path</span><span class="s2">, </span><span class="s1">cookie.name)</span>
+        <span class="s2">finally</span><span class="s1">:</span>
+            <span class="s1">self._cookies_lock.release()</span>
+
+    <span class="s2">def </span><span class="s1">__iter__(self):</span>
+        <span class="s2">return </span><span class="s1">deepvalues(self._cookies)</span>
+
+    <span class="s2">def </span><span class="s1">__len__(self):</span>
+        <span class="s0">&quot;&quot;&quot;Return number of contained cookies.&quot;&quot;&quot;</span>
+        <span class="s1">i = </span><span class="s4">0</span>
+        <span class="s2">for </span><span class="s1">cookie </span><span class="s2">in </span><span class="s1">self: i = i + </span><span class="s4">1</span>
+        <span class="s2">return </span><span class="s1">i</span>
+
+    <span class="s1">@as_native_str()</span>
+    <span class="s2">def </span><span class="s1">__repr__(self):</span>
+        <span class="s1">r = []</span>
+        <span class="s2">for </span><span class="s1">cookie </span><span class="s2">in </span><span class="s1">self: r.append(repr(cookie))</span>
+        <span class="s2">return </span><span class="s3">&quot;&lt;%s[%s]&gt;&quot; </span><span class="s1">% (self.__class__</span><span class="s2">, </span><span class="s3">&quot;, &quot;</span><span class="s1">.join(r))</span>
+
+    <span class="s2">def </span><span class="s1">__str__(self):</span>
+        <span class="s1">r = []</span>
+        <span class="s2">for </span><span class="s1">cookie </span><span class="s2">in </span><span class="s1">self: r.append(str(cookie))</span>
+        <span class="s2">return </span><span class="s3">&quot;&lt;%s[%s]&gt;&quot; </span><span class="s1">% (self.__class__</span><span class="s2">, </span><span class="s3">&quot;, &quot;</span><span class="s1">.join(r))</span>
+
+
+<span class="s5"># derives from IOError for backwards-compatibility with Python 2.4.0</span>
+<span class="s2">class </span><span class="s1">LoadError(IOError): </span><span class="s2">pass</span>
+
+<span class="s2">class </span><span class="s1">FileCookieJar(CookieJar):</span>
+    <span class="s0">&quot;&quot;&quot;CookieJar that can be loaded from and saved to a file.&quot;&quot;&quot;</span>
+
+    <span class="s2">def </span><span class="s1">__init__(self</span><span class="s2">, </span><span class="s1">filename=</span><span class="s2">None, </span><span class="s1">delayload=</span><span class="s2">False, </span><span class="s1">policy=</span><span class="s2">None</span><span class="s1">):</span>
+        <span class="s0">&quot;&quot;&quot; 
+        Cookies are NOT loaded from the named file until either the .load() or 
+        .revert() method is called. 
+ 
+        &quot;&quot;&quot;</span>
+        <span class="s1">CookieJar.__init__(self</span><span class="s2">, </span><span class="s1">policy)</span>
+        <span class="s2">if </span><span class="s1">filename </span><span class="s2">is not None</span><span class="s1">:</span>
+            <span class="s2">try</span><span class="s1">:</span>
+                <span class="s1">filename+</span><span class="s3">&quot;&quot;</span>
+            <span class="s2">except</span><span class="s1">:</span>
+                <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s3">&quot;filename must be string-like&quot;</span><span class="s1">)</span>
+        <span class="s1">self.filename = filename</span>
+        <span class="s1">self.delayload = bool(delayload)</span>
+
+    <span class="s2">def </span><span class="s1">save(self</span><span class="s2">, </span><span class="s1">filename=</span><span class="s2">None, </span><span class="s1">ignore_discard=</span><span class="s2">False, </span><span class="s1">ignore_expires=</span><span class="s2">False</span><span class="s1">):</span>
+        <span class="s0">&quot;&quot;&quot;Save cookies to a file.&quot;&quot;&quot;</span>
+        <span class="s2">raise </span><span class="s1">NotImplementedError()</span>
+
+    <span class="s2">def </span><span class="s1">load(self</span><span class="s2">, </span><span class="s1">filename=</span><span class="s2">None, </span><span class="s1">ignore_discard=</span><span class="s2">False, </span><span class="s1">ignore_expires=</span><span class="s2">False</span><span class="s1">):</span>
+        <span class="s0">&quot;&quot;&quot;Load cookies from a file.&quot;&quot;&quot;</span>
+        <span class="s2">if </span><span class="s1">filename </span><span class="s2">is None</span><span class="s1">:</span>
+            <span class="s2">if </span><span class="s1">self.filename </span><span class="s2">is not None</span><span class="s1">: filename = self.filename</span>
+            <span class="s2">else</span><span class="s1">: </span><span class="s2">raise </span><span class="s1">ValueError(MISSING_FILENAME_TEXT)</span>
+
+        <span class="s1">f = open(filename)</span>
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s1">self._really_load(f</span><span class="s2">, </span><span class="s1">filename</span><span class="s2">, </span><span class="s1">ignore_discard</span><span class="s2">, </span><span class="s1">ignore_expires)</span>
+        <span class="s2">finally</span><span class="s1">:</span>
+            <span class="s1">f.close()</span>
+
+    <span class="s2">def </span><span class="s1">revert(self</span><span class="s2">, </span><span class="s1">filename=</span><span class="s2">None,</span>
+               <span class="s1">ignore_discard=</span><span class="s2">False, </span><span class="s1">ignore_expires=</span><span class="s2">False</span><span class="s1">):</span>
+        <span class="s0">&quot;&quot;&quot;Clear all cookies and reload cookies from a saved file. 
+ 
+        Raises LoadError (or IOError) if reversion is not successful; the 
+        object's state will not be altered if this happens. 
+ 
+        &quot;&quot;&quot;</span>
+        <span class="s2">if </span><span class="s1">filename </span><span class="s2">is None</span><span class="s1">:</span>
+            <span class="s2">if </span><span class="s1">self.filename </span><span class="s2">is not None</span><span class="s1">: filename = self.filename</span>
+            <span class="s2">else</span><span class="s1">: </span><span class="s2">raise </span><span class="s1">ValueError(MISSING_FILENAME_TEXT)</span>
+
+        <span class="s1">self._cookies_lock.acquire()</span>
+        <span class="s2">try</span><span class="s1">:</span>
+
+            <span class="s1">old_state = copy.deepcopy(self._cookies)</span>
+            <span class="s1">self._cookies = {}</span>
+            <span class="s2">try</span><span class="s1">:</span>
+                <span class="s1">self.load(filename</span><span class="s2">, </span><span class="s1">ignore_discard</span><span class="s2">, </span><span class="s1">ignore_expires)</span>
+            <span class="s2">except </span><span class="s1">(LoadError</span><span class="s2">, </span><span class="s1">IOError):</span>
+                <span class="s1">self._cookies = old_state</span>
+                <span class="s2">raise</span>
+
+        <span class="s2">finally</span><span class="s1">:</span>
+            <span class="s1">self._cookies_lock.release()</span>
+
+
+<span class="s2">def </span><span class="s1">lwp_cookie_str(cookie):</span>
+    <span class="s0">&quot;&quot;&quot;Return string representation of Cookie in an the LWP cookie file format. 
+ 
+    Actually, the format is extended a bit -- see module docstring. 
+ 
+    &quot;&quot;&quot;</span>
+    <span class="s1">h = [(cookie.name</span><span class="s2">, </span><span class="s1">cookie.value)</span><span class="s2">,</span>
+         <span class="s1">(</span><span class="s3">&quot;path&quot;</span><span class="s2">, </span><span class="s1">cookie.path)</span><span class="s2">,</span>
+         <span class="s1">(</span><span class="s3">&quot;domain&quot;</span><span class="s2">, </span><span class="s1">cookie.domain)]</span>
+    <span class="s2">if </span><span class="s1">cookie.port </span><span class="s2">is not None</span><span class="s1">: h.append((</span><span class="s3">&quot;port&quot;</span><span class="s2">, </span><span class="s1">cookie.port))</span>
+    <span class="s2">if </span><span class="s1">cookie.path_specified: h.append((</span><span class="s3">&quot;path_spec&quot;</span><span class="s2">, None</span><span class="s1">))</span>
+    <span class="s2">if </span><span class="s1">cookie.port_specified: h.append((</span><span class="s3">&quot;port_spec&quot;</span><span class="s2">, None</span><span class="s1">))</span>
+    <span class="s2">if </span><span class="s1">cookie.domain_initial_dot: h.append((</span><span class="s3">&quot;domain_dot&quot;</span><span class="s2">, None</span><span class="s1">))</span>
+    <span class="s2">if </span><span class="s1">cookie.secure: h.append((</span><span class="s3">&quot;secure&quot;</span><span class="s2">, None</span><span class="s1">))</span>
+    <span class="s2">if </span><span class="s1">cookie.expires: h.append((</span><span class="s3">&quot;expires&quot;</span><span class="s2">,</span>
+                               <span class="s1">time2isoz(float(cookie.expires))))</span>
+    <span class="s2">if </span><span class="s1">cookie.discard: h.append((</span><span class="s3">&quot;discard&quot;</span><span class="s2">, None</span><span class="s1">))</span>
+    <span class="s2">if </span><span class="s1">cookie.comment: h.append((</span><span class="s3">&quot;comment&quot;</span><span class="s2">, </span><span class="s1">cookie.comment))</span>
+    <span class="s2">if </span><span class="s1">cookie.comment_url: h.append((</span><span class="s3">&quot;commenturl&quot;</span><span class="s2">, </span><span class="s1">cookie.comment_url))</span>
+
+    <span class="s1">keys = sorted(cookie._rest.keys())</span>
+    <span class="s2">for </span><span class="s1">k </span><span class="s2">in </span><span class="s1">keys:</span>
+        <span class="s1">h.append((k</span><span class="s2">, </span><span class="s1">str(cookie._rest[k])))</span>
+
+    <span class="s1">h.append((</span><span class="s3">&quot;version&quot;</span><span class="s2">, </span><span class="s1">str(cookie.version)))</span>
+
+    <span class="s2">return </span><span class="s1">join_header_words([h])</span>
+
+<span class="s2">class </span><span class="s1">LWPCookieJar(FileCookieJar):</span>
+    <span class="s0">&quot;&quot;&quot; 
+    The LWPCookieJar saves a sequence of &quot;Set-Cookie3&quot; lines. 
+    &quot;Set-Cookie3&quot; is the format used by the libwww-perl libary, not known 
+    to be compatible with any browser, but which is easy to read and 
+    doesn't lose information about RFC 2965 cookies. 
+ 
+    Additional methods 
+ 
+    as_lwp_str(ignore_discard=True, ignore_expired=True) 
+ 
+    &quot;&quot;&quot;</span>
+
+    <span class="s2">def </span><span class="s1">as_lwp_str(self</span><span class="s2">, </span><span class="s1">ignore_discard=</span><span class="s2">True, </span><span class="s1">ignore_expires=</span><span class="s2">True</span><span class="s1">):</span>
+        <span class="s0">&quot;&quot;&quot;Return cookies as a string of &quot;\\n&quot;-separated &quot;Set-Cookie3&quot; headers. 
+ 
+        ignore_discard and ignore_expires: see docstring for FileCookieJar.save 
+ 
+        &quot;&quot;&quot;</span>
+        <span class="s1">now = time.time()</span>
+        <span class="s1">r = []</span>
+        <span class="s2">for </span><span class="s1">cookie </span><span class="s2">in </span><span class="s1">self:</span>
+            <span class="s2">if not </span><span class="s1">ignore_discard </span><span class="s2">and </span><span class="s1">cookie.discard:</span>
+                <span class="s2">continue</span>
+            <span class="s2">if not </span><span class="s1">ignore_expires </span><span class="s2">and </span><span class="s1">cookie.is_expired(now):</span>
+                <span class="s2">continue</span>
+            <span class="s1">r.append(</span><span class="s3">&quot;Set-Cookie3: %s&quot; </span><span class="s1">% lwp_cookie_str(cookie))</span>
+        <span class="s2">return </span><span class="s3">&quot;</span><span class="s2">\n</span><span class="s3">&quot;</span><span class="s1">.join(r+[</span><span class="s3">&quot;&quot;</span><span class="s1">])</span>
+
+    <span class="s2">def </span><span class="s1">save(self</span><span class="s2">, </span><span class="s1">filename=</span><span class="s2">None, </span><span class="s1">ignore_discard=</span><span class="s2">False, </span><span class="s1">ignore_expires=</span><span class="s2">False</span><span class="s1">):</span>
+        <span class="s2">if </span><span class="s1">filename </span><span class="s2">is None</span><span class="s1">:</span>
+            <span class="s2">if </span><span class="s1">self.filename </span><span class="s2">is not None</span><span class="s1">: filename = self.filename</span>
+            <span class="s2">else</span><span class="s1">: </span><span class="s2">raise </span><span class="s1">ValueError(MISSING_FILENAME_TEXT)</span>
+
+        <span class="s1">f = open(filename</span><span class="s2">, </span><span class="s3">&quot;w&quot;</span><span class="s1">)</span>
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s5"># There really isn't an LWP Cookies 2.0 format, but this indicates</span>
+            <span class="s5"># that there is extra information in here (domain_dot and</span>
+            <span class="s5"># port_spec) while still being compatible with libwww-perl, I hope.</span>
+            <span class="s1">f.write(</span><span class="s3">&quot;#LWP-Cookies-2.0</span><span class="s2">\n</span><span class="s3">&quot;</span><span class="s1">)</span>
+            <span class="s1">f.write(self.as_lwp_str(ignore_discard</span><span class="s2">, </span><span class="s1">ignore_expires))</span>
+        <span class="s2">finally</span><span class="s1">:</span>
+            <span class="s1">f.close()</span>
+
+    <span class="s2">def </span><span class="s1">_really_load(self</span><span class="s2">, </span><span class="s1">f</span><span class="s2">, </span><span class="s1">filename</span><span class="s2">, </span><span class="s1">ignore_discard</span><span class="s2">, </span><span class="s1">ignore_expires):</span>
+        <span class="s1">magic = f.readline()</span>
+        <span class="s2">if not </span><span class="s1">self.magic_re.search(magic):</span>
+            <span class="s1">msg = (</span><span class="s3">&quot;%r does not look like a Set-Cookie3 (LWP) format &quot;</span>
+                   <span class="s3">&quot;file&quot; </span><span class="s1">% filename)</span>
+            <span class="s2">raise </span><span class="s1">LoadError(msg)</span>
+
+        <span class="s1">now = time.time()</span>
+
+        <span class="s1">header = </span><span class="s3">&quot;Set-Cookie3:&quot;</span>
+        <span class="s1">boolean_attrs = (</span><span class="s3">&quot;port_spec&quot;</span><span class="s2">, </span><span class="s3">&quot;path_spec&quot;</span><span class="s2">, </span><span class="s3">&quot;domain_dot&quot;</span><span class="s2">,</span>
+                         <span class="s3">&quot;secure&quot;</span><span class="s2">, </span><span class="s3">&quot;discard&quot;</span><span class="s1">)</span>
+        <span class="s1">value_attrs = (</span><span class="s3">&quot;version&quot;</span><span class="s2">,</span>
+                       <span class="s3">&quot;port&quot;</span><span class="s2">, </span><span class="s3">&quot;path&quot;</span><span class="s2">, </span><span class="s3">&quot;domain&quot;</span><span class="s2">,</span>
+                       <span class="s3">&quot;expires&quot;</span><span class="s2">,</span>
+                       <span class="s3">&quot;comment&quot;</span><span class="s2">, </span><span class="s3">&quot;commenturl&quot;</span><span class="s1">)</span>
+
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s2">while </span><span class="s4">1</span><span class="s1">:</span>
+                <span class="s1">line = f.readline()</span>
+                <span class="s2">if </span><span class="s1">line == </span><span class="s3">&quot;&quot;</span><span class="s1">: </span><span class="s2">break</span>
+                <span class="s2">if not </span><span class="s1">line.startswith(header):</span>
+                    <span class="s2">continue</span>
+                <span class="s1">line = line[len(header):].strip()</span>
+
+                <span class="s2">for </span><span class="s1">data </span><span class="s2">in </span><span class="s1">split_header_words([line]):</span>
+                    <span class="s1">name</span><span class="s2">, </span><span class="s1">value = data[</span><span class="s4">0</span><span class="s1">]</span>
+                    <span class="s1">standard = {}</span>
+                    <span class="s1">rest = {}</span>
+                    <span class="s2">for </span><span class="s1">k </span><span class="s2">in </span><span class="s1">boolean_attrs:</span>
+                        <span class="s1">standard[k] = </span><span class="s2">False</span>
+                    <span class="s2">for </span><span class="s1">k</span><span class="s2">, </span><span class="s1">v </span><span class="s2">in </span><span class="s1">data[</span><span class="s4">1</span><span class="s1">:]:</span>
+                        <span class="s2">if </span><span class="s1">k </span><span class="s2">is not None</span><span class="s1">:</span>
+                            <span class="s1">lc = k.lower()</span>
+                        <span class="s2">else</span><span class="s1">:</span>
+                            <span class="s1">lc = </span><span class="s2">None</span>
+                        <span class="s5"># don't lose case distinction for unknown fields</span>
+                        <span class="s2">if </span><span class="s1">(lc </span><span class="s2">in </span><span class="s1">value_attrs) </span><span class="s2">or </span><span class="s1">(lc </span><span class="s2">in </span><span class="s1">boolean_attrs):</span>
+                            <span class="s1">k = lc</span>
+                        <span class="s2">if </span><span class="s1">k </span><span class="s2">in </span><span class="s1">boolean_attrs:</span>
+                            <span class="s2">if </span><span class="s1">v </span><span class="s2">is None</span><span class="s1">: v = </span><span class="s2">True</span>
+                            <span class="s1">standard[k] = v</span>
+                        <span class="s2">elif </span><span class="s1">k </span><span class="s2">in </span><span class="s1">value_attrs:</span>
+                            <span class="s1">standard[k] = v</span>
+                        <span class="s2">else</span><span class="s1">:</span>
+                            <span class="s1">rest[k] = v</span>
+
+                    <span class="s1">h = standard.get</span>
+                    <span class="s1">expires = h(</span><span class="s3">&quot;expires&quot;</span><span class="s1">)</span>
+                    <span class="s1">discard = h(</span><span class="s3">&quot;discard&quot;</span><span class="s1">)</span>
+                    <span class="s2">if </span><span class="s1">expires </span><span class="s2">is not None</span><span class="s1">:</span>
+                        <span class="s1">expires = iso2time(expires)</span>
+                    <span class="s2">if </span><span class="s1">expires </span><span class="s2">is None</span><span class="s1">:</span>
+                        <span class="s1">discard = </span><span class="s2">True</span>
+                    <span class="s1">domain = h(</span><span class="s3">&quot;domain&quot;</span><span class="s1">)</span>
+                    <span class="s1">domain_specified = domain.startswith(</span><span class="s3">&quot;.&quot;</span><span class="s1">)</span>
+                    <span class="s1">c = Cookie(h(</span><span class="s3">&quot;version&quot;</span><span class="s1">)</span><span class="s2">, </span><span class="s1">name</span><span class="s2">, </span><span class="s1">value</span><span class="s2">,</span>
+                               <span class="s1">h(</span><span class="s3">&quot;port&quot;</span><span class="s1">)</span><span class="s2">, </span><span class="s1">h(</span><span class="s3">&quot;port_spec&quot;</span><span class="s1">)</span><span class="s2">,</span>
+                               <span class="s1">domain</span><span class="s2">, </span><span class="s1">domain_specified</span><span class="s2">, </span><span class="s1">h(</span><span class="s3">&quot;domain_dot&quot;</span><span class="s1">)</span><span class="s2">,</span>
+                               <span class="s1">h(</span><span class="s3">&quot;path&quot;</span><span class="s1">)</span><span class="s2">, </span><span class="s1">h(</span><span class="s3">&quot;path_spec&quot;</span><span class="s1">)</span><span class="s2">,</span>
+                               <span class="s1">h(</span><span class="s3">&quot;secure&quot;</span><span class="s1">)</span><span class="s2">,</span>
+                               <span class="s1">expires</span><span class="s2">,</span>
+                               <span class="s1">discard</span><span class="s2">,</span>
+                               <span class="s1">h(</span><span class="s3">&quot;comment&quot;</span><span class="s1">)</span><span class="s2">,</span>
+                               <span class="s1">h(</span><span class="s3">&quot;commenturl&quot;</span><span class="s1">)</span><span class="s2">,</span>
+                               <span class="s1">rest)</span>
+                    <span class="s2">if not </span><span class="s1">ignore_discard </span><span class="s2">and </span><span class="s1">c.discard:</span>
+                        <span class="s2">continue</span>
+                    <span class="s2">if not </span><span class="s1">ignore_expires </span><span class="s2">and </span><span class="s1">c.is_expired(now):</span>
+                        <span class="s2">continue</span>
+                    <span class="s1">self.set_cookie(c)</span>
+
+        <span class="s2">except </span><span class="s1">IOError:</span>
+            <span class="s2">raise</span>
+        <span class="s2">except </span><span class="s1">Exception:</span>
+            <span class="s1">_warn_unhandled_exception()</span>
+            <span class="s2">raise </span><span class="s1">LoadError(</span><span class="s3">&quot;invalid Set-Cookie3 format file %r: %r&quot; </span><span class="s1">%</span>
+                            <span class="s1">(filename</span><span class="s2">, </span><span class="s1">line))</span>
+
+
+<span class="s2">class </span><span class="s1">MozillaCookieJar(FileCookieJar):</span>
+    <span class="s0">&quot;&quot;&quot; 
+ 
+    WARNING: you may want to backup your browser's cookies file if you use 
+    this class to save cookies.  I *think* it works, but there have been 
+    bugs in the past! 
+ 
+    This class differs from CookieJar only in the format it uses to save and 
+    load cookies to and from a file.  This class uses the Mozilla/Netscape 
+    `cookies.txt' format.  lynx uses this file format, too. 
+ 
+    Don't expect cookies saved while the browser is running to be noticed by 
+    the browser (in fact, Mozilla on unix will overwrite your saved cookies if 
+    you change them on disk while it's running; on Windows, you probably can't 
+    save at all while the browser is running). 
+ 
+    Note that the Mozilla/Netscape format will downgrade RFC2965 cookies to 
+    Netscape cookies on saving. 
+ 
+    In particular, the cookie version and port number information is lost, 
+    together with information about whether or not Path, Port and Discard were 
+    specified by the Set-Cookie2 (or Set-Cookie) header, and whether or not the 
+    domain as set in the HTTP header started with a dot (yes, I'm aware some 
+    domains in Netscape files start with a dot and some don't -- trust me, you 
+    really don't want to know any more about this). 
+ 
+    Note that though Mozilla and Netscape use the same format, they use 
+    slightly different headers.  The class saves cookies using the Netscape 
+    header by default (Mozilla can cope with that). 
+ 
+    &quot;&quot;&quot;</span>
+    <span class="s1">magic_re = re.compile(</span><span class="s3">&quot;#( Netscape)? HTTP Cookie File&quot;</span><span class="s1">)</span>
+    <span class="s1">header = </span><span class="s3">&quot;&quot;&quot;</span><span class="s2">\ 
+</span><span class="s3"># Netscape HTTP Cookie File 
+# http://www.netscape.com/newsref/std/cookie_spec.html 
+# This is a generated file!  Do not edit. 
+ 
+&quot;&quot;&quot;</span>
+
+    <span class="s2">def </span><span class="s1">_really_load(self</span><span class="s2">, </span><span class="s1">f</span><span class="s2">, </span><span class="s1">filename</span><span class="s2">, </span><span class="s1">ignore_discard</span><span class="s2">, </span><span class="s1">ignore_expires):</span>
+        <span class="s1">now = time.time()</span>
+
+        <span class="s1">magic = f.readline()</span>
+        <span class="s2">if not </span><span class="s1">self.magic_re.search(magic):</span>
+            <span class="s1">f.close()</span>
+            <span class="s2">raise </span><span class="s1">LoadError(</span>
+                <span class="s3">&quot;%r does not look like a Netscape format cookies file&quot; </span><span class="s1">%</span>
+                <span class="s1">filename)</span>
+
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s2">while </span><span class="s4">1</span><span class="s1">:</span>
+                <span class="s1">line = f.readline()</span>
+                <span class="s2">if </span><span class="s1">line == </span><span class="s3">&quot;&quot;</span><span class="s1">: </span><span class="s2">break</span>
+
+                <span class="s5"># last field may be absent, so keep any trailing tab</span>
+                <span class="s2">if </span><span class="s1">line.endswith(</span><span class="s3">&quot;</span><span class="s2">\n</span><span class="s3">&quot;</span><span class="s1">): line = line[:-</span><span class="s4">1</span><span class="s1">]</span>
+
+                <span class="s5"># skip comments and blank lines XXX what is $ for?</span>
+                <span class="s2">if </span><span class="s1">(line.strip().startswith((</span><span class="s3">&quot;#&quot;</span><span class="s2">, </span><span class="s3">&quot;$&quot;</span><span class="s1">)) </span><span class="s2">or</span>
+                    <span class="s1">line.strip() == </span><span class="s3">&quot;&quot;</span><span class="s1">):</span>
+                    <span class="s2">continue</span>
+
+                <span class="s1">domain</span><span class="s2">, </span><span class="s1">domain_specified</span><span class="s2">, </span><span class="s1">path</span><span class="s2">, </span><span class="s1">secure</span><span class="s2">, </span><span class="s1">expires</span><span class="s2">, </span><span class="s1">name</span><span class="s2">, </span><span class="s1">value = \</span>
+                        <span class="s1">line.split(</span><span class="s3">&quot;</span><span class="s2">\t</span><span class="s3">&quot;</span><span class="s1">)</span>
+                <span class="s1">secure = (secure == </span><span class="s3">&quot;TRUE&quot;</span><span class="s1">)</span>
+                <span class="s1">domain_specified = (domain_specified == </span><span class="s3">&quot;TRUE&quot;</span><span class="s1">)</span>
+                <span class="s2">if </span><span class="s1">name == </span><span class="s3">&quot;&quot;</span><span class="s1">:</span>
+                    <span class="s5"># cookies.txt regards 'Set-Cookie: foo' as a cookie</span>
+                    <span class="s5"># with no name, whereas http.cookiejar regards it as a</span>
+                    <span class="s5"># cookie with no value.</span>
+                    <span class="s1">name = value</span>
+                    <span class="s1">value = </span><span class="s2">None</span>
+
+                <span class="s1">initial_dot = domain.startswith(</span><span class="s3">&quot;.&quot;</span><span class="s1">)</span>
+                <span class="s2">assert </span><span class="s1">domain_specified == initial_dot</span>
+
+                <span class="s1">discard = </span><span class="s2">False</span>
+                <span class="s2">if </span><span class="s1">expires == </span><span class="s3">&quot;&quot;</span><span class="s1">:</span>
+                    <span class="s1">expires = </span><span class="s2">None</span>
+                    <span class="s1">discard = </span><span class="s2">True</span>
+
+                <span class="s5"># assume path_specified is false</span>
+                <span class="s1">c = Cookie(</span><span class="s4">0</span><span class="s2">, </span><span class="s1">name</span><span class="s2">, </span><span class="s1">value</span><span class="s2">,</span>
+                           <span class="s2">None, False,</span>
+                           <span class="s1">domain</span><span class="s2">, </span><span class="s1">domain_specified</span><span class="s2">, </span><span class="s1">initial_dot</span><span class="s2">,</span>
+                           <span class="s1">path</span><span class="s2">, False,</span>
+                           <span class="s1">secure</span><span class="s2">,</span>
+                           <span class="s1">expires</span><span class="s2">,</span>
+                           <span class="s1">discard</span><span class="s2">,</span>
+                           <span class="s2">None,</span>
+                           <span class="s2">None,</span>
+                           <span class="s1">{})</span>
+                <span class="s2">if not </span><span class="s1">ignore_discard </span><span class="s2">and </span><span class="s1">c.discard:</span>
+                    <span class="s2">continue</span>
+                <span class="s2">if not </span><span class="s1">ignore_expires </span><span class="s2">and </span><span class="s1">c.is_expired(now):</span>
+                    <span class="s2">continue</span>
+                <span class="s1">self.set_cookie(c)</span>
+
+        <span class="s2">except </span><span class="s1">IOError:</span>
+            <span class="s2">raise</span>
+        <span class="s2">except </span><span class="s1">Exception:</span>
+            <span class="s1">_warn_unhandled_exception()</span>
+            <span class="s2">raise </span><span class="s1">LoadError(</span><span class="s3">&quot;invalid Netscape format cookies file %r: %r&quot; </span><span class="s1">%</span>
+                            <span class="s1">(filename</span><span class="s2">, </span><span class="s1">line))</span>
+
+    <span class="s2">def </span><span class="s1">save(self</span><span class="s2">, </span><span class="s1">filename=</span><span class="s2">None, </span><span class="s1">ignore_discard=</span><span class="s2">False, </span><span class="s1">ignore_expires=</span><span class="s2">False</span><span class="s1">):</span>
+        <span class="s2">if </span><span class="s1">filename </span><span class="s2">is None</span><span class="s1">:</span>
+            <span class="s2">if </span><span class="s1">self.filename </span><span class="s2">is not None</span><span class="s1">: filename = self.filename</span>
+            <span class="s2">else</span><span class="s1">: </span><span class="s2">raise </span><span class="s1">ValueError(MISSING_FILENAME_TEXT)</span>
+
+        <span class="s1">f = open(filename</span><span class="s2">, </span><span class="s3">&quot;w&quot;</span><span class="s1">)</span>
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s1">f.write(self.header)</span>
+            <span class="s1">now = time.time()</span>
+            <span class="s2">for </span><span class="s1">cookie </span><span class="s2">in </span><span class="s1">self:</span>
+                <span class="s2">if not </span><span class="s1">ignore_discard </span><span class="s2">and </span><span class="s1">cookie.discard:</span>
+                    <span class="s2">continue</span>
+                <span class="s2">if not </span><span class="s1">ignore_expires </span><span class="s2">and </span><span class="s1">cookie.is_expired(now):</span>
+                    <span class="s2">continue</span>
+                <span class="s2">if </span><span class="s1">cookie.secure: secure = </span><span class="s3">&quot;TRUE&quot;</span>
+                <span class="s2">else</span><span class="s1">: secure = </span><span class="s3">&quot;FALSE&quot;</span>
+                <span class="s2">if </span><span class="s1">cookie.domain.startswith(</span><span class="s3">&quot;.&quot;</span><span class="s1">): initial_dot = </span><span class="s3">&quot;TRUE&quot;</span>
+                <span class="s2">else</span><span class="s1">: initial_dot = </span><span class="s3">&quot;FALSE&quot;</span>
+                <span class="s2">if </span><span class="s1">cookie.expires </span><span class="s2">is not None</span><span class="s1">:</span>
+                    <span class="s1">expires = str(cookie.expires)</span>
+                <span class="s2">else</span><span class="s1">:</span>
+                    <span class="s1">expires = </span><span class="s3">&quot;&quot;</span>
+                <span class="s2">if </span><span class="s1">cookie.value </span><span class="s2">is None</span><span class="s1">:</span>
+                    <span class="s5"># cookies.txt regards 'Set-Cookie: foo' as a cookie</span>
+                    <span class="s5"># with no name, whereas http.cookiejar regards it as a</span>
+                    <span class="s5"># cookie with no value.</span>
+                    <span class="s1">name = </span><span class="s3">&quot;&quot;</span>
+                    <span class="s1">value = cookie.name</span>
+                <span class="s2">else</span><span class="s1">:</span>
+                    <span class="s1">name = cookie.name</span>
+                    <span class="s1">value = cookie.value</span>
+                <span class="s1">f.write(</span>
+                    <span class="s3">&quot;</span><span class="s2">\t</span><span class="s3">&quot;</span><span class="s1">.join([cookie.domain</span><span class="s2">, </span><span class="s1">initial_dot</span><span class="s2">, </span><span class="s1">cookie.path</span><span class="s2">,</span>
+                               <span class="s1">secure</span><span class="s2">, </span><span class="s1">expires</span><span class="s2">, </span><span class="s1">name</span><span class="s2">, </span><span class="s1">value])+</span>
+                    <span class="s3">&quot;</span><span class="s2">\n</span><span class="s3">&quot;</span><span class="s1">)</span>
+        <span class="s2">finally</span><span class="s1">:</span>
+            <span class="s1">f.close()</span>
+</pre>
+</body>
+</html>

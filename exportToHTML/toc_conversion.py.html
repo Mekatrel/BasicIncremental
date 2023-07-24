@@ -1,0 +1,187 @@
+<html>
+<head>
+<title>toc_conversion.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #cc7832;}
+.s3 { color: #6a8759;}
+.s4 { color: #629755; font-style: italic;}
+.s5 { color: #6897bb;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+toc_conversion.py</font>
+</center></td></tr></table>
+<pre><span class="s0"># -----------------------------------------------------------------------------</span>
+<span class="s0"># Copyright (c) 2005-2021, PyInstaller Development Team.</span>
+<span class="s0">#</span>
+<span class="s0"># Distributed under the terms of the GNU General Public License (version 2</span>
+<span class="s0"># or later) with exception for distributing the bootloader.</span>
+<span class="s0">#</span>
+<span class="s0"># The full license is in the file COPYING.txt, distributed with this software.</span>
+<span class="s0">#</span>
+<span class="s0"># SPDX-License-Identifier: (GPL-2.0-or-later WITH Bootloader-exception)</span>
+<span class="s0"># -----------------------------------------------------------------------------</span>
+
+<span class="s2">import </span><span class="s1">os</span>
+<span class="s2">import </span><span class="s1">zipfile</span>
+
+<span class="s2">import </span><span class="s1">pkg_resources</span>
+
+<span class="s2">from </span><span class="s1">PyInstaller </span><span class="s2">import </span><span class="s1">log </span><span class="s2">as </span><span class="s1">logging</span>
+<span class="s2">from </span><span class="s1">PyInstaller.building.datastruct </span><span class="s2">import </span><span class="s1">TOC</span><span class="s2">, </span><span class="s1">Tree</span>
+<span class="s2">from </span><span class="s1">PyInstaller.compat </span><span class="s2">import </span><span class="s1">ALL_SUFFIXES</span>
+<span class="s2">from </span><span class="s1">PyInstaller.depend.utils </span><span class="s2">import </span><span class="s1">get_path_to_egg</span>
+
+<span class="s1">logger = logging.getLogger(__name__)</span>
+
+<span class="s0"># create a list of excludes suitable for Tree.</span>
+<span class="s1">PY_IGNORE_EXTENSIONS = {</span>
+    <span class="s1">*(</span><span class="s3">'*' </span><span class="s1">+ x </span><span class="s2">for </span><span class="s1">x </span><span class="s2">in </span><span class="s1">ALL_SUFFIXES)</span><span class="s2">,</span>
+    <span class="s0"># Exclude EGG-INFO, too, as long as we do not have a way to hold several in one archive.</span>
+    <span class="s3">'EGG-INFO'</span><span class="s2">,</span>
+<span class="s1">}</span>
+
+
+<span class="s2">class </span><span class="s1">DependencyProcessor(object):</span>
+    <span class="s4">&quot;&quot;&quot; 
+    Class to convert final module dependency graph into TOC data structures. 
+    TOC data structures are suitable for creating the final executable. 
+    &quot;&quot;&quot;</span>
+    <span class="s2">def </span><span class="s1">__init__(self</span><span class="s2">, </span><span class="s1">graph</span><span class="s2">, </span><span class="s1">additional_files):</span>
+        <span class="s1">self._binaries = set()</span>
+        <span class="s1">self._datas = set()</span>
+        <span class="s1">self._distributions = set()</span>
+        <span class="s1">self.__seen_distribution_paths = set()</span>
+        <span class="s0"># Include files that were found by hooks. graph.iter_graph() should include only those modules that are</span>
+        <span class="s0"># reachable from the top-level script.</span>
+        <span class="s2">for </span><span class="s1">node </span><span class="s2">in </span><span class="s1">graph.iter_graph(start=graph._top_script_node):</span>
+            <span class="s0"># Update 'binaries', 'datas'</span>
+            <span class="s1">name = node.identifier</span>
+            <span class="s2">if </span><span class="s1">name </span><span class="s2">in </span><span class="s1">additional_files:</span>
+                <span class="s1">self._binaries.update(additional_files.binaries(name))</span>
+                <span class="s1">self._datas.update(additional_files.datas(name))</span>
+            <span class="s0"># Any module can belong to a single distribution</span>
+            <span class="s1">self._distributions.update(self._get_distribution_for_node(node))</span>
+
+    <span class="s2">def </span><span class="s1">_get_distribution_for_node(self</span><span class="s2">, </span><span class="s1">node):</span>
+        <span class="s4">&quot;&quot;&quot; 
+        Get the distribution a module belongs to. 
+ 
+        Bug: This currently only handles packages in eggs. 
+        &quot;&quot;&quot;</span>
+        <span class="s0"># TODO: Modulegraph could flag a module as residing in a zip file</span>
+        <span class="s0"># TODO add support for single modules in eggs (e.g. mock-1.0.1)</span>
+        <span class="s0"># TODO add support for egg-info:</span>
+        <span class="s0"># TODO add support for wheels (dist-info)</span>
+        <span class="s0">#</span>
+        <span class="s0"># TODO add support for unpacked eggs and for new .whl packages.</span>
+        <span class="s0"># Wheels:</span>
+        <span class="s0">#  .../site-packages/pip/  # It seams this has to be a package</span>
+        <span class="s0">#  .../site-packages/pip-6.1.1.dist-info</span>
+        <span class="s0"># Unzipped Eggs:</span>
+        <span class="s0">#  .../site-packages/mock.py   # this may be a single module, too!</span>
+        <span class="s0">#  .../site-packages/mock-1.0.1-py2.7.egg-info</span>
+        <span class="s0"># Unzipped Eggs (I asume: multiple-versions externaly managed):</span>
+        <span class="s0">#  .../site-packages/pyPdf-1.13-py2.6.egg/pyPdf/</span>
+        <span class="s0">#  .../site-packages/pyPdf-1.13-py2.6.egg/EGG_INFO</span>
+        <span class="s0"># Zipped Egg:</span>
+        <span class="s0">#  .../site-packages/zipped.egg/zipped_egg/</span>
+        <span class="s0">#  .../site-packages/zipped.egg/EGG_INFO</span>
+        <span class="s1">modpath = node.filename</span>
+        <span class="s2">if not </span><span class="s1">modpath:</span>
+            <span class="s0"># e.g. namespace-package</span>
+            <span class="s2">return </span><span class="s1">[]</span>
+        <span class="s0"># TODO: add other ways to get a distribution path</span>
+        <span class="s1">distpath = get_path_to_egg(modpath)</span>
+        <span class="s2">if not </span><span class="s1">distpath </span><span class="s2">or </span><span class="s1">distpath </span><span class="s2">in </span><span class="s1">self.__seen_distribution_paths:</span>
+            <span class="s0"># no egg or already handled</span>
+            <span class="s2">return </span><span class="s1">[]</span>
+        <span class="s1">self.__seen_distribution_paths.add(distpath)</span>
+        <span class="s1">dists = list(pkg_resources.find_distributions(distpath))</span>
+        <span class="s2">assert </span><span class="s1">len(dists) == </span><span class="s5">1</span>
+        <span class="s1">dist = dists[</span><span class="s5">0</span><span class="s1">]</span>
+        <span class="s1">dist._pyinstaller_info = {</span>
+            <span class="s3">'zipped'</span><span class="s1">: zipfile.is_zipfile(dist.location)</span><span class="s2">,</span>
+            <span class="s3">'egg'</span><span class="s1">: </span><span class="s2">True,  </span><span class="s0"># TODO when supporting other types</span>
+            <span class="s3">'zip-safe'</span><span class="s1">: dist.has_metadata(</span><span class="s3">'zip-safe'</span><span class="s1">)</span><span class="s2">,</span>
+        <span class="s1">}</span>
+        <span class="s2">return </span><span class="s1">dists</span>
+
+    <span class="s0"># Public methods.</span>
+
+    <span class="s2">def </span><span class="s1">make_binaries_toc(self):</span>
+        <span class="s0"># TODO create a real TOC when handling of more files is added.</span>
+        <span class="s2">return </span><span class="s1">[(x</span><span class="s2">, </span><span class="s1">y</span><span class="s2">, </span><span class="s3">'BINARY'</span><span class="s1">) </span><span class="s2">for </span><span class="s1">x</span><span class="s2">, </span><span class="s1">y </span><span class="s2">in </span><span class="s1">self._binaries]</span>
+
+    <span class="s2">def </span><span class="s1">make_datas_toc(self):</span>
+        <span class="s1">toc = TOC((x</span><span class="s2">, </span><span class="s1">y</span><span class="s2">, </span><span class="s3">'DATA'</span><span class="s1">) </span><span class="s2">for </span><span class="s1">x</span><span class="s2">, </span><span class="s1">y </span><span class="s2">in </span><span class="s1">self._datas)</span>
+        <span class="s2">for </span><span class="s1">dist </span><span class="s2">in </span><span class="s1">self._distributions:</span>
+            <span class="s2">if </span><span class="s1">(</span>
+                <span class="s1">dist._pyinstaller_info[</span><span class="s3">'egg'</span><span class="s1">] </span><span class="s2">and not </span><span class="s1">dist._pyinstaller_info[</span><span class="s3">'zipped'</span><span class="s1">]</span>
+                <span class="s2">and not </span><span class="s1">dist._pyinstaller_info[</span><span class="s3">'zip-safe'</span><span class="s1">]</span>
+            <span class="s1">):</span>
+                <span class="s0"># this is a un-zipped, not-zip-safe egg</span>
+                <span class="s1">toplevel = dist.get_metadata(</span><span class="s3">'top_level.txt'</span><span class="s1">).strip()</span>
+                <span class="s1">basedir = dist.location</span>
+                <span class="s2">if </span><span class="s1">toplevel:</span>
+                    <span class="s1">os.path.join(basedir</span><span class="s2">, </span><span class="s1">toplevel)</span>
+                <span class="s1">tree = Tree(dist.location</span><span class="s2">, </span><span class="s1">excludes=PY_IGNORE_EXTENSIONS)</span>
+                <span class="s1">toc.extend(tree)</span>
+        <span class="s2">return </span><span class="s1">toc</span>
+
+    <span class="s2">def </span><span class="s1">make_zipfiles_toc(self):</span>
+        <span class="s0"># TODO create a real TOC when handling of more files is added.</span>
+        <span class="s1">toc = []</span>
+        <span class="s2">for </span><span class="s1">dist </span><span class="s2">in </span><span class="s1">self._distributions:</span>
+            <span class="s2">if </span><span class="s1">dist._pyinstaller_info[</span><span class="s3">'zipped'</span><span class="s1">] </span><span class="s2">and not </span><span class="s1">dist._pyinstaller_info[</span><span class="s3">'egg'</span><span class="s1">]:</span>
+                <span class="s0"># Hmm, this should never happen as normal zip-files are not associated with a distribution, are they?</span>
+                <span class="s1">toc.append((</span><span class="s3">&quot;eggs/&quot; </span><span class="s1">+ os.path.basename(dist.location)</span><span class="s2">, </span><span class="s1">dist.location</span><span class="s2">, </span><span class="s3">'ZIPFILE'</span><span class="s1">))</span>
+        <span class="s2">return </span><span class="s1">toc</span>
+
+    <span class="s1">@staticmethod</span>
+    <span class="s2">def </span><span class="s1">__collect_data_files_from_zip(zipfilename):</span>
+        <span class="s0"># 'PyInstaller.config' cannot be imported as other top-level modules.</span>
+        <span class="s2">from </span><span class="s1">PyInstaller.config </span><span class="s2">import </span><span class="s1">CONF</span>
+        <span class="s1">workpath = os.path.join(CONF[</span><span class="s3">'workpath'</span><span class="s1">]</span><span class="s2">, </span><span class="s1">os.path.basename(zipfilename))</span>
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s1">os.makedirs(workpath)</span>
+        <span class="s2">except </span><span class="s1">OSError </span><span class="s2">as </span><span class="s1">e:</span>
+            <span class="s2">import </span><span class="s1">errno</span>
+            <span class="s2">if </span><span class="s1">e.errno != errno.EEXIST:</span>
+                <span class="s2">raise</span>
+        <span class="s0"># TODO: extract only those file which would then be included</span>
+        <span class="s2">with </span><span class="s1">zipfile.ZipFile(zipfilename) </span><span class="s2">as </span><span class="s1">zfh:</span>
+            <span class="s1">zfh.extractall(workpath)</span>
+        <span class="s2">return </span><span class="s1">Tree(workpath</span><span class="s2">, </span><span class="s1">excludes=PY_IGNORE_EXTENSIONS)</span>
+
+    <span class="s2">def </span><span class="s1">make_zipped_data_toc(self):</span>
+        <span class="s1">toc = TOC()</span>
+        <span class="s1">logger.debug(</span><span class="s3">'Looking for egg data files...'</span><span class="s1">)</span>
+        <span class="s2">for </span><span class="s1">dist </span><span class="s2">in </span><span class="s1">self._distributions:</span>
+            <span class="s2">if </span><span class="s1">dist._pyinstaller_info[</span><span class="s3">'egg'</span><span class="s1">]:</span>
+                <span class="s0"># TODO: check in docs if top_level.txt always exists</span>
+                <span class="s1">toplevel = dist.get_metadata(</span><span class="s3">'top_level.txt'</span><span class="s1">).strip()</span>
+                <span class="s2">if </span><span class="s1">dist._pyinstaller_info[</span><span class="s3">'zipped'</span><span class="s1">]:</span>
+                    <span class="s0"># this is a zipped egg</span>
+                    <span class="s1">tree = self.__collect_data_files_from_zip(dist.location)</span>
+                    <span class="s1">toc.extend(tree)</span>
+                <span class="s2">elif </span><span class="s1">dist._pyinstaller_info[</span><span class="s3">'zip-safe'</span><span class="s1">]:</span>
+                    <span class="s0"># this is an un-zipped, zip-safe egg</span>
+                    <span class="s1">basedir = dist.location</span>
+                    <span class="s2">if </span><span class="s1">toplevel:</span>
+                        <span class="s1">os.path.join(basedir</span><span class="s2">, </span><span class="s1">toplevel)</span>
+                    <span class="s1">tree = Tree(dist.location</span><span class="s2">, </span><span class="s1">excludes=PY_IGNORE_EXTENSIONS)</span>
+                    <span class="s1">toc.extend(tree)</span>
+                <span class="s2">else</span><span class="s1">:</span>
+                    <span class="s0"># this is an un-zipped, not-zip-safe egg, handled in make_datas_toc()</span>
+                    <span class="s2">pass</span>
+        <span class="s2">return </span><span class="s1">toc</span>
+</pre>
+</body>
+</html>

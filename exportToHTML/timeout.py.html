@@ -1,0 +1,404 @@
+<html>
+<head>
+<title>timeout.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #629755; font-style: italic;}
+.s3 { color: #cc7832;}
+.s4 { color: #6a8759;}
+.s5 { color: #6897bb;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+timeout.py</font>
+</center></td></tr></table>
+<pre><span class="s0"># Copyright (c) 2009-2010 Denis Bilenko. See LICENSE for details.</span>
+<span class="s2">&quot;&quot;&quot; 
+Timeouts. 
+ 
+Many functions in :mod:`gevent` have a *timeout* argument that allows 
+limiting the time the function will block. When that is not available, 
+the :class:`Timeout` class and :func:`with_timeout` function in this 
+module add timeouts to arbitrary code. 
+ 
+.. warning:: 
+ 
+    Timeouts can only work when the greenlet switches to the hub. 
+    If a blocking function is called or an intense calculation is ongoing during 
+    which no switches occur, :class:`Timeout` is powerless. 
+&quot;&quot;&quot;</span>
+<span class="s3">from </span><span class="s1">__future__ </span><span class="s3">import </span><span class="s1">absolute_import</span><span class="s3">, </span><span class="s1">print_function</span><span class="s3">, </span><span class="s1">division</span>
+
+<span class="s3">from </span><span class="s1">gevent._compat </span><span class="s3">import </span><span class="s1">string_types</span>
+<span class="s3">from </span><span class="s1">gevent._util </span><span class="s3">import </span><span class="s1">_NONE</span>
+
+<span class="s3">from </span><span class="s1">greenlet </span><span class="s3">import </span><span class="s1">getcurrent</span>
+<span class="s3">from </span><span class="s1">gevent._hub_local </span><span class="s3">import </span><span class="s1">get_hub_noargs </span><span class="s3">as </span><span class="s1">get_hub</span>
+
+<span class="s1">__all__ = [</span>
+    <span class="s4">'Timeout'</span><span class="s3">,</span>
+    <span class="s4">'with_timeout'</span><span class="s3">,</span>
+<span class="s1">]</span>
+
+
+<span class="s3">class </span><span class="s1">_FakeTimer(object):</span>
+    <span class="s0"># An object that mimics the API of get_hub().loop.timer, but</span>
+    <span class="s0"># without allocating any native resources. This is useful for timeouts</span>
+    <span class="s0"># that will never expire.</span>
+    <span class="s0"># Also partially mimics the API of Timeout itself for use in _start_new_or_dummy</span>
+
+    <span class="s0"># This object is used as a singleton, so it should be</span>
+    <span class="s0"># immutable.</span>
+    <span class="s1">__slots__ = ()</span>
+
+    <span class="s1">@property</span>
+    <span class="s3">def </span><span class="s1">pending(self):</span>
+        <span class="s3">return False</span>
+
+    <span class="s1">active = pending</span>
+
+    <span class="s1">@property</span>
+    <span class="s3">def </span><span class="s1">seconds(self):</span>
+        <span class="s2">&quot;Always returns None&quot;</span>
+
+    <span class="s1">timer = exception = seconds</span>
+
+    <span class="s3">def </span><span class="s1">start(self</span><span class="s3">, </span><span class="s1">*args</span><span class="s3">, </span><span class="s1">**kwargs):</span>
+        <span class="s0"># pylint:disable=unused-argument</span>
+        <span class="s3">raise </span><span class="s1">AssertionError(</span><span class="s4">&quot;non-expiring timer cannot be started&quot;</span><span class="s1">)</span>
+
+    <span class="s3">def </span><span class="s1">stop(self):</span>
+        <span class="s3">return</span>
+
+    <span class="s1">cancel = stop</span>
+
+    <span class="s1">stop = close = cancel</span>
+
+    <span class="s3">def </span><span class="s1">__enter__(self):</span>
+        <span class="s3">return </span><span class="s1">self</span>
+
+    <span class="s3">def </span><span class="s1">__exit__(self</span><span class="s3">, </span><span class="s1">_t</span><span class="s3">, </span><span class="s1">_v</span><span class="s3">, </span><span class="s1">_tb):</span>
+        <span class="s3">return</span>
+
+<span class="s1">_FakeTimer = _FakeTimer()</span>
+
+
+<span class="s3">class </span><span class="s1">Timeout(BaseException):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Timeout(seconds=None, exception=None, ref=True, priority=-1) 
+ 
+    Raise *exception* in the current greenlet after *seconds* 
+    have elapsed:: 
+ 
+        timeout = Timeout(seconds, exception) 
+        timeout.start() 
+        try: 
+            ...  # exception will be raised here, after *seconds* passed since start() call 
+        finally: 
+            timeout.close() 
+ 
+    .. warning:: 
+ 
+        You must **always** call `close` on a ``Timeout`` object you have created, 
+        whether or not the code that the timeout was protecting finishes 
+        executing before the timeout elapses (whether or not the 
+        ``Timeout`` exception is raised)  This ``try/finally`` 
+        construct or a ``with`` statement is a good pattern. (If 
+        the timeout object will be started again, use `cancel` instead 
+        of `close`; this is rare. You must still `close` it when you are 
+        done.) 
+ 
+    When *exception* is omitted or ``None``, the ``Timeout`` instance 
+    itself is raised:: 
+ 
+        &gt;&gt;&gt; import gevent 
+        &gt;&gt;&gt; gevent.Timeout(0.1).start() 
+        &gt;&gt;&gt; gevent.sleep(0.2)  #doctest: +IGNORE_EXCEPTION_DETAIL 
+        Traceback (most recent call last): 
+         ... 
+        Timeout: 0.1 seconds 
+ 
+    If the *seconds* argument is not given or is ``None`` (e.g., 
+    ``Timeout()``), then the timeout will never expire and never raise 
+    *exception*. This is convenient for creating functions which take 
+    an optional timeout parameter of their own. (Note that this is **not** 
+    the same thing as a *seconds* value of ``0``.) 
+ 
+    :: 
+ 
+       def function(args, timeout=None): 
+          &quot;A function with an optional timeout.&quot; 
+          timer = Timeout(timeout) 
+          with timer: 
+             ... 
+ 
+    .. caution:: 
+ 
+        A *seconds* value less than ``0.0`` (e.g., ``-1``) is poorly defined. In the future, 
+        support for negative values is likely to do the same thing as a value 
+        of ``None`` or ``0`` 
+ 
+    A *seconds* value of ``0`` requests that the event loop spin and poll for I/O; 
+    it will immediately expire as soon as control returns to the event loop. 
+ 
+    .. rubric:: Use As A Context Manager 
+ 
+    To simplify starting and canceling timeouts, the ``with`` 
+    statement can be used:: 
+ 
+        with gevent.Timeout(seconds, exception) as timeout: 
+            pass  # ... code block ... 
+ 
+    This is equivalent to the try/finally block above with one 
+    additional feature: if *exception* is the literal ``False``, the 
+    timeout is still raised, but the context manager suppresses it, so 
+    the code outside the with-block won't see it. 
+ 
+    This is handy for adding a timeout to the functions that don't 
+    support a *timeout* parameter themselves:: 
+ 
+        data = None 
+        with gevent.Timeout(5, False): 
+            data = mysock.makefile().readline() 
+        if data is None: 
+            ...  # 5 seconds passed without reading a line 
+        else: 
+            ...  # a line was read within 5 seconds 
+ 
+    .. caution:: 
+ 
+        If ``readline()`` above catches and doesn't re-raise 
+        :exc:`BaseException` (for example, with a bare ``except:``), then 
+        your timeout will fail to function and control won't be returned 
+        to you when you expect. 
+ 
+    .. rubric:: Catching Timeouts 
+ 
+    When catching timeouts, keep in mind that the one you catch may 
+    not be the one you have set (a calling function may have set its 
+    own timeout); if you going to silence a timeout, always check that 
+    it's the instance you need:: 
+ 
+        timeout = Timeout(1) 
+        timeout.start() 
+        try: 
+            ... 
+        except Timeout as t: 
+            if t is not timeout: 
+                raise # not my timeout 
+        finally: 
+            timeout.close() 
+ 
+ 
+    .. versionchanged:: 1.1b2 
+ 
+        If *seconds* is not given or is ``None``, no longer allocate a 
+        native timer object that will never be started. 
+ 
+    .. versionchanged:: 1.1 
+ 
+        Add warning about negative *seconds* values. 
+ 
+    .. versionchanged:: 1.3a1 
+ 
+        Timeout objects now have a :meth:`close` 
+        method that *must* be called when the timeout will no longer be 
+        used to properly clean up native resources. 
+        The ``with`` statement does this automatically. 
+ 
+    &quot;&quot;&quot;</span>
+
+    <span class="s0"># We inherit a __dict__ from BaseException, so __slots__ actually</span>
+    <span class="s0"># makes us larger.</span>
+
+    <span class="s3">def </span><span class="s1">__init__(self</span><span class="s3">, </span><span class="s1">seconds=</span><span class="s3">None, </span><span class="s1">exception=</span><span class="s3">None, </span><span class="s1">ref=</span><span class="s3">True, </span><span class="s1">priority=-</span><span class="s5">1</span><span class="s3">,</span>
+                 <span class="s1">_one_shot=</span><span class="s3">False</span><span class="s1">):</span>
+        <span class="s1">BaseException.__init__(self)</span>
+        <span class="s1">self.seconds = seconds</span>
+        <span class="s1">self.exception = exception</span>
+        <span class="s1">self._one_shot = _one_shot</span>
+        <span class="s3">if </span><span class="s1">seconds </span><span class="s3">is None</span><span class="s1">:</span>
+            <span class="s0"># Avoid going through the timer codepath if no timeout is</span>
+            <span class="s0"># desired; this avoids some CFFI interactions on PyPy that can lead to a</span>
+            <span class="s0"># RuntimeError if this implementation is used during an `import` statement. See</span>
+            <span class="s0"># https://bitbucket.org/pypy/pypy/issues/2089/crash-in-pypy-260-linux64-with-gevent-11b1</span>
+            <span class="s0"># and https://github.com/gevent/gevent/issues/618.</span>
+            <span class="s0"># Plus, in general, it should be more efficient</span>
+
+            <span class="s1">self.timer = _FakeTimer</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s0"># XXX: A timer &lt;= 0 could cause libuv to block the loop; we catch</span>
+            <span class="s0"># that case in libuv/loop.py</span>
+            <span class="s1">self.timer = get_hub().loop.timer(seconds </span><span class="s3">or </span><span class="s5">0.0</span><span class="s3">, </span><span class="s1">ref=ref</span><span class="s3">, </span><span class="s1">priority=priority)</span>
+
+    <span class="s3">def </span><span class="s1">start(self):</span>
+        <span class="s2">&quot;&quot;&quot;Schedule the timeout.&quot;&quot;&quot;</span>
+        <span class="s3">if </span><span class="s1">self.pending:</span>
+            <span class="s3">raise </span><span class="s1">AssertionError(</span><span class="s4">'%r is already started; to restart it, cancel it first' </span><span class="s1">% self)</span>
+
+        <span class="s3">if </span><span class="s1">self.seconds </span><span class="s3">is None</span><span class="s1">:</span>
+            <span class="s0"># &quot;fake&quot; timeout (never expires)</span>
+            <span class="s3">return</span>
+
+        <span class="s3">if </span><span class="s1">self.exception </span><span class="s3">is None or </span><span class="s1">self.exception </span><span class="s3">is False or </span><span class="s1">isinstance(self.exception</span><span class="s3">, </span><span class="s1">string_types):</span>
+            <span class="s0"># timeout that raises self</span>
+            <span class="s1">throws = self</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s0"># regular timeout with user-provided exception</span>
+            <span class="s1">throws = self.exception</span>
+
+        <span class="s0"># Make sure the timer updates the current time so that we don't</span>
+        <span class="s0"># expire prematurely.</span>
+        <span class="s1">self.timer.start(self._on_expiration</span><span class="s3">, </span><span class="s1">getcurrent()</span><span class="s3">, </span><span class="s1">throws</span><span class="s3">, </span><span class="s1">update=</span><span class="s3">True</span><span class="s1">)</span>
+
+    <span class="s3">def </span><span class="s1">_on_expiration(self</span><span class="s3">, </span><span class="s1">prev_greenlet</span><span class="s3">, </span><span class="s1">ex):</span>
+        <span class="s0"># Hook for subclasses.</span>
+        <span class="s1">prev_greenlet.throw(ex)</span>
+
+    <span class="s1">@classmethod</span>
+    <span class="s3">def </span><span class="s1">start_new(cls</span><span class="s3">, </span><span class="s1">timeout=</span><span class="s3">None, </span><span class="s1">exception=</span><span class="s3">None, </span><span class="s1">ref=</span><span class="s3">True, </span><span class="s1">_one_shot=</span><span class="s3">False</span><span class="s1">):</span>
+        <span class="s2">&quot;&quot;&quot;Create a started :class:`Timeout`. 
+ 
+        This is a shortcut, the exact action depends on *timeout*'s type: 
+ 
+        * If *timeout* is a :class:`Timeout`, then call its :meth:`start` method 
+          if it's not already begun. 
+        * Otherwise, create a new :class:`Timeout` instance, passing (*timeout*, *exception*) as 
+          arguments, then call its :meth:`start` method. 
+ 
+        Returns the :class:`Timeout` instance. 
+        &quot;&quot;&quot;</span>
+        <span class="s3">if </span><span class="s1">isinstance(timeout</span><span class="s3">, </span><span class="s1">Timeout):</span>
+            <span class="s3">if not </span><span class="s1">timeout.pending:</span>
+                <span class="s1">timeout.start()</span>
+            <span class="s3">return </span><span class="s1">timeout</span>
+        <span class="s1">timeout = cls(timeout</span><span class="s3">, </span><span class="s1">exception</span><span class="s3">, </span><span class="s1">ref=ref</span><span class="s3">, </span><span class="s1">_one_shot=_one_shot)</span>
+        <span class="s1">timeout.start()</span>
+        <span class="s3">return </span><span class="s1">timeout</span>
+
+    <span class="s1">@staticmethod</span>
+    <span class="s3">def </span><span class="s1">_start_new_or_dummy(timeout</span><span class="s3">, </span><span class="s1">exception=</span><span class="s3">None, </span><span class="s1">ref=</span><span class="s3">True</span><span class="s1">):</span>
+        <span class="s0"># Internal use only in 1.1</span>
+        <span class="s0"># Return an object with a 'cancel' method; if timeout is None,</span>
+        <span class="s0"># this will be a shared instance object that does nothing. Otherwise,</span>
+        <span class="s0"># return an actual Timeout. A 0 value is allowed and creates a real Timeout.</span>
+
+        <span class="s0"># Because negative values are hard to reason about,</span>
+        <span class="s0"># and are often used as sentinels in Python APIs, in the future it's likely</span>
+        <span class="s0"># that a negative timeout will also return the shared instance.</span>
+        <span class="s0"># This saves the previously common idiom of</span>
+        <span class="s0"># 'timer = Timeout.start_new(t) if t is not None else None'</span>
+        <span class="s0"># followed by 'if timer is not None: timer.cancel()'.</span>
+        <span class="s0"># That idiom was used to avoid any object allocations.</span>
+
+        <span class="s0"># A staticmethod is slightly faster under CPython, compared to a classmethod;</span>
+        <span class="s0"># under PyPy in synthetic benchmarks it makes no difference.</span>
+        <span class="s3">if </span><span class="s1">timeout </span><span class="s3">is None</span><span class="s1">:</span>
+            <span class="s3">return </span><span class="s1">_FakeTimer</span>
+        <span class="s3">return </span><span class="s1">Timeout.start_new(timeout</span><span class="s3">, </span><span class="s1">exception</span><span class="s3">, </span><span class="s1">ref</span><span class="s3">, </span><span class="s1">_one_shot=</span><span class="s3">True</span><span class="s1">)</span>
+
+    <span class="s1">@property</span>
+    <span class="s3">def </span><span class="s1">pending(self):</span>
+        <span class="s2">&quot;&quot;&quot;True if the timeout is scheduled to be raised.&quot;&quot;&quot;</span>
+        <span class="s3">return </span><span class="s1">self.timer.pending </span><span class="s3">or </span><span class="s1">self.timer.active</span>
+
+    <span class="s3">def </span><span class="s1">cancel(self):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        If the timeout is pending, cancel it. Otherwise, do nothing. 
+ 
+        The timeout object can be :meth:`started &lt;start&gt;` again. If 
+        you will not start the timeout again, you should use 
+        :meth:`close` instead. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">self.timer.stop()</span>
+        <span class="s3">if </span><span class="s1">self._one_shot:</span>
+            <span class="s1">self.close()</span>
+
+    <span class="s3">def </span><span class="s1">close(self):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Close the timeout and free resources. The timer cannot be started again 
+        after this method has been used. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">self.timer.stop()</span>
+        <span class="s1">self.timer.close()</span>
+        <span class="s1">self.timer = _FakeTimer</span>
+
+    <span class="s3">def </span><span class="s1">__repr__(self):</span>
+        <span class="s1">classname = type(self).__name__</span>
+        <span class="s3">if </span><span class="s1">self.pending:</span>
+            <span class="s1">pending = </span><span class="s4">' pending'</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s1">pending = </span><span class="s4">''</span>
+        <span class="s3">if </span><span class="s1">self.exception </span><span class="s3">is None</span><span class="s1">:</span>
+            <span class="s1">exception = </span><span class="s4">''</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s1">exception = </span><span class="s4">' exception=%r' </span><span class="s1">% self.exception</span>
+        <span class="s3">return </span><span class="s4">'&lt;%s at %s seconds=%s%s%s&gt;' </span><span class="s1">% (classname</span><span class="s3">, </span><span class="s1">hex(id(self))</span><span class="s3">, </span><span class="s1">self.seconds</span><span class="s3">, </span><span class="s1">exception</span><span class="s3">, </span><span class="s1">pending)</span>
+
+    <span class="s3">def </span><span class="s1">__str__(self):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        &gt;&gt;&gt; raise Timeout #doctest: +IGNORE_EXCEPTION_DETAIL 
+        Traceback (most recent call last): 
+            ... 
+        Timeout 
+        &quot;&quot;&quot;</span>
+        <span class="s3">if </span><span class="s1">self.seconds </span><span class="s3">is None</span><span class="s1">:</span>
+            <span class="s3">return </span><span class="s4">''</span>
+
+        <span class="s1">suffix = </span><span class="s4">'' </span><span class="s3">if </span><span class="s1">self.seconds == </span><span class="s5">1 </span><span class="s3">else </span><span class="s4">'s'</span>
+
+        <span class="s3">if </span><span class="s1">self.exception </span><span class="s3">is None</span><span class="s1">:</span>
+            <span class="s3">return </span><span class="s4">'%s second%s' </span><span class="s1">% (self.seconds</span><span class="s3">, </span><span class="s1">suffix)</span>
+        <span class="s3">if </span><span class="s1">self.exception </span><span class="s3">is False</span><span class="s1">:</span>
+            <span class="s3">return </span><span class="s4">'%s second%s (silent)' </span><span class="s1">% (self.seconds</span><span class="s3">, </span><span class="s1">suffix)</span>
+        <span class="s3">return </span><span class="s4">'%s second%s: %s' </span><span class="s1">% (self.seconds</span><span class="s3">, </span><span class="s1">suffix</span><span class="s3">, </span><span class="s1">self.exception)</span>
+
+    <span class="s3">def </span><span class="s1">__enter__(self):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Start and return the timer. If the timer is already started, just return it. 
+        &quot;&quot;&quot;</span>
+        <span class="s3">if not </span><span class="s1">self.pending:</span>
+            <span class="s1">self.start()</span>
+        <span class="s3">return </span><span class="s1">self</span>
+
+    <span class="s3">def </span><span class="s1">__exit__(self</span><span class="s3">, </span><span class="s1">typ</span><span class="s3">, </span><span class="s1">value</span><span class="s3">, </span><span class="s1">tb):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Stop the timer. 
+ 
+        .. versionchanged:: 1.3a1 
+           The underlying native timer is also stopped. This object cannot be 
+           used again. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">self.close()</span>
+        <span class="s3">if </span><span class="s1">value </span><span class="s3">is </span><span class="s1">self </span><span class="s3">and </span><span class="s1">self.exception </span><span class="s3">is False</span><span class="s1">:</span>
+            <span class="s3">return True </span><span class="s0"># Suppress the exception</span>
+
+
+<span class="s3">def </span><span class="s1">with_timeout(seconds</span><span class="s3">, </span><span class="s1">function</span><span class="s3">, </span><span class="s1">*args</span><span class="s3">, </span><span class="s1">**kwds):</span>
+    <span class="s2">&quot;&quot;&quot;Wrap a call to *function* with a timeout; if the called 
+    function fails to return before the timeout, cancel it and return a 
+    flag value, provided by *timeout_value* keyword argument. 
+ 
+    If timeout expires but *timeout_value* is not provided, raise :class:`Timeout`. 
+ 
+    Keyword argument *timeout_value* is not passed to *function*. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">timeout_value = kwds.pop(</span><span class="s4">&quot;timeout_value&quot;</span><span class="s3">, </span><span class="s1">_NONE)</span>
+    <span class="s1">timeout = Timeout.start_new(seconds</span><span class="s3">, </span><span class="s1">_one_shot=</span><span class="s3">True</span><span class="s1">)</span>
+    <span class="s3">try</span><span class="s1">:</span>
+        <span class="s3">try</span><span class="s1">:</span>
+            <span class="s3">return </span><span class="s1">function(*args</span><span class="s3">, </span><span class="s1">**kwds)</span>
+        <span class="s3">except </span><span class="s1">Timeout </span><span class="s3">as </span><span class="s1">ex:</span>
+            <span class="s3">if </span><span class="s1">ex </span><span class="s3">is </span><span class="s1">timeout </span><span class="s3">and </span><span class="s1">timeout_value </span><span class="s3">is not </span><span class="s1">_NONE:</span>
+                <span class="s3">return </span><span class="s1">timeout_value</span>
+            <span class="s3">raise</span>
+    <span class="s3">finally</span><span class="s1">:</span>
+        <span class="s1">timeout.cancel()</span>
+</pre>
+</body>
+</html>

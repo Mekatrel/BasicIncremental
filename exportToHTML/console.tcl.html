@@ -1,0 +1,1165 @@
+<html>
+<head>
+<title>console.tcl</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #a9b7c6;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+console.tcl</font>
+</center></td></tr></table>
+<pre><span class="s0"># console.tcl --</span>
+<span class="s0">#</span>
+<span class="s0"># This code constructs the console window for an application.  It</span>
+<span class="s0"># can be used by non-unix systems that do not have built-in support</span>
+<span class="s0"># for shells.</span>
+<span class="s0">#</span>
+<span class="s0"># Copyright (c) 1995-1997 Sun Microsystems, Inc.</span>
+<span class="s0"># Copyright (c) 1998-2000 Ajuba Solutions.</span>
+<span class="s0"># Copyright (c) 2007-2008 Daniel A. Steffen &lt;das@users.sourceforge.net&gt;</span>
+<span class="s0">#</span>
+<span class="s0"># See the file &quot;license.terms&quot; for information on usage and redistribution</span>
+<span class="s0"># of this file, and for a DISCLAIMER OF ALL WARRANTIES.</span>
+<span class="s0">#</span>
+
+<span class="s0"># TODO: history - remember partially written command</span>
+
+<span class="s0">namespace eval ::tk::console {</span>
+    <span class="s0">variable blinkTime   500 ; # msecs to blink braced range for</span>
+    <span class="s0">variable blinkRange  1   ; # enable blinking of the entire braced range</span>
+    <span class="s0">variable magicKeys   1   ; # enable brace matching and proc/var recognition</span>
+    <span class="s0">variable maxLines    600 ; # maximum # of lines buffered in console</span>
+    <span class="s0">variable showMatches 1   ; # show multiple expand matches</span>
+    <span class="s0">variable useFontchooser [llength [info command ::tk::fontchooser]]</span>
+    <span class="s0">variable inPlugin [info exists embed_args]</span>
+    <span class="s0">variable defaultPrompt   ; # default prompt if tcl_prompt1 isn't used</span>
+
+    <span class="s0">if {$inPlugin} {</span>
+	<span class="s0">set defaultPrompt {subst {[history nextid] % }}</span>
+    <span class="s0">} else {</span>
+	<span class="s0">set defaultPrompt {subst {([file tail [pwd]]) [history nextid] % }}</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+
+<span class="s0"># simple compat function for tkcon code added for this console</span>
+<span class="s0">interp alias {} EvalAttached {} consoleinterp eval</span>
+
+<span class="s0"># ::tk::ConsoleInit --</span>
+<span class="s0"># This procedure constructs and configures the console windows.</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0"># 	None.</span>
+
+<span class="s0">proc ::tk::ConsoleInit {} {</span>
+    <span class="s0">if {![consoleinterp eval {set tcl_interactive}]} {</span>
+	<span class="s0">wm withdraw .</span>
+    <span class="s0">}</span>
+
+    <span class="s0">if {[tk windowingsystem] eq &quot;aqua&quot;} {</span>
+	<span class="s0">set mod &quot;Cmd&quot;</span>
+    <span class="s0">} else {</span>
+	<span class="s0">set mod &quot;Ctrl&quot;</span>
+    <span class="s0">}</span>
+
+    <span class="s0">if {[catch {menu .menubar} err]} {</span>
+	<span class="s0">bgerror &quot;INIT: $err&quot;</span>
+    <span class="s0">}</span>
+    <span class="s0">AmpMenuArgs .menubar add cascade -label [mc &amp;File] -menu .menubar.file</span>
+    <span class="s0">AmpMenuArgs .menubar add cascade -label [mc &amp;Edit] -menu .menubar.edit</span>
+
+    <span class="s0">menu .menubar.file -tearoff 0</span>
+    <span class="s0">AmpMenuArgs .menubar.file add command -label [mc &quot;&amp;Source...&quot;] \</span>
+	    <span class="s0">-command {tk::ConsoleSource}</span>
+    <span class="s0">AmpMenuArgs .menubar.file add command -label [mc &quot;&amp;Hide Console&quot;] \</span>
+	    <span class="s0">-command {wm withdraw .}</span>
+    <span class="s0">AmpMenuArgs .menubar.file add command -label [mc &quot;&amp;Clear Console&quot;] \</span>
+	    <span class="s0">-command {.console delete 1.0 &quot;promptEnd linestart&quot;}</span>
+    <span class="s0">if {[tk windowingsystem] ne &quot;aqua&quot;} {</span>
+	<span class="s0">AmpMenuArgs .menubar.file add command -label [mc E&amp;xit] -command {exit}</span>
+    <span class="s0">}</span>
+
+    <span class="s0">menu .menubar.edit -tearoff 0</span>
+    <span class="s0">AmpMenuArgs	.menubar.edit add command -label [mc Cu&amp;t]   -accel &quot;$mod+X&quot;\</span>
+	    <span class="s0">-command {event generate .console &lt;&lt;Cut&gt;&gt;}</span>
+    <span class="s0">AmpMenuArgs	.menubar.edit add command -label [mc &amp;Copy]  -accel &quot;$mod+C&quot;\</span>
+	    <span class="s0">-command {event generate .console &lt;&lt;Copy&gt;&gt;}</span>
+    <span class="s0">AmpMenuArgs	.menubar.edit add command -label [mc P&amp;aste] -accel &quot;$mod+V&quot;\</span>
+	    <span class="s0">-command {event generate .console &lt;&lt;Paste&gt;&gt;}</span>
+
+    <span class="s0">if {[tk windowingsystem] ne &quot;win32&quot;} {</span>
+	<span class="s0">AmpMenuArgs .menubar.edit add command -label [mc Cl&amp;ear] \</span>
+		<span class="s0">-command {event generate .console &lt;&lt;Clear&gt;&gt;}</span>
+    <span class="s0">} else {</span>
+	<span class="s0">AmpMenuArgs .menubar.edit add command -label [mc &amp;Delete] \</span>
+		<span class="s0">-command {event generate .console &lt;&lt;Clear&gt;&gt;} -accel &quot;Del&quot;</span>
+
+	<span class="s0">AmpMenuArgs .menubar add cascade -label [mc &amp;Help] -menu .menubar.help</span>
+	<span class="s0">menu .menubar.help -tearoff 0</span>
+	<span class="s0">AmpMenuArgs .menubar.help add command -label [mc &amp;About...] \</span>
+		<span class="s0">-command tk::ConsoleAbout</span>
+    <span class="s0">}</span>
+
+    <span class="s0">AmpMenuArgs .menubar.edit add separator</span>
+    <span class="s0">if {$::tk::console::useFontchooser} {</span>
+        <span class="s0">if {[tk windowingsystem] eq &quot;aqua&quot;} {</span>
+            <span class="s0">.menubar.edit add command -label tk_choose_font_marker</span>
+            <span class="s0">set index [.menubar.edit index tk_choose_font_marker]</span>
+            <span class="s0">.menubar.edit entryconfigure $index \</span>
+                <span class="s0">-label [mc &quot;Show Fonts&quot;]\</span>
+                <span class="s0">-accelerator &quot;$mod-T&quot;\</span>
+                <span class="s0">-command [list ::tk::console::FontchooserToggle]</span>
+            <span class="s0">bind Console &lt;&lt;TkFontchooserVisibility&gt;&gt; \</span>
+                <span class="s0">[list ::tk::console::FontchooserVisibility $index]</span>
+	    <span class="s0">::tk::console::FontchooserVisibility $index</span>
+        <span class="s0">} else {</span>
+            <span class="s0">AmpMenuArgs .menubar.edit add command -label [mc &quot;&amp;Font...&quot;] \</span>
+                <span class="s0">-command [list ::tk::console::FontchooserToggle]</span>
+        <span class="s0">}</span>
+	<span class="s0">bind Console &lt;FocusIn&gt;  [list ::tk::console::FontchooserFocus %W 1]</span>
+	<span class="s0">bind Console &lt;FocusOut&gt; [list ::tk::console::FontchooserFocus %W 0]</span>
+    <span class="s0">}</span>
+    <span class="s0">AmpMenuArgs .menubar.edit add command -label [mc &quot;&amp;Increase Font Size&quot;] \</span>
+        <span class="s0">-accel &quot;$mod++&quot; -command {event generate .console &lt;&lt;Console_FontSizeIncr&gt;&gt;}</span>
+    <span class="s0">AmpMenuArgs .menubar.edit add command -label [mc &quot;&amp;Decrease Font Size&quot;] \</span>
+        <span class="s0">-accel &quot;$mod+-&quot; -command {event generate .console &lt;&lt;Console_FontSizeDecr&gt;&gt;}</span>
+    <span class="s0">AmpMenuArgs .menubar.edit add command -label [mc &quot;Fit To Screen Width&quot;] \</span>
+        <span class="s0">-command {event generate .console &lt;&lt;Console_FitScreenWidth&gt;&gt;}</span>
+
+    <span class="s0">if {[tk windowingsystem] eq &quot;aqua&quot;} {</span>
+	<span class="s0">.menubar add cascade -label [mc Window] -menu [menu .menubar.window]</span>
+	<span class="s0">.menubar add cascade -label [mc Help] -menu [menu .menubar.help]</span>
+    <span class="s0">}</span>
+
+    <span class="s0">. configure -menu .menubar</span>
+
+    <span class="s0"># See if we can find a better font than the TkFixedFont</span>
+    <span class="s0">catch {font create TkConsoleFont {*}[font configure TkFixedFont]}</span>
+    <span class="s0">set families [font families]</span>
+    <span class="s0">switch -exact -- [tk windowingsystem] {</span>
+        <span class="s0">aqua { set preferred {Monaco 10} }</span>
+        <span class="s0">win32 { set preferred {ProFontWindows 8 Consolas 8} }</span>
+        <span class="s0">default { set preferred {} }</span>
+    <span class="s0">}</span>
+    <span class="s0">foreach {family size} $preferred {</span>
+        <span class="s0">if {[lsearch -exact $families $family] != -1} {</span>
+            <span class="s0">font configure TkConsoleFont -family $family -size $size</span>
+            <span class="s0">break</span>
+        <span class="s0">}</span>
+    <span class="s0">}</span>
+
+    <span class="s0"># Provide the right border for the text widget (platform dependent).</span>
+    <span class="s0">::ttk::style layout ConsoleFrame {</span>
+        <span class="s0">Entry.field -sticky news -border 1 -children {</span>
+            <span class="s0">ConsoleFrame.padding -sticky news</span>
+        <span class="s0">}</span>
+    <span class="s0">}</span>
+    <span class="s0">::ttk::frame .consoleframe -style ConsoleFrame</span>
+
+    <span class="s0">set con [text .console -yscrollcommand [list .sb set] -setgrid true \</span>
+                 <span class="s0">-borderwidth 0 -highlightthickness 0 -font TkConsoleFont]</span>
+    <span class="s0">if {[tk windowingsystem] eq &quot;aqua&quot;} {</span>
+        <span class="s0">scrollbar .sb -command [list $con yview]</span>
+    <span class="s0">} else {</span>
+        <span class="s0">::ttk::scrollbar .sb -command [list $con yview]</span>
+    <span class="s0">}</span>
+    <span class="s0">pack .sb  -in .consoleframe -fill both -side right -padx 1 -pady 1</span>
+    <span class="s0">pack $con -in .consoleframe -fill both -expand 1 -side left -padx 1 -pady 1</span>
+    <span class="s0">pack .consoleframe -fill both -expand 1 -side left</span>
+
+    <span class="s0">ConsoleBind $con</span>
+
+    <span class="s0">$con tag configure stderr	-foreground red</span>
+    <span class="s0">$con tag configure stdin	-foreground blue</span>
+    <span class="s0">$con tag configure prompt	-foreground \#8F4433</span>
+    <span class="s0">$con tag configure proc	-foreground \#008800</span>
+    <span class="s0">$con tag configure var	-background \#FFC0D0</span>
+    <span class="s0">$con tag raise sel</span>
+    <span class="s0">$con tag configure blink	-background \#FFFF00</span>
+    <span class="s0">$con tag configure find	-background \#FFFF00</span>
+
+    <span class="s0">focus $con</span>
+
+    <span class="s0"># Avoid listing this console in [winfo interps]</span>
+    <span class="s0">if {[info command ::send] eq &quot;::send&quot;} {rename ::send {}}</span>
+
+    <span class="s0">wm protocol . WM_DELETE_WINDOW { wm withdraw . }</span>
+    <span class="s0">wm title . [mc &quot;Console&quot;]</span>
+    <span class="s0">flush stdout</span>
+    <span class="s0">$con mark set output [$con index &quot;end - 1 char&quot;]</span>
+    <span class="s0">tk::TextSetCursor $con end</span>
+    <span class="s0">$con mark set promptEnd insert</span>
+    <span class="s0">$con mark gravity promptEnd left</span>
+
+    <span class="s0"># A variant of ConsolePrompt to avoid a 'puts' call</span>
+    <span class="s0">set w $con</span>
+    <span class="s0">set temp [$w index &quot;end - 1 char&quot;]</span>
+    <span class="s0">$w mark set output end</span>
+    <span class="s0">if {![consoleinterp eval &quot;info exists tcl_prompt1&quot;]} {</span>
+	<span class="s0">set string [EvalAttached $::tk::console::defaultPrompt]</span>
+	<span class="s0">$w insert output $string stdout</span>
+    <span class="s0">}</span>
+    <span class="s0">$w mark set output $temp</span>
+    <span class="s0">::tk::TextSetCursor $w end</span>
+    <span class="s0">$w mark set promptEnd insert</span>
+    <span class="s0">$w mark gravity promptEnd left</span>
+
+    <span class="s0">if {[tk windowingsystem] ne &quot;aqua&quot;} {</span>
+	<span class="s0"># Subtle work-around to erase the '% ' that tclMain.c prints out</span>
+	<span class="s0">after idle [subst -nocommand {</span>
+	    <span class="s0">if {[$con get 1.0 output] eq &quot;% &quot;} { $con delete 1.0 output }</span>
+	<span class="s0">}]</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+
+<span class="s0"># ::tk::ConsoleSource --</span>
+<span class="s0">#</span>
+<span class="s0"># Prompts the user for a file to source in the main interpreter.</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0"># None.</span>
+
+<span class="s0">proc ::tk::ConsoleSource {} {</span>
+    <span class="s0">set filename [tk_getOpenFile -defaultextension .tcl -parent . \</span>
+	    <span class="s0">-title [mc &quot;Select a file to source&quot;] \</span>
+	    <span class="s0">-filetypes [list \</span>
+	    <span class="s0">[list [mc &quot;Tcl Scripts&quot;] .tcl] \</span>
+	    <span class="s0">[list [mc &quot;All Files&quot;] *]]]</span>
+    <span class="s0">if {$filename ne &quot;&quot;} {</span>
+    	<span class="s0">set cmd [list source $filename]</span>
+	<span class="s0">if {[catch {consoleinterp eval $cmd} result]} {</span>
+	    <span class="s0">ConsoleOutput stderr &quot;$result\n&quot;</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+
+<span class="s0"># ::tk::ConsoleInvoke --</span>
+<span class="s0"># Processes the command line input.  If the command is complete it</span>
+<span class="s0"># is evaled in the main interpreter.  Otherwise, the continuation</span>
+<span class="s0"># prompt is added and more input may be added.</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0"># None.</span>
+
+<span class="s0">proc ::tk::ConsoleInvoke {args} {</span>
+    <span class="s0">set ranges [.console tag ranges input]</span>
+    <span class="s0">set cmd &quot;&quot;</span>
+    <span class="s0">if {[llength $ranges]} {</span>
+	<span class="s0">set pos 0</span>
+	<span class="s0">while {[lindex $ranges $pos] ne &quot;&quot;} {</span>
+	    <span class="s0">set start [lindex $ranges $pos]</span>
+	    <span class="s0">set end [lindex $ranges [incr pos]]</span>
+	    <span class="s0">append cmd [.console get $start $end]</span>
+	    <span class="s0">incr pos</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+    <span class="s0">if {$cmd eq &quot;&quot;} {</span>
+	<span class="s0">ConsolePrompt</span>
+    <span class="s0">} elseif {[info complete $cmd]} {</span>
+	<span class="s0">.console mark set output end</span>
+	<span class="s0">.console tag delete input</span>
+	<span class="s0">set result [consoleinterp record $cmd]</span>
+	<span class="s0">if {$result ne &quot;&quot;} {</span>
+	    <span class="s0">puts $result</span>
+	<span class="s0">}</span>
+	<span class="s0">ConsoleHistory reset</span>
+	<span class="s0">ConsolePrompt</span>
+    <span class="s0">} else {</span>
+	<span class="s0">ConsolePrompt partial</span>
+    <span class="s0">}</span>
+    <span class="s0">.console yview -pickplace insert</span>
+<span class="s0">}</span>
+
+<span class="s0"># ::tk::ConsoleHistory --</span>
+<span class="s0"># This procedure implements command line history for the</span>
+<span class="s0"># console.  In general is evals the history command in the</span>
+<span class="s0"># main interpreter to obtain the history.  The variable</span>
+<span class="s0"># ::tk::HistNum is used to store the current location in the history.</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0"># cmd -	Which action to take: prev, next, reset.</span>
+
+<span class="s0">set ::tk::HistNum 1</span>
+<span class="s0">proc ::tk::ConsoleHistory {cmd} {</span>
+    <span class="s0">variable HistNum</span>
+
+    <span class="s0">switch $cmd {</span>
+    	<span class="s0">prev {</span>
+	    <span class="s0">incr HistNum -1</span>
+	    <span class="s0">if {$HistNum == 0} {</span>
+		<span class="s0">set cmd {history event [expr {[history nextid] -1}]}</span>
+	    <span class="s0">} else {</span>
+		<span class="s0">set cmd &quot;history event $HistNum&quot;</span>
+	    <span class="s0">}</span>
+    	    <span class="s0">if {[catch {consoleinterp eval $cmd} cmd]} {</span>
+    	    	<span class="s0">incr HistNum</span>
+    	    	<span class="s0">return</span>
+    	    <span class="s0">}</span>
+	    <span class="s0">.console delete promptEnd end</span>
+    	    <span class="s0">.console insert promptEnd $cmd {input stdin}</span>
+    	<span class="s0">}</span>
+    	<span class="s0">next {</span>
+	    <span class="s0">incr HistNum</span>
+	    <span class="s0">if {$HistNum == 0} {</span>
+		<span class="s0">set cmd {history event [expr {[history nextid] -1}]}</span>
+	    <span class="s0">} elseif {$HistNum &gt; 0} {</span>
+		<span class="s0">set cmd &quot;&quot;</span>
+		<span class="s0">set HistNum 1</span>
+	    <span class="s0">} else {</span>
+		<span class="s0">set cmd &quot;history event $HistNum&quot;</span>
+	    <span class="s0">}</span>
+	    <span class="s0">if {$cmd ne &quot;&quot;} {</span>
+		<span class="s0">catch {consoleinterp eval $cmd} cmd</span>
+	    <span class="s0">}</span>
+	    <span class="s0">.console delete promptEnd end</span>
+	    <span class="s0">.console insert promptEnd $cmd {input stdin}</span>
+    	<span class="s0">}</span>
+    	<span class="s0">reset {</span>
+    	    <span class="s0">set HistNum 1</span>
+    	<span class="s0">}</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+
+<span class="s0"># ::tk::ConsolePrompt --</span>
+<span class="s0"># This procedure draws the prompt.  If tcl_prompt1 or tcl_prompt2</span>
+<span class="s0"># exists in the main interpreter it will be called to generate the</span>
+<span class="s0"># prompt.  Otherwise, a hard coded default prompt is printed.</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0"># partial -	Flag to specify which prompt to print.</span>
+
+<span class="s0">proc ::tk::ConsolePrompt {{partial normal}} {</span>
+    <span class="s0">set w .console</span>
+    <span class="s0">if {$partial eq &quot;normal&quot;} {</span>
+	<span class="s0">set temp [$w index &quot;end - 1 char&quot;]</span>
+	<span class="s0">$w mark set output end</span>
+    	<span class="s0">if {[consoleinterp eval &quot;info exists tcl_prompt1&quot;]} {</span>
+    	    <span class="s0">consoleinterp eval &quot;eval \[set tcl_prompt1\]&quot;</span>
+    	<span class="s0">} else {</span>
+    	    <span class="s0">puts -nonewline [EvalAttached $::tk::console::defaultPrompt]</span>
+    	<span class="s0">}</span>
+    <span class="s0">} else {</span>
+	<span class="s0">set temp [$w index output]</span>
+	<span class="s0">$w mark set output end</span>
+    	<span class="s0">if {[consoleinterp eval &quot;info exists tcl_prompt2&quot;]} {</span>
+    	    <span class="s0">consoleinterp eval &quot;eval \[set tcl_prompt2\]&quot;</span>
+    	<span class="s0">} else {</span>
+	    <span class="s0">puts -nonewline &quot;&gt; &quot;</span>
+    	<span class="s0">}</span>
+    <span class="s0">}</span>
+    <span class="s0">flush stdout</span>
+    <span class="s0">$w mark set output $temp</span>
+    <span class="s0">::tk::TextSetCursor $w end</span>
+    <span class="s0">$w mark set promptEnd insert</span>
+    <span class="s0">$w mark gravity promptEnd left</span>
+    <span class="s0">::tk::console::ConstrainBuffer $w $::tk::console::maxLines</span>
+    <span class="s0">$w see end</span>
+<span class="s0">}</span>
+
+<span class="s0"># Copy selected text from the console</span>
+<span class="s0">proc ::tk::console::Copy {w} {</span>
+    <span class="s0">if {![catch {set data [$w get sel.first sel.last]}]} {</span>
+        <span class="s0">clipboard clear -displayof $w</span>
+        <span class="s0">clipboard append -displayof $w $data</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+<span class="s0"># Copies selected text. If the selection is within the current active edit</span>
+<span class="s0"># region then it will be cut, if not it is only copied.</span>
+<span class="s0">proc ::tk::console::Cut {w} {</span>
+    <span class="s0">if {![catch {set data [$w get sel.first sel.last]}]} {</span>
+        <span class="s0">clipboard clear -displayof $w</span>
+        <span class="s0">clipboard append -displayof $w $data</span>
+        <span class="s0">if {[$w compare sel.first &gt;= output]} {</span>
+            <span class="s0">$w delete sel.first sel.last</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+<span class="s0"># Paste text from the clipboard</span>
+<span class="s0">proc ::tk::console::Paste {w} {</span>
+    <span class="s0">catch {</span>
+        <span class="s0">set clip [::tk::GetSelection $w CLIPBOARD]</span>
+        <span class="s0">set list [split $clip \n\r]</span>
+        <span class="s0">tk::ConsoleInsert $w [lindex $list 0]</span>
+        <span class="s0">foreach x [lrange $list 1 end] {</span>
+            <span class="s0">$w mark set insert {end - 1c}</span>
+            <span class="s0">tk::ConsoleInsert $w &quot;\n&quot;</span>
+            <span class="s0">tk::ConsoleInvoke</span>
+            <span class="s0">tk::ConsoleInsert $w $x</span>
+        <span class="s0">}</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+
+<span class="s0"># Fit TkConsoleFont to window width</span>
+<span class="s0">proc ::tk::console::FitScreenWidth {w} {</span>
+    <span class="s0">set width [winfo screenwidth $w]</span>
+    <span class="s0">set cwidth [$w cget -width]</span>
+    <span class="s0">set s -50</span>
+    <span class="s0">set fit 0</span>
+    <span class="s0">array set fi [font configure TkConsoleFont]</span>
+    <span class="s0">while {$s &lt; 0} {</span>
+        <span class="s0">set fi(-size) $s</span>
+        <span class="s0">set f [font create {*}[array get fi]]</span>
+        <span class="s0">set c [font measure $f &quot;eM&quot;]</span>
+        <span class="s0">font delete $f</span>
+        <span class="s0">if {$c * $cwidth &lt; 1.667 * $width} {</span>
+            <span class="s0">font configure TkConsoleFont -size $s</span>
+            <span class="s0">break</span>
+        <span class="s0">}</span>
+	<span class="s0">incr s 2</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+
+<span class="s0"># ::tk::ConsoleBind --</span>
+<span class="s0"># This procedure first ensures that the default bindings for the Text</span>
+<span class="s0"># class have been defined.  Then certain bindings are overridden for</span>
+<span class="s0"># the class.</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0"># None.</span>
+
+<span class="s0">proc ::tk::ConsoleBind {w} {</span>
+    <span class="s0">bindtags $w [list $w Console PostConsole [winfo toplevel $w] all]</span>
+
+    <span class="s0">## Get all Text bindings into Console</span>
+    <span class="s0">foreach ev [bind Text] {</span>
+	<span class="s0">bind Console $ev [bind Text $ev]</span>
+    <span class="s0">}</span>
+    <span class="s0">## We really didn't want the newline insertion...</span>
+    <span class="s0">bind Console &lt;Control-Key-o&gt; {}</span>
+    <span class="s0">## ...or any Control-v binding (would block &lt;&lt;Paste&gt;&gt;)</span>
+    <span class="s0">bind Console &lt;Control-Key-v&gt; {}</span>
+
+    <span class="s0"># For the moment, transpose isn't enabled until the console</span>
+    <span class="s0"># gets and overhaul of how it handles input -- hobbs</span>
+    <span class="s0">bind Console &lt;Control-Key-t&gt; {}</span>
+
+    <span class="s0"># Ignore all Alt, Meta, and Control keypresses unless explicitly bound.</span>
+    <span class="s0"># Otherwise, if a widget binding for one of these is defined, the</span>
+    <span class="s0"># &lt;Keypress&gt; class binding will also fire and insert the character</span>
+    <span class="s0"># which is wrong.</span>
+
+    <span class="s0">bind Console &lt;Alt-KeyPress&gt; {# nothing }</span>
+    <span class="s0">bind Console &lt;Meta-KeyPress&gt; {# nothing}</span>
+    <span class="s0">bind Console &lt;Control-KeyPress&gt; {# nothing}</span>
+
+    <span class="s0">foreach {ev key} {</span>
+	<span class="s0">&lt;&lt;Console_NextImmediate&gt;&gt;	&lt;Control-Key-n&gt;</span>
+	<span class="s0">&lt;&lt;Console_PrevImmediate&gt;&gt;	&lt;Control-Key-p&gt;</span>
+	<span class="s0">&lt;&lt;Console_PrevSearch&gt;&gt;		&lt;Control-Key-r&gt;</span>
+	<span class="s0">&lt;&lt;Console_NextSearch&gt;&gt;		&lt;Control-Key-s&gt;</span>
+
+	<span class="s0">&lt;&lt;Console_Expand&gt;&gt;		&lt;Key-Tab&gt;</span>
+	<span class="s0">&lt;&lt;Console_Expand&gt;&gt;		&lt;Key-Escape&gt;</span>
+	<span class="s0">&lt;&lt;Console_ExpandFile&gt;&gt;		&lt;Control-Shift-Key-F&gt;</span>
+	<span class="s0">&lt;&lt;Console_ExpandProc&gt;&gt;		&lt;Control-Shift-Key-P&gt;</span>
+	<span class="s0">&lt;&lt;Console_ExpandVar&gt;&gt;		&lt;Control-Shift-Key-V&gt;</span>
+	<span class="s0">&lt;&lt;Console_Tab&gt;&gt;			&lt;Control-Key-i&gt;</span>
+	<span class="s0">&lt;&lt;Console_Tab&gt;&gt;			&lt;Meta-Key-i&gt;</span>
+	<span class="s0">&lt;&lt;Console_Eval&gt;&gt;		&lt;Key-Return&gt;</span>
+	<span class="s0">&lt;&lt;Console_Eval&gt;&gt;		&lt;Key-KP_Enter&gt;</span>
+
+	<span class="s0">&lt;&lt;Console_Clear&gt;&gt;		&lt;Control-Key-l&gt;</span>
+	<span class="s0">&lt;&lt;Console_KillLine&gt;&gt;		&lt;Control-Key-k&gt;</span>
+	<span class="s0">&lt;&lt;Console_Transpose&gt;&gt;		&lt;Control-Key-t&gt;</span>
+	<span class="s0">&lt;&lt;Console_ClearLine&gt;&gt;		&lt;Control-Key-u&gt;</span>
+	<span class="s0">&lt;&lt;Console_SaveCommand&gt;&gt;		&lt;Control-Key-z&gt;</span>
+        <span class="s0">&lt;&lt;Console_FontSizeIncr&gt;&gt;	&lt;Control-Key-plus&gt;</span>
+        <span class="s0">&lt;&lt;Console_FontSizeDecr&gt;&gt;	&lt;Control-Key-minus&gt;</span>
+    <span class="s0">} {</span>
+	<span class="s0">event add $ev $key</span>
+	<span class="s0">bind Console $key {}</span>
+    <span class="s0">}</span>
+    <span class="s0">if {[tk windowingsystem] eq &quot;aqua&quot;} {</span>
+	<span class="s0">foreach {ev key} {</span>
+	    <span class="s0">&lt;&lt;Console_FontSizeIncr&gt;&gt;	&lt;Command-Key-plus&gt;</span>
+	    <span class="s0">&lt;&lt;Console_FontSizeDecr&gt;&gt;	&lt;Command-Key-minus&gt;</span>
+	<span class="s0">} {</span>
+	    <span class="s0">event add $ev $key</span>
+	    <span class="s0">bind Console $key {}</span>
+	<span class="s0">}</span>
+	<span class="s0">if {$::tk::console::useFontchooser} {</span>
+	    <span class="s0">bind Console &lt;Command-Key-t&gt; [list ::tk::console::FontchooserToggle]</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+    <span class="s0">bind Console &lt;&lt;Console_Expand&gt;&gt; {</span>
+	<span class="s0">if {[%W compare insert &gt; promptEnd]} {</span>
+	    <span class="s0">::tk::console::Expand %W</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+    <span class="s0">bind Console &lt;&lt;Console_ExpandFile&gt;&gt; {</span>
+	<span class="s0">if {[%W compare insert &gt; promptEnd]} {</span>
+	    <span class="s0">::tk::console::Expand %W path</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+    <span class="s0">bind Console &lt;&lt;Console_ExpandProc&gt;&gt; {</span>
+	<span class="s0">if {[%W compare insert &gt; promptEnd]} {</span>
+	    <span class="s0">::tk::console::Expand %W proc</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+    <span class="s0">bind Console &lt;&lt;Console_ExpandVar&gt;&gt; {</span>
+	<span class="s0">if {[%W compare insert &gt; promptEnd]} {</span>
+	    <span class="s0">::tk::console::Expand %W var</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+    <span class="s0">bind Console &lt;&lt;Console_Eval&gt;&gt; {</span>
+	<span class="s0">%W mark set insert {end - 1c}</span>
+	<span class="s0">tk::ConsoleInsert %W &quot;\n&quot;</span>
+	<span class="s0">tk::ConsoleInvoke</span>
+	<span class="s0">break</span>
+    <span class="s0">}</span>
+    <span class="s0">bind Console &lt;Delete&gt; {</span>
+	<span class="s0">if {{} ne [%W tag nextrange sel 1.0 end] \</span>
+		<span class="s0">&amp;&amp; [%W compare sel.first &gt;= promptEnd]} {</span>
+	    <span class="s0">%W delete sel.first sel.last</span>
+	<span class="s0">} elseif {[%W compare insert &gt;= promptEnd]} {</span>
+	    <span class="s0">%W delete insert</span>
+	    <span class="s0">%W see insert</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+    <span class="s0">bind Console &lt;BackSpace&gt; {</span>
+	<span class="s0">if {{} ne [%W tag nextrange sel 1.0 end] \</span>
+		<span class="s0">&amp;&amp; [%W compare sel.first &gt;= promptEnd]} {</span>
+	    <span class="s0">%W delete sel.first sel.last</span>
+	<span class="s0">} elseif {[%W compare insert != 1.0] &amp;&amp; \</span>
+		<span class="s0">[%W compare insert &gt; promptEnd]} {</span>
+	    <span class="s0">%W delete insert-1c</span>
+	    <span class="s0">%W see insert</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+    <span class="s0">bind Console &lt;Control-h&gt; [bind Console &lt;BackSpace&gt;]</span>
+
+    <span class="s0">bind Console &lt;&lt;LineStart&gt;&gt; {</span>
+	<span class="s0">if {[%W compare insert &lt; promptEnd]} {</span>
+	    <span class="s0">tk::TextSetCursor %W {insert linestart}</span>
+	<span class="s0">} else {</span>
+	    <span class="s0">tk::TextSetCursor %W promptEnd</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+    <span class="s0">bind Console &lt;&lt;LineEnd&gt;&gt; {</span>
+	<span class="s0">tk::TextSetCursor %W {insert lineend}</span>
+    <span class="s0">}</span>
+    <span class="s0">bind Console &lt;Control-d&gt; {</span>
+	<span class="s0">if {[%W compare insert &lt; promptEnd]} {</span>
+	    <span class="s0">break</span>
+	<span class="s0">}</span>
+	<span class="s0">%W delete insert</span>
+    <span class="s0">}</span>
+    <span class="s0">bind Console &lt;&lt;Console_KillLine&gt;&gt; {</span>
+	<span class="s0">if {[%W compare insert &lt; promptEnd]} {</span>
+	    <span class="s0">break</span>
+	<span class="s0">}</span>
+	<span class="s0">if {[%W compare insert == {insert lineend}]} {</span>
+	    <span class="s0">%W delete insert</span>
+	<span class="s0">} else {</span>
+	    <span class="s0">%W delete insert {insert lineend}</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+    <span class="s0">bind Console &lt;&lt;Console_Clear&gt;&gt; {</span>
+	<span class="s0">## Clear console display</span>
+	<span class="s0">%W delete 1.0 &quot;promptEnd linestart&quot;</span>
+    <span class="s0">}</span>
+    <span class="s0">bind Console &lt;&lt;Console_ClearLine&gt;&gt; {</span>
+	<span class="s0">## Clear command line (Unix shell staple)</span>
+	<span class="s0">%W delete promptEnd end</span>
+    <span class="s0">}</span>
+    <span class="s0">bind Console &lt;Meta-d&gt; {</span>
+	<span class="s0">if {[%W compare insert &gt;= promptEnd]} {</span>
+	    <span class="s0">%W delete insert {insert wordend}</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+    <span class="s0">bind Console &lt;Meta-BackSpace&gt; {</span>
+	<span class="s0">if {[%W compare {insert -1c wordstart} &gt;= promptEnd]} {</span>
+	    <span class="s0">%W delete {insert -1c wordstart} insert</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+    <span class="s0">bind Console &lt;Meta-d&gt; {</span>
+	<span class="s0">if {[%W compare insert &gt;= promptEnd]} {</span>
+	    <span class="s0">%W delete insert {insert wordend}</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+    <span class="s0">bind Console &lt;Meta-BackSpace&gt; {</span>
+	<span class="s0">if {[%W compare {insert -1c wordstart} &gt;= promptEnd]} {</span>
+	    <span class="s0">%W delete {insert -1c wordstart} insert</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+    <span class="s0">bind Console &lt;Meta-Delete&gt; {</span>
+	<span class="s0">if {[%W compare insert &gt;= promptEnd]} {</span>
+	    <span class="s0">%W delete insert {insert wordend}</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+    <span class="s0">bind Console &lt;&lt;PrevLine&gt;&gt; {</span>
+	<span class="s0">tk::ConsoleHistory prev</span>
+    <span class="s0">}</span>
+    <span class="s0">bind Console &lt;&lt;NextLine&gt;&gt; {</span>
+	<span class="s0">tk::ConsoleHistory next</span>
+    <span class="s0">}</span>
+    <span class="s0">bind Console &lt;Insert&gt; {</span>
+	<span class="s0">catch {tk::ConsoleInsert %W [::tk::GetSelection %W PRIMARY]}</span>
+    <span class="s0">}</span>
+    <span class="s0">bind Console &lt;KeyPress&gt; {</span>
+	<span class="s0">tk::ConsoleInsert %W %A</span>
+    <span class="s0">}</span>
+    <span class="s0">bind Console &lt;F9&gt; {</span>
+	<span class="s0">eval destroy [winfo child .]</span>
+	<span class="s0">source [file join $tk_library console.tcl]</span>
+    <span class="s0">}</span>
+    <span class="s0">if {[tk windowingsystem] eq &quot;aqua&quot;} {</span>
+	<span class="s0">bind Console &lt;Command-q&gt; {</span>
+	    <span class="s0">exit</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+    <span class="s0">bind Console &lt;&lt;Cut&gt;&gt; { ::tk::console::Cut %W }</span>
+    <span class="s0">bind Console &lt;&lt;Copy&gt;&gt; { ::tk::console::Copy %W }</span>
+    <span class="s0">bind Console &lt;&lt;Paste&gt;&gt; { ::tk::console::Paste %W }</span>
+
+    <span class="s0">bind Console &lt;&lt;Console_FontSizeIncr&gt;&gt; {</span>
+        <span class="s0">set size [font configure TkConsoleFont -size]</span>
+        <span class="s0">if {$size &lt; 0} {set sign -1} else {set sign 1}</span>
+        <span class="s0">set size [expr {(abs($size) + 1) * $sign}]</span>
+        <span class="s0">font configure TkConsoleFont -size $size</span>
+	<span class="s0">if {$::tk::console::useFontchooser} {</span>
+	    <span class="s0">tk fontchooser configure -font TkConsoleFont</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+    <span class="s0">bind Console &lt;&lt;Console_FontSizeDecr&gt;&gt; {</span>
+        <span class="s0">set size [font configure TkConsoleFont -size]</span>
+        <span class="s0">if {abs($size) &lt; 2} { return }</span>
+        <span class="s0">if {$size &lt; 0} {set sign -1} else {set sign 1}</span>
+        <span class="s0">set size [expr {(abs($size) - 1) * $sign}]</span>
+        <span class="s0">font configure TkConsoleFont -size $size</span>
+	<span class="s0">if {$::tk::console::useFontchooser} {</span>
+	    <span class="s0">tk fontchooser configure -font TkConsoleFont</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+    <span class="s0">bind Console &lt;&lt;Console_FitScreenWidth&gt;&gt; {</span>
+	<span class="s0">::tk::console::FitScreenWidth %W</span>
+    <span class="s0">}</span>
+
+    <span class="s0">##</span>
+    <span class="s0">## Bindings for doing special things based on certain keys</span>
+    <span class="s0">##</span>
+    <span class="s0">bind PostConsole &lt;Key-parenright&gt; {</span>
+	<span class="s0">if {&quot;\\&quot; ne [%W get insert-2c]} {</span>
+	    <span class="s0">::tk::console::MatchPair %W \( \) promptEnd</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+    <span class="s0">bind PostConsole &lt;Key-bracketright&gt; {</span>
+	<span class="s0">if {&quot;\\&quot; ne [%W get insert-2c]} {</span>
+	    <span class="s0">::tk::console::MatchPair %W \[ \] promptEnd</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+    <span class="s0">bind PostConsole &lt;Key-braceright&gt; {</span>
+	<span class="s0">if {&quot;\\&quot; ne [%W get insert-2c]} {</span>
+	    <span class="s0">::tk::console::MatchPair %W \{ \} promptEnd</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+    <span class="s0">bind PostConsole &lt;Key-quotedbl&gt; {</span>
+	<span class="s0">if {&quot;\\&quot; ne [%W get insert-2c]} {</span>
+	    <span class="s0">::tk::console::MatchQuote %W promptEnd</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+
+    <span class="s0">bind PostConsole &lt;KeyPress&gt; {</span>
+	<span class="s0">if {&quot;%A&quot; ne &quot;&quot;} {</span>
+	    <span class="s0">::tk::console::TagProc %W</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+
+<span class="s0"># ::tk::ConsoleInsert --</span>
+<span class="s0"># Insert a string into a text at the point of the insertion cursor.</span>
+<span class="s0"># If there is a selection in the text, and it covers the point of the</span>
+<span class="s0"># insertion cursor, then delete the selection before inserting.  Insertion</span>
+<span class="s0"># is restricted to the prompt area.</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0"># w -		The text window in which to insert the string</span>
+<span class="s0"># s -		The string to insert (usually just a single character)</span>
+
+<span class="s0">proc ::tk::ConsoleInsert {w s} {</span>
+    <span class="s0">if {$s eq &quot;&quot;} {</span>
+	<span class="s0">return</span>
+    <span class="s0">}</span>
+    <span class="s0">catch {</span>
+	<span class="s0">if {[$w compare sel.first &lt;= insert] \</span>
+		<span class="s0">&amp;&amp; [$w compare sel.last &gt;= insert]} {</span>
+	    <span class="s0">$w tag remove sel sel.first promptEnd</span>
+	    <span class="s0">$w delete sel.first sel.last</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+    <span class="s0">if {[$w compare insert &lt; promptEnd]} {</span>
+	<span class="s0">$w mark set insert end</span>
+    <span class="s0">}</span>
+    <span class="s0">$w insert insert $s {input stdin}</span>
+    <span class="s0">$w see insert</span>
+<span class="s0">}</span>
+
+<span class="s0"># ::tk::ConsoleOutput --</span>
+<span class="s0">#</span>
+<span class="s0"># This routine is called directly by ConsolePutsCmd to cause a string</span>
+<span class="s0"># to be displayed in the console.</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0"># dest -	The output tag to be used: either &quot;stderr&quot; or &quot;stdout&quot;.</span>
+<span class="s0"># string -	The string to be displayed.</span>
+
+<span class="s0">proc ::tk::ConsoleOutput {dest string} {</span>
+    <span class="s0">set w .console</span>
+    <span class="s0">$w insert output $string $dest</span>
+    <span class="s0">::tk::console::ConstrainBuffer $w $::tk::console::maxLines</span>
+    <span class="s0">$w see insert</span>
+<span class="s0">}</span>
+
+<span class="s0"># ::tk::ConsoleExit --</span>
+<span class="s0">#</span>
+<span class="s0"># This routine is called by ConsoleEventProc when the main window of</span>
+<span class="s0"># the application is destroyed.  Don't call exit - that probably already</span>
+<span class="s0"># happened.  Just delete our window.</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0"># None.</span>
+
+<span class="s0">proc ::tk::ConsoleExit {} {</span>
+    <span class="s0">destroy .</span>
+<span class="s0">}</span>
+
+<span class="s0"># ::tk::ConsoleAbout --</span>
+<span class="s0">#</span>
+<span class="s0"># This routine displays an About box to show Tcl/Tk version info.</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0"># None.</span>
+
+<span class="s0">proc ::tk::ConsoleAbout {} {</span>
+    <span class="s0">tk_messageBox -type ok -message &quot;[mc {Tcl for Windows}]</span>
+
+<span class="s0">Tcl $::tcl_patchLevel</span>
+<span class="s0">Tk $::tk_patchLevel&quot;</span>
+<span class="s0">}</span>
+
+<span class="s0"># ::tk::console::Fontchooser* --</span>
+<span class="s0"># 	Let the user select the console font (TIP 324).</span>
+
+<span class="s0">proc ::tk::console::FontchooserToggle {} {</span>
+    <span class="s0">if {[tk fontchooser configure -visible]} {</span>
+	<span class="s0">tk fontchooser hide</span>
+    <span class="s0">} else {</span>
+	<span class="s0">tk fontchooser show</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+<span class="s0">proc ::tk::console::FontchooserVisibility {index} {</span>
+    <span class="s0">if {[tk fontchooser configure -visible]} {</span>
+	<span class="s0">.menubar.edit entryconfigure $index -label [msgcat::mc &quot;Hide Fonts&quot;]</span>
+    <span class="s0">} else {</span>
+	<span class="s0">.menubar.edit entryconfigure $index -label [msgcat::mc &quot;Show Fonts&quot;]</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+<span class="s0">proc ::tk::console::FontchooserFocus {w isFocusIn} {</span>
+    <span class="s0">if {$isFocusIn} {</span>
+	<span class="s0">tk fontchooser configure -parent $w -font TkConsoleFont \</span>
+		<span class="s0">-command [namespace code [list FontchooserApply]]</span>
+    <span class="s0">} else {</span>
+	<span class="s0">tk fontchooser configure -parent $w -font {} -command {}</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+<span class="s0">proc ::tk::console::FontchooserApply {font args} {</span>
+    <span class="s0">catch {font configure TkConsoleFont {*}[font actual $font]}</span>
+<span class="s0">}</span>
+
+<span class="s0"># ::tk::console::TagProc --</span>
+<span class="s0">#</span>
+<span class="s0"># Tags a procedure in the console if it's recognized</span>
+<span class="s0"># This procedure is not perfect.  However, making it perfect wastes</span>
+<span class="s0"># too much CPU time...</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0">#	w	- console text widget</span>
+
+<span class="s0">proc ::tk::console::TagProc w {</span>
+    <span class="s0">if {!$::tk::console::magicKeys} {</span>
+	<span class="s0">return</span>
+    <span class="s0">}</span>
+    <span class="s0">set exp &quot;\[^\\\\\]\[\[ \t\n\r\;{}\&quot;\$\]&quot;</span>
+    <span class="s0">set i [$w search -backwards -regexp $exp insert-1c promptEnd-1c]</span>
+    <span class="s0">if {$i eq &quot;&quot;} {</span>
+	<span class="s0">set i promptEnd</span>
+    <span class="s0">} else {</span>
+	<span class="s0">append i +2c</span>
+    <span class="s0">}</span>
+    <span class="s0">regsub -all &quot;\[\[\\\\\\?\\*\]&quot; [$w get $i &quot;insert-1c wordend&quot;] {\\\0} c</span>
+    <span class="s0">if {[llength [EvalAttached [list info commands $c]]]} {</span>
+	<span class="s0">$w tag add proc $i &quot;insert-1c wordend&quot;</span>
+    <span class="s0">} else {</span>
+	<span class="s0">$w tag remove proc $i &quot;insert-1c wordend&quot;</span>
+    <span class="s0">}</span>
+    <span class="s0">if {[llength [EvalAttached [list info vars $c]]]} {</span>
+	<span class="s0">$w tag add var $i &quot;insert-1c wordend&quot;</span>
+    <span class="s0">} else {</span>
+	<span class="s0">$w tag remove var $i &quot;insert-1c wordend&quot;</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+
+<span class="s0"># ::tk::console::MatchPair --</span>
+<span class="s0">#</span>
+<span class="s0"># Blinks a matching pair of characters</span>
+<span class="s0"># c2 is assumed to be at the text index 'insert'.</span>
+<span class="s0"># This proc is really loopy and took me an hour to figure out given</span>
+<span class="s0"># all possible combinations with escaping except for escaped \'s.</span>
+<span class="s0"># It doesn't take into account possible commenting... Oh well.  If</span>
+<span class="s0"># anyone has something better, I'd like to see/use it.  This is really</span>
+<span class="s0"># only efficient for small contexts.</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0">#	w	- console text widget</span>
+<span class="s0"># 	c1	- first char of pair</span>
+<span class="s0"># 	c2	- second char of pair</span>
+<span class="s0">#</span>
+<span class="s0"># Calls:	::tk::console::Blink</span>
+
+<span class="s0">proc ::tk::console::MatchPair {w c1 c2 {lim 1.0}} {</span>
+    <span class="s0">if {!$::tk::console::magicKeys} {</span>
+	<span class="s0">return</span>
+    <span class="s0">}</span>
+    <span class="s0">if {{} ne [set ix [$w search -back $c1 insert $lim]]} {</span>
+	<span class="s0">while {</span>
+	    <span class="s0">[string match {\\} [$w get $ix-1c]] &amp;&amp;</span>
+	    <span class="s0">[set ix [$w search -back $c1 $ix-1c $lim]] ne {}</span>
+	<span class="s0">} {}</span>
+	<span class="s0">set i1 insert-1c</span>
+	<span class="s0">while {$ix ne {}} {</span>
+	    <span class="s0">set i0 $ix</span>
+	    <span class="s0">set j 0</span>
+	    <span class="s0">while {[set i0 [$w search $c2 $i0 $i1]] ne {}} {</span>
+		<span class="s0">append i0 +1c</span>
+		<span class="s0">if {[string match {\\} [$w get $i0-2c]]} {</span>
+		    <span class="s0">continue</span>
+		<span class="s0">}</span>
+		<span class="s0">incr j</span>
+	    <span class="s0">}</span>
+	    <span class="s0">if {!$j} {</span>
+		<span class="s0">break</span>
+	    <span class="s0">}</span>
+	    <span class="s0">set i1 $ix</span>
+	    <span class="s0">while {$j &amp;&amp; [set ix [$w search -back $c1 $ix $lim]] ne {}} {</span>
+		<span class="s0">if {[string match {\\} [$w get $ix-1c]]} {</span>
+		    <span class="s0">continue</span>
+		<span class="s0">}</span>
+		<span class="s0">incr j -1</span>
+	    <span class="s0">}</span>
+	<span class="s0">}</span>
+	<span class="s0">if {[string match {} $ix]} {</span>
+	    <span class="s0">set ix [$w index $lim]</span>
+	<span class="s0">}</span>
+    <span class="s0">} else {</span>
+	<span class="s0">set ix [$w index $lim]</span>
+    <span class="s0">}</span>
+    <span class="s0">if {$::tk::console::blinkRange} {</span>
+	<span class="s0">Blink $w $ix [$w index insert]</span>
+    <span class="s0">} else {</span>
+	<span class="s0">Blink $w $ix $ix+1c [$w index insert-1c] [$w index insert]</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+
+<span class="s0"># ::tk::console::MatchQuote --</span>
+<span class="s0">#</span>
+<span class="s0"># Blinks between matching quotes.</span>
+<span class="s0"># Blinks just the quote if it's unmatched, otherwise blinks quoted string</span>
+<span class="s0"># The quote to match is assumed to be at the text index 'insert'.</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0">#	w	- console text widget</span>
+<span class="s0">#</span>
+<span class="s0"># Calls:	::tk::console::Blink</span>
+
+<span class="s0">proc ::tk::console::MatchQuote {w {lim 1.0}} {</span>
+    <span class="s0">if {!$::tk::console::magicKeys} {</span>
+	<span class="s0">return</span>
+    <span class="s0">}</span>
+    <span class="s0">set i insert-1c</span>
+    <span class="s0">set j 0</span>
+    <span class="s0">while {[set i [$w search -back \&quot; $i $lim]] ne {}} {</span>
+	<span class="s0">if {[string match {\\} [$w get $i-1c]]} {</span>
+	    <span class="s0">continue</span>
+	<span class="s0">}</span>
+	<span class="s0">if {!$j} {</span>
+	    <span class="s0">set i0 $i</span>
+	<span class="s0">}</span>
+	<span class="s0">incr j</span>
+    <span class="s0">}</span>
+    <span class="s0">if {$j&amp;1} {</span>
+	<span class="s0">if {$::tk::console::blinkRange} {</span>
+	    <span class="s0">Blink $w $i0 [$w index insert]</span>
+	<span class="s0">} else {</span>
+	    <span class="s0">Blink $w $i0 $i0+1c [$w index insert-1c] [$w index insert]</span>
+	<span class="s0">}</span>
+    <span class="s0">} else {</span>
+	<span class="s0">Blink $w [$w index insert-1c] [$w index insert]</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+
+<span class="s0"># ::tk::console::Blink --</span>
+<span class="s0">#</span>
+<span class="s0"># Blinks between n index pairs for a specified duration.</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0">#	w	- console text widget</span>
+<span class="s0"># 	i1	- start index to blink region</span>
+<span class="s0"># 	i2	- end index of blink region</span>
+<span class="s0"># 	dur	- duration in usecs to blink for</span>
+<span class="s0">#</span>
+<span class="s0"># Outputs:</span>
+<span class="s0">#	blinks selected characters in $w</span>
+
+<span class="s0">proc ::tk::console::Blink {w args} {</span>
+    <span class="s0">eval [list $w tag add blink] $args</span>
+    <span class="s0">after $::tk::console::blinkTime [list $w] tag remove blink $args</span>
+<span class="s0">}</span>
+
+<span class="s0"># ::tk::console::ConstrainBuffer --</span>
+<span class="s0">#</span>
+<span class="s0"># This limits the amount of data in the text widget</span>
+<span class="s0"># Called by Prompt and ConsoleOutput</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0">#	w	- console text widget</span>
+<span class="s0">#	size	- # of lines to constrain to</span>
+<span class="s0">#</span>
+<span class="s0"># Outputs:</span>
+<span class="s0">#	may delete data in console widget</span>
+
+<span class="s0">proc ::tk::console::ConstrainBuffer {w size} {</span>
+    <span class="s0">if {[$w index end] &gt; $size} {</span>
+	<span class="s0">$w delete 1.0 [expr {int([$w index end])-$size}].0</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+
+<span class="s0"># ::tk::console::Expand --</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0"># ARGS:	w	- text widget in which to expand str</span>
+<span class="s0"># 	type	- type of expansion (path / proc / variable)</span>
+<span class="s0">#</span>
+<span class="s0"># Calls:	::tk::console::Expand(Pathname|Procname|Variable)</span>
+<span class="s0">#</span>
+<span class="s0"># Outputs:	The string to match is expanded to the longest possible match.</span>
+<span class="s0">#		If ::tk::console::showMatches is non-zero and the longest match</span>
+<span class="s0">#		equaled the string to expand, then all possible matches are</span>
+<span class="s0">#		output to stdout.  Triggers bell if no matches are found.</span>
+<span class="s0">#</span>
+<span class="s0"># Returns:	number of matches found</span>
+
+<span class="s0">proc ::tk::console::Expand {w {type &quot;&quot;}} {</span>
+    <span class="s0">set exp &quot;\[^\\\\\]\[\[ \t\n\r\\\{\&quot;\\\\\$\]&quot;</span>
+    <span class="s0">set tmp [$w search -backwards -regexp $exp insert-1c promptEnd-1c]</span>
+    <span class="s0">if {$tmp eq &quot;&quot;} {</span>
+	<span class="s0">set tmp promptEnd</span>
+    <span class="s0">} else {</span>
+	<span class="s0">append tmp +2c</span>
+    <span class="s0">}</span>
+    <span class="s0">if {[$w compare $tmp &gt;= insert]} {</span>
+	<span class="s0">return</span>
+    <span class="s0">}</span>
+    <span class="s0">set str [$w get $tmp insert]</span>
+    <span class="s0">switch -glob $type {</span>
+	<span class="s0">path* {</span>
+	    <span class="s0">set res [ExpandPathname $str]</span>
+	<span class="s0">}</span>
+	<span class="s0">proc* {</span>
+	    <span class="s0">set res [ExpandProcname $str]</span>
+	<span class="s0">}</span>
+	<span class="s0">var* {</span>
+	    <span class="s0">set res [ExpandVariable $str]</span>
+	<span class="s0">}</span>
+	<span class="s0">default {</span>
+	    <span class="s0">set res {}</span>
+	    <span class="s0">foreach t {Pathname Procname Variable} {</span>
+		<span class="s0">if {![catch {Expand$t $str} res] &amp;&amp; ($res ne &quot;&quot;)} {</span>
+		    <span class="s0">break</span>
+		<span class="s0">}</span>
+	    <span class="s0">}</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+    <span class="s0">set len [llength $res]</span>
+    <span class="s0">if {$len} {</span>
+	<span class="s0">set repl [lindex $res 0]</span>
+	<span class="s0">$w delete $tmp insert</span>
+	<span class="s0">$w insert $tmp $repl {input stdin}</span>
+	<span class="s0">if {($len &gt; 1) &amp;&amp; ($::tk::console::showMatches) &amp;&amp; ($repl eq $str)} {</span>
+	    <span class="s0">puts stdout [lsort [lreplace $res 0 0]]</span>
+	<span class="s0">}</span>
+    <span class="s0">} else {</span>
+	<span class="s0">bell</span>
+    <span class="s0">}</span>
+    <span class="s0">return [incr len -1]</span>
+<span class="s0">}</span>
+
+<span class="s0"># ::tk::console::ExpandPathname --</span>
+<span class="s0">#</span>
+<span class="s0"># Expand a file pathname based on $str</span>
+<span class="s0"># This is based on UNIX file name conventions</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0">#	str	- partial file pathname to expand</span>
+<span class="s0">#</span>
+<span class="s0"># Calls:	::tk::console::ExpandBestMatch</span>
+<span class="s0">#</span>
+<span class="s0"># Returns:	list containing longest unique match followed by all the</span>
+<span class="s0">#		possible further matches</span>
+
+<span class="s0">proc ::tk::console::ExpandPathname str {</span>
+    <span class="s0">set pwd [EvalAttached pwd]</span>
+    <span class="s0">if {[catch {EvalAttached [list cd [file dirname $str]]} err opt]} {</span>
+	<span class="s0">return -options $opt $err</span>
+    <span class="s0">}</span>
+    <span class="s0">set dir [file tail $str]</span>
+    <span class="s0">## Check to see if it was known to be a directory and keep the trailing</span>
+    <span class="s0">## slash if so (file tail cuts it off)</span>
+    <span class="s0">if {[string match */ $str]} {</span>
+	<span class="s0">append dir /</span>
+    <span class="s0">}</span>
+    <span class="s0">if {[catch {lsort [EvalAttached [list glob $dir*]]} m]} {</span>
+	<span class="s0">set match {}</span>
+    <span class="s0">} else {</span>
+	<span class="s0">if {[llength $m] &gt; 1} {</span>
+	    <span class="s0">if { $::tcl_platform(platform) eq &quot;windows&quot; } {</span>
+		<span class="s0">## Windows is screwy because it's case insensitive</span>
+		<span class="s0">set tmp [ExpandBestMatch [string tolower $m] \</span>
+			<span class="s0">[string tolower $dir]]</span>
+		<span class="s0">## Don't change case if we haven't changed the word</span>
+		<span class="s0">if {[string length $dir]==[string length $tmp]} {</span>
+		    <span class="s0">set tmp $dir</span>
+		<span class="s0">}</span>
+	    <span class="s0">} else {</span>
+		<span class="s0">set tmp [ExpandBestMatch $m $dir]</span>
+	    <span class="s0">}</span>
+	    <span class="s0">if {[string match ?*/* $str]} {</span>
+		<span class="s0">set tmp [file dirname $str]/$tmp</span>
+	    <span class="s0">} elseif {[string match /* $str]} {</span>
+		<span class="s0">set tmp /$tmp</span>
+	    <span class="s0">}</span>
+	    <span class="s0">regsub -all { } $tmp {\\ } tmp</span>
+	    <span class="s0">set match [linsert $m 0 $tmp]</span>
+	<span class="s0">} else {</span>
+	    <span class="s0">## This may look goofy, but it handles spaces in path names</span>
+	    <span class="s0">eval append match $m</span>
+	    <span class="s0">if {[file isdir $match]} {</span>
+		<span class="s0">append match /</span>
+	    <span class="s0">}</span>
+	    <span class="s0">if {[string match ?*/* $str]} {</span>
+		<span class="s0">set match [file dirname $str]/$match</span>
+	    <span class="s0">} elseif {[string match /* $str]} {</span>
+		<span class="s0">set match /$match</span>
+	    <span class="s0">}</span>
+	    <span class="s0">regsub -all { } $match {\\ } match</span>
+	    <span class="s0">## Why is this one needed and the ones below aren't!!</span>
+	    <span class="s0">set match [list $match]</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+    <span class="s0">EvalAttached [list cd $pwd]</span>
+    <span class="s0">return $match</span>
+<span class="s0">}</span>
+
+<span class="s0"># ::tk::console::ExpandProcname --</span>
+<span class="s0">#</span>
+<span class="s0"># Expand a tcl proc name based on $str</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0">#	str	- partial proc name to expand</span>
+<span class="s0">#</span>
+<span class="s0"># Calls:	::tk::console::ExpandBestMatch</span>
+<span class="s0">#</span>
+<span class="s0"># Returns:	list containing longest unique match followed by all the</span>
+<span class="s0">#		possible further matches</span>
+
+<span class="s0">proc ::tk::console::ExpandProcname str {</span>
+    <span class="s0">set match [EvalAttached [list info commands $str*]]</span>
+    <span class="s0">if {[llength $match] == 0} {</span>
+	<span class="s0">set ns [EvalAttached \</span>
+		<span class="s0">&quot;namespace children \[namespace current\] [list $str*]&quot;]</span>
+	<span class="s0">if {[llength $ns]==1} {</span>
+	    <span class="s0">set match [EvalAttached [list info commands ${ns}::*]]</span>
+	<span class="s0">} else {</span>
+	    <span class="s0">set match $ns</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+    <span class="s0">if {[llength $match] &gt; 1} {</span>
+	<span class="s0">regsub -all { } [ExpandBestMatch $match $str] {\\ } str</span>
+	<span class="s0">set match [linsert $match 0 $str]</span>
+    <span class="s0">} else {</span>
+	<span class="s0">regsub -all { } $match {\\ } match</span>
+    <span class="s0">}</span>
+    <span class="s0">return $match</span>
+<span class="s0">}</span>
+
+<span class="s0"># ::tk::console::ExpandVariable --</span>
+<span class="s0">#</span>
+<span class="s0"># Expand a tcl variable name based on $str</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0">#	str	- partial tcl var name to expand</span>
+<span class="s0">#</span>
+<span class="s0"># Calls:	::tk::console::ExpandBestMatch</span>
+<span class="s0">#</span>
+<span class="s0"># Returns:	list containing longest unique match followed by all the</span>
+<span class="s0">#		possible further matches</span>
+
+<span class="s0">proc ::tk::console::ExpandVariable str {</span>
+    <span class="s0">if {[regexp {([^\(]*)\((.*)} $str -&gt; ary str]} {</span>
+	<span class="s0">## Looks like they're trying to expand an array.</span>
+	<span class="s0">set match [EvalAttached [list array names $ary $str*]]</span>
+	<span class="s0">if {[llength $match] &gt; 1} {</span>
+	    <span class="s0">set vars $ary\([ExpandBestMatch $match $str]</span>
+	    <span class="s0">foreach var $match {</span>
+		<span class="s0">lappend vars $ary\($var\)</span>
+	    <span class="s0">}</span>
+	    <span class="s0">return $vars</span>
+	<span class="s0">} elseif {[llength $match] == 1} {</span>
+	    <span class="s0">set match $ary\($match\)</span>
+	<span class="s0">}</span>
+	<span class="s0">## Space transformation avoided for array names.</span>
+    <span class="s0">} else {</span>
+	<span class="s0">set match [EvalAttached [list info vars $str*]]</span>
+	<span class="s0">if {[llength $match] &gt; 1} {</span>
+	    <span class="s0">regsub -all { } [ExpandBestMatch $match $str] {\\ } str</span>
+	    <span class="s0">set match [linsert $match 0 $str]</span>
+	<span class="s0">} else {</span>
+	    <span class="s0">regsub -all { } $match {\\ } match</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+    <span class="s0">return $match</span>
+<span class="s0">}</span>
+
+<span class="s0"># ::tk::console::ExpandBestMatch --</span>
+<span class="s0">#</span>
+<span class="s0"># Finds the best unique match in a list of names.</span>
+<span class="s0"># The extra $e in this argument allows us to limit the innermost loop a little</span>
+<span class="s0"># further.  This improves speed as $l becomes large or $e becomes long.</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0">#	l	- list to find best unique match in</span>
+<span class="s0"># 	e	- currently best known unique match</span>
+<span class="s0">#</span>
+<span class="s0"># Returns:	longest unique match in the list</span>
+
+<span class="s0">proc ::tk::console::ExpandBestMatch {l {e {}}} {</span>
+    <span class="s0">set ec [lindex $l 0]</span>
+    <span class="s0">if {[llength $l]&gt;1} {</span>
+	<span class="s0">set e [expr {[string length $e] - 1}]</span>
+	<span class="s0">set ei [expr {[string length $ec] - 1}]</span>
+	<span class="s0">foreach l $l {</span>
+	    <span class="s0">while {$ei&gt;=$e &amp;&amp; [string first $ec $l]} {</span>
+		<span class="s0">set ec [string range $ec 0 [incr ei -1]]</span>
+	    <span class="s0">}</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+    <span class="s0">return $ec</span>
+<span class="s0">}</span>
+
+<span class="s0"># now initialize the console</span>
+<span class="s0">::tk::ConsoleInit</span>
+</pre>
+</body>
+</html>

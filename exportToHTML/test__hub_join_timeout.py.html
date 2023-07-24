@@ -1,0 +1,121 @@
+<html>
+<head>
+<title>test__hub_join_timeout.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #cc7832;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #6897bb;}
+.s3 { color: #808080;}
+.s4 { color: #629755; font-style: italic;}
+.s5 { color: #6a8759;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+test__hub_join_timeout.py</font>
+</center></td></tr></table>
+<pre><span class="s0">import </span><span class="s1">functools</span>
+<span class="s0">import </span><span class="s1">unittest</span>
+
+<span class="s0">import </span><span class="s1">gevent</span>
+<span class="s0">import </span><span class="s1">gevent.core</span>
+<span class="s0">from </span><span class="s1">gevent.event </span><span class="s0">import </span><span class="s1">Event</span>
+
+<span class="s0">from </span><span class="s1">gevent.testing.testcase </span><span class="s0">import </span><span class="s1">TimeAssertMixin</span>
+
+<span class="s1">SMALL_TICK = </span><span class="s2">0.05</span>
+
+<span class="s3"># setting up signal does not affect join()</span>
+<span class="s1">gevent.signal_handler(</span><span class="s2">1</span><span class="s0">, lambda</span><span class="s1">: </span><span class="s0">None</span><span class="s1">)  </span><span class="s3"># wouldn't work on windows</span>
+
+
+<span class="s0">def </span><span class="s1">repeated(func</span><span class="s0">, </span><span class="s1">repetitions=</span><span class="s2">2</span><span class="s1">):</span>
+    <span class="s1">@functools.wraps(func)</span>
+    <span class="s0">def </span><span class="s1">f(self):</span>
+        <span class="s0">for </span><span class="s1">_ </span><span class="s0">in </span><span class="s1">range(repetitions):</span>
+            <span class="s1">func(self)</span>
+    <span class="s0">return </span><span class="s1">f</span>
+
+<span class="s0">class </span><span class="s1">Test(TimeAssertMixin</span><span class="s0">, </span><span class="s1">unittest.TestCase):</span>
+
+    <span class="s1">@repeated</span>
+    <span class="s0">def </span><span class="s1">test_callback(self):</span>
+        <span class="s3"># exiting because the spawned greenlet finished execution (spawn (=callback) variant)</span>
+        <span class="s1">x = gevent.spawn(</span><span class="s0">lambda</span><span class="s1">: </span><span class="s2">5</span><span class="s1">)</span>
+        <span class="s0">with </span><span class="s1">self.runs_in_no_time():</span>
+            <span class="s1">result = gevent.wait(timeout=</span><span class="s2">10</span><span class="s1">)</span>
+        <span class="s1">self.assertTrue(result)</span>
+        <span class="s1">self.assertTrue(x.dead</span><span class="s0">, </span><span class="s1">x)</span>
+        <span class="s1">self.assertEqual(x.value</span><span class="s0">, </span><span class="s2">5</span><span class="s1">)</span>
+
+    <span class="s1">@repeated</span>
+    <span class="s0">def </span><span class="s1">test_later(self):</span>
+        <span class="s3"># exiting because the spawned greenlet finished execution (spawn_later (=timer) variant)</span>
+        <span class="s1">x = gevent.spawn_later(SMALL_TICK</span><span class="s0">, lambda</span><span class="s1">: </span><span class="s2">5</span><span class="s1">)</span>
+        <span class="s0">with </span><span class="s1">self.runs_in_given_time(SMALL_TICK):</span>
+            <span class="s1">result = gevent.wait(timeout=</span><span class="s2">10</span><span class="s1">)</span>
+        <span class="s1">self.assertTrue(result)</span>
+        <span class="s1">self.assertTrue(x.dead</span><span class="s0">, </span><span class="s1">x)</span>
+
+    <span class="s1">@repeated</span>
+    <span class="s0">def </span><span class="s1">test_timeout(self):</span>
+        <span class="s3"># exiting because of timeout (the spawned greenlet still runs)</span>
+        <span class="s1">x = gevent.spawn_later(</span><span class="s2">10</span><span class="s0">, lambda</span><span class="s1">: </span><span class="s2">5</span><span class="s1">)</span>
+        <span class="s0">with </span><span class="s1">self.runs_in_given_time(SMALL_TICK):</span>
+            <span class="s1">result = gevent.wait(timeout=SMALL_TICK)</span>
+        <span class="s1">self.assertFalse(result)</span>
+        <span class="s1">self.assertFalse(x.dead</span><span class="s0">, </span><span class="s1">x)</span>
+        <span class="s1">x.kill()</span>
+        <span class="s0">with </span><span class="s1">self.runs_in_no_time():</span>
+            <span class="s1">result = gevent.wait()</span>
+
+        <span class="s1">self.assertTrue(result)</span>
+
+    <span class="s1">@repeated</span>
+    <span class="s0">def </span><span class="s1">test_event(self):</span>
+        <span class="s3"># exiting because of event (the spawned greenlet still runs)</span>
+        <span class="s1">x = gevent.spawn_later(</span><span class="s2">10</span><span class="s0">, lambda</span><span class="s1">: </span><span class="s2">5</span><span class="s1">)</span>
+        <span class="s1">event = Event()</span>
+        <span class="s1">event_set = gevent.spawn_later(SMALL_TICK</span><span class="s0">, </span><span class="s1">event.set)</span>
+        <span class="s0">with </span><span class="s1">self.runs_in_given_time(SMALL_TICK):</span>
+            <span class="s1">result = gevent.wait([event])</span>
+        <span class="s1">self.assertEqual(result</span><span class="s0">, </span><span class="s1">[event])</span>
+        <span class="s1">self.assertFalse(x.dead</span><span class="s0">, </span><span class="s1">x)</span>
+        <span class="s1">self.assertTrue(event_set.dead)</span>
+        <span class="s1">self.assertTrue(event.is_set)</span>
+        <span class="s1">x.kill()</span>
+        <span class="s0">with </span><span class="s1">self.runs_in_no_time():</span>
+            <span class="s1">result = gevent.wait()</span>
+
+        <span class="s1">self.assertTrue(result)</span>
+
+    <span class="s1">@repeated</span>
+    <span class="s0">def </span><span class="s1">test_ref_arg(self):</span>
+        <span class="s3"># checking &quot;ref=False&quot; argument</span>
+        <span class="s1">gevent.get_hub().loop.timer(</span><span class="s2">10</span><span class="s0">, </span><span class="s1">ref=</span><span class="s0">False</span><span class="s1">).start(</span><span class="s0">lambda</span><span class="s1">: </span><span class="s0">None</span><span class="s1">)</span>
+        <span class="s0">with </span><span class="s1">self.runs_in_no_time():</span>
+            <span class="s1">result = gevent.wait()</span>
+        <span class="s1">self.assertTrue(result)</span>
+
+    <span class="s1">@repeated</span>
+    <span class="s0">def </span><span class="s1">test_ref_attribute(self):</span>
+        <span class="s3"># checking &quot;ref=False&quot; attribute</span>
+        <span class="s1">w = gevent.get_hub().loop.timer(</span><span class="s2">10</span><span class="s1">)</span>
+        <span class="s1">w.start(</span><span class="s0">lambda</span><span class="s1">: </span><span class="s0">None</span><span class="s1">)</span>
+        <span class="s1">w.ref = </span><span class="s0">False</span>
+        <span class="s0">with </span><span class="s1">self.runs_in_no_time():</span>
+            <span class="s1">result = gevent.wait()</span>
+        <span class="s1">self.assertTrue(result)</span>
+
+
+<span class="s0">class </span><span class="s1">TestAgain(Test):</span>
+    <span class="s4">&quot;Repeat the same tests&quot;</span>
+
+<span class="s0">if </span><span class="s1">__name__ == </span><span class="s5">'__main__'</span><span class="s1">:</span>
+    <span class="s1">unittest.main()</span>
+</pre>
+</body>
+</html>

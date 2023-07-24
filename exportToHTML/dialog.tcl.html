@@ -1,0 +1,197 @@
+<html>
+<head>
+<title>dialog.tcl</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #a9b7c6;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+dialog.tcl</font>
+</center></td></tr></table>
+<pre><span class="s0"># dialog.tcl --</span>
+<span class="s0">#</span>
+<span class="s0"># This file defines the procedure tk_dialog, which creates a dialog</span>
+<span class="s0"># box containing a bitmap, a message, and one or more buttons.</span>
+<span class="s0">#</span>
+<span class="s0"># Copyright (c) 1992-1993 The Regents of the University of California.</span>
+<span class="s0"># Copyright (c) 1994-1997 Sun Microsystems, Inc.</span>
+<span class="s0">#</span>
+<span class="s0"># See the file &quot;license.terms&quot; for information on usage and redistribution</span>
+<span class="s0"># of this file, and for a DISCLAIMER OF ALL WARRANTIES.</span>
+<span class="s0">#</span>
+
+<span class="s0">#</span>
+<span class="s0"># ::tk_dialog:</span>
+<span class="s0">#</span>
+<span class="s0"># This procedure displays a dialog box, waits for a button in the dialog</span>
+<span class="s0"># to be invoked, then returns the index of the selected button.  If the</span>
+<span class="s0"># dialog somehow gets destroyed, -1 is returned.</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0"># w -		Window to use for dialog top-level.</span>
+<span class="s0"># title -	Title to display in dialog's decorative frame.</span>
+<span class="s0"># text -	Message to display in dialog.</span>
+<span class="s0"># bitmap -	Bitmap to display in dialog (empty string means none).</span>
+<span class="s0"># default -	Index of button that is to display the default ring</span>
+<span class="s0">#		(-1 means none).</span>
+<span class="s0"># args -	One or more strings to display in buttons across the</span>
+<span class="s0">#		bottom of the dialog box.</span>
+
+<span class="s0">proc ::tk_dialog {w title text bitmap default args} {</span>
+    <span class="s0">variable ::tk::Priv</span>
+
+    <span class="s0"># Check that $default was properly given</span>
+    <span class="s0">if {[string is integer -strict $default]} {</span>
+	<span class="s0">if {$default &gt;= [llength $args]} {</span>
+	    <span class="s0">return -code error -errorcode {TK DIALOG BAD_DEFAULT} \</span>
+		<span class="s0">&quot;default button index greater than number of buttons\</span>
+		<span class="s0">specified for tk_dialog&quot;</span>
+	<span class="s0">}</span>
+    <span class="s0">} elseif {&quot;&quot; eq $default} {</span>
+	<span class="s0">set default -1</span>
+    <span class="s0">} else {</span>
+	<span class="s0">set default [lsearch -exact $args $default]</span>
+    <span class="s0">}</span>
+
+    <span class="s0">set windowingsystem [tk windowingsystem]</span>
+    <span class="s0">if {$windowingsystem eq &quot;aqua&quot;} {</span>
+	<span class="s0">option add *Dialog*background systemDialogBackgroundActive widgetDefault</span>
+	<span class="s0">option add *Dialog*Button.highlightBackground \</span>
+		<span class="s0">systemDialogBackgroundActive widgetDefault</span>
+    <span class="s0">}</span>
+
+    <span class="s0"># 1. Create the top-level window and divide it into top</span>
+    <span class="s0"># and bottom parts.</span>
+
+    <span class="s0">destroy $w</span>
+    <span class="s0">toplevel $w -class Dialog</span>
+    <span class="s0">wm title $w $title</span>
+    <span class="s0">wm iconname $w Dialog</span>
+    <span class="s0">wm protocol $w WM_DELETE_WINDOW { }</span>
+
+    <span class="s0"># Dialog boxes should be transient with respect to their parent,</span>
+    <span class="s0"># so that they will always stay on top of their parent window.  However,</span>
+    <span class="s0"># some window managers will create the window as withdrawn if the parent</span>
+    <span class="s0"># window is withdrawn or iconified.  Combined with the grab we put on the</span>
+    <span class="s0"># window, this can hang the entire application.  Therefore we only make</span>
+    <span class="s0"># the dialog transient if the parent is viewable.</span>
+    <span class="s0">#</span>
+    <span class="s0">if {[winfo viewable [winfo toplevel [winfo parent $w]]] } {</span>
+	<span class="s0">wm transient $w [winfo toplevel [winfo parent $w]]</span>
+    <span class="s0">}</span>
+
+    <span class="s0">if {$windowingsystem eq &quot;aqua&quot;} {</span>
+	<span class="s0">::tk::unsupported::MacWindowStyle style $w moveableModal {}</span>
+    <span class="s0">} elseif {$windowingsystem eq &quot;x11&quot;} {</span>
+	<span class="s0">wm attributes $w -type dialog</span>
+    <span class="s0">}</span>
+
+    <span class="s0">frame $w.bot</span>
+    <span class="s0">frame $w.top</span>
+    <span class="s0">if {$windowingsystem eq &quot;x11&quot;} {</span>
+	<span class="s0">$w.bot configure -relief raised -bd 1</span>
+	<span class="s0">$w.top configure -relief raised -bd 1</span>
+    <span class="s0">}</span>
+    <span class="s0">pack $w.bot -side bottom -fill both</span>
+    <span class="s0">pack $w.top -side top -fill both -expand 1</span>
+    <span class="s0">grid anchor $w.bot center</span>
+
+    <span class="s0"># 2. Fill the top part with bitmap and message (use the option</span>
+    <span class="s0"># database for -wraplength and -font so that they can be</span>
+    <span class="s0"># overridden by the caller).</span>
+
+    <span class="s0">option add *Dialog.msg.wrapLength 3i widgetDefault</span>
+    <span class="s0">option add *Dialog.msg.font TkCaptionFont widgetDefault</span>
+
+    <span class="s0">label $w.msg -justify left -text $text</span>
+    <span class="s0">pack $w.msg -in $w.top -side right -expand 1 -fill both -padx 3m -pady 3m</span>
+    <span class="s0">if {$bitmap ne &quot;&quot;} {</span>
+	<span class="s0">if {$windowingsystem eq &quot;aqua&quot; &amp;&amp; $bitmap eq &quot;error&quot;} {</span>
+	    <span class="s0">set bitmap &quot;stop&quot;</span>
+	<span class="s0">}</span>
+	<span class="s0">label $w.bitmap -bitmap $bitmap</span>
+	<span class="s0">pack $w.bitmap -in $w.top -side left -padx 3m -pady 3m</span>
+    <span class="s0">}</span>
+
+    <span class="s0"># 3. Create a row of buttons at the bottom of the dialog.</span>
+
+    <span class="s0">set i 0</span>
+    <span class="s0">foreach but $args {</span>
+	<span class="s0">button $w.button$i -text $but -command [list set ::tk::Priv(button) $i]</span>
+	<span class="s0">if {$i == $default} {</span>
+	    <span class="s0">$w.button$i configure -default active</span>
+	<span class="s0">} else {</span>
+	    <span class="s0">$w.button$i configure -default normal</span>
+	<span class="s0">}</span>
+	<span class="s0">grid $w.button$i -in $w.bot -column $i -row 0 -sticky ew \</span>
+		<span class="s0">-padx 10 -pady 4</span>
+	<span class="s0">grid columnconfigure $w.bot $i</span>
+	<span class="s0"># We boost the size of some Mac buttons for l&amp;f</span>
+	<span class="s0">if {$windowingsystem eq &quot;aqua&quot;} {</span>
+	    <span class="s0">set tmp [string tolower $but]</span>
+	    <span class="s0">if {$tmp eq &quot;ok&quot; || $tmp eq &quot;cancel&quot;} {</span>
+		<span class="s0">grid columnconfigure $w.bot $i -minsize 90</span>
+	    <span class="s0">}</span>
+	    <span class="s0">grid configure $w.button$i -pady 7</span>
+	<span class="s0">}</span>
+	<span class="s0">incr i</span>
+    <span class="s0">}</span>
+
+    <span class="s0"># 4. Create a binding for &lt;Return&gt; on the dialog if there is a</span>
+    <span class="s0"># default button.</span>
+    <span class="s0"># Convention also dictates that if the keyboard focus moves among the</span>
+    <span class="s0"># the buttons that the &lt;Return&gt; binding affects the button with the focus.</span>
+
+    <span class="s0">if {$default &gt;= 0} {</span>
+	<span class="s0">bind $w &lt;Return&gt; [list $w.button$default invoke]</span>
+    <span class="s0">}</span>
+    <span class="s0">bind $w &lt;&lt;PrevWindow&gt;&gt; [list bind $w &lt;Return&gt; {[tk_focusPrev %W] invoke}]</span>
+    <span class="s0">bind $w &lt;&lt;NextWindow&gt;&gt; [list bind $w &lt;Return&gt; {[tk_focusNext %W] invoke}]</span>
+
+    <span class="s0"># 5. Create a &lt;Destroy&gt; binding for the window that sets the</span>
+    <span class="s0"># button variable to -1;  this is needed in case something happens</span>
+    <span class="s0"># that destroys the window, such as its parent window being destroyed.</span>
+
+    <span class="s0">bind $w &lt;Destroy&gt; {set ::tk::Priv(button) -1}</span>
+
+    <span class="s0"># 6. Withdraw the window, then update all the geometry information</span>
+    <span class="s0"># so we know how big it wants to be, then center the window in the</span>
+    <span class="s0"># display (Motif style) and de-iconify it.</span>
+
+    <span class="s0">::tk::PlaceWindow $w</span>
+    <span class="s0">tkwait visibility $w</span>
+
+    <span class="s0"># 7. Set a grab and claim the focus too.</span>
+
+    <span class="s0">if {$default &gt;= 0} {</span>
+        <span class="s0">set focus $w.button$default</span>
+    <span class="s0">} else {</span>
+        <span class="s0">set focus $w</span>
+    <span class="s0">}</span>
+    <span class="s0">tk::SetFocusGrab $w $focus</span>
+
+    <span class="s0"># 8. Wait for the user to respond, then restore the focus and</span>
+    <span class="s0"># return the index of the selected button.  Restore the focus</span>
+    <span class="s0"># before deleting the window, since otherwise the window manager</span>
+    <span class="s0"># may take the focus away so we can't redirect it.  Finally,</span>
+    <span class="s0"># restore any grab that was in effect.</span>
+
+    <span class="s0">vwait ::tk::Priv(button)</span>
+
+    <span class="s0">catch {</span>
+	<span class="s0"># It's possible that the window has already been destroyed,</span>
+	<span class="s0"># hence this &quot;catch&quot;.  Delete the Destroy handler so that</span>
+	<span class="s0"># Priv(button) doesn't get reset by it.</span>
+
+	<span class="s0">bind $w &lt;Destroy&gt; {}</span>
+    <span class="s0">}</span>
+    <span class="s0">tk::RestoreFocusGrab $w $focus</span>
+    <span class="s0">return $Priv(button)</span>
+<span class="s0">}</span>
+</pre>
+</body>
+</html>

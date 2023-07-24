@@ -1,0 +1,367 @@
+<html>
+<head>
+<title>utils.tcl</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #a9b7c6;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+utils.tcl</font>
+</center></td></tr></table>
+<pre><span class="s0">#</span>
+<span class="s0"># Utilities for widget implementations.</span>
+<span class="s0">#</span>
+
+<span class="s0">### Focus management.</span>
+<span class="s0">#</span>
+<span class="s0"># See also: #1516479</span>
+<span class="s0">#</span>
+
+<span class="s0">## ttk::takefocus --</span>
+<span class="s0">#	This is the default value of the &quot;-takefocus&quot; option</span>
+<span class="s0">#	for ttk::* widgets that participate in keyboard navigation.</span>
+<span class="s0">#</span>
+<span class="s0"># NOTES:</span>
+<span class="s0">#	tk::FocusOK (called by tk_focusNext) tests [winfo viewable]</span>
+<span class="s0">#	if -takefocus is 1, empty, or missing; but not if it's a</span>
+<span class="s0">#	script prefix, so we have to check that here as well.</span>
+<span class="s0">#</span>
+<span class="s0">#</span>
+<span class="s0">proc ttk::takefocus {w} {</span>
+    <span class="s0">expr {[$w instate !disabled] &amp;&amp; [winfo viewable $w]}</span>
+<span class="s0">}</span>
+
+<span class="s0">## ttk::GuessTakeFocus --</span>
+<span class="s0">#	This routine is called as a fallback for widgets</span>
+<span class="s0">#	with a missing or empty -takefocus option.</span>
+<span class="s0">#</span>
+<span class="s0">#	It implements the same heuristics as tk::FocusOK.</span>
+<span class="s0">#</span>
+<span class="s0">proc ttk::GuessTakeFocus {w} {</span>
+    <span class="s0"># Don't traverse to widgets with '-state disabled':</span>
+    <span class="s0">#</span>
+    <span class="s0">if {![catch {$w cget -state} state] &amp;&amp; $state eq &quot;disabled&quot;} {</span>
+	<span class="s0">return 0</span>
+    <span class="s0">}</span>
+
+    <span class="s0"># Allow traversal to widgets with explicit key or focus bindings:</span>
+    <span class="s0">#</span>
+    <span class="s0">if {[regexp {Key|Focus} [concat [bind $w] [bind [winfo class $w]]]]} {</span>
+	<span class="s0">return 1;</span>
+    <span class="s0">}</span>
+
+    <span class="s0"># Default is nontraversable:</span>
+    <span class="s0">#</span>
+    <span class="s0">return 0;</span>
+<span class="s0">}</span>
+
+<span class="s0">## ttk::traverseTo $w --</span>
+<span class="s0"># 	Set the keyboard focus to the specified window.</span>
+<span class="s0">#</span>
+<span class="s0">proc ttk::traverseTo {w} {</span>
+    <span class="s0">set focus [focus]</span>
+    <span class="s0">if {$focus ne &quot;&quot;} {</span>
+	<span class="s0">event generate $focus &lt;&lt;TraverseOut&gt;&gt;</span>
+    <span class="s0">}</span>
+    <span class="s0">focus $w</span>
+    <span class="s0">event generate $w &lt;&lt;TraverseIn&gt;&gt;</span>
+<span class="s0">}</span>
+
+<span class="s0">## ttk::clickToFocus $w --</span>
+<span class="s0">#	Utility routine, used in &lt;ButtonPress-1&gt; bindings --</span>
+<span class="s0">#	Assign keyboard focus to the specified widget if -takefocus is enabled.</span>
+<span class="s0">#</span>
+<span class="s0">proc ttk::clickToFocus {w} {</span>
+    <span class="s0">if {[ttk::takesFocus $w]} { focus $w }</span>
+<span class="s0">}</span>
+
+<span class="s0">## ttk::takesFocus w --</span>
+<span class="s0">#	Test if the widget can take keyboard focus.</span>
+<span class="s0">#</span>
+<span class="s0">#	See the description of the -takefocus option in options(n)</span>
+<span class="s0">#	for details.</span>
+<span class="s0">#</span>
+<span class="s0">proc ttk::takesFocus {w} {</span>
+    <span class="s0">if {![winfo viewable $w]} {</span>
+    	<span class="s0">return 0</span>
+    <span class="s0">} elseif {[catch {$w cget -takefocus} takefocus]} {</span>
+	<span class="s0">return [GuessTakeFocus $w]</span>
+    <span class="s0">} else {</span>
+	<span class="s0">switch -- $takefocus {</span>
+	    <span class="s0">&quot;&quot; { return [GuessTakeFocus $w] }</span>
+	    <span class="s0">0  { return 0 }</span>
+	    <span class="s0">1  { return 1 }</span>
+	    <span class="s0">default {</span>
+		<span class="s0">return [expr {[uplevel #0 $takefocus [list $w]] == 1}]</span>
+	    <span class="s0">}</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+
+<span class="s0">## ttk::focusFirst $w --</span>
+<span class="s0">#	Return the first descendant of $w, in preorder traversal order,</span>
+<span class="s0">#	that can take keyboard focus, &quot;&quot; if none do.</span>
+<span class="s0">#</span>
+<span class="s0"># See also: tk_focusNext</span>
+<span class="s0">#</span>
+
+<span class="s0">proc ttk::focusFirst {w} {</span>
+    <span class="s0">if {[ttk::takesFocus $w]} {</span>
+	<span class="s0">return $w</span>
+    <span class="s0">}</span>
+    <span class="s0">foreach child [winfo children $w] {</span>
+	<span class="s0">if {[set c [ttk::focusFirst $child]] ne &quot;&quot;} {</span>
+	    <span class="s0">return $c</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+    <span class="s0">return &quot;&quot;</span>
+<span class="s0">}</span>
+
+<span class="s0">### Grabs.</span>
+<span class="s0">#</span>
+<span class="s0"># Rules:</span>
+<span class="s0">#	Each call to [grabWindow $w] or [globalGrab $w] must be</span>
+<span class="s0">#	matched with a call to [releaseGrab $w] in LIFO order.</span>
+<span class="s0">#</span>
+<span class="s0">#	Do not call [grabWindow $w] for a window that currently</span>
+<span class="s0">#	appears on the grab stack.</span>
+<span class="s0">#</span>
+<span class="s0">#	See #1239190 and #1411983 for more discussion.</span>
+<span class="s0">#</span>
+<span class="s0">namespace eval ttk {</span>
+    <span class="s0">variable Grab 		;# map: window name -&gt; grab token</span>
+
+    <span class="s0"># grab token details:</span>
+    <span class="s0">#	Two-element list containing:</span>
+    <span class="s0">#	1) a script to evaluate to restore the previous grab (if any);</span>
+    <span class="s0">#	2) a script to evaluate to restore the focus (if any)</span>
+<span class="s0">}</span>
+
+<span class="s0">## SaveGrab --</span>
+<span class="s0">#	Record current grab and focus windows.</span>
+<span class="s0">#</span>
+<span class="s0">proc ttk::SaveGrab {w} {</span>
+    <span class="s0">variable Grab</span>
+
+    <span class="s0">if {[info exists Grab($w)]} {</span>
+	<span class="s0"># $w is already on the grab stack.</span>
+	<span class="s0"># This should not happen, but bail out in case it does anyway:</span>
+	<span class="s0">#</span>
+	<span class="s0">return</span>
+    <span class="s0">}</span>
+
+    <span class="s0">set restoreGrab [set restoreFocus &quot;&quot;]</span>
+
+    <span class="s0">set grabbed [grab current $w]</span>
+    <span class="s0">if {[winfo exists $grabbed]} {</span>
+    	<span class="s0">switch [grab status $grabbed] {</span>
+	    <span class="s0">global { set restoreGrab [list grab -global $grabbed] }</span>
+	    <span class="s0">local  { set restoreGrab [list grab $grabbed] }</span>
+	    <span class="s0">none   { ;# grab window is really in a different interp }</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+
+    <span class="s0">set focus [focus]</span>
+    <span class="s0">if {$focus ne &quot;&quot;} {</span>
+    	<span class="s0">set restoreFocus [list focus -force $focus]</span>
+    <span class="s0">}</span>
+
+    <span class="s0">set Grab($w) [list $restoreGrab $restoreFocus]</span>
+<span class="s0">}</span>
+
+<span class="s0">## RestoreGrab --</span>
+<span class="s0">#	Restore previous grab and focus windows.</span>
+<span class="s0">#	If called more than once without an intervening [SaveGrab $w],</span>
+<span class="s0">#	does nothing.</span>
+<span class="s0">#</span>
+<span class="s0">proc ttk::RestoreGrab {w} {</span>
+    <span class="s0">variable Grab</span>
+
+    <span class="s0">if {![info exists Grab($w)]} {	# Ignore</span>
+	<span class="s0">return;</span>
+    <span class="s0">}</span>
+
+    <span class="s0"># The previous grab/focus window may have been destroyed,</span>
+    <span class="s0"># unmapped, or some other abnormal condition; ignore any errors.</span>
+    <span class="s0">#</span>
+    <span class="s0">foreach script $Grab($w) {</span>
+	<span class="s0">catch $script</span>
+    <span class="s0">}</span>
+
+    <span class="s0">unset Grab($w)</span>
+<span class="s0">}</span>
+
+<span class="s0">## ttk::grabWindow $w --</span>
+<span class="s0">#	Records the current focus and grab windows, sets an application-modal</span>
+<span class="s0">#	grab on window $w.</span>
+<span class="s0">#</span>
+<span class="s0">proc ttk::grabWindow {w} {</span>
+    <span class="s0">SaveGrab $w</span>
+    <span class="s0">grab $w</span>
+<span class="s0">}</span>
+
+<span class="s0">## ttk::globalGrab $w --</span>
+<span class="s0">#	Same as grabWindow, but sets a global grab on $w.</span>
+<span class="s0">#</span>
+<span class="s0">proc ttk::globalGrab {w} {</span>
+    <span class="s0">SaveGrab $w</span>
+    <span class="s0">grab -global $w</span>
+<span class="s0">}</span>
+
+<span class="s0">## ttk::releaseGrab --</span>
+<span class="s0">#	Release the grab previously set by [ttk::grabWindow]</span>
+<span class="s0">#	or [ttk::globalGrab].</span>
+<span class="s0">#</span>
+<span class="s0">proc ttk::releaseGrab {w} {</span>
+    <span class="s0">grab release $w</span>
+    <span class="s0">RestoreGrab $w</span>
+<span class="s0">}</span>
+
+<span class="s0">### Auto-repeat.</span>
+<span class="s0">#</span>
+<span class="s0"># NOTE: repeating widgets do not have -repeatdelay</span>
+<span class="s0"># or -repeatinterval resources as in standard Tk;</span>
+<span class="s0"># instead a single set of settings is applied application-wide.</span>
+<span class="s0"># (TODO: make this user-configurable)</span>
+<span class="s0">#</span>
+<span class="s0"># (@@@ Windows seems to use something like 500/50 milliseconds</span>
+<span class="s0">#  @@@ for -repeatdelay/-repeatinterval)</span>
+<span class="s0">#</span>
+
+<span class="s0">namespace eval ttk {</span>
+    <span class="s0">variable Repeat</span>
+    <span class="s0">array set Repeat {</span>
+	<span class="s0">delay		300</span>
+	<span class="s0">interval	100</span>
+	<span class="s0">timer		{}</span>
+	<span class="s0">script		{}</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+
+<span class="s0">## ttk::Repeatedly --</span>
+<span class="s0">#	Begin auto-repeat.</span>
+<span class="s0">#</span>
+<span class="s0">proc ttk::Repeatedly {args} {</span>
+    <span class="s0">variable Repeat</span>
+    <span class="s0">after cancel $Repeat(timer)</span>
+    <span class="s0">set script [uplevel 1 [list namespace code $args]]</span>
+    <span class="s0">set Repeat(script) $script</span>
+    <span class="s0">uplevel #0 $script</span>
+    <span class="s0">set Repeat(timer) [after $Repeat(delay) ttk::Repeat]</span>
+<span class="s0">}</span>
+
+<span class="s0">## Repeat --</span>
+<span class="s0">#	Continue auto-repeat</span>
+<span class="s0">#</span>
+<span class="s0">proc ttk::Repeat {} {</span>
+    <span class="s0">variable Repeat</span>
+    <span class="s0">uplevel #0 $Repeat(script)</span>
+    <span class="s0">set Repeat(timer) [after $Repeat(interval) ttk::Repeat]</span>
+<span class="s0">}</span>
+
+<span class="s0">## ttk::CancelRepeat --</span>
+<span class="s0">#	Halt auto-repeat.</span>
+<span class="s0">#</span>
+<span class="s0">proc ttk::CancelRepeat {} {</span>
+    <span class="s0">variable Repeat</span>
+    <span class="s0">after cancel $Repeat(timer)</span>
+<span class="s0">}</span>
+
+<span class="s0">### Bindings.</span>
+<span class="s0">#</span>
+
+<span class="s0">## ttk::copyBindings $from $to --</span>
+<span class="s0">#	Utility routine; copies bindings from one bindtag onto another.</span>
+<span class="s0">#</span>
+<span class="s0">proc ttk::copyBindings {from to} {</span>
+    <span class="s0">foreach event [bind $from] {</span>
+	<span class="s0">bind $to $event [bind $from $event]</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+
+<span class="s0">### Mousewheel bindings.</span>
+<span class="s0">#</span>
+<span class="s0"># Platform inconsistencies:</span>
+<span class="s0">#</span>
+<span class="s0"># On X11, the server typically maps the mouse wheel to Button4 and Button5.</span>
+<span class="s0">#</span>
+<span class="s0"># On OSX, Tk generates sensible values for the %D field in &lt;MouseWheel&gt; events.</span>
+<span class="s0">#</span>
+<span class="s0"># On Windows, %D must be scaled by a factor of 120.</span>
+<span class="s0"># In addition, Tk redirects mousewheel events to the window with</span>
+<span class="s0"># keyboard focus instead of sending them to the window under the pointer.</span>
+<span class="s0"># We do not attempt to fix that here, see also TIP#171.</span>
+<span class="s0">#</span>
+<span class="s0"># OSX conventionally uses Shift+MouseWheel for horizontal scrolling,</span>
+<span class="s0"># and Option+MouseWheel for accelerated scrolling.</span>
+<span class="s0">#</span>
+<span class="s0"># The Shift+MouseWheel behavior is not conventional on Windows or most</span>
+<span class="s0"># X11 toolkits, but it's useful.</span>
+<span class="s0">#</span>
+<span class="s0"># MouseWheel scrolling is accelerated on X11, which is conventional</span>
+<span class="s0"># for Tk and appears to be conventional for other toolkits (although</span>
+<span class="s0"># Gtk+ and Qt do not appear to use as large a factor).</span>
+<span class="s0">#</span>
+
+<span class="s0">## ttk::bindMouseWheel $bindtag $command...</span>
+<span class="s0">#	Adds basic mousewheel support to $bindtag.</span>
+<span class="s0">#	$command will be passed one additional argument</span>
+<span class="s0">#	specifying the mousewheel direction (-1: up, +1: down).</span>
+<span class="s0">#</span>
+
+<span class="s0">proc ttk::bindMouseWheel {bindtag callback} {</span>
+    <span class="s0">switch -- [tk windowingsystem] {</span>
+	<span class="s0">x11 {</span>
+	    <span class="s0">bind $bindtag &lt;ButtonPress-4&gt; &quot;$callback -1&quot;</span>
+	    <span class="s0">bind $bindtag &lt;ButtonPress-5&gt; &quot;$callback +1&quot;</span>
+	<span class="s0">}</span>
+	<span class="s0">win32 {</span>
+	    <span class="s0">bind $bindtag &lt;MouseWheel&gt; [append callback { [expr {-(%D/120)}]}]</span>
+	<span class="s0">}</span>
+	<span class="s0">aqua {</span>
+	    <span class="s0">bind $bindtag &lt;MouseWheel&gt; [append callback { [expr {-(%D)}]} ]</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+
+<span class="s0">## Mousewheel bindings for standard scrollable widgets.</span>
+<span class="s0">#</span>
+<span class="s0"># Usage: [ttk::copyBindings TtkScrollable $bindtag]</span>
+<span class="s0">#</span>
+<span class="s0"># $bindtag should be for a widget that supports the</span>
+<span class="s0"># standard scrollbar protocol.</span>
+<span class="s0">#</span>
+
+<span class="s0">switch -- [tk windowingsystem] {</span>
+    <span class="s0">x11 {</span>
+	<span class="s0">bind TtkScrollable &lt;ButtonPress-4&gt;       { %W yview scroll -5 units }</span>
+	<span class="s0">bind TtkScrollable &lt;ButtonPress-5&gt;       { %W yview scroll  5 units }</span>
+	<span class="s0">bind TtkScrollable &lt;Shift-ButtonPress-4&gt; { %W xview scroll -5 units }</span>
+	<span class="s0">bind TtkScrollable &lt;Shift-ButtonPress-5&gt; { %W xview scroll  5 units }</span>
+    <span class="s0">}</span>
+    <span class="s0">win32 {</span>
+	<span class="s0">bind TtkScrollable &lt;MouseWheel&gt; \</span>
+	    <span class="s0">{ %W yview scroll [expr {-(%D/120)}] units }</span>
+	<span class="s0">bind TtkScrollable &lt;Shift-MouseWheel&gt; \</span>
+	    <span class="s0">{ %W xview scroll [expr {-(%D/120)}] units }</span>
+    <span class="s0">}</span>
+    <span class="s0">aqua {</span>
+	<span class="s0">bind TtkScrollable &lt;MouseWheel&gt; \</span>
+	    <span class="s0">{ %W yview scroll [expr {-(%D)}] units }</span>
+	<span class="s0">bind TtkScrollable &lt;Shift-MouseWheel&gt; \</span>
+	    <span class="s0">{ %W xview scroll [expr {-(%D)}] units }</span>
+	<span class="s0">bind TtkScrollable &lt;Option-MouseWheel&gt; \</span>
+	    <span class="s0">{ %W yview scroll  [expr {-10*(%D)}] units }</span>
+	<span class="s0">bind TtkScrollable &lt;Shift-Option-MouseWheel&gt; \</span>
+	    <span class="s0">{ %W xview scroll [expr {-10*(%D)}] units }</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+
+<span class="s0">#*EOF*</span>
+</pre>
+</body>
+</html>

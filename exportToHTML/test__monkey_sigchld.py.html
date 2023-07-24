@@ -1,0 +1,110 @@
+<html>
+<head>
+<title>test__monkey_sigchld.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #cc7832;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #808080;}
+.s3 { color: #6a8759;}
+.s4 { color: #6897bb;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+test__monkey_sigchld.py</font>
+</center></td></tr></table>
+<pre><span class="s0">import </span><span class="s1">errno</span>
+<span class="s0">import </span><span class="s1">os</span>
+<span class="s0">import </span><span class="s1">sys</span>
+
+<span class="s0">import </span><span class="s1">gevent</span>
+<span class="s0">import </span><span class="s1">gevent.monkey</span>
+<span class="s1">gevent.monkey.patch_all()</span>
+
+<span class="s1">pid = </span><span class="s0">None</span>
+<span class="s1">awaiting_child = []</span>
+
+
+<span class="s0">def </span><span class="s1">handle_sigchld(*_args):</span>
+    <span class="s2"># Make sure we can do a blocking operation</span>
+    <span class="s1">gevent.sleep()</span>
+    <span class="s2"># Signal completion</span>
+    <span class="s1">awaiting_child.pop()</span>
+    <span class="s2"># Raise an ignored error</span>
+    <span class="s0">raise </span><span class="s1">TypeError(</span><span class="s3">&quot;This should be ignored but printed&quot;</span><span class="s1">)</span>
+
+<span class="s2"># Try to produce output compatible with unittest output so</span>
+<span class="s2"># our status parsing functions work.</span>
+
+<span class="s0">import </span><span class="s1">signal</span>
+<span class="s0">if </span><span class="s1">hasattr(signal</span><span class="s0">, </span><span class="s3">'SIGCHLD'</span><span class="s1">):</span>
+    <span class="s2"># In Python 3.8.0 final, on both Travis CI/Linux and locally</span>
+    <span class="s2"># on macOS, the *child* process started crashing on exit with a memory</span>
+    <span class="s2"># error:</span>
+    <span class="s2">#</span>
+    <span class="s2"># Debug memory block at address p=0x7fcf5d6b5000: API ''</span>
+    <span class="s2">#     6508921152173528397 bytes originally requested</span>
+    <span class="s2">#     The 7 pad bytes at p-7 are not all FORBIDDENBYTE (0xfd):</span>
+    <span class="s2">#</span>
+    <span class="s2"># When PYTHONDEVMODE is set. This happens even if we just simply fork</span>
+    <span class="s2"># the child process and don't have gevent even /imported/ in the most</span>
+    <span class="s2"># minimal test case. It's not clear what caused that.</span>
+    <span class="s0">if </span><span class="s1">sys.version_info[:</span><span class="s4">2</span><span class="s1">] &gt;= (</span><span class="s4">3</span><span class="s0">, </span><span class="s4">8</span><span class="s1">) </span><span class="s0">and </span><span class="s1">os.environ.get(</span><span class="s3">&quot;PYTHONDEVMODE&quot;</span><span class="s1">):</span>
+        <span class="s1">print(</span><span class="s3">&quot;Ran 1 tests in 0.0s (skipped=1)&quot;</span><span class="s1">)</span>
+        <span class="s1">sys.exit(</span><span class="s4">0</span><span class="s1">)</span>
+
+
+    <span class="s0">assert </span><span class="s1">signal.getsignal(signal.SIGCHLD) == signal.SIG_DFL</span>
+    <span class="s1">signal.signal(signal.SIGCHLD</span><span class="s0">, </span><span class="s1">handle_sigchld)</span>
+    <span class="s1">handler = signal.getsignal(signal.SIGCHLD)</span>
+    <span class="s0">assert </span><span class="s1">signal.getsignal(signal.SIGCHLD) </span><span class="s0">is </span><span class="s1">handle_sigchld</span><span class="s0">, </span><span class="s1">handler</span>
+
+    <span class="s0">if </span><span class="s1">hasattr(os</span><span class="s0">, </span><span class="s3">'forkpty'</span><span class="s1">):</span>
+        <span class="s0">def </span><span class="s1">forkpty():</span>
+            <span class="s2"># For printing in errors</span>
+            <span class="s0">return </span><span class="s1">os.forkpty()[</span><span class="s4">0</span><span class="s1">]</span>
+        <span class="s1">funcs = (os.fork</span><span class="s0">, </span><span class="s1">forkpty)</span>
+    <span class="s0">else</span><span class="s1">:</span>
+        <span class="s1">funcs = (os.fork</span><span class="s0">,</span><span class="s1">)</span>
+
+    <span class="s0">for </span><span class="s1">func </span><span class="s0">in </span><span class="s1">funcs:</span>
+        <span class="s1">awaiting_child = [</span><span class="s0">True</span><span class="s1">]</span>
+        <span class="s1">pid = func()</span>
+        <span class="s0">if not </span><span class="s1">pid:</span>
+            <span class="s2"># child</span>
+            <span class="s1">gevent.sleep(</span><span class="s4">0.3</span><span class="s1">)</span>
+            <span class="s1">sys.exit(</span><span class="s4">0</span><span class="s1">)</span>
+        <span class="s0">else</span><span class="s1">:</span>
+            <span class="s1">timeout = gevent.Timeout(</span><span class="s4">1</span><span class="s1">)</span>
+            <span class="s0">try</span><span class="s1">:</span>
+                <span class="s0">while </span><span class="s1">awaiting_child:</span>
+                    <span class="s1">gevent.sleep(</span><span class="s4">0.01</span><span class="s1">)</span>
+                <span class="s2"># We should now be able to waitpid() for an arbitrary child</span>
+                <span class="s1">wpid</span><span class="s0">, </span><span class="s1">status = os.waitpid(-</span><span class="s4">1</span><span class="s0">, </span><span class="s1">os.WNOHANG)</span>
+                <span class="s0">if </span><span class="s1">wpid != pid:</span>
+                    <span class="s0">raise </span><span class="s1">AssertionError(</span><span class="s3">&quot;Failed to wait on a child pid forked with a function&quot;</span><span class="s0">,</span>
+                                         <span class="s1">wpid</span><span class="s0">, </span><span class="s1">pid</span><span class="s0">, </span><span class="s1">func)</span>
+
+                <span class="s2"># And a second call should raise ECHILD</span>
+                <span class="s0">try</span><span class="s1">:</span>
+                    <span class="s1">wpid</span><span class="s0">, </span><span class="s1">status = os.waitpid(-</span><span class="s4">1</span><span class="s0">, </span><span class="s1">os.WNOHANG)</span>
+                    <span class="s0">raise </span><span class="s1">AssertionError(</span><span class="s3">&quot;Should not be able to wait again&quot;</span><span class="s1">)</span>
+                <span class="s0">except </span><span class="s1">OSError </span><span class="s0">as </span><span class="s1">e:</span>
+                    <span class="s0">assert </span><span class="s1">e.errno == errno.ECHILD</span>
+            <span class="s0">except </span><span class="s1">gevent.Timeout </span><span class="s0">as </span><span class="s1">t:</span>
+                <span class="s0">if </span><span class="s1">timeout </span><span class="s0">is not </span><span class="s1">t:</span>
+                    <span class="s0">raise</span>
+                <span class="s0">raise </span><span class="s1">AssertionError(</span><span class="s3">&quot;Failed to wait using&quot;</span><span class="s0">, </span><span class="s1">func)</span>
+            <span class="s0">finally</span><span class="s1">:</span>
+                <span class="s1">timeout.close()</span>
+    <span class="s1">print(</span><span class="s3">&quot;Ran 1 tests in 0.0s&quot;</span><span class="s1">)</span>
+    <span class="s1">sys.exit(</span><span class="s4">0</span><span class="s1">)</span>
+<span class="s0">else</span><span class="s1">:</span>
+    <span class="s1">print(</span><span class="s3">&quot;No SIGCHLD, not testing&quot;</span><span class="s1">)</span>
+    <span class="s1">print(</span><span class="s3">&quot;Ran 1 tests in 0.0s (skipped=1)&quot;</span><span class="s1">)</span>
+</pre>
+</body>
+</html>

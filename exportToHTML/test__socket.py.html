@@ -1,0 +1,658 @@
+<html>
+<head>
+<title>test__socket.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #cc7832;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #808080;}
+.s3 { color: #6a8759;}
+.s4 { color: #6897bb;}
+.s5 { color: #629755; font-style: italic;}
+.s6 { color: #a5c261;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+test__socket.py</font>
+</center></td></tr></table>
+<pre><span class="s0">from </span><span class="s1">__future__ </span><span class="s0">import </span><span class="s1">print_function</span>
+<span class="s0">from </span><span class="s1">__future__ </span><span class="s0">import </span><span class="s1">absolute_import</span>
+
+<span class="s0">from </span><span class="s1">gevent </span><span class="s0">import </span><span class="s1">monkey</span>
+<span class="s2"># This line can be commented out so that most tests run with the</span>
+<span class="s2"># system socket for comparison.</span>
+<span class="s1">monkey.patch_all()</span>
+
+<span class="s0">import </span><span class="s1">sys</span>
+<span class="s0">import </span><span class="s1">array</span>
+<span class="s0">import </span><span class="s1">socket</span>
+<span class="s0">import </span><span class="s1">time</span>
+<span class="s0">import </span><span class="s1">unittest</span>
+<span class="s0">from </span><span class="s1">functools </span><span class="s0">import </span><span class="s1">wraps</span>
+
+<span class="s0">import </span><span class="s1">gevent</span>
+<span class="s0">from </span><span class="s1">gevent._compat </span><span class="s0">import </span><span class="s1">reraise</span>
+
+<span class="s0">import </span><span class="s1">gevent.testing </span><span class="s0">as </span><span class="s1">greentest</span>
+
+<span class="s0">from </span><span class="s1">gevent.testing </span><span class="s0">import </span><span class="s1">six</span>
+<span class="s0">from </span><span class="s1">gevent.testing </span><span class="s0">import </span><span class="s1">LARGE_TIMEOUT</span>
+<span class="s0">from </span><span class="s1">gevent.testing </span><span class="s0">import </span><span class="s1">support</span>
+<span class="s0">from </span><span class="s1">gevent.testing </span><span class="s0">import </span><span class="s1">params</span>
+<span class="s0">from </span><span class="s1">gevent.testing.sockets </span><span class="s0">import </span><span class="s1">tcp_listener</span>
+<span class="s0">from </span><span class="s1">gevent.testing.skipping </span><span class="s0">import </span><span class="s1">skipWithoutExternalNetwork</span>
+<span class="s0">from </span><span class="s1">gevent.testing.skipping </span><span class="s0">import </span><span class="s1">skipOnMacOnCI</span>
+
+<span class="s2"># we use threading on purpose so that we can test both regular and</span>
+<span class="s2"># gevent sockets with the same code</span>
+<span class="s0">from </span><span class="s1">threading </span><span class="s0">import </span><span class="s1">Thread </span><span class="s0">as </span><span class="s1">_Thread</span>
+<span class="s0">from </span><span class="s1">threading </span><span class="s0">import </span><span class="s1">Event</span>
+
+<span class="s1">errno_types = int</span>
+
+<span class="s2"># socket.accept/unwrap/makefile aren't found for some reason</span>
+<span class="s2"># pylint:disable=no-member</span>
+
+<span class="s0">class </span><span class="s1">BaseThread(object):</span>
+    <span class="s1">terminal_exc = </span><span class="s0">None</span>
+
+    <span class="s0">def </span><span class="s1">__init__(self</span><span class="s0">, </span><span class="s1">target):</span>
+        <span class="s1">@wraps(target)</span>
+        <span class="s0">def </span><span class="s1">errors_are_fatal(*args</span><span class="s0">, </span><span class="s1">**kwargs):</span>
+            <span class="s0">try</span><span class="s1">:</span>
+                <span class="s0">return </span><span class="s1">target(*args</span><span class="s0">, </span><span class="s1">**kwargs)</span>
+            <span class="s0">except</span><span class="s1">: </span><span class="s2"># pylint:disable=bare-except</span>
+                <span class="s1">self.terminal_exc = sys.exc_info()</span>
+                <span class="s0">raise</span>
+        <span class="s1">self.target = errors_are_fatal</span>
+
+<span class="s0">class </span><span class="s1">GreenletThread(BaseThread):</span>
+
+    <span class="s0">def </span><span class="s1">__init__(self</span><span class="s0">, </span><span class="s1">target=</span><span class="s0">None, </span><span class="s1">args=()):</span>
+        <span class="s1">BaseThread.__init__(self</span><span class="s0">, </span><span class="s1">target)</span>
+        <span class="s1">self.glet = gevent.spawn(self.target</span><span class="s0">, </span><span class="s1">*args)</span>
+
+    <span class="s0">def </span><span class="s1">join(self</span><span class="s0">, </span><span class="s1">*args</span><span class="s0">, </span><span class="s1">**kwargs):</span>
+        <span class="s0">return </span><span class="s1">self.glet.join(*args</span><span class="s0">, </span><span class="s1">**kwargs)</span>
+
+    <span class="s0">def </span><span class="s1">is_alive(self):</span>
+        <span class="s0">return not </span><span class="s1">self.glet.ready()</span>
+
+<span class="s0">if not </span><span class="s1">monkey.is_module_patched(</span><span class="s3">'threading'</span><span class="s1">):</span>
+    <span class="s0">class </span><span class="s1">ThreadThread(BaseThread</span><span class="s0">, </span><span class="s1">_Thread):</span>
+        <span class="s0">def </span><span class="s1">__init__(self</span><span class="s0">, </span><span class="s1">**kwargs):</span>
+            <span class="s1">target = kwargs.pop(</span><span class="s3">'target'</span><span class="s1">)</span>
+            <span class="s1">BaseThread.__init__(self</span><span class="s0">, </span><span class="s1">target)</span>
+            <span class="s1">_Thread.__init__(self</span><span class="s0">, </span><span class="s1">target=self.target</span><span class="s0">, </span><span class="s1">**kwargs)</span>
+            <span class="s1">self.start()</span>
+    <span class="s1">Thread = ThreadThread</span>
+<span class="s0">else</span><span class="s1">:</span>
+    <span class="s1">Thread = GreenletThread</span>
+
+<span class="s0">class </span><span class="s1">TestTCP(greentest.TestCase):</span>
+    <span class="s1">__timeout__ = </span><span class="s0">None</span>
+    <span class="s1">TIMEOUT_ERROR = socket.timeout</span>
+    <span class="s1">long_data = </span><span class="s3">&quot;, &quot;</span><span class="s1">.join([str(x) </span><span class="s0">for </span><span class="s1">x </span><span class="s0">in </span><span class="s1">range(</span><span class="s4">20000</span><span class="s1">)])</span>
+    <span class="s0">if not </span><span class="s1">isinstance(long_data</span><span class="s0">, </span><span class="s1">bytes):</span>
+        <span class="s1">long_data = long_data.encode(</span><span class="s3">'ascii'</span><span class="s1">)</span>
+
+    <span class="s0">def </span><span class="s1">setUp(self):</span>
+        <span class="s1">super(TestTCP</span><span class="s0">, </span><span class="s1">self).setUp()</span>
+        <span class="s0">if </span><span class="s3">'-v' </span><span class="s0">in </span><span class="s1">sys.argv:</span>
+            <span class="s1">printed = []</span>
+            <span class="s0">try</span><span class="s1">:</span>
+                <span class="s0">from </span><span class="s1">time </span><span class="s0">import </span><span class="s1">perf_counter </span><span class="s0">as </span><span class="s1">now</span>
+            <span class="s0">except </span><span class="s1">ImportError:</span>
+                <span class="s0">from </span><span class="s1">time </span><span class="s0">import </span><span class="s1">time </span><span class="s0">as </span><span class="s1">now</span>
+            <span class="s0">def </span><span class="s1">log(*args):</span>
+                <span class="s0">if not </span><span class="s1">printed:</span>
+                    <span class="s1">print()</span>
+                    <span class="s1">printed.append(</span><span class="s4">1</span><span class="s1">)</span>
+                <span class="s1">print(</span><span class="s3">&quot;</span><span class="s0">\t </span><span class="s3">-&gt; %0.6f&quot; </span><span class="s1">% now()</span><span class="s0">, </span><span class="s1">*args)</span>
+
+            <span class="s1">orig_cot = self._close_on_teardown</span>
+            <span class="s0">def </span><span class="s1">cot(o):</span>
+                <span class="s1">log(</span><span class="s3">&quot;Registering for teardown&quot;</span><span class="s0">, </span><span class="s1">o)</span>
+                <span class="s0">def </span><span class="s1">c(o=o):</span>
+                    <span class="s1">log(</span><span class="s3">&quot;Closing on teardown&quot;</span><span class="s0">, </span><span class="s1">o)</span>
+                    <span class="s1">o.close()</span>
+                    <span class="s1">o = </span><span class="s0">None</span>
+                <span class="s1">orig_cot(c)</span>
+                <span class="s0">return </span><span class="s1">o</span>
+            <span class="s1">self._close_on_teardown = cot</span>
+
+        <span class="s0">else</span><span class="s1">:</span>
+            <span class="s0">def </span><span class="s1">log(*_args):</span>
+                <span class="s5">&quot;Does nothing&quot;</span>
+        <span class="s1">self.log = log</span>
+
+
+        <span class="s1">self.listener = self._close_on_teardown(self._setup_listener())</span>
+        <span class="s2"># It is important to watch the lifetimes of socket objects and</span>
+        <span class="s2"># ensure that:</span>
+        <span class="s2"># (1) they are closed; and</span>
+        <span class="s2"># (2) *before* the next test begins.</span>
+        <span class="s2">#</span>
+        <span class="s2"># For example, it's a bad bad thing to leave a greenlet running past the</span>
+        <span class="s2"># scope of the individual test method if that greenlet will close</span>
+        <span class="s2"># a socket object --- especially if that socket object might also have been</span>
+        <span class="s2"># closed explicitly.</span>
+        <span class="s2">#</span>
+        <span class="s2"># On Windows, we've seen issue with filenos getting reused while something</span>
+        <span class="s2"># still thinks they have the original fileno around. When they later</span>
+        <span class="s2"># close that fileno, a completely unrelated object is closed.</span>
+        <span class="s1">self.port = self.listener.getsockname()[</span><span class="s4">1</span><span class="s1">]</span>
+
+    <span class="s0">def </span><span class="s1">_setup_listener(self):</span>
+        <span class="s0">return </span><span class="s1">tcp_listener()</span>
+
+    <span class="s0">def </span><span class="s1">create_connection(self</span><span class="s0">, </span><span class="s1">host=</span><span class="s0">None, </span><span class="s1">port=</span><span class="s0">None, </span><span class="s1">timeout=</span><span class="s0">None,</span>
+                          <span class="s1">blocking=</span><span class="s0">None</span><span class="s1">):</span>
+        <span class="s1">sock = self._close_on_teardown(socket.socket())</span>
+        <span class="s1">sock.connect((host </span><span class="s0">or </span><span class="s1">params.DEFAULT_CONNECT</span><span class="s0">, </span><span class="s1">port </span><span class="s0">or </span><span class="s1">self.port))</span>
+        <span class="s0">if </span><span class="s1">timeout </span><span class="s0">is not None</span><span class="s1">:</span>
+            <span class="s1">sock.settimeout(timeout)</span>
+        <span class="s0">if </span><span class="s1">blocking </span><span class="s0">is not None</span><span class="s1">:</span>
+            <span class="s1">sock.setblocking(blocking)</span>
+        <span class="s0">return </span><span class="s1">sock</span>
+
+    <span class="s0">def </span><span class="s1">_test_sendall(self</span><span class="s0">, </span><span class="s1">data</span><span class="s0">, </span><span class="s1">match_data=</span><span class="s0">None, </span><span class="s1">client_method=</span><span class="s3">'sendall'</span><span class="s0">,</span>
+                      <span class="s1">**client_args):</span>
+        <span class="s2"># pylint:disable=too-many-locals,too-many-branches,too-many-statements</span>
+        <span class="s1">log = self.log</span>
+        <span class="s1">log(</span><span class="s3">&quot;test_sendall using method&quot;</span><span class="s0">, </span><span class="s1">client_method)</span>
+
+        <span class="s1">read_data = []</span>
+        <span class="s1">accepted_event = Event()</span>
+
+        <span class="s0">def </span><span class="s1">accept_and_read():</span>
+            <span class="s1">log(</span><span class="s3">&quot;</span><span class="s0">\t</span><span class="s3">accepting&quot;</span><span class="s0">, </span><span class="s1">self.listener)</span>
+            <span class="s1">conn</span><span class="s0">, </span><span class="s1">_ = self.listener.accept()</span>
+            <span class="s0">try</span><span class="s1">:</span>
+                <span class="s0">with </span><span class="s1">conn.makefile(mode=</span><span class="s3">'rb'</span><span class="s1">) </span><span class="s0">as </span><span class="s1">r:</span>
+                    <span class="s1">log(</span><span class="s3">&quot;</span><span class="s0">\t</span><span class="s3">accepted on server; client conn is&quot;</span><span class="s0">, </span><span class="s1">conn</span><span class="s0">, </span><span class="s3">&quot;file is&quot;</span><span class="s0">, </span><span class="s1">r)</span>
+                    <span class="s1">accepted_event.set()</span>
+                    <span class="s1">log(</span><span class="s3">&quot;</span><span class="s0">\t</span><span class="s3">reading&quot;</span><span class="s1">)</span>
+                    <span class="s1">read_data.append(r.read())</span>
+                    <span class="s1">log(</span><span class="s3">&quot;</span><span class="s0">\t</span><span class="s3">done reading&quot;</span><span class="s0">, </span><span class="s1">r</span><span class="s0">, </span><span class="s3">&quot;got bytes&quot;</span><span class="s0">, </span><span class="s1">len(read_data[</span><span class="s4">0</span><span class="s1">]))</span>
+                <span class="s0">del </span><span class="s1">r</span>
+            <span class="s0">finally</span><span class="s1">:</span>
+                <span class="s1">conn.close()</span>
+                <span class="s0">del </span><span class="s1">conn</span>
+
+
+        <span class="s1">server = Thread(target=accept_and_read)</span>
+        <span class="s0">try</span><span class="s1">:</span>
+            <span class="s1">log(</span><span class="s3">&quot;creating client connection&quot;</span><span class="s1">)</span>
+            <span class="s1">client = self.create_connection(**client_args)</span>
+
+            <span class="s2"># It's important to wait for the server to fully accept before</span>
+            <span class="s2"># we shutdown and close the socket. In SSL mode, the number</span>
+            <span class="s2"># and timing of data exchanges to complete the handshake and</span>
+            <span class="s2"># thus exactly when greenlet switches occur, varies by TLS version.</span>
+            <span class="s2">#</span>
+            <span class="s2"># It turns out that on &lt; TLS1.3, we were getting lucky and the</span>
+            <span class="s2"># server was the greenlet that raced ahead and blocked in r.read()</span>
+            <span class="s2"># before the client returned from create_connection().</span>
+            <span class="s2">#</span>
+            <span class="s2"># But when TLS 1.3 was deployed (OpenSSL 1.1), the *client* was the</span>
+            <span class="s2"># one that raced ahead while the server had yet to return from</span>
+            <span class="s2"># self.listener.accept(). So the client sent the data to the socket,</span>
+            <span class="s2"># and closed, before the server could do anything, and the server,</span>
+            <span class="s2"># when it got switched to by server.join(), found its new socket</span>
+            <span class="s2"># dead.</span>
+            <span class="s1">accepted_event.wait()</span>
+            <span class="s1">log(</span><span class="s3">&quot;Client got accepted event from server&quot;</span><span class="s0">, </span><span class="s1">client</span><span class="s0">, </span><span class="s3">&quot;; sending data&quot;</span><span class="s0">, </span><span class="s1">len(data))</span>
+            <span class="s0">try</span><span class="s1">:</span>
+                <span class="s1">x = getattr(client</span><span class="s0">, </span><span class="s1">client_method)(data)</span>
+                <span class="s1">log(</span><span class="s3">&quot;Client sent data: result from method&quot;</span><span class="s0">, </span><span class="s1">x)</span>
+            <span class="s0">finally</span><span class="s1">:</span>
+                <span class="s1">log(</span><span class="s3">&quot;Client will unwrap and shutdown&quot;</span><span class="s1">)</span>
+                <span class="s0">if </span><span class="s1">hasattr(client</span><span class="s0">, </span><span class="s3">'unwrap'</span><span class="s1">):</span>
+                    <span class="s2"># Are we dealing with an SSLSocket? If so, unwrap it</span>
+                    <span class="s2"># before attempting to shut down the socket. This does the</span>
+                    <span class="s2"># SSL shutdown handshake and (hopefully) stops ``accept_and_read``</span>
+                    <span class="s2"># from generating ``ConnectionResetError`` on AppVeyor.</span>
+                    <span class="s0">try</span><span class="s1">:</span>
+                        <span class="s1">client = client.unwrap()</span>
+                    <span class="s0">except </span><span class="s1">(ValueError</span><span class="s0">, </span><span class="s1">IOError</span><span class="s0">, </span><span class="s1">OSError):</span>
+                        <span class="s2"># PyPy raises _cffi_ssl._stdssl.error.SSLSyscallError,</span>
+                        <span class="s2"># which is an IOError in 2.7 and OSError in 3.7</span>
+                        <span class="s0">pass</span>
+
+                <span class="s0">try</span><span class="s1">:</span>
+                    <span class="s2"># The implicit reference-based nastiness of Python 2</span>
+                    <span class="s2"># sockets interferes, especially when using SSL sockets.</span>
+                    <span class="s2"># The best way to get a decent FIN to the server is to shutdown</span>
+                    <span class="s2"># the output. Doing that on Python 3, OTOH, is contraindicated</span>
+                    <span class="s2"># except on PyPy, so this used to read ``PY2 or PYPY``. But</span>
+                    <span class="s2"># it seems that a shutdown is generally good practice, and I didn't</span>
+                    <span class="s2"># document what errors we saw without it. Per issue #1637</span>
+                    <span class="s2"># lets do a shutdown everywhere, but only after removing any</span>
+                    <span class="s2"># SSL wrapping.</span>
+                    <span class="s1">client.shutdown(socket.SHUT_RDWR)</span>
+                <span class="s0">except </span><span class="s1">(OSError</span><span class="s0">, </span><span class="s1">socket.error):</span>
+                    <span class="s0">pass</span>
+
+                <span class="s1">log(</span><span class="s3">&quot;Client will close&quot;</span><span class="s1">)</span>
+                <span class="s1">client.close()</span>
+        <span class="s0">finally</span><span class="s1">:</span>
+            <span class="s1">server.join(</span><span class="s4">10</span><span class="s1">)</span>
+            <span class="s0">assert not </span><span class="s1">server.is_alive()</span>
+
+        <span class="s0">if </span><span class="s1">server.terminal_exc:</span>
+            <span class="s1">reraise(*server.terminal_exc)</span>
+
+        <span class="s0">if </span><span class="s1">match_data </span><span class="s0">is None</span><span class="s1">:</span>
+            <span class="s1">match_data = self.long_data</span>
+        <span class="s1">read_data = read_data[</span><span class="s4">0</span><span class="s1">].split(</span><span class="s6">b','</span><span class="s1">)</span>
+        <span class="s1">match_data = match_data.split(</span><span class="s6">b','</span><span class="s1">)</span>
+        <span class="s1">self.assertEqual(read_data[</span><span class="s4">0</span><span class="s1">]</span><span class="s0">, </span><span class="s1">match_data[</span><span class="s4">0</span><span class="s1">])</span>
+        <span class="s1">self.assertEqual(len(read_data)</span><span class="s0">, </span><span class="s1">len(match_data))</span>
+        <span class="s1">self.assertEqual(read_data</span><span class="s0">, </span><span class="s1">match_data)</span>
+
+    <span class="s0">def </span><span class="s1">test_sendall_str(self):</span>
+        <span class="s1">self._test_sendall(self.long_data)</span>
+
+    <span class="s0">if </span><span class="s1">six.PY2:</span>
+        <span class="s0">def </span><span class="s1">test_sendall_unicode(self):</span>
+            <span class="s1">self._test_sendall(six.text_type(self.long_data))</span>
+
+    <span class="s1">@skipOnMacOnCI(</span><span class="s3">&quot;Sometimes fails for no apparent reason (buffering?)&quot;</span><span class="s1">)</span>
+    <span class="s0">def </span><span class="s1">test_sendall_array(self):</span>
+        <span class="s1">data = array.array(</span><span class="s3">&quot;B&quot;</span><span class="s0">, </span><span class="s1">self.long_data)</span>
+        <span class="s1">self._test_sendall(data)</span>
+
+    <span class="s0">def </span><span class="s1">test_sendall_empty(self):</span>
+        <span class="s1">data = </span><span class="s6">b''</span>
+        <span class="s1">self._test_sendall(data</span><span class="s0">, </span><span class="s1">data)</span>
+
+    <span class="s0">def </span><span class="s1">test_sendall_empty_with_timeout(self):</span>
+        <span class="s2"># Issue 719</span>
+        <span class="s1">data = </span><span class="s6">b''</span>
+        <span class="s1">self._test_sendall(data</span><span class="s0">, </span><span class="s1">data</span><span class="s0">, </span><span class="s1">timeout=</span><span class="s4">10</span><span class="s1">)</span>
+
+    <span class="s0">def </span><span class="s1">test_sendall_nonblocking(self):</span>
+        <span class="s2"># https://github.com/benoitc/gunicorn/issues/1282</span>
+        <span class="s2"># Even if the socket is non-blocking, we make at least</span>
+        <span class="s2"># one attempt to send data. Under Py2 before this fix, we</span>
+        <span class="s2"># would incorrectly immediately raise a timeout error</span>
+        <span class="s1">data = </span><span class="s6">b'hi</span><span class="s0">\n</span><span class="s6">'</span>
+        <span class="s1">self._test_sendall(data</span><span class="s0">, </span><span class="s1">data</span><span class="s0">, </span><span class="s1">blocking=</span><span class="s0">False</span><span class="s1">)</span>
+
+    <span class="s0">def </span><span class="s1">test_empty_send(self):</span>
+        <span class="s2"># Issue 719</span>
+        <span class="s1">data = </span><span class="s6">b''</span>
+        <span class="s1">self._test_sendall(data</span><span class="s0">, </span><span class="s1">data</span><span class="s0">, </span><span class="s1">client_method=</span><span class="s3">'send'</span><span class="s1">)</span>
+
+    <span class="s0">def </span><span class="s1">test_fullduplex(self):</span>
+        <span class="s1">N = </span><span class="s4">100000</span>
+
+        <span class="s0">def </span><span class="s1">server():</span>
+            <span class="s1">remote_client</span><span class="s0">, </span><span class="s1">_ = self.listener.accept()</span>
+            <span class="s1">self._close_on_teardown(remote_client)</span>
+            <span class="s2"># start reading, then, while reading, start writing. the reader should not hang forever</span>
+
+            <span class="s1">sender = Thread(target=remote_client.sendall</span><span class="s0">,</span>
+                            <span class="s1">args=((</span><span class="s6">b't' </span><span class="s1">* N)</span><span class="s0">,</span><span class="s1">))</span>
+            <span class="s0">try</span><span class="s1">:</span>
+                <span class="s1">result = remote_client.recv(</span><span class="s4">1000</span><span class="s1">)</span>
+                <span class="s1">self.assertEqual(result</span><span class="s0">, </span><span class="s6">b'hello world'</span><span class="s1">)</span>
+            <span class="s0">finally</span><span class="s1">:</span>
+                <span class="s1">sender.join()</span>
+
+        <span class="s1">server_thread = Thread(target=server)</span>
+        <span class="s1">client = self.create_connection()</span>
+        <span class="s1">client_file = self._close_on_teardown(client.makefile())</span>
+        <span class="s1">client_reader = Thread(target=client_file.read</span><span class="s0">, </span><span class="s1">args=(N</span><span class="s0">, </span><span class="s1">))</span>
+        <span class="s1">time.sleep(</span><span class="s4">0.1</span><span class="s1">)</span>
+        <span class="s1">client.sendall(</span><span class="s6">b'hello world'</span><span class="s1">)</span>
+        <span class="s1">time.sleep(</span><span class="s4">0.1</span><span class="s1">)</span>
+
+        <span class="s2"># close() used to hang</span>
+        <span class="s1">client_file.close()</span>
+        <span class="s1">client.close()</span>
+
+        <span class="s2"># this tests &quot;full duplex&quot; bug;</span>
+        <span class="s1">server_thread.join()</span>
+
+        <span class="s1">client_reader.join()</span>
+
+    <span class="s0">def </span><span class="s1">test_recv_timeout(self):</span>
+        <span class="s0">def </span><span class="s1">accept():</span>
+            <span class="s2"># make sure the conn object stays alive until the end;</span>
+            <span class="s2"># premature closing triggers a ResourceWarning and</span>
+            <span class="s2"># EOF on the client.</span>
+            <span class="s1">conn</span><span class="s0">, </span><span class="s1">_ = self.listener.accept()</span>
+            <span class="s1">self._close_on_teardown(conn)</span>
+
+        <span class="s1">acceptor = Thread(target=accept)</span>
+        <span class="s1">client = self.create_connection()</span>
+        <span class="s0">try</span><span class="s1">:</span>
+            <span class="s1">client.settimeout(</span><span class="s4">1</span><span class="s1">)</span>
+            <span class="s1">start = time.time()</span>
+            <span class="s0">with </span><span class="s1">self.assertRaises(self.TIMEOUT_ERROR):</span>
+                <span class="s1">client.recv(</span><span class="s4">1024</span><span class="s1">)</span>
+            <span class="s1">took = time.time() - start</span>
+            <span class="s1">self.assertTimeWithinRange(took</span><span class="s0">, </span><span class="s4">1 </span><span class="s1">- </span><span class="s4">0.1</span><span class="s0">, </span><span class="s4">1 </span><span class="s1">+ </span><span class="s4">0.1</span><span class="s1">)</span>
+        <span class="s0">finally</span><span class="s1">:</span>
+            <span class="s1">acceptor.join()</span>
+
+    <span class="s2"># Subclasses can disable  this</span>
+    <span class="s1">_test_sendall_timeout_check_time = </span><span class="s0">True</span>
+
+    <span class="s2"># Travis-CI container infrastructure is configured with</span>
+    <span class="s2"># large socket buffers, at least 2MB, as-of Jun 3, 2015,</span>
+    <span class="s2"># so we must be sure to send more data than that.</span>
+    <span class="s2"># In 2018, this needs to be increased *again* as a smaller value was</span>
+    <span class="s2"># still often being sent.</span>
+    <span class="s1">_test_sendall_data = </span><span class="s6">b'hello' </span><span class="s1">* </span><span class="s4">100000000</span>
+
+    <span class="s2"># This doesn't make much sense...why are we really skipping this?</span>
+    <span class="s1">@greentest.skipOnWindows(</span><span class="s3">&quot;On Windows send() accepts whatever is thrown at it&quot;</span><span class="s1">)</span>
+    <span class="s0">def </span><span class="s1">test_sendall_timeout(self):</span>
+        <span class="s1">client_sock = []</span>
+        <span class="s1">acceptor = Thread(target=</span><span class="s0">lambda</span><span class="s1">: client_sock.append(self.listener.accept()))</span>
+        <span class="s1">client = self.create_connection()</span>
+        <span class="s1">time.sleep(</span><span class="s4">0.1</span><span class="s1">)</span>
+        <span class="s0">assert </span><span class="s1">client_sock</span>
+        <span class="s1">client.settimeout(</span><span class="s4">0.1</span><span class="s1">)</span>
+        <span class="s1">start = time.time()</span>
+        <span class="s0">try</span><span class="s1">:</span>
+            <span class="s0">with </span><span class="s1">self.assertRaises(self.TIMEOUT_ERROR):</span>
+                <span class="s1">client.sendall(self._test_sendall_data)</span>
+            <span class="s0">if </span><span class="s1">self._test_sendall_timeout_check_time:</span>
+                <span class="s1">took = time.time() - start</span>
+                <span class="s1">self.assertTimeWithinRange(took</span><span class="s0">, </span><span class="s4">0.09</span><span class="s0">, </span><span class="s4">0.2</span><span class="s1">)</span>
+        <span class="s0">finally</span><span class="s1">:</span>
+            <span class="s1">acceptor.join()</span>
+            <span class="s1">client.close()</span>
+            <span class="s1">client_sock[</span><span class="s4">0</span><span class="s1">][</span><span class="s4">0</span><span class="s1">].close()</span>
+
+    <span class="s0">def </span><span class="s1">test_makefile(self):</span>
+        <span class="s0">def </span><span class="s1">accept_once():</span>
+            <span class="s1">conn</span><span class="s0">, </span><span class="s1">_ = self.listener.accept()</span>
+            <span class="s1">fd = conn.makefile(mode=</span><span class="s3">'wb'</span><span class="s1">)</span>
+            <span class="s1">fd.write(</span><span class="s6">b'hello</span><span class="s0">\n</span><span class="s6">'</span><span class="s1">)</span>
+            <span class="s1">fd.flush()</span>
+            <span class="s1">fd.close()</span>
+            <span class="s1">conn.close()  </span><span class="s2"># for pypy</span>
+
+        <span class="s1">acceptor = Thread(target=accept_once)</span>
+        <span class="s0">try</span><span class="s1">:</span>
+            <span class="s1">client = self.create_connection()</span>
+            <span class="s2"># Closing the socket doesn't close the file</span>
+            <span class="s1">client_file = client.makefile(mode=</span><span class="s3">'rb'</span><span class="s1">)</span>
+            <span class="s1">client.close()</span>
+            <span class="s1">line = client_file.readline()</span>
+            <span class="s1">self.assertEqual(line</span><span class="s0">, </span><span class="s6">b'hello</span><span class="s0">\n</span><span class="s6">'</span><span class="s1">)</span>
+            <span class="s1">self.assertEqual(client_file.read()</span><span class="s0">, </span><span class="s6">b''</span><span class="s1">)</span>
+            <span class="s1">client_file.close()</span>
+        <span class="s0">finally</span><span class="s1">:</span>
+            <span class="s1">acceptor.join()</span>
+
+    <span class="s0">def </span><span class="s1">test_makefile_timeout(self):</span>
+
+        <span class="s0">def </span><span class="s1">accept_once():</span>
+            <span class="s1">conn</span><span class="s0">, </span><span class="s1">_ = self.listener.accept()</span>
+            <span class="s0">try</span><span class="s1">:</span>
+                <span class="s1">time.sleep(</span><span class="s4">0.3</span><span class="s1">)</span>
+            <span class="s0">finally</span><span class="s1">:</span>
+                <span class="s1">conn.close()  </span><span class="s2"># for pypy</span>
+
+        <span class="s1">acceptor = Thread(target=accept_once)</span>
+        <span class="s0">try</span><span class="s1">:</span>
+            <span class="s1">client = self.create_connection()</span>
+            <span class="s1">client.settimeout(</span><span class="s4">0.1</span><span class="s1">)</span>
+            <span class="s1">fd = client.makefile(mode=</span><span class="s3">'rb'</span><span class="s1">)</span>
+            <span class="s1">self.assertRaises(self.TIMEOUT_ERROR</span><span class="s0">, </span><span class="s1">fd.readline)</span>
+            <span class="s1">client.close()</span>
+            <span class="s1">fd.close()</span>
+        <span class="s0">finally</span><span class="s1">:</span>
+            <span class="s1">acceptor.join()</span>
+
+    <span class="s0">def </span><span class="s1">test_attributes(self):</span>
+        <span class="s1">s = socket.socket(socket.AF_INET</span><span class="s0">, </span><span class="s1">socket.SOCK_DGRAM</span><span class="s0">, </span><span class="s4">0</span><span class="s1">)</span>
+        <span class="s1">self.assertEqual(socket.AF_INET</span><span class="s0">, </span><span class="s1">s.type)</span>
+        <span class="s1">self.assertEqual(socket.SOCK_DGRAM</span><span class="s0">, </span><span class="s1">s.family)</span>
+        <span class="s1">self.assertEqual(</span><span class="s4">0</span><span class="s0">, </span><span class="s1">s.proto)</span>
+
+        <span class="s0">if </span><span class="s1">hasattr(socket</span><span class="s0">, </span><span class="s3">'SOCK_NONBLOCK'</span><span class="s1">):</span>
+            <span class="s1">s.settimeout(</span><span class="s4">1</span><span class="s1">)</span>
+            <span class="s1">self.assertEqual(socket.AF_INET</span><span class="s0">, </span><span class="s1">s.type)</span>
+
+            <span class="s1">s.setblocking(</span><span class="s4">0</span><span class="s1">)</span>
+            <span class="s1">std_socket = monkey.get_original(</span><span class="s3">'socket'</span><span class="s0">, </span><span class="s3">'socket'</span><span class="s1">)(socket.AF_INET</span><span class="s0">, </span><span class="s1">socket.SOCK_DGRAM</span><span class="s0">, </span><span class="s4">0</span><span class="s1">)</span>
+            <span class="s0">try</span><span class="s1">:</span>
+                <span class="s1">std_socket.setblocking(</span><span class="s4">0</span><span class="s1">)</span>
+                <span class="s1">self.assertEqual(std_socket.type</span><span class="s0">, </span><span class="s1">s.type)</span>
+            <span class="s0">finally</span><span class="s1">:</span>
+                <span class="s1">std_socket.close()</span>
+
+        <span class="s1">s.close()</span>
+
+    <span class="s0">def </span><span class="s1">test_connect_ex_nonblocking_bad_connection(self):</span>
+        <span class="s2"># Issue 841</span>
+        <span class="s1">s = socket.socket(socket.AF_INET</span><span class="s0">, </span><span class="s1">socket.SOCK_STREAM)</span>
+        <span class="s0">try</span><span class="s1">:</span>
+            <span class="s1">s.setblocking(</span><span class="s0">False</span><span class="s1">)</span>
+            <span class="s1">ret = s.connect_ex((greentest.DEFAULT_LOCAL_HOST_ADDR</span><span class="s0">, </span><span class="s1">support.find_unused_port()))</span>
+            <span class="s1">self.assertIsInstance(ret</span><span class="s0">, </span><span class="s1">errno_types)</span>
+        <span class="s0">finally</span><span class="s1">:</span>
+            <span class="s1">s.close()</span>
+
+    <span class="s1">@skipWithoutExternalNetwork(</span><span class="s3">&quot;Tries to resolve hostname&quot;</span><span class="s1">)</span>
+    <span class="s0">def </span><span class="s1">test_connect_ex_gaierror(self):</span>
+        <span class="s2"># Issue 841</span>
+        <span class="s1">s = socket.socket(socket.AF_INET</span><span class="s0">, </span><span class="s1">socket.SOCK_STREAM)</span>
+        <span class="s0">try</span><span class="s1">:</span>
+            <span class="s0">with </span><span class="s1">self.assertRaises(socket.gaierror):</span>
+                <span class="s1">s.connect_ex((</span><span class="s3">'foo.bar.fizzbuzz'</span><span class="s0">, </span><span class="s1">support.find_unused_port()))</span>
+        <span class="s0">finally</span><span class="s1">:</span>
+            <span class="s1">s.close()</span>
+
+    <span class="s0">def </span><span class="s1">test_connect_ex_nonblocking_overflow(self):</span>
+        <span class="s2"># Issue 841</span>
+        <span class="s1">s = socket.socket(socket.AF_INET</span><span class="s0">, </span><span class="s1">socket.SOCK_STREAM)</span>
+        <span class="s0">try</span><span class="s1">:</span>
+            <span class="s1">s.setblocking(</span><span class="s0">False</span><span class="s1">)</span>
+            <span class="s0">with </span><span class="s1">self.assertRaises(OverflowError):</span>
+                <span class="s1">s.connect_ex((greentest.DEFAULT_LOCAL_HOST_ADDR</span><span class="s0">, </span><span class="s4">65539</span><span class="s1">))</span>
+        <span class="s0">finally</span><span class="s1">:</span>
+            <span class="s1">s.close()</span>
+
+    <span class="s1">@unittest.skipUnless(hasattr(socket</span><span class="s0">, </span><span class="s3">'SOCK_CLOEXEC'</span><span class="s1">)</span><span class="s0">,</span>
+                         <span class="s3">&quot;Requires SOCK_CLOEXEC&quot;</span><span class="s1">)</span>
+    <span class="s0">def </span><span class="s1">test_connect_with_type_flags_ignored(self):</span>
+        <span class="s2"># Issue 944</span>
+        <span class="s2"># If we have SOCK_CLOEXEC or similar, we shouldn't be passing</span>
+        <span class="s2"># them through to the getaddrinfo call that connect() makes</span>
+        <span class="s1">SOCK_CLOEXEC = socket.SOCK_CLOEXEC </span><span class="s2"># pylint:disable=no-member</span>
+        <span class="s1">s = socket.socket(socket.AF_INET</span><span class="s0">, </span><span class="s1">socket.SOCK_STREAM | SOCK_CLOEXEC)</span>
+
+        <span class="s0">def </span><span class="s1">accept_once():</span>
+            <span class="s1">conn</span><span class="s0">, </span><span class="s1">_ = self.listener.accept()</span>
+            <span class="s1">fd = conn.makefile(mode=</span><span class="s3">'wb'</span><span class="s1">)</span>
+            <span class="s1">fd.write(</span><span class="s6">b'hello</span><span class="s0">\n</span><span class="s6">'</span><span class="s1">)</span>
+            <span class="s1">fd.close()</span>
+            <span class="s1">conn.close()</span>
+
+        <span class="s1">acceptor = Thread(target=accept_once)</span>
+        <span class="s0">try</span><span class="s1">:</span>
+            <span class="s1">s.connect((params.DEFAULT_CONNECT</span><span class="s0">, </span><span class="s1">self.port))</span>
+            <span class="s1">fd = s.makefile(mode=</span><span class="s3">'rb'</span><span class="s1">)</span>
+            <span class="s1">self.assertEqual(fd.readline()</span><span class="s0">, </span><span class="s6">b'hello</span><span class="s0">\n</span><span class="s6">'</span><span class="s1">)</span>
+
+            <span class="s1">fd.close()</span>
+            <span class="s1">s.close()</span>
+        <span class="s0">finally</span><span class="s1">:</span>
+            <span class="s1">acceptor.join()</span>
+
+
+<span class="s0">class </span><span class="s1">TestCreateConnection(greentest.TestCase):</span>
+
+    <span class="s1">__timeout__ = LARGE_TIMEOUT</span>
+
+    <span class="s0">def </span><span class="s1">test_refuses(self</span><span class="s0">, </span><span class="s1">**conn_args):</span>
+        <span class="s1">connect_port = support.find_unused_port()</span>
+
+        <span class="s0">with </span><span class="s1">self.assertRaisesRegex(</span>
+                <span class="s1">socket.error</span><span class="s0">,</span>
+                <span class="s2"># We really expect &quot;connection refused&quot;. It's unclear</span>
+                <span class="s2"># where/why we would get '[errno -2] name or service</span>
+                <span class="s2"># not known' but it seems some systems generate that.</span>
+                <span class="s2"># https://github.com/gevent/gevent/issues/1389 Somehow</span>
+                <span class="s2"># extremly rarely we've also seen 'address already in</span>
+                <span class="s2"># use', which makes even less sense. The manylinux</span>
+                <span class="s2"># 2010 environment produces 'errno 99 Cannot assign</span>
+                <span class="s2"># requested address', which, I guess?</span>
+                <span class="s2"># Meanwhile, the musllinux_1 environment produces</span>
+                <span class="s2"># '[Errno 99] Address not available'</span>
+                <span class="s3">'refused|not known|already in use|assign|not available'</span>
+        <span class="s1">):</span>
+            <span class="s1">socket.create_connection(</span>
+                <span class="s1">(greentest.DEFAULT_BIND_ADDR</span><span class="s0">, </span><span class="s1">connect_port)</span><span class="s0">,</span>
+                <span class="s1">timeout=</span><span class="s4">30</span><span class="s0">,</span>
+                <span class="s1">**conn_args</span>
+            <span class="s1">)</span>
+
+    <span class="s0">def </span><span class="s1">test_refuses_from_port(self):</span>
+        <span class="s1">source_port = support.find_unused_port()</span>
+        <span class="s2"># Usually we don't want to bind/connect to '', but</span>
+        <span class="s2"># using it as the source is required if we don't want to hang,</span>
+        <span class="s2"># at least on some systems (OS X)</span>
+        <span class="s1">self.test_refuses(source_address=(</span><span class="s3">''</span><span class="s0">, </span><span class="s1">source_port))</span>
+
+
+    <span class="s1">@greentest.ignores_leakcheck</span>
+    <span class="s1">@skipWithoutExternalNetwork(</span><span class="s3">&quot;Tries to resolve hostname&quot;</span><span class="s1">)</span>
+    <span class="s0">def </span><span class="s1">test_base_exception(self):</span>
+        <span class="s2"># such as a GreenletExit or a gevent.timeout.Timeout</span>
+
+        <span class="s0">class </span><span class="s1">E(BaseException):</span>
+            <span class="s0">pass</span>
+
+        <span class="s0">class </span><span class="s1">MockSocket(object):</span>
+
+            <span class="s1">created = ()</span>
+            <span class="s1">closed = </span><span class="s0">False</span>
+
+            <span class="s0">def </span><span class="s1">__init__(self</span><span class="s0">, </span><span class="s1">*_):</span>
+                <span class="s1">MockSocket.created += (self</span><span class="s0">,</span><span class="s1">)</span>
+
+            <span class="s0">def </span><span class="s1">connect(self</span><span class="s0">, </span><span class="s1">_):</span>
+                <span class="s0">raise </span><span class="s1">E(_)</span>
+
+            <span class="s0">def </span><span class="s1">close(self):</span>
+                <span class="s1">self.closed = </span><span class="s0">True</span>
+
+        <span class="s0">def </span><span class="s1">mockgetaddrinfo(*_):</span>
+            <span class="s0">return </span><span class="s1">[(</span><span class="s4">1</span><span class="s0">, </span><span class="s4">2</span><span class="s0">, </span><span class="s4">3</span><span class="s0">, </span><span class="s4">3</span><span class="s0">, </span><span class="s4">5</span><span class="s1">)</span><span class="s0">,</span><span class="s1">]</span>
+
+        <span class="s0">import </span><span class="s1">gevent.socket </span><span class="s0">as </span><span class="s1">gsocket</span>
+        <span class="s2"># Make sure we're monkey patched</span>
+        <span class="s1">self.assertEqual(gsocket.create_connection</span><span class="s0">, </span><span class="s1">socket.create_connection)</span>
+        <span class="s1">orig_socket = gsocket.socket</span>
+        <span class="s1">orig_getaddrinfo = gsocket.getaddrinfo</span>
+
+        <span class="s0">try</span><span class="s1">:</span>
+            <span class="s1">gsocket.socket = MockSocket</span>
+            <span class="s1">gsocket.getaddrinfo = mockgetaddrinfo</span>
+
+            <span class="s0">with </span><span class="s1">self.assertRaises(E):</span>
+                <span class="s1">socket.create_connection((</span><span class="s3">'host'</span><span class="s0">, </span><span class="s3">'port'</span><span class="s1">))</span>
+
+            <span class="s1">self.assertEqual(</span><span class="s4">1</span><span class="s0">, </span><span class="s1">len(MockSocket.created))</span>
+            <span class="s1">self.assertTrue(MockSocket.created[</span><span class="s4">0</span><span class="s1">].closed)</span>
+
+        <span class="s0">finally</span><span class="s1">:</span>
+            <span class="s1">MockSocket.created = ()</span>
+            <span class="s1">gsocket.socket = orig_socket</span>
+            <span class="s1">gsocket.getaddrinfo = orig_getaddrinfo</span>
+
+<span class="s0">class </span><span class="s1">TestFunctions(greentest.TestCase):</span>
+
+    <span class="s1">@greentest.ignores_leakcheck</span>
+    <span class="s2"># Creating new types in the function takes a cycle to cleanup.</span>
+    <span class="s0">def </span><span class="s1">test_wait_timeout(self):</span>
+        <span class="s2"># Issue #635</span>
+        <span class="s0">from </span><span class="s1">gevent </span><span class="s0">import </span><span class="s1">socket </span><span class="s0">as </span><span class="s1">gsocket</span>
+        <span class="s0">class </span><span class="s1">io(object):</span>
+            <span class="s1">callback = </span><span class="s0">None</span>
+
+            <span class="s0">def </span><span class="s1">start(self</span><span class="s0">, </span><span class="s1">*_args):</span>
+                <span class="s1">gevent.sleep(</span><span class="s4">10</span><span class="s1">)</span>
+
+        <span class="s0">with </span><span class="s1">self.assertRaises(gsocket.timeout):</span>
+            <span class="s1">gsocket.wait(io()</span><span class="s0">, </span><span class="s1">timeout=</span><span class="s4">0.01</span><span class="s1">) </span><span class="s2"># pylint:disable=no-member</span>
+
+
+    <span class="s0">def </span><span class="s1">test_signatures(self):</span>
+        <span class="s2"># https://github.com/gevent/gevent/issues/960</span>
+        <span class="s1">exclude = []</span>
+        <span class="s0">if </span><span class="s1">greentest.PYPY:</span>
+            <span class="s2"># Up through at least PyPy 5.7.1, they define these as</span>
+            <span class="s2"># gethostbyname(host), whereas the official CPython argument name</span>
+            <span class="s2"># is hostname. But cpython doesn't allow calling with keyword args.</span>
+            <span class="s2"># Likewise for gethostbyaddr: PyPy uses host, cpython uses ip_address</span>
+            <span class="s1">exclude.append(</span><span class="s3">'gethostbyname'</span><span class="s1">)</span>
+            <span class="s1">exclude.append(</span><span class="s3">'gethostbyname_ex'</span><span class="s1">)</span>
+            <span class="s1">exclude.append(</span><span class="s3">'gethostbyaddr'</span><span class="s1">)</span>
+        <span class="s0">if </span><span class="s1">sys.version_info[:</span><span class="s4">2</span><span class="s1">] == (</span><span class="s4">3</span><span class="s0">, </span><span class="s4">11</span><span class="s1">):</span>
+            <span class="s2"># Be careful not to exclude this on 3.12, etc, in case of</span>
+            <span class="s2"># more changes.</span>
+            <span class="s1">exclude.append(</span><span class="s3">'create_connection'</span><span class="s1">)</span>
+        <span class="s1">self.assertMonkeyPatchedFuncSignatures(</span><span class="s3">'socket'</span><span class="s0">, </span><span class="s1">exclude=exclude)</span>
+
+    <span class="s0">def </span><span class="s1">test_resolve_ipv6_scope_id(self):</span>
+        <span class="s0">from </span><span class="s1">gevent </span><span class="s0">import </span><span class="s1">_socketcommon </span><span class="s0">as </span><span class="s1">SC</span>
+        <span class="s0">if not </span><span class="s1">SC.__socket__.has_ipv6:</span>
+            <span class="s1">self.skipTest(</span><span class="s3">&quot;Needs IPv6&quot;</span><span class="s1">) </span><span class="s2"># pragma: no cover</span>
+        <span class="s0">if not </span><span class="s1">hasattr(SC.__socket__</span><span class="s0">, </span><span class="s3">'inet_pton'</span><span class="s1">):</span>
+            <span class="s1">self.skipTest(</span><span class="s3">&quot;Needs inet_pton&quot;</span><span class="s1">) </span><span class="s2"># pragma: no cover</span>
+
+        <span class="s2"># A valid IPv6 address, with a scope.</span>
+        <span class="s1">addr = (</span><span class="s3">'2607:f8b0:4000:80e::200e'</span><span class="s0">, </span><span class="s4">80</span><span class="s0">, </span><span class="s4">0</span><span class="s0">, </span><span class="s4">9</span><span class="s1">)</span>
+        <span class="s2"># Mock socket</span>
+        <span class="s0">class </span><span class="s1">sock(object):</span>
+            <span class="s1">family = SC.AF_INET6 </span><span class="s2"># pylint:disable=no-member</span>
+        <span class="s1">self.assertIs(addr</span><span class="s0">, </span><span class="s1">SC._resolve_addr(sock</span><span class="s0">, </span><span class="s1">addr))</span>
+
+<span class="s0">class </span><span class="s1">TestSocket(greentest.TestCase):</span>
+
+    <span class="s0">def </span><span class="s1">test_shutdown_when_closed(self):</span>
+        <span class="s2"># https://github.com/gevent/gevent/issues/1089</span>
+        <span class="s2"># we once raised an AttributeError.</span>
+        <span class="s1">s = socket.socket()</span>
+        <span class="s1">s.close()</span>
+        <span class="s0">with </span><span class="s1">self.assertRaises(socket.error):</span>
+            <span class="s1">s.shutdown(socket.SHUT_RDWR)</span>
+
+    <span class="s0">def </span><span class="s1">test_can_be_weak_ref(self):</span>
+        <span class="s2"># stdlib socket can be weak reffed.</span>
+        <span class="s0">import </span><span class="s1">weakref</span>
+        <span class="s1">s = socket.socket()</span>
+        <span class="s0">try</span><span class="s1">:</span>
+            <span class="s1">w = weakref.ref(s)</span>
+            <span class="s1">self.assertIsNotNone(w)</span>
+        <span class="s0">finally</span><span class="s1">:</span>
+            <span class="s1">s.close()</span>
+
+    <span class="s0">def </span><span class="s1">test_has_no_dict(self):</span>
+        <span class="s2"># stdlib socket has no dict</span>
+        <span class="s1">s = socket.socket()</span>
+        <span class="s0">try</span><span class="s1">:</span>
+            <span class="s0">with </span><span class="s1">self.assertRaises(AttributeError):</span>
+                <span class="s1">getattr(s</span><span class="s0">, </span><span class="s3">'__dict__'</span><span class="s1">)</span>
+        <span class="s0">finally</span><span class="s1">:</span>
+            <span class="s1">s.close()</span>
+
+
+<span class="s0">if </span><span class="s1">__name__ == </span><span class="s3">'__main__'</span><span class="s1">:</span>
+    <span class="s1">greentest.main()</span>
+</pre>
+</body>
+</html>

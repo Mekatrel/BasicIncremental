@@ -1,0 +1,360 @@
+<html>
+<head>
+<title>find_modules.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #629755; font-style: italic;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #cc7832;}
+.s3 { color: #6a8759;}
+.s4 { color: #808080;}
+.s5 { color: #6897bb;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+find_modules.py</font>
+</center></td></tr></table>
+<pre><span class="s0">&quot;&quot;&quot; 
+modulegraph.find_modules - High-level module dependency finding interface 
+========================================================================= 
+ 
+History 
+........ 
+ 
+Originally (loosely) based on code in py2exe's build_exe.py by Thomas Heller. 
+&quot;&quot;&quot;</span>
+<span class="s2">import </span><span class="s1">sys</span>
+<span class="s2">import </span><span class="s1">os</span>
+<span class="s2">import </span><span class="s1">imp</span>
+<span class="s2">import </span><span class="s1">warnings</span>
+<span class="s2">import </span><span class="s1">pkgutil</span>
+
+<span class="s2">from </span><span class="s1">. </span><span class="s2">import </span><span class="s1">modulegraph</span>
+<span class="s2">from </span><span class="s1">.modulegraph </span><span class="s2">import </span><span class="s1">Alias</span><span class="s2">, </span><span class="s1">Script</span><span class="s2">, </span><span class="s1">Extension</span>
+<span class="s2">from </span><span class="s1">.util </span><span class="s2">import </span><span class="s1">imp_find_module</span>
+
+<span class="s1">__all__ = [</span>
+    <span class="s3">'find_modules'</span><span class="s2">, </span><span class="s3">'parse_mf_results'</span>
+<span class="s1">]</span>
+
+<span class="s1">_PLATFORM_MODULES = {</span><span class="s3">'posix'</span><span class="s2">, </span><span class="s3">'nt'</span><span class="s2">, </span><span class="s3">'os2'</span><span class="s2">, </span><span class="s3">'mac'</span><span class="s2">, </span><span class="s3">'ce'</span><span class="s2">, </span><span class="s3">'riscos'</span><span class="s1">}</span>
+
+
+<span class="s2">def </span><span class="s1">get_implies():</span>
+    <span class="s1">result = {</span>
+        <span class="s4"># imports done from builtin modules in C code</span>
+        <span class="s4"># (untrackable by modulegraph)</span>
+        <span class="s3">&quot;_curses&quot;</span><span class="s1">:      [</span><span class="s3">&quot;curses&quot;</span><span class="s1">]</span><span class="s2">,</span>
+        <span class="s3">&quot;posix&quot;</span><span class="s1">:        [</span><span class="s3">&quot;resource&quot;</span><span class="s1">]</span><span class="s2">,</span>
+        <span class="s3">&quot;gc&quot;</span><span class="s1">:           [</span><span class="s3">&quot;time&quot;</span><span class="s1">]</span><span class="s2">,</span>
+        <span class="s3">&quot;time&quot;</span><span class="s1">:         [</span><span class="s3">&quot;_strptime&quot;</span><span class="s1">]</span><span class="s2">,</span>
+        <span class="s3">&quot;datetime&quot;</span><span class="s1">:     [</span><span class="s3">&quot;time&quot;</span><span class="s1">]</span><span class="s2">,</span>
+        <span class="s3">&quot;MacOS&quot;</span><span class="s1">:        [</span><span class="s3">&quot;macresource&quot;</span><span class="s1">]</span><span class="s2">,</span>
+        <span class="s3">&quot;cPickle&quot;</span><span class="s1">:      [</span><span class="s3">&quot;copy_reg&quot;</span><span class="s2">, </span><span class="s3">&quot;cStringIO&quot;</span><span class="s1">]</span><span class="s2">,</span>
+        <span class="s3">&quot;parser&quot;</span><span class="s1">:       [</span><span class="s3">&quot;copy_reg&quot;</span><span class="s1">]</span><span class="s2">,</span>
+        <span class="s3">&quot;codecs&quot;</span><span class="s1">:       [</span><span class="s3">&quot;encodings&quot;</span><span class="s1">]</span><span class="s2">,</span>
+        <span class="s3">&quot;cStringIO&quot;</span><span class="s1">:    [</span><span class="s3">&quot;copy_reg&quot;</span><span class="s1">]</span><span class="s2">,</span>
+        <span class="s3">&quot;_sre&quot;</span><span class="s1">:         [</span><span class="s3">&quot;copy&quot;</span><span class="s2">, </span><span class="s3">&quot;string&quot;</span><span class="s2">, </span><span class="s3">&quot;sre&quot;</span><span class="s1">]</span><span class="s2">,</span>
+        <span class="s3">&quot;zipimport&quot;</span><span class="s1">:    [</span><span class="s3">&quot;zlib&quot;</span><span class="s1">]</span><span class="s2">,</span>
+
+        <span class="s4"># Python 3.2:</span>
+        <span class="s3">&quot;_datetime&quot;</span><span class="s1">:    [</span><span class="s3">&quot;time&quot;</span><span class="s2">, </span><span class="s3">&quot;_strptime&quot;</span><span class="s1">]</span><span class="s2">,</span>
+        <span class="s3">&quot;_json&quot;</span><span class="s1">:        [</span><span class="s3">&quot;json.decoder&quot;</span><span class="s1">]</span><span class="s2">,</span>
+        <span class="s3">&quot;_pickle&quot;</span><span class="s1">:      [</span><span class="s3">&quot;codecs&quot;</span><span class="s2">, </span><span class="s3">&quot;copyreg&quot;</span><span class="s2">, </span><span class="s3">&quot;_compat_pickle&quot;</span><span class="s1">]</span><span class="s2">,</span>
+        <span class="s3">&quot;_posixsubprocess&quot;</span><span class="s1">: [</span><span class="s3">&quot;gc&quot;</span><span class="s1">]</span><span class="s2">,</span>
+        <span class="s3">&quot;_ssl&quot;</span><span class="s1">:         [</span><span class="s3">&quot;socket&quot;</span><span class="s1">]</span><span class="s2">,</span>
+
+        <span class="s4"># Python 3.3:</span>
+        <span class="s3">&quot;_elementtree&quot;</span><span class="s1">: [</span><span class="s3">&quot;copy&quot;</span><span class="s2">, </span><span class="s3">&quot;xml.etree.ElementPath&quot;</span><span class="s1">]</span><span class="s2">,</span>
+
+        <span class="s4"># mactoolboxglue can do a bunch more of these</span>
+        <span class="s4"># that are far harder to predict, these should be tracked</span>
+        <span class="s4"># manually for now.</span>
+
+        <span class="s4"># this isn't C, but it uses __import__</span>
+        <span class="s3">&quot;anydbm&quot;</span><span class="s1">:       [</span><span class="s3">&quot;dbhash&quot;</span><span class="s2">, </span><span class="s3">&quot;gdbm&quot;</span><span class="s2">, </span><span class="s3">&quot;dbm&quot;</span><span class="s2">, </span><span class="s3">&quot;dumbdbm&quot;</span><span class="s2">, </span><span class="s3">&quot;whichdb&quot;</span><span class="s1">]</span><span class="s2">,</span>
+        <span class="s4"># package aliases</span>
+        <span class="s3">&quot;wxPython.wx&quot;</span><span class="s1">:  Alias(</span><span class="s3">'wx'</span><span class="s1">)</span><span class="s2">,</span>
+
+    <span class="s1">}</span>
+
+    <span class="s2">if </span><span class="s1">sys.version_info[</span><span class="s5">0</span><span class="s1">] == </span><span class="s5">3</span><span class="s1">:</span>
+        <span class="s1">result[</span><span class="s3">&quot;_sre&quot;</span><span class="s1">] = [</span><span class="s3">&quot;copy&quot;</span><span class="s2">, </span><span class="s3">&quot;re&quot;</span><span class="s1">]</span>
+        <span class="s1">result[</span><span class="s3">&quot;parser&quot;</span><span class="s1">] = [</span><span class="s3">&quot;copyreg&quot;</span><span class="s1">]</span>
+
+        <span class="s4"># _frozen_importlib is part of the interpreter itself</span>
+        <span class="s1">result[</span><span class="s3">&quot;_frozen_importlib&quot;</span><span class="s1">] = </span><span class="s2">None</span>
+
+    <span class="s2">if </span><span class="s1">sys.version_info[</span><span class="s5">0</span><span class="s1">] == </span><span class="s5">2 </span><span class="s2">and </span><span class="s1">sys.version_info[</span><span class="s5">1</span><span class="s1">] &gt;= </span><span class="s5">5</span><span class="s1">:</span>
+        <span class="s1">result.update({</span>
+            <span class="s3">&quot;email.base64MIME&quot;</span><span class="s1">:         Alias(</span><span class="s3">&quot;email.base64mime&quot;</span><span class="s1">)</span><span class="s2">,</span>
+            <span class="s3">&quot;email.Charset&quot;</span><span class="s1">:            Alias(</span><span class="s3">&quot;email.charset&quot;</span><span class="s1">)</span><span class="s2">,</span>
+            <span class="s3">&quot;email.Encoders&quot;</span><span class="s1">:           Alias(</span><span class="s3">&quot;email.encoders&quot;</span><span class="s1">)</span><span class="s2">,</span>
+            <span class="s3">&quot;email.Errors&quot;</span><span class="s1">:             Alias(</span><span class="s3">&quot;email.errors&quot;</span><span class="s1">)</span><span class="s2">,</span>
+            <span class="s3">&quot;email.Feedparser&quot;</span><span class="s1">:         Alias(</span><span class="s3">&quot;email.feedParser&quot;</span><span class="s1">)</span><span class="s2">,</span>
+            <span class="s3">&quot;email.Generator&quot;</span><span class="s1">:          Alias(</span><span class="s3">&quot;email.generator&quot;</span><span class="s1">)</span><span class="s2">,</span>
+            <span class="s3">&quot;email.Header&quot;</span><span class="s1">:             Alias(</span><span class="s3">&quot;email.header&quot;</span><span class="s1">)</span><span class="s2">,</span>
+            <span class="s3">&quot;email.Iterators&quot;</span><span class="s1">:          Alias(</span><span class="s3">&quot;email.iterators&quot;</span><span class="s1">)</span><span class="s2">,</span>
+            <span class="s3">&quot;email.Message&quot;</span><span class="s1">:            Alias(</span><span class="s3">&quot;email.message&quot;</span><span class="s1">)</span><span class="s2">,</span>
+            <span class="s3">&quot;email.Parser&quot;</span><span class="s1">:             Alias(</span><span class="s3">&quot;email.parser&quot;</span><span class="s1">)</span><span class="s2">,</span>
+            <span class="s3">&quot;email.quopriMIME&quot;</span><span class="s1">:         Alias(</span><span class="s3">&quot;email.quoprimime&quot;</span><span class="s1">)</span><span class="s2">,</span>
+            <span class="s3">&quot;email.Utils&quot;</span><span class="s1">:              Alias(</span><span class="s3">&quot;email.utils&quot;</span><span class="s1">)</span><span class="s2">,</span>
+            <span class="s3">&quot;email.MIMEAudio&quot;</span><span class="s1">:          Alias(</span><span class="s3">&quot;email.mime.audio&quot;</span><span class="s1">)</span><span class="s2">,</span>
+            <span class="s3">&quot;email.MIMEBase&quot;</span><span class="s1">:           Alias(</span><span class="s3">&quot;email.mime.base&quot;</span><span class="s1">)</span><span class="s2">,</span>
+            <span class="s3">&quot;email.MIMEImage&quot;</span><span class="s1">:          Alias(</span><span class="s3">&quot;email.mime.image&quot;</span><span class="s1">)</span><span class="s2">,</span>
+            <span class="s3">&quot;email.MIMEMessage&quot;</span><span class="s1">:        Alias(</span><span class="s3">&quot;email.mime.message&quot;</span><span class="s1">)</span><span class="s2">,</span>
+            <span class="s3">&quot;email.MIMEMultipart&quot;</span><span class="s1">:      Alias(</span><span class="s3">&quot;email.mime.multipart&quot;</span><span class="s1">)</span><span class="s2">,</span>
+            <span class="s3">&quot;email.MIMENonMultipart&quot;</span><span class="s1">:   Alias(</span><span class="s3">&quot;email.mime.nonmultipart&quot;</span><span class="s1">)</span><span class="s2">,</span>
+            <span class="s3">&quot;email.MIMEText&quot;</span><span class="s1">:           Alias(</span><span class="s3">&quot;email.mime.text&quot;</span><span class="s1">)</span><span class="s2">,</span>
+        <span class="s1">})</span>
+
+    <span class="s2">if </span><span class="s1">sys.version_info[:</span><span class="s5">2</span><span class="s1">] &gt;= (</span><span class="s5">2</span><span class="s2">, </span><span class="s5">5</span><span class="s1">):</span>
+        <span class="s1">result[</span><span class="s3">&quot;_elementtree&quot;</span><span class="s1">] = [</span><span class="s3">&quot;pyexpat&quot;</span><span class="s1">]</span>
+
+        <span class="s2">import </span><span class="s1">xml.etree</span>
+        <span class="s2">for </span><span class="s1">_</span><span class="s2">, </span><span class="s1">module_name</span><span class="s2">, </span><span class="s1">is_package </span><span class="s2">in </span><span class="s1">pkgutil.iter_modules(xml.etree.__path__):</span>
+            <span class="s2">if not </span><span class="s1">is_package:</span>
+                <span class="s1">result[</span><span class="s3">&quot;_elementtree&quot;</span><span class="s1">].append(</span><span class="s3">&quot;xml.etree.%s&quot; </span><span class="s1">% (module_name</span><span class="s2">,</span><span class="s1">))</span>
+
+    <span class="s2">if </span><span class="s1">sys.version_info[:</span><span class="s5">2</span><span class="s1">] &gt;= (</span><span class="s5">2</span><span class="s2">, </span><span class="s5">6</span><span class="s1">):</span>
+        <span class="s1">result[</span><span class="s3">'future_builtins'</span><span class="s1">] = [</span><span class="s3">'itertools'</span><span class="s1">]</span>
+
+    <span class="s4"># os.path is an alias for a platform specific submodule,</span>
+    <span class="s4"># ensure that the graph shows this.</span>
+    <span class="s1">result[</span><span class="s3">'os.path'</span><span class="s1">] = Alias(os.path.__name__)</span>
+
+    <span class="s2">return </span><span class="s1">result</span>
+
+
+<span class="s2">def </span><span class="s1">parse_mf_results(mf):</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Return two lists: the first one contains the python files in the graph, 
+    the second the C extensions. 
+ 
+    :param mf: a :class:`modulegraph.modulegraph.ModuleGraph` instance 
+    &quot;&quot;&quot;</span>
+    <span class="s4"># Retrieve modules from modulegraph</span>
+    <span class="s1">py_files = []</span>
+    <span class="s1">extensions = []</span>
+
+    <span class="s2">for </span><span class="s1">item </span><span class="s2">in </span><span class="s1">mf.iter_graph():</span>
+        <span class="s4"># There may be __main__ modules (from mf.run_script), but</span>
+        <span class="s4"># we don't need it in the zipfile we build.</span>
+        <span class="s2">if </span><span class="s1">item.identifier == </span><span class="s3">&quot;__main__&quot;</span><span class="s1">:</span>
+            <span class="s2">continue</span>
+        <span class="s1">src = item.filename</span>
+        <span class="s2">if </span><span class="s1">src </span><span class="s2">and </span><span class="s1">src != </span><span class="s3">'-'</span><span class="s1">:</span>
+            <span class="s2">if </span><span class="s1">isinstance(item</span><span class="s2">, </span><span class="s1">Script):</span>
+                <span class="s4"># Scripts are python files</span>
+                <span class="s1">py_files.append(item)</span>
+
+            <span class="s2">elif </span><span class="s1">isinstance(item</span><span class="s2">, </span><span class="s1">Extension):</span>
+                <span class="s1">extensions.append(item)</span>
+
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s1">py_files.append(item)</span>
+
+    <span class="s4"># sort on the file names, the output is nicer to read</span>
+    <span class="s1">py_files.sort(key=</span><span class="s2">lambda </span><span class="s1">v: v.filename)</span>
+    <span class="s1">extensions.sort(key=</span><span class="s2">lambda </span><span class="s1">v: v.filename)</span>
+    <span class="s2">return </span><span class="s1">py_files</span><span class="s2">, </span><span class="s1">extensions</span>
+
+
+<span class="s2">def </span><span class="s1">plat_prepare(includes</span><span class="s2">, </span><span class="s1">packages</span><span class="s2">, </span><span class="s1">excludes):</span>
+    <span class="s4"># used by Python itself</span>
+    <span class="s1">includes.update([</span><span class="s3">&quot;warnings&quot;</span><span class="s2">, </span><span class="s3">&quot;unicodedata&quot;</span><span class="s2">, </span><span class="s3">&quot;weakref&quot;</span><span class="s1">])</span>
+
+    <span class="s2">if not </span><span class="s1">sys.platform.startswith(</span><span class="s3">'irix'</span><span class="s1">):</span>
+        <span class="s1">excludes.update([</span>
+            <span class="s3">'AL'</span><span class="s2">,</span>
+            <span class="s3">'sgi'</span><span class="s2">,</span>
+            <span class="s3">'vms_lib'</span><span class="s2">,</span>
+        <span class="s1">])</span>
+
+    <span class="s2">if </span><span class="s1">sys.platform </span><span class="s2">not in </span><span class="s1">(</span><span class="s3">'mac'</span><span class="s2">, </span><span class="s3">'darwin'</span><span class="s1">):</span>
+        <span class="s4"># XXX - this doesn't look nearly complete</span>
+        <span class="s1">excludes.update([</span>
+            <span class="s3">'Audio_mac'</span><span class="s2">,</span>
+            <span class="s3">'Carbon.File'</span><span class="s2">,</span>
+            <span class="s3">'Carbon.Folder'</span><span class="s2">,</span>
+            <span class="s3">'Carbon.Folders'</span><span class="s2">,</span>
+            <span class="s3">'EasyDialogs'</span><span class="s2">,</span>
+            <span class="s3">'MacOS'</span><span class="s2">,</span>
+            <span class="s3">'macfs'</span><span class="s2">,</span>
+            <span class="s3">'macostools'</span><span class="s2">,</span>
+            <span class="s3">'_scproxy'</span><span class="s2">,</span>
+        <span class="s1">])</span>
+
+    <span class="s2">if not </span><span class="s1">sys.platform == </span><span class="s3">'win32'</span><span class="s1">:</span>
+        <span class="s4"># only win32</span>
+        <span class="s1">excludes.update([</span>
+            <span class="s3">'nturl2path'</span><span class="s2">,</span>
+            <span class="s3">'win32api'</span><span class="s2">,</span>
+            <span class="s3">'win32con'</span><span class="s2">,</span>
+            <span class="s3">'win32ctypes'</span><span class="s2">,</span>
+            <span class="s3">'win32event'</span><span class="s2">,</span>
+            <span class="s3">'win32evtlogutil'</span><span class="s2">,</span>
+            <span class="s3">'win32evtlog'</span><span class="s2">,</span>
+            <span class="s3">'win32file'</span><span class="s2">,</span>
+            <span class="s3">'win32gui'</span><span class="s2">,</span>
+            <span class="s3">'win32pipe'</span><span class="s2">,</span>
+            <span class="s3">'win32process'</span><span class="s2">,</span>
+            <span class="s3">'win32security'</span><span class="s2">,</span>
+            <span class="s3">'pywintypes'</span><span class="s2">,</span>
+            <span class="s3">'winsound'</span><span class="s2">,</span>
+            <span class="s3">'win32'</span><span class="s2">,</span>
+            <span class="s3">'_winreg'</span><span class="s2">,</span>
+            <span class="s3">'_winapi'</span><span class="s2">,</span>
+            <span class="s3">'msvcrt'</span><span class="s2">,</span>
+            <span class="s3">'winreg'</span><span class="s2">,</span>
+            <span class="s3">'_subprocess'</span><span class="s2">,</span>
+         <span class="s1">])</span>
+
+    <span class="s2">if not </span><span class="s1">sys.platform == </span><span class="s3">'riscos'</span><span class="s1">:</span>
+        <span class="s1">excludes.update([</span>
+             <span class="s3">'riscosenviron'</span><span class="s2">,</span>
+             <span class="s3">'rourl2path'</span><span class="s2">,</span>
+          <span class="s1">])</span>
+
+    <span class="s2">if not </span><span class="s1">sys.platform == </span><span class="s3">'dos' </span><span class="s2">or </span><span class="s1">sys.platform.startswith(</span><span class="s3">'ms-dos'</span><span class="s1">):</span>
+        <span class="s1">excludes.update([</span>
+            <span class="s3">'dos'</span><span class="s2">,</span>
+        <span class="s1">])</span>
+
+    <span class="s2">if not </span><span class="s1">sys.platform == </span><span class="s3">'os2emx'</span><span class="s1">:</span>
+        <span class="s1">excludes.update([</span>
+            <span class="s3">'_emx_link'</span><span class="s2">,</span>
+        <span class="s1">])</span>
+
+    <span class="s1">excludes.update(_PLATFORM_MODULES - set(sys.builtin_module_names))</span>
+
+    <span class="s4"># Carbon.Res depends on this, but the module hasn't been present</span>
+    <span class="s4"># for a while...</span>
+    <span class="s1">excludes.add(</span><span class="s3">'OverrideFrom23'</span><span class="s1">)</span>
+    <span class="s1">excludes.add(</span><span class="s3">'OverrideFrom23._Res'</span><span class="s1">)</span>
+
+    <span class="s4"># import trickery in the dummy_threading module (stdlib)</span>
+    <span class="s1">excludes.add(</span><span class="s3">'_dummy_threading'</span><span class="s1">)</span>
+
+    <span class="s2">try</span><span class="s1">:</span>
+        <span class="s1">imp_find_module(</span><span class="s3">'poll'</span><span class="s1">)</span>
+    <span class="s2">except </span><span class="s1">ImportError:</span>
+        <span class="s1">excludes.update([</span>
+            <span class="s3">'poll'</span><span class="s2">,</span>
+        <span class="s1">])</span>
+
+
+<span class="s2">def </span><span class="s1">find_needed_modules(</span>
+        <span class="s1">mf=</span><span class="s2">None, </span><span class="s1">scripts=()</span><span class="s2">, </span><span class="s1">includes=()</span><span class="s2">, </span><span class="s1">packages=()</span><span class="s2">, </span><span class="s1">warn=warnings.warn):</span>
+    <span class="s2">if </span><span class="s1">mf </span><span class="s2">is None</span><span class="s1">:</span>
+        <span class="s1">mf = modulegraph.ModuleGraph()</span>
+    <span class="s4"># feed Modulefinder with everything, and return it.</span>
+
+    <span class="s2">for </span><span class="s1">path </span><span class="s2">in </span><span class="s1">scripts:</span>
+        <span class="s1">mf.add_script(path)</span>
+
+    <span class="s2">for </span><span class="s1">mod </span><span class="s2">in </span><span class="s1">includes:</span>
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s2">if </span><span class="s1">mod[-</span><span class="s5">2</span><span class="s1">:] == </span><span class="s3">'.*'</span><span class="s1">:</span>
+                <span class="s1">mf.import_hook(mod[:-</span><span class="s5">2</span><span class="s1">]</span><span class="s2">, None, </span><span class="s1">[</span><span class="s3">'*'</span><span class="s1">])</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s1">mf.import_hook(mod)</span>
+        <span class="s2">except </span><span class="s1">ImportError:</span>
+            <span class="s1">warn(</span><span class="s3">&quot;No module named %s&quot; </span><span class="s1">% (mod</span><span class="s2">,</span><span class="s1">))</span>
+
+    <span class="s2">for </span><span class="s1">f </span><span class="s2">in </span><span class="s1">packages:</span>
+        <span class="s4"># If modulegraph has seen a reference to the package, then</span>
+        <span class="s4"># we prefer to believe that (imp_find_module doesn't seem to locate</span>
+        <span class="s4"># sub-packages)</span>
+        <span class="s1">m = mf.find_node(f)</span>
+        <span class="s2">if </span><span class="s1">m </span><span class="s2">is not None</span><span class="s1">:</span>
+            <span class="s1">path = m.packagepath[</span><span class="s5">0</span><span class="s1">]</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s4"># Find path of package</span>
+            <span class="s4"># TODO: use imp_find_module_or_importer</span>
+            <span class="s2">try</span><span class="s1">:</span>
+                <span class="s1">path = imp_find_module(f</span><span class="s2">, </span><span class="s1">mf.path)[</span><span class="s5">1</span><span class="s1">]</span>
+            <span class="s2">except </span><span class="s1">ImportError:</span>
+                <span class="s1">warn(</span><span class="s3">&quot;No package named %s&quot; </span><span class="s1">% f)</span>
+                <span class="s2">continue</span>
+
+        <span class="s4"># walk the path to find subdirs containing __init__.py files</span>
+        <span class="s4"># scan the results (directory of __init__.py files)</span>
+        <span class="s4"># first trim the path (of the head package),</span>
+        <span class="s4"># then convert directory name in package name,</span>
+        <span class="s4"># finally push into modulegraph.</span>
+        <span class="s4"># FIXME:</span>
+        <span class="s4"># 1) Needs to be adjusted for namespace packages in python 3.3</span>
+        <span class="s4"># 2) Code is fairly dodgy and needs better tests</span>
+        <span class="s2">for </span><span class="s1">(dirpath</span><span class="s2">, </span><span class="s1">dirnames</span><span class="s2">, </span><span class="s1">filenames) </span><span class="s2">in </span><span class="s1">os.walk(path):</span>
+            <span class="s2">if </span><span class="s3">'__init__.py' </span><span class="s2">in </span><span class="s1">filenames </span><span class="s2">and </span><span class="s1">dirpath.startswith(path):</span>
+                <span class="s1">package = f + </span><span class="s3">'.' </span><span class="s1">+ dirpath[len(path)+</span><span class="s5">1</span><span class="s1">:].replace(os.sep</span><span class="s2">, </span><span class="s3">'.'</span><span class="s1">)</span>
+                <span class="s2">if </span><span class="s1">package.endswith(</span><span class="s3">'.'</span><span class="s1">):</span>
+                    <span class="s1">package = package[:-</span><span class="s5">1</span><span class="s1">]</span>
+                <span class="s1">m = mf.import_hook(package</span><span class="s2">, None, </span><span class="s1">[</span><span class="s3">&quot;*&quot;</span><span class="s1">])</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s4"># Exclude subtrees that aren't packages</span>
+                <span class="s1">dirnames[:] = []</span>
+
+    <span class="s2">return </span><span class="s1">mf</span>
+
+<span class="s4">#</span>
+<span class="s4"># resource constants</span>
+<span class="s4">#</span>
+
+
+<span class="s1">PY_SUFFIXES = [</span><span class="s3">'.py'</span><span class="s2">, </span><span class="s3">'.pyw'</span><span class="s2">, </span><span class="s3">'.pyo'</span><span class="s2">, </span><span class="s3">'.pyc'</span><span class="s1">]</span>
+<span class="s1">C_SUFFIXES = [</span>
+    <span class="s1">_triple[</span><span class="s5">0</span><span class="s1">] </span><span class="s2">for </span><span class="s1">_triple </span><span class="s2">in </span><span class="s1">imp.get_suffixes()</span>
+    <span class="s2">if </span><span class="s1">_triple[</span><span class="s5">2</span><span class="s1">] == imp.C_EXTENSION</span>
+<span class="s1">]</span>
+
+
+<span class="s4">#</span>
+<span class="s4"># side-effects</span>
+<span class="s4">#</span>
+
+
+<span class="s2">def </span><span class="s1">_replacePackages():</span>
+    <span class="s1">REPLACEPACKAGES = {</span>
+        <span class="s3">'_xmlplus'</span><span class="s1">:     </span><span class="s3">'xml'</span><span class="s2">,</span>
+    <span class="s1">}</span>
+    <span class="s2">for </span><span class="s1">k</span><span class="s2">, </span><span class="s1">v </span><span class="s2">in </span><span class="s1">REPLACEPACKAGES.items():</span>
+        <span class="s1">modulegraph.replacePackage(k</span><span class="s2">, </span><span class="s1">v)</span>
+
+
+<span class="s1">_replacePackages()</span>
+
+
+<span class="s2">def </span><span class="s1">find_modules(</span>
+        <span class="s1">scripts=()</span><span class="s2">, </span><span class="s1">includes=()</span><span class="s2">, </span><span class="s1">packages=()</span><span class="s2">, </span><span class="s1">excludes=()</span><span class="s2">, </span><span class="s1">path=</span><span class="s2">None, </span><span class="s1">debug=</span><span class="s5">0</span><span class="s1">):</span>
+    <span class="s0">&quot;&quot;&quot; 
+    High-level interface, takes iterables for: 
+        scripts, includes, packages, excludes 
+ 
+    And returns a :class:`modulegraph.modulegraph.ModuleGraph` instance, 
+    python_files, and extensions 
+ 
+    python_files is a list of pure python dependencies as modulegraph.Module 
+    objects, extensions is a list of platform-specific C extension dependencies 
+    as modulegraph.Module objects 
+    &quot;&quot;&quot;</span>
+    <span class="s1">scripts = set(scripts)</span>
+    <span class="s1">includes = set(includes)</span>
+    <span class="s1">packages = set(packages)</span>
+    <span class="s1">excludes = set(excludes)</span>
+    <span class="s1">plat_prepare(includes</span><span class="s2">, </span><span class="s1">packages</span><span class="s2">, </span><span class="s1">excludes)</span>
+    <span class="s1">mf = modulegraph.ModuleGraph(</span>
+        <span class="s1">path=path</span><span class="s2">,</span>
+        <span class="s1">excludes=(excludes - includes)</span><span class="s2">,</span>
+        <span class="s1">implies=get_implies()</span><span class="s2">,</span>
+        <span class="s1">debug=debug</span><span class="s2">,</span>
+    <span class="s1">)</span>
+    <span class="s1">find_needed_modules(mf</span><span class="s2">, </span><span class="s1">scripts</span><span class="s2">, </span><span class="s1">includes</span><span class="s2">, </span><span class="s1">packages)</span>
+    <span class="s2">return </span><span class="s1">mf</span>
+</pre>
+</body>
+</html>

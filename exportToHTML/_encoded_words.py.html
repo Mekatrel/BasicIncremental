@@ -1,0 +1,255 @@
+<html>
+<head>
+<title>_encoded_words.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #629755; font-style: italic;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #cc7832;}
+.s3 { color: #808080;}
+.s4 { color: #6a8759;}
+.s5 { color: #a5c261;}
+.s6 { color: #6897bb;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+_encoded_words.py</font>
+</center></td></tr></table>
+<pre><span class="s0">&quot;&quot;&quot; Routines for manipulating RFC2047 encoded words. 
+ 
+This is currently a package-private API, but will be considered for promotion 
+to a public API if there is demand. 
+ 
+&quot;&quot;&quot;</span>
+<span class="s2">from </span><span class="s1">__future__ </span><span class="s2">import </span><span class="s1">unicode_literals</span>
+<span class="s2">from </span><span class="s1">__future__ </span><span class="s2">import </span><span class="s1">division</span>
+<span class="s2">from </span><span class="s1">__future__ </span><span class="s2">import </span><span class="s1">absolute_import</span>
+<span class="s2">from </span><span class="s1">future.builtins </span><span class="s2">import </span><span class="s1">bytes</span>
+<span class="s2">from </span><span class="s1">future.builtins </span><span class="s2">import </span><span class="s1">chr</span>
+<span class="s2">from </span><span class="s1">future.builtins </span><span class="s2">import </span><span class="s1">int</span>
+<span class="s2">from </span><span class="s1">future.builtins </span><span class="s2">import </span><span class="s1">str</span>
+
+<span class="s3"># An ecoded word looks like this:</span>
+<span class="s3">#</span>
+<span class="s3">#        =?charset[*lang]?cte?encoded_string?=</span>
+<span class="s3">#</span>
+<span class="s3"># for more information about charset see the charset module.  Here it is one</span>
+<span class="s3"># of the preferred MIME charset names (hopefully; you never know when parsing).</span>
+<span class="s3"># cte (Content Transfer Encoding) is either 'q' or 'b' (ignoring case).  In</span>
+<span class="s3"># theory other letters could be used for other encodings, but in practice this</span>
+<span class="s3"># (almost?) never happens.  There could be a public API for adding entries</span>
+<span class="s3"># to the CTE tables, but YAGNI for now.  'q' is Quoted Printable, 'b' is</span>
+<span class="s3"># Base64.  The meaning of encoded_string should be obvious.  'lang' is optional</span>
+<span class="s3"># as indicated by the brackets (they are not part of the syntax) but is almost</span>
+<span class="s3"># never encountered in practice.</span>
+<span class="s3">#</span>
+<span class="s3"># The general interface for a CTE decoder is that it takes the encoded_string</span>
+<span class="s3"># as its argument, and returns a tuple (cte_decoded_string, defects).  The</span>
+<span class="s3"># cte_decoded_string is the original binary that was encoded using the</span>
+<span class="s3"># specified cte.  'defects' is a list of MessageDefect instances indicating any</span>
+<span class="s3"># problems encountered during conversion.  'charset' and 'lang' are the</span>
+<span class="s3"># corresponding strings extracted from the EW, case preserved.</span>
+<span class="s3">#</span>
+<span class="s3"># The general interface for a CTE encoder is that it takes a binary sequence</span>
+<span class="s3"># as input and returns the cte_encoded_string, which is an ascii-only string.</span>
+<span class="s3">#</span>
+<span class="s3"># Each decoder must also supply a length function that takes the binary</span>
+<span class="s3"># sequence as its argument and returns the length of the resulting encoded</span>
+<span class="s3"># string.</span>
+<span class="s3">#</span>
+<span class="s3"># The main API functions for the module are decode, which calls the decoder</span>
+<span class="s3"># referenced by the cte specifier, and encode, which adds the appropriate</span>
+<span class="s3"># RFC 2047 &quot;chrome&quot; to the encoded string, and can optionally automatically</span>
+<span class="s3"># select the shortest possible encoding.  See their docstrings below for</span>
+<span class="s3"># details.</span>
+
+<span class="s2">import </span><span class="s1">re</span>
+<span class="s2">import </span><span class="s1">base64</span>
+<span class="s2">import </span><span class="s1">binascii</span>
+<span class="s2">import </span><span class="s1">functools</span>
+<span class="s2">from </span><span class="s1">string </span><span class="s2">import </span><span class="s1">ascii_letters</span><span class="s2">, </span><span class="s1">digits</span>
+<span class="s2">from </span><span class="s1">future.backports.email </span><span class="s2">import </span><span class="s1">errors</span>
+
+<span class="s1">__all__ = [</span><span class="s4">'decode_q'</span><span class="s2">,</span>
+           <span class="s4">'encode_q'</span><span class="s2">,</span>
+           <span class="s4">'decode_b'</span><span class="s2">,</span>
+           <span class="s4">'encode_b'</span><span class="s2">,</span>
+           <span class="s4">'len_q'</span><span class="s2">,</span>
+           <span class="s4">'len_b'</span><span class="s2">,</span>
+           <span class="s4">'decode'</span><span class="s2">,</span>
+           <span class="s4">'encode'</span><span class="s2">,</span>
+           <span class="s1">]</span>
+
+<span class="s3">#</span>
+<span class="s3"># Quoted Printable</span>
+<span class="s3">#</span>
+
+<span class="s3"># regex based decoder.</span>
+<span class="s1">_q_byte_subber = functools.partial(re.compile(</span><span class="s5">br'=([a-fA-F0-9]{2})'</span><span class="s1">).sub</span><span class="s2">,</span>
+        <span class="s2">lambda </span><span class="s1">m: bytes([int(m.group(</span><span class="s6">1</span><span class="s1">)</span><span class="s2">, </span><span class="s6">16</span><span class="s1">)]))</span>
+
+<span class="s2">def </span><span class="s1">decode_q(encoded):</span>
+    <span class="s1">encoded = bytes(encoded.replace(</span><span class="s5">b'_'</span><span class="s2">, </span><span class="s5">b' '</span><span class="s1">))</span>
+    <span class="s2">return </span><span class="s1">_q_byte_subber(encoded)</span><span class="s2">, </span><span class="s1">[]</span>
+
+
+<span class="s3"># dict mapping bytes to their encoded form</span>
+<span class="s2">class </span><span class="s1">_QByteMap(dict):</span>
+
+    <span class="s1">safe = bytes(</span><span class="s5">b'-!*+/' </span><span class="s1">+ ascii_letters.encode(</span><span class="s4">'ascii'</span><span class="s1">) + digits.encode(</span><span class="s4">'ascii'</span><span class="s1">))</span>
+
+    <span class="s2">def </span><span class="s1">__missing__(self</span><span class="s2">, </span><span class="s1">key):</span>
+        <span class="s2">if </span><span class="s1">key </span><span class="s2">in </span><span class="s1">self.safe:</span>
+            <span class="s1">self[key] = chr(key)</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">self[key] = </span><span class="s4">&quot;={:02X}&quot;</span><span class="s1">.format(key)</span>
+        <span class="s2">return </span><span class="s1">self[key]</span>
+
+<span class="s1">_q_byte_map = _QByteMap()</span>
+
+<span class="s3"># In headers spaces are mapped to '_'.</span>
+<span class="s1">_q_byte_map[ord(</span><span class="s4">' '</span><span class="s1">)] = </span><span class="s4">'_'</span>
+
+<span class="s2">def </span><span class="s1">encode_q(bstring):</span>
+    <span class="s2">return </span><span class="s1">str(</span><span class="s4">''</span><span class="s1">.join(_q_byte_map[x] </span><span class="s2">for </span><span class="s1">x </span><span class="s2">in </span><span class="s1">bytes(bstring)))</span>
+
+<span class="s2">def </span><span class="s1">len_q(bstring):</span>
+    <span class="s2">return </span><span class="s1">sum(len(_q_byte_map[x]) </span><span class="s2">for </span><span class="s1">x </span><span class="s2">in </span><span class="s1">bytes(bstring))</span>
+
+
+<span class="s3">#</span>
+<span class="s3"># Base64</span>
+<span class="s3">#</span>
+
+<span class="s2">def </span><span class="s1">decode_b(encoded):</span>
+    <span class="s1">defects = []</span>
+    <span class="s1">pad_err = len(encoded) % </span><span class="s6">4</span>
+    <span class="s2">if </span><span class="s1">pad_err:</span>
+        <span class="s1">defects.append(errors.InvalidBase64PaddingDefect())</span>
+        <span class="s1">padded_encoded = encoded + </span><span class="s5">b'==='</span><span class="s1">[:</span><span class="s6">4</span><span class="s1">-pad_err]</span>
+    <span class="s2">else</span><span class="s1">:</span>
+        <span class="s1">padded_encoded = encoded</span>
+    <span class="s2">try</span><span class="s1">:</span>
+        <span class="s3"># The validate kwarg to b64decode is not supported in Py2.x</span>
+        <span class="s2">if not </span><span class="s1">re.match(</span><span class="s5">b'^[A-Za-z0-9+/]*={0,2}$'</span><span class="s2">, </span><span class="s1">padded_encoded):</span>
+            <span class="s2">raise </span><span class="s1">binascii.Error(</span><span class="s4">'Non-base64 digit found'</span><span class="s1">)</span>
+        <span class="s2">return </span><span class="s1">base64.b64decode(padded_encoded)</span><span class="s2">, </span><span class="s1">defects</span>
+    <span class="s2">except </span><span class="s1">binascii.Error:</span>
+        <span class="s3"># Since we had correct padding, this must an invalid char error.</span>
+        <span class="s1">defects = [errors.InvalidBase64CharactersDefect()]</span>
+        <span class="s3"># The non-alphabet characters are ignored as far as padding</span>
+        <span class="s3"># goes, but we don't know how many there are.  So we'll just</span>
+        <span class="s3"># try various padding lengths until something works.</span>
+        <span class="s2">for </span><span class="s1">i </span><span class="s2">in </span><span class="s6">0</span><span class="s2">, </span><span class="s6">1</span><span class="s2">, </span><span class="s6">2</span><span class="s2">, </span><span class="s6">3</span><span class="s1">:</span>
+            <span class="s2">try</span><span class="s1">:</span>
+                <span class="s2">return </span><span class="s1">base64.b64decode(encoded+</span><span class="s5">b'='</span><span class="s1">*i)</span><span class="s2">, </span><span class="s1">defects</span>
+            <span class="s2">except </span><span class="s1">(binascii.Error</span><span class="s2">, </span><span class="s1">TypeError):    </span><span class="s3"># Py2 raises a TypeError</span>
+                <span class="s2">if </span><span class="s1">i==</span><span class="s6">0</span><span class="s1">:</span>
+                    <span class="s1">defects.append(errors.InvalidBase64PaddingDefect())</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s3"># This should never happen.</span>
+            <span class="s2">raise </span><span class="s1">AssertionError(</span><span class="s4">&quot;unexpected binascii.Error&quot;</span><span class="s1">)</span>
+
+<span class="s2">def </span><span class="s1">encode_b(bstring):</span>
+    <span class="s2">return </span><span class="s1">base64.b64encode(bstring).decode(</span><span class="s4">'ascii'</span><span class="s1">)</span>
+
+<span class="s2">def </span><span class="s1">len_b(bstring):</span>
+    <span class="s1">groups_of_3</span><span class="s2">, </span><span class="s1">leftover = divmod(len(bstring)</span><span class="s2">, </span><span class="s6">3</span><span class="s1">)</span>
+    <span class="s3"># 4 bytes out for each 3 bytes (or nonzero fraction thereof) in.</span>
+    <span class="s2">return </span><span class="s1">groups_of_3 * </span><span class="s6">4 </span><span class="s1">+ (</span><span class="s6">4 </span><span class="s2">if </span><span class="s1">leftover </span><span class="s2">else </span><span class="s6">0</span><span class="s1">)</span>
+
+
+<span class="s1">_cte_decoders = {</span>
+    <span class="s4">'q'</span><span class="s1">: decode_q</span><span class="s2">,</span>
+    <span class="s4">'b'</span><span class="s1">: decode_b</span><span class="s2">,</span>
+    <span class="s1">}</span>
+
+<span class="s2">def </span><span class="s1">decode(ew):</span>
+    <span class="s0">&quot;&quot;&quot;Decode encoded word and return (string, charset, lang, defects) tuple. 
+ 
+    An RFC 2047/2243 encoded word has the form: 
+ 
+        =?charset*lang?cte?encoded_string?= 
+ 
+    where '*lang' may be omitted but the other parts may not be. 
+ 
+    This function expects exactly such a string (that is, it does not check the 
+    syntax and may raise errors if the string is not well formed), and returns 
+    the encoded_string decoded first from its Content Transfer Encoding and 
+    then from the resulting bytes into unicode using the specified charset.  If 
+    the cte-decoded string does not successfully decode using the specified 
+    character set, a defect is added to the defects list and the unknown octets 
+    are replaced by the unicode 'unknown' character \uFDFF. 
+ 
+    The specified charset and language are returned.  The default for language, 
+    which is rarely if ever encountered, is the empty string. 
+ 
+    &quot;&quot;&quot;</span>
+    <span class="s1">_</span><span class="s2">, </span><span class="s1">charset</span><span class="s2">, </span><span class="s1">cte</span><span class="s2">, </span><span class="s1">cte_string</span><span class="s2">, </span><span class="s1">_ = str(ew).split(</span><span class="s4">'?'</span><span class="s1">)</span>
+    <span class="s1">charset</span><span class="s2">, </span><span class="s1">_</span><span class="s2">, </span><span class="s1">lang = charset.partition(</span><span class="s4">'*'</span><span class="s1">)</span>
+    <span class="s1">cte = cte.lower()</span>
+    <span class="s3"># Recover the original bytes and do CTE decoding.</span>
+    <span class="s1">bstring = cte_string.encode(</span><span class="s4">'ascii'</span><span class="s2">, </span><span class="s4">'surrogateescape'</span><span class="s1">)</span>
+    <span class="s1">bstring</span><span class="s2">, </span><span class="s1">defects = _cte_decoders[cte](bstring)</span>
+    <span class="s3"># Turn the CTE decoded bytes into unicode.</span>
+    <span class="s2">try</span><span class="s1">:</span>
+        <span class="s1">string = bstring.decode(charset)</span>
+    <span class="s2">except </span><span class="s1">UnicodeError:</span>
+        <span class="s1">defects.append(errors.UndecodableBytesDefect(</span><span class="s4">&quot;Encoded word &quot;</span>
+            <span class="s4">&quot;contains bytes not decodable using {} charset&quot;</span><span class="s1">.format(charset)))</span>
+        <span class="s1">string = bstring.decode(charset</span><span class="s2">, </span><span class="s4">'surrogateescape'</span><span class="s1">)</span>
+    <span class="s2">except </span><span class="s1">LookupError:</span>
+        <span class="s1">string = bstring.decode(</span><span class="s4">'ascii'</span><span class="s2">, </span><span class="s4">'surrogateescape'</span><span class="s1">)</span>
+        <span class="s2">if </span><span class="s1">charset.lower() != </span><span class="s4">'unknown-8bit'</span><span class="s1">:</span>
+            <span class="s1">defects.append(errors.CharsetError(</span><span class="s4">&quot;Unknown charset {} &quot;</span>
+                <span class="s4">&quot;in encoded word; decoded as unknown bytes&quot;</span><span class="s1">.format(charset)))</span>
+    <span class="s2">return </span><span class="s1">string</span><span class="s2">, </span><span class="s1">charset</span><span class="s2">, </span><span class="s1">lang</span><span class="s2">, </span><span class="s1">defects</span>
+
+
+<span class="s1">_cte_encoders = {</span>
+    <span class="s4">'q'</span><span class="s1">: encode_q</span><span class="s2">,</span>
+    <span class="s4">'b'</span><span class="s1">: encode_b</span><span class="s2">,</span>
+    <span class="s1">}</span>
+
+<span class="s1">_cte_encode_length = {</span>
+    <span class="s4">'q'</span><span class="s1">: len_q</span><span class="s2">,</span>
+    <span class="s4">'b'</span><span class="s1">: len_b</span><span class="s2">,</span>
+    <span class="s1">}</span>
+
+<span class="s2">def </span><span class="s1">encode(string</span><span class="s2">, </span><span class="s1">charset=</span><span class="s4">'utf-8'</span><span class="s2">, </span><span class="s1">encoding=</span><span class="s2">None, </span><span class="s1">lang=</span><span class="s4">''</span><span class="s1">):</span>
+    <span class="s0">&quot;&quot;&quot;Encode string using the CTE encoding that produces the shorter result. 
+ 
+    Produces an RFC 2047/2243 encoded word of the form: 
+ 
+        =?charset*lang?cte?encoded_string?= 
+ 
+    where '*lang' is omitted unless the 'lang' parameter is given a value. 
+    Optional argument charset (defaults to utf-8) specifies the charset to use 
+    to encode the string to binary before CTE encoding it.  Optional argument 
+    'encoding' is the cte specifier for the encoding that should be used ('q' 
+    or 'b'); if it is None (the default) the encoding which produces the 
+    shortest encoded sequence is used, except that 'q' is preferred if it is up 
+    to five characters longer.  Optional argument 'lang' (default '') gives the 
+    RFC 2243 language string to specify in the encoded word. 
+ 
+    &quot;&quot;&quot;</span>
+    <span class="s1">string = str(string)</span>
+    <span class="s2">if </span><span class="s1">charset == </span><span class="s4">'unknown-8bit'</span><span class="s1">:</span>
+        <span class="s1">bstring = string.encode(</span><span class="s4">'ascii'</span><span class="s2">, </span><span class="s4">'surrogateescape'</span><span class="s1">)</span>
+    <span class="s2">else</span><span class="s1">:</span>
+        <span class="s1">bstring = string.encode(charset)</span>
+    <span class="s2">if </span><span class="s1">encoding </span><span class="s2">is None</span><span class="s1">:</span>
+        <span class="s1">qlen = _cte_encode_length[</span><span class="s4">'q'</span><span class="s1">](bstring)</span>
+        <span class="s1">blen = _cte_encode_length[</span><span class="s4">'b'</span><span class="s1">](bstring)</span>
+        <span class="s3"># Bias toward q.  5 is arbitrary.</span>
+        <span class="s1">encoding = </span><span class="s4">'q' </span><span class="s2">if </span><span class="s1">qlen - blen &lt; </span><span class="s6">5 </span><span class="s2">else </span><span class="s4">'b'</span>
+    <span class="s1">encoded = _cte_encoders[encoding](bstring)</span>
+    <span class="s2">if </span><span class="s1">lang:</span>
+        <span class="s1">lang = </span><span class="s4">'*' </span><span class="s1">+ lang</span>
+    <span class="s2">return </span><span class="s4">&quot;=?{0}{1}?{2}?{3}?=&quot;</span><span class="s1">.format(charset</span><span class="s2">, </span><span class="s1">lang</span><span class="s2">, </span><span class="s1">encoding</span><span class="s2">, </span><span class="s1">encoded)</span>
+</pre>
+</body>
+</html>

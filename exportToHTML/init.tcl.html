@@ -1,0 +1,835 @@
+<html>
+<head>
+<title>init.tcl</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #a9b7c6;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+init.tcl</font>
+</center></td></tr></table>
+<pre><span class="s0"># init.tcl --</span>
+<span class="s0">#</span>
+<span class="s0"># Default system startup file for Tcl-based applications.  Defines</span>
+<span class="s0"># &quot;unknown&quot; procedure and auto-load facilities.</span>
+<span class="s0">#</span>
+<span class="s0"># Copyright (c) 1991-1993 The Regents of the University of California.</span>
+<span class="s0"># Copyright (c) 1994-1996 Sun Microsystems, Inc.</span>
+<span class="s0"># Copyright (c) 1998-1999 Scriptics Corporation.</span>
+<span class="s0"># Copyright (c) 2004 by Kevin B. Kenny.  All rights reserved.</span>
+<span class="s0">#</span>
+<span class="s0"># See the file &quot;license.terms&quot; for information on usage and redistribution</span>
+<span class="s0"># of this file, and for a DISCLAIMER OF ALL WARRANTIES.</span>
+<span class="s0">#</span>
+
+<span class="s0"># This test intentionally written in pre-7.5 Tcl</span>
+<span class="s0">if {[info commands package] == &quot;&quot;} {</span>
+    <span class="s0">error &quot;version mismatch: library\nscripts expect Tcl version 7.5b1 or later but the loaded version is\nonly [info patchlevel]&quot;</span>
+<span class="s0">}</span>
+<span class="s0">package require -exact Tcl 8.6.6</span>
+
+<span class="s0"># Compute the auto path to use in this interpreter.</span>
+<span class="s0"># The values on the path come from several locations:</span>
+<span class="s0">#</span>
+<span class="s0"># The environment variable TCLLIBPATH</span>
+<span class="s0">#</span>
+<span class="s0"># tcl_library, which is the directory containing this init.tcl script.</span>
+<span class="s0"># [tclInit] (Tcl_Init()) searches around for the directory containing this</span>
+<span class="s0"># init.tcl and defines tcl_library to that location before sourcing it.</span>
+<span class="s0">#</span>
+<span class="s0"># The parent directory of tcl_library. Adding the parent</span>
+<span class="s0"># means that packages in peer directories will be found automatically.</span>
+<span class="s0">#</span>
+<span class="s0"># Also add the directory ../lib relative to the directory where the</span>
+<span class="s0"># executable is located.  This is meant to find binary packages for the</span>
+<span class="s0"># same architecture as the current executable.</span>
+<span class="s0">#</span>
+<span class="s0"># tcl_pkgPath, which is set by the platform-specific initialization routines</span>
+<span class="s0">#	On UNIX it is compiled in</span>
+<span class="s0">#       On Windows, it is not used</span>
+
+<span class="s0">if {![info exists auto_path]} {</span>
+    <span class="s0">if {[info exists env(TCLLIBPATH)]} {</span>
+	<span class="s0">set auto_path $env(TCLLIBPATH)</span>
+    <span class="s0">} else {</span>
+	<span class="s0">set auto_path &quot;&quot;</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+<span class="s0">namespace eval tcl {</span>
+    <span class="s0">variable Dir</span>
+    <span class="s0">foreach Dir [list $::tcl_library [file dirname $::tcl_library]] {</span>
+	<span class="s0">if {$Dir ni $::auto_path} {</span>
+	    <span class="s0">lappend ::auto_path $Dir</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+    <span class="s0">set Dir [file join [file dirname [file dirname \</span>
+	    <span class="s0">[info nameofexecutable]]] lib]</span>
+    <span class="s0">if {$Dir ni $::auto_path} {</span>
+	<span class="s0">lappend ::auto_path $Dir</span>
+    <span class="s0">}</span>
+    <span class="s0">catch {</span>
+	<span class="s0">foreach Dir $::tcl_pkgPath {</span>
+	    <span class="s0">if {$Dir ni $::auto_path} {</span>
+		<span class="s0">lappend ::auto_path $Dir</span>
+	    <span class="s0">}</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+
+    <span class="s0">if {![interp issafe]} {</span>
+        <span class="s0">variable Path [encoding dirs]</span>
+        <span class="s0">set Dir [file join $::tcl_library encoding]</span>
+        <span class="s0">if {$Dir ni $Path} {</span>
+	    <span class="s0">lappend Path $Dir</span>
+	    <span class="s0">encoding dirs $Path</span>
+        <span class="s0">}</span>
+    <span class="s0">}</span>
+
+    <span class="s0"># TIP #255 min and max functions</span>
+    <span class="s0">namespace eval mathfunc {</span>
+	<span class="s0">proc min {args} {</span>
+	    <span class="s0">if {![llength $args]} {</span>
+		<span class="s0">return -code error \</span>
+		    <span class="s0">&quot;too few arguments to math function \&quot;min\&quot;&quot;</span>
+	    <span class="s0">}</span>
+	    <span class="s0">set val Inf</span>
+	    <span class="s0">foreach arg $args {</span>
+		<span class="s0"># This will handle forcing the numeric value without</span>
+		<span class="s0"># ruining the internal type of a numeric object</span>
+		<span class="s0">if {[catch {expr {double($arg)}} err]} {</span>
+		    <span class="s0">return -code error $err</span>
+		<span class="s0">}</span>
+		<span class="s0">if {$arg &lt; $val} {set val $arg}</span>
+	    <span class="s0">}</span>
+	    <span class="s0">return $val</span>
+	<span class="s0">}</span>
+	<span class="s0">proc max {args} {</span>
+	    <span class="s0">if {![llength $args]} {</span>
+		<span class="s0">return -code error \</span>
+		    <span class="s0">&quot;too few arguments to math function \&quot;max\&quot;&quot;</span>
+	    <span class="s0">}</span>
+	    <span class="s0">set val -Inf</span>
+	    <span class="s0">foreach arg $args {</span>
+		<span class="s0"># This will handle forcing the numeric value without</span>
+		<span class="s0"># ruining the internal type of a numeric object</span>
+		<span class="s0">if {[catch {expr {double($arg)}} err]} {</span>
+		    <span class="s0">return -code error $err</span>
+		<span class="s0">}</span>
+		<span class="s0">if {$arg &gt; $val} {set val $arg}</span>
+	    <span class="s0">}</span>
+	    <span class="s0">return $val</span>
+	<span class="s0">}</span>
+	<span class="s0">namespace export min max</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+
+<span class="s0"># Windows specific end of initialization</span>
+
+<span class="s0">if {(![interp issafe]) &amp;&amp; ($tcl_platform(platform) eq &quot;windows&quot;)} {</span>
+    <span class="s0">namespace eval tcl {</span>
+	<span class="s0">proc EnvTraceProc {lo n1 n2 op} {</span>
+	    <span class="s0">global env</span>
+	    <span class="s0">set x $env($n2)</span>
+	    <span class="s0">set env($lo) $x</span>
+	    <span class="s0">set env([string toupper $lo]) $x</span>
+	<span class="s0">}</span>
+	<span class="s0">proc InitWinEnv {} {</span>
+	    <span class="s0">global env tcl_platform</span>
+	    <span class="s0">foreach p [array names env] {</span>
+		<span class="s0">set u [string toupper $p]</span>
+		<span class="s0">if {$u ne $p} {</span>
+		    <span class="s0">switch -- $u {</span>
+			<span class="s0">COMSPEC -</span>
+			<span class="s0">PATH {</span>
+			    <span class="s0">set temp $env($p)</span>
+			    <span class="s0">unset env($p)</span>
+			    <span class="s0">set env($u) $temp</span>
+			    <span class="s0">trace add variable env($p) write \</span>
+				    <span class="s0">[namespace code [list EnvTraceProc $p]]</span>
+			    <span class="s0">trace add variable env($u) write \</span>
+				    <span class="s0">[namespace code [list EnvTraceProc $p]]</span>
+			<span class="s0">}</span>
+		    <span class="s0">}</span>
+		<span class="s0">}</span>
+	    <span class="s0">}</span>
+	    <span class="s0">if {![info exists env(COMSPEC)]} {</span>
+		<span class="s0">set env(COMSPEC) cmd.exe</span>
+	    <span class="s0">}</span>
+	<span class="s0">}</span>
+	<span class="s0">InitWinEnv</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+
+<span class="s0"># Setup the unknown package handler</span>
+
+
+<span class="s0">if {[interp issafe]} {</span>
+    <span class="s0">package unknown {::tcl::tm::UnknownHandler ::tclPkgUnknown}</span>
+<span class="s0">} else {</span>
+    <span class="s0"># Set up search for Tcl Modules (TIP #189).</span>
+    <span class="s0"># and setup platform specific unknown package handlers</span>
+    <span class="s0">if {$tcl_platform(os) eq &quot;Darwin&quot;</span>
+	    <span class="s0">&amp;&amp; $tcl_platform(platform) eq &quot;unix&quot;} {</span>
+	<span class="s0">package unknown {::tcl::tm::UnknownHandler \</span>
+		<span class="s0">{::tcl::MacOSXPkgUnknown ::tclPkgUnknown}}</span>
+    <span class="s0">} else {</span>
+	<span class="s0">package unknown {::tcl::tm::UnknownHandler ::tclPkgUnknown}</span>
+    <span class="s0">}</span>
+
+    <span class="s0"># Set up the 'clock' ensemble</span>
+
+    <span class="s0">namespace eval ::tcl::clock [list variable TclLibDir $::tcl_library]</span>
+
+    <span class="s0">proc clock args {</span>
+	<span class="s0">namespace eval ::tcl::clock [list namespace ensemble create -command \</span>
+		<span class="s0">[uplevel 1 [list namespace origin [lindex [info level 0] 0]]] \</span>
+		<span class="s0">-subcommands {</span>
+		    <span class="s0">add clicks format microseconds milliseconds scan seconds</span>
+		<span class="s0">}]</span>
+
+	<span class="s0"># Auto-loading stubs for 'clock.tcl'</span>
+
+	<span class="s0">foreach cmd {add format scan} {</span>
+	    <span class="s0">proc ::tcl::clock::$cmd args {</span>
+		<span class="s0">variable TclLibDir</span>
+		<span class="s0">source -encoding utf-8 [file join $TclLibDir clock.tcl]</span>
+		<span class="s0">return [uplevel 1 [info level 0]]</span>
+	    <span class="s0">}</span>
+	<span class="s0">}</span>
+
+	<span class="s0">return [uplevel 1 [info level 0]]</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+
+<span class="s0"># Conditionalize for presence of exec.</span>
+
+<span class="s0">if {[namespace which -command exec] eq &quot;&quot;} {</span>
+
+    <span class="s0"># Some machines do not have exec. Also, on all</span>
+    <span class="s0"># platforms, safe interpreters do not have exec.</span>
+
+    <span class="s0">set auto_noexec 1</span>
+<span class="s0">}</span>
+
+<span class="s0"># Define a log command (which can be overwitten to log errors</span>
+<span class="s0"># differently, specially when stderr is not available)</span>
+
+<span class="s0">if {[namespace which -command tclLog] eq &quot;&quot;} {</span>
+    <span class="s0">proc tclLog {string} {</span>
+	<span class="s0">catch {puts stderr $string}</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+
+<span class="s0"># unknown --</span>
+<span class="s0"># This procedure is called when a Tcl command is invoked that doesn't</span>
+<span class="s0"># exist in the interpreter.  It takes the following steps to make the</span>
+<span class="s0"># command available:</span>
+<span class="s0">#</span>
+<span class="s0">#	1. See if the autoload facility can locate the command in a</span>
+<span class="s0">#	   Tcl script file.  If so, load it and execute it.</span>
+<span class="s0">#	2. If the command was invoked interactively at top-level:</span>
+<span class="s0">#	    (a) see if the command exists as an executable UNIX program.</span>
+<span class="s0">#		If so, &quot;exec&quot; the command.</span>
+<span class="s0">#	    (b) see if the command requests csh-like history substitution</span>
+<span class="s0">#		in one of the common forms !!, !&lt;number&gt;, or ^old^new.  If</span>
+<span class="s0">#		so, emulate csh's history substitution.</span>
+<span class="s0">#	    (c) see if the command is a unique abbreviation for another</span>
+<span class="s0">#		command.  If so, invoke the command.</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0"># args -	A list whose elements are the words of the original</span>
+<span class="s0">#		command, including the command name.</span>
+
+<span class="s0">proc unknown args {</span>
+    <span class="s0">variable ::tcl::UnknownPending</span>
+    <span class="s0">global auto_noexec auto_noload env tcl_interactive errorInfo errorCode</span>
+
+    <span class="s0">if {[info exists errorInfo]} {</span>
+	<span class="s0">set savedErrorInfo $errorInfo</span>
+    <span class="s0">}</span>
+    <span class="s0">if {[info exists errorCode]} {</span>
+	<span class="s0">set savedErrorCode $errorCode</span>
+    <span class="s0">}</span>
+
+    <span class="s0">set name [lindex $args 0]</span>
+    <span class="s0">if {![info exists auto_noload]} {</span>
+	<span class="s0">#</span>
+	<span class="s0"># Make sure we're not trying to load the same proc twice.</span>
+	<span class="s0">#</span>
+	<span class="s0">if {[info exists UnknownPending($name)]} {</span>
+	    <span class="s0">return -code error &quot;self-referential recursion\</span>
+		    <span class="s0">in \&quot;unknown\&quot; for command \&quot;$name\&quot;&quot;</span>
+	<span class="s0">}</span>
+	<span class="s0">set UnknownPending($name) pending</span>
+	<span class="s0">set ret [catch {</span>
+		<span class="s0">auto_load $name [uplevel 1 {::namespace current}]</span>
+	<span class="s0">} msg opts]</span>
+	<span class="s0">unset UnknownPending($name)</span>
+	<span class="s0">if {$ret != 0} {</span>
+	    <span class="s0">dict append opts -errorinfo &quot;\n    (autoloading \&quot;$name\&quot;)&quot;</span>
+	    <span class="s0">return -options $opts $msg</span>
+	<span class="s0">}</span>
+	<span class="s0">if {![array size UnknownPending]} {</span>
+	    <span class="s0">unset UnknownPending</span>
+	<span class="s0">}</span>
+	<span class="s0">if {$msg} {</span>
+	    <span class="s0">if {[info exists savedErrorCode]} {</span>
+		<span class="s0">set ::errorCode $savedErrorCode</span>
+	    <span class="s0">} else {</span>
+		<span class="s0">unset -nocomplain ::errorCode</span>
+	    <span class="s0">}</span>
+	    <span class="s0">if {[info exists savedErrorInfo]} {</span>
+		<span class="s0">set errorInfo $savedErrorInfo</span>
+	    <span class="s0">} else {</span>
+		<span class="s0">unset -nocomplain errorInfo</span>
+	    <span class="s0">}</span>
+	    <span class="s0">set code [catch {uplevel 1 $args} msg opts]</span>
+	    <span class="s0">if {$code ==  1} {</span>
+		<span class="s0">#</span>
+		<span class="s0"># Compute stack trace contribution from the [uplevel].</span>
+		<span class="s0"># Note the dependence on how Tcl_AddErrorInfo, etc.</span>
+		<span class="s0"># construct the stack trace.</span>
+		<span class="s0">#</span>
+		<span class="s0">set errInfo [dict get $opts -errorinfo]</span>
+		<span class="s0">set errCode [dict get $opts -errorcode]</span>
+		<span class="s0">set cinfo $args</span>
+		<span class="s0">if {[string bytelength $cinfo] &gt; 150} {</span>
+		    <span class="s0">set cinfo [string range $cinfo 0 150]</span>
+		    <span class="s0">while {[string bytelength $cinfo] &gt; 150} {</span>
+			<span class="s0">set cinfo [string range $cinfo 0 end-1]</span>
+		    <span class="s0">}</span>
+		    <span class="s0">append cinfo ...</span>
+		<span class="s0">}</span>
+		<span class="s0">append cinfo &quot;\&quot;\n    (\&quot;uplevel\&quot; body line 1)&quot;</span>
+		<span class="s0">append cinfo &quot;\n    invoked from within&quot;</span>
+		<span class="s0">append cinfo &quot;\n\&quot;uplevel 1 \$args\&quot;&quot;</span>
+		<span class="s0">#</span>
+		<span class="s0"># Try each possible form of the stack trace</span>
+		<span class="s0"># and trim the extra contribution from the matching case</span>
+		<span class="s0">#</span>
+		<span class="s0">set expect &quot;$msg\n    while executing\n\&quot;$cinfo&quot;</span>
+		<span class="s0">if {$errInfo eq $expect} {</span>
+		    <span class="s0">#</span>
+		    <span class="s0"># The stack has only the eval from the expanded command</span>
+		    <span class="s0"># Do not generate any stack trace here.</span>
+		    <span class="s0">#</span>
+		    <span class="s0">dict unset opts -errorinfo</span>
+		    <span class="s0">dict incr opts -level</span>
+		    <span class="s0">return -options $opts $msg</span>
+		<span class="s0">}</span>
+		<span class="s0">#</span>
+		<span class="s0"># Stack trace is nested, trim off just the contribution</span>
+		<span class="s0"># from the extra &quot;eval&quot; of $args due to the &quot;catch&quot; above.</span>
+		<span class="s0">#</span>
+		<span class="s0">set expect &quot;\n    invoked from within\n\&quot;$cinfo&quot;</span>
+		<span class="s0">set exlen [string length $expect]</span>
+		<span class="s0">set eilen [string length $errInfo]</span>
+		<span class="s0">set i [expr {$eilen - $exlen - 1}]</span>
+		<span class="s0">set einfo [string range $errInfo 0 $i]</span>
+		<span class="s0">#</span>
+		<span class="s0"># For now verify that $errInfo consists of what we are about</span>
+		<span class="s0"># to return plus what we expected to trim off.</span>
+		<span class="s0">#</span>
+		<span class="s0">if {$errInfo ne &quot;$einfo$expect&quot;} {</span>
+		    <span class="s0">error &quot;Tcl bug: unexpected stack trace in \&quot;unknown\&quot;&quot; {} \</span>
+			<span class="s0">[list CORE UNKNOWN BADTRACE $einfo $expect $errInfo]</span>
+		<span class="s0">}</span>
+		<span class="s0">return -code error -errorcode $errCode \</span>
+			<span class="s0">-errorinfo $einfo $msg</span>
+	    <span class="s0">} else {</span>
+		<span class="s0">dict incr opts -level</span>
+		<span class="s0">return -options $opts $msg</span>
+	    <span class="s0">}</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+
+    <span class="s0">if {([info level] == 1) &amp;&amp; ([info script] eq &quot;&quot;)</span>
+	    <span class="s0">&amp;&amp; [info exists tcl_interactive] &amp;&amp; $tcl_interactive} {</span>
+	<span class="s0">if {![info exists auto_noexec]} {</span>
+	    <span class="s0">set new [auto_execok $name]</span>
+	    <span class="s0">if {$new ne &quot;&quot;} {</span>
+		<span class="s0">set redir &quot;&quot;</span>
+		<span class="s0">if {[namespace which -command console] eq &quot;&quot;} {</span>
+		    <span class="s0">set redir &quot;&gt;&amp;@stdout &lt;@stdin&quot;</span>
+		<span class="s0">}</span>
+		<span class="s0">uplevel 1 [list ::catch \</span>
+			<span class="s0">[concat exec $redir $new [lrange $args 1 end]] \</span>
+			<span class="s0">::tcl::UnknownResult ::tcl::UnknownOptions]</span>
+		<span class="s0">dict incr ::tcl::UnknownOptions -level</span>
+		<span class="s0">return -options $::tcl::UnknownOptions $::tcl::UnknownResult</span>
+	    <span class="s0">}</span>
+	<span class="s0">}</span>
+	<span class="s0">if {$name eq &quot;!!&quot;} {</span>
+	    <span class="s0">set newcmd [history event]</span>
+	<span class="s0">} elseif {[regexp {^!(.+)$} $name -&gt; event]} {</span>
+	    <span class="s0">set newcmd [history event $event]</span>
+	<span class="s0">} elseif {[regexp {^\^([^^]*)\^([^^]*)\^?$} $name -&gt; old new]} {</span>
+	    <span class="s0">set newcmd [history event -1]</span>
+	    <span class="s0">catch {regsub -all -- $old $newcmd $new newcmd}</span>
+	<span class="s0">}</span>
+	<span class="s0">if {[info exists newcmd]} {</span>
+	    <span class="s0">tclLog $newcmd</span>
+	    <span class="s0">history change $newcmd 0</span>
+	    <span class="s0">uplevel 1 [list ::catch $newcmd \</span>
+		    <span class="s0">::tcl::UnknownResult ::tcl::UnknownOptions]</span>
+	    <span class="s0">dict incr ::tcl::UnknownOptions -level</span>
+	    <span class="s0">return -options $::tcl::UnknownOptions $::tcl::UnknownResult</span>
+	<span class="s0">}</span>
+
+	<span class="s0">set ret [catch {set candidates [info commands $name*]} msg]</span>
+	<span class="s0">if {$name eq &quot;::&quot;} {</span>
+	    <span class="s0">set name &quot;&quot;</span>
+	<span class="s0">}</span>
+	<span class="s0">if {$ret != 0} {</span>
+	    <span class="s0">dict append opts -errorinfo \</span>
+		    <span class="s0">&quot;\n    (expanding command prefix \&quot;$name\&quot; in unknown)&quot;</span>
+	    <span class="s0">return -options $opts $msg</span>
+	<span class="s0">}</span>
+	<span class="s0"># Filter out bogus matches when $name contained</span>
+	<span class="s0"># a glob-special char [Bug 946952]</span>
+	<span class="s0">if {$name eq &quot;&quot;} {</span>
+	    <span class="s0"># Handle empty $name separately due to strangeness</span>
+	    <span class="s0"># in [string first] (See RFE 1243354)</span>
+	    <span class="s0">set cmds $candidates</span>
+	<span class="s0">} else {</span>
+	    <span class="s0">set cmds [list]</span>
+	    <span class="s0">foreach x $candidates {</span>
+		<span class="s0">if {[string first $name $x] == 0} {</span>
+		    <span class="s0">lappend cmds $x</span>
+		<span class="s0">}</span>
+	    <span class="s0">}</span>
+	<span class="s0">}</span>
+	<span class="s0">if {[llength $cmds] == 1} {</span>
+	    <span class="s0">uplevel 1 [list ::catch [lreplace $args 0 0 [lindex $cmds 0]] \</span>
+		    <span class="s0">::tcl::UnknownResult ::tcl::UnknownOptions]</span>
+	    <span class="s0">dict incr ::tcl::UnknownOptions -level</span>
+	    <span class="s0">return -options $::tcl::UnknownOptions $::tcl::UnknownResult</span>
+	<span class="s0">}</span>
+	<span class="s0">if {[llength $cmds]} {</span>
+	    <span class="s0">return -code error &quot;ambiguous command name \&quot;$name\&quot;: [lsort $cmds]&quot;</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+    <span class="s0">return -code error -errorcode [list TCL LOOKUP COMMAND $name] \</span>
+	<span class="s0">&quot;invalid command name \&quot;$name\&quot;&quot;</span>
+<span class="s0">}</span>
+
+<span class="s0"># auto_load --</span>
+<span class="s0"># Checks a collection of library directories to see if a procedure</span>
+<span class="s0"># is defined in one of them.  If so, it sources the appropriate</span>
+<span class="s0"># library file to create the procedure.  Returns 1 if it successfully</span>
+<span class="s0"># loaded the procedure, 0 otherwise.</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0"># cmd -			Name of the command to find and load.</span>
+<span class="s0"># namespace (optional)  The namespace where the command is being used - must be</span>
+<span class="s0">#                       a canonical namespace as returned [namespace current]</span>
+<span class="s0">#                       for instance. If not given, namespace current is used.</span>
+
+<span class="s0">proc auto_load {cmd {namespace {}}} {</span>
+    <span class="s0">global auto_index auto_path</span>
+
+    <span class="s0">if {$namespace eq &quot;&quot;} {</span>
+	<span class="s0">set namespace [uplevel 1 [list ::namespace current]]</span>
+    <span class="s0">}</span>
+    <span class="s0">set nameList [auto_qualify $cmd $namespace]</span>
+    <span class="s0"># workaround non canonical auto_index entries that might be around</span>
+    <span class="s0"># from older auto_mkindex versions</span>
+    <span class="s0">lappend nameList $cmd</span>
+    <span class="s0">foreach name $nameList {</span>
+	<span class="s0">if {[info exists auto_index($name)]} {</span>
+	    <span class="s0">namespace eval :: $auto_index($name)</span>
+	    <span class="s0"># There's a couple of ways to look for a command of a given</span>
+	    <span class="s0"># name.  One is to use</span>
+	    <span class="s0">#    info commands $name</span>
+	    <span class="s0"># Unfortunately, if the name has glob-magic chars in it like *</span>
+	    <span class="s0"># or [], it may not match.  For our purposes here, a better</span>
+	    <span class="s0"># route is to use</span>
+	    <span class="s0">#    namespace which -command $name</span>
+	    <span class="s0">if {[namespace which -command $name] ne &quot;&quot;} {</span>
+		<span class="s0">return 1</span>
+	    <span class="s0">}</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+    <span class="s0">if {![info exists auto_path]} {</span>
+	<span class="s0">return 0</span>
+    <span class="s0">}</span>
+
+    <span class="s0">if {![auto_load_index]} {</span>
+	<span class="s0">return 0</span>
+    <span class="s0">}</span>
+    <span class="s0">foreach name $nameList {</span>
+	<span class="s0">if {[info exists auto_index($name)]} {</span>
+	    <span class="s0">namespace eval :: $auto_index($name)</span>
+	    <span class="s0">if {[namespace which -command $name] ne &quot;&quot;} {</span>
+		<span class="s0">return 1</span>
+	    <span class="s0">}</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+    <span class="s0">return 0</span>
+<span class="s0">}</span>
+
+<span class="s0"># auto_load_index --</span>
+<span class="s0"># Loads the contents of tclIndex files on the auto_path directory</span>
+<span class="s0"># list.  This is usually invoked within auto_load to load the index</span>
+<span class="s0"># of available commands.  Returns 1 if the index is loaded, and 0 if</span>
+<span class="s0"># the index is already loaded and up to date.</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0"># None.</span>
+
+<span class="s0">proc auto_load_index {} {</span>
+    <span class="s0">variable ::tcl::auto_oldpath</span>
+    <span class="s0">global auto_index auto_path</span>
+
+    <span class="s0">if {[info exists auto_oldpath] &amp;&amp; ($auto_oldpath eq $auto_path)} {</span>
+	<span class="s0">return 0</span>
+    <span class="s0">}</span>
+    <span class="s0">set auto_oldpath $auto_path</span>
+
+    <span class="s0"># Check if we are a safe interpreter. In that case, we support only</span>
+    <span class="s0"># newer format tclIndex files.</span>
+
+    <span class="s0">set issafe [interp issafe]</span>
+    <span class="s0">for {set i [expr {[llength $auto_path] - 1}]} {$i &gt;= 0} {incr i -1} {</span>
+	<span class="s0">set dir [lindex $auto_path $i]</span>
+	<span class="s0">set f &quot;&quot;</span>
+	<span class="s0">if {$issafe} {</span>
+	    <span class="s0">catch {source [file join $dir tclIndex]}</span>
+	<span class="s0">} elseif {[catch {set f [open [file join $dir tclIndex]]}]} {</span>
+	    <span class="s0">continue</span>
+	<span class="s0">} else {</span>
+	    <span class="s0">set error [catch {</span>
+		<span class="s0">set id [gets $f]</span>
+		<span class="s0">if {$id eq &quot;# Tcl autoload index file, version 2.0&quot;} {</span>
+		    <span class="s0">eval [read $f]</span>
+		<span class="s0">} elseif {$id eq &quot;# Tcl autoload index file: each line identifies a Tcl&quot;} {</span>
+		    <span class="s0">while {[gets $f line] &gt;= 0} {</span>
+			<span class="s0">if {([string index $line 0] eq &quot;#&quot;) \</span>
+				<span class="s0">|| ([llength $line] != 2)} {</span>
+			    <span class="s0">continue</span>
+			<span class="s0">}</span>
+			<span class="s0">set name [lindex $line 0]</span>
+			<span class="s0">set auto_index($name) \</span>
+				<span class="s0">&quot;source [file join $dir [lindex $line 1]]&quot;</span>
+		    <span class="s0">}</span>
+		<span class="s0">} else {</span>
+		    <span class="s0">error &quot;[file join $dir tclIndex] isn't a proper Tcl index file&quot;</span>
+		<span class="s0">}</span>
+	    <span class="s0">} msg opts]</span>
+	    <span class="s0">if {$f ne &quot;&quot;} {</span>
+		<span class="s0">close $f</span>
+	    <span class="s0">}</span>
+	    <span class="s0">if {$error} {</span>
+		<span class="s0">return -options $opts $msg</span>
+	    <span class="s0">}</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+    <span class="s0">return 1</span>
+<span class="s0">}</span>
+
+<span class="s0"># auto_qualify --</span>
+<span class="s0">#</span>
+<span class="s0"># Compute a fully qualified names list for use in the auto_index array.</span>
+<span class="s0"># For historical reasons, commands in the global namespace do not have leading</span>
+<span class="s0"># :: in the index key. The list has two elements when the command name is</span>
+<span class="s0"># relative (no leading ::) and the namespace is not the global one. Otherwise</span>
+<span class="s0"># only one name is returned (and searched in the auto_index).</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments -</span>
+<span class="s0"># cmd		The command name. Can be any name accepted for command</span>
+<span class="s0">#               invocations (Like &quot;foo::::bar&quot;).</span>
+<span class="s0"># namespace	The namespace where the command is being used - must be</span>
+<span class="s0">#               a canonical namespace as returned by [namespace current]</span>
+<span class="s0">#               for instance.</span>
+
+<span class="s0">proc auto_qualify {cmd namespace} {</span>
+
+    <span class="s0"># count separators and clean them up</span>
+    <span class="s0"># (making sure that foo:::::bar will be treated as foo::bar)</span>
+    <span class="s0">set n [regsub -all {::+} $cmd :: cmd]</span>
+
+    <span class="s0"># Ignore namespace if the name starts with ::</span>
+    <span class="s0"># Handle special case of only leading ::</span>
+
+    <span class="s0"># Before each return case we give an example of which category it is</span>
+    <span class="s0"># with the following form :</span>
+    <span class="s0"># (inputCmd, inputNameSpace) -&gt; output</span>
+
+    <span class="s0">if {[string match ::* $cmd]} {</span>
+	<span class="s0">if {$n &gt; 1} {</span>
+	    <span class="s0"># (::foo::bar , *) -&gt; ::foo::bar</span>
+	    <span class="s0">return [list $cmd]</span>
+	<span class="s0">} else {</span>
+	    <span class="s0"># (::global , *) -&gt; global</span>
+	    <span class="s0">return [list [string range $cmd 2 end]]</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+
+    <span class="s0"># Potentially returning 2 elements to try  :</span>
+    <span class="s0"># (if the current namespace is not the global one)</span>
+
+    <span class="s0">if {$n == 0} {</span>
+	<span class="s0">if {$namespace eq &quot;::&quot;} {</span>
+	    <span class="s0"># (nocolons , ::) -&gt; nocolons</span>
+	    <span class="s0">return [list $cmd]</span>
+	<span class="s0">} else {</span>
+	    <span class="s0"># (nocolons , ::sub) -&gt; ::sub::nocolons nocolons</span>
+	    <span class="s0">return [list ${namespace}::$cmd $cmd]</span>
+	<span class="s0">}</span>
+    <span class="s0">} elseif {$namespace eq &quot;::&quot;} {</span>
+	<span class="s0">#  (foo::bar , ::) -&gt; ::foo::bar</span>
+	<span class="s0">return [list ::$cmd]</span>
+    <span class="s0">} else {</span>
+	<span class="s0"># (foo::bar , ::sub) -&gt; ::sub::foo::bar ::foo::bar</span>
+	<span class="s0">return [list ${namespace}::$cmd ::$cmd]</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+
+<span class="s0"># auto_import --</span>
+<span class="s0">#</span>
+<span class="s0"># Invoked during &quot;namespace import&quot; to make see if the imported commands</span>
+<span class="s0"># reside in an autoloaded library.  If so, the commands are loaded so</span>
+<span class="s0"># that they will be available for the import links.  If not, then this</span>
+<span class="s0"># procedure does nothing.</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments -</span>
+<span class="s0"># pattern	The pattern of commands being imported (like &quot;foo::*&quot;)</span>
+<span class="s0">#               a canonical namespace as returned by [namespace current]</span>
+
+<span class="s0">proc auto_import {pattern} {</span>
+    <span class="s0">global auto_index</span>
+
+    <span class="s0"># If no namespace is specified, this will be an error case</span>
+
+    <span class="s0">if {![string match *::* $pattern]} {</span>
+	<span class="s0">return</span>
+    <span class="s0">}</span>
+
+    <span class="s0">set ns [uplevel 1 [list ::namespace current]]</span>
+    <span class="s0">set patternList [auto_qualify $pattern $ns]</span>
+
+    <span class="s0">auto_load_index</span>
+
+    <span class="s0">foreach pattern $patternList {</span>
+        <span class="s0">foreach name [array names auto_index $pattern] {</span>
+            <span class="s0">if {([namespace which -command $name] eq &quot;&quot;)</span>
+		    <span class="s0">&amp;&amp; ([namespace qualifiers $pattern] eq [namespace qualifiers $name])} {</span>
+                <span class="s0">namespace eval :: $auto_index($name)</span>
+            <span class="s0">}</span>
+        <span class="s0">}</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+
+<span class="s0"># auto_execok --</span>
+<span class="s0">#</span>
+<span class="s0"># Returns string that indicates name of program to execute if</span>
+<span class="s0"># name corresponds to a shell builtin or an executable in the</span>
+<span class="s0"># Windows search path, or &quot;&quot; otherwise.  Builds an associative</span>
+<span class="s0"># array auto_execs that caches information about previous checks,</span>
+<span class="s0"># for speed.</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0"># name -			Name of a command.</span>
+
+<span class="s0">if {$tcl_platform(platform) eq &quot;windows&quot;} {</span>
+<span class="s0"># Windows version.</span>
+<span class="s0">#</span>
+<span class="s0"># Note that info executable doesn't work under Windows, so we have to</span>
+<span class="s0"># look for files with .exe, .com, or .bat extensions.  Also, the path</span>
+<span class="s0"># may be in the Path or PATH environment variables, and path</span>
+<span class="s0"># components are separated with semicolons, not colons as under Unix.</span>
+<span class="s0">#</span>
+<span class="s0">proc auto_execok name {</span>
+    <span class="s0">global auto_execs env tcl_platform</span>
+
+    <span class="s0">if {[info exists auto_execs($name)]} {</span>
+	<span class="s0">return $auto_execs($name)</span>
+    <span class="s0">}</span>
+    <span class="s0">set auto_execs($name) &quot;&quot;</span>
+
+    <span class="s0">set shellBuiltins [list cls copy date del dir echo erase md mkdir \</span>
+	    <span class="s0">mklink rd ren rename rmdir start time type ver vol]</span>
+    <span class="s0">if {[info exists env(PATHEXT)]} {</span>
+	<span class="s0"># Add an initial ; to have the {} extension check first.</span>
+	<span class="s0">set execExtensions [split &quot;;$env(PATHEXT)&quot; &quot;;&quot;]</span>
+    <span class="s0">} else {</span>
+	<span class="s0">set execExtensions [list {} .com .exe .bat .cmd]</span>
+    <span class="s0">}</span>
+
+    <span class="s0">if {[string tolower $name] in $shellBuiltins} {</span>
+	<span class="s0"># When this is command.com for some reason on Win2K, Tcl won't</span>
+	<span class="s0"># exec it unless the case is right, which this corrects.  COMSPEC</span>
+	<span class="s0"># may not point to a real file, so do the check.</span>
+	<span class="s0">set cmd $env(COMSPEC)</span>
+	<span class="s0">if {[file exists $cmd]} {</span>
+	    <span class="s0">set cmd [file attributes $cmd -shortname]</span>
+	<span class="s0">}</span>
+	<span class="s0">return [set auto_execs($name) [list $cmd /c $name]]</span>
+    <span class="s0">}</span>
+
+    <span class="s0">if {[llength [file split $name]] != 1} {</span>
+	<span class="s0">foreach ext $execExtensions {</span>
+	    <span class="s0">set file ${name}${ext}</span>
+	    <span class="s0">if {[file exists $file] &amp;&amp; ![file isdirectory $file]} {</span>
+		<span class="s0">return [set auto_execs($name) [list $file]]</span>
+	    <span class="s0">}</span>
+	<span class="s0">}</span>
+	<span class="s0">return &quot;&quot;</span>
+    <span class="s0">}</span>
+
+    <span class="s0">set path &quot;[file dirname [info nameof]];.;&quot;</span>
+    <span class="s0">if {[info exists env(WINDIR)]} {</span>
+	<span class="s0">set windir $env(WINDIR)</span>
+    <span class="s0">}</span>
+    <span class="s0">if {[info exists windir]} {</span>
+	<span class="s0">if {$tcl_platform(os) eq &quot;Windows NT&quot;} {</span>
+	    <span class="s0">append path &quot;$windir/system32;&quot;</span>
+	<span class="s0">}</span>
+	<span class="s0">append path &quot;$windir/system;$windir;&quot;</span>
+    <span class="s0">}</span>
+
+    <span class="s0">foreach var {PATH Path path} {</span>
+	<span class="s0">if {[info exists env($var)]} {</span>
+	    <span class="s0">append path &quot;;$env($var)&quot;</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+
+    <span class="s0">foreach ext $execExtensions {</span>
+	<span class="s0">unset -nocomplain checked</span>
+	<span class="s0">foreach dir [split $path {;}] {</span>
+	    <span class="s0"># Skip already checked directories</span>
+	    <span class="s0">if {[info exists checked($dir)] || ($dir eq &quot;&quot;)} {</span>
+		<span class="s0">continue</span>
+	    <span class="s0">}</span>
+	    <span class="s0">set checked($dir) {}</span>
+	    <span class="s0">set file [file join $dir ${name}${ext}]</span>
+	    <span class="s0">if {[file exists $file] &amp;&amp; ![file isdirectory $file]} {</span>
+		<span class="s0">return [set auto_execs($name) [list $file]]</span>
+	    <span class="s0">}</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+    <span class="s0">return &quot;&quot;</span>
+<span class="s0">}</span>
+
+<span class="s0">} else {</span>
+<span class="s0"># Unix version.</span>
+<span class="s0">#</span>
+<span class="s0">proc auto_execok name {</span>
+    <span class="s0">global auto_execs env</span>
+
+    <span class="s0">if {[info exists auto_execs($name)]} {</span>
+	<span class="s0">return $auto_execs($name)</span>
+    <span class="s0">}</span>
+    <span class="s0">set auto_execs($name) &quot;&quot;</span>
+    <span class="s0">if {[llength [file split $name]] != 1} {</span>
+	<span class="s0">if {[file executable $name] &amp;&amp; ![file isdirectory $name]} {</span>
+	    <span class="s0">set auto_execs($name) [list $name]</span>
+	<span class="s0">}</span>
+	<span class="s0">return $auto_execs($name)</span>
+    <span class="s0">}</span>
+    <span class="s0">foreach dir [split $env(PATH) :] {</span>
+	<span class="s0">if {$dir eq &quot;&quot;} {</span>
+	    <span class="s0">set dir .</span>
+	<span class="s0">}</span>
+	<span class="s0">set file [file join $dir $name]</span>
+	<span class="s0">if {[file executable $file] &amp;&amp; ![file isdirectory $file]} {</span>
+	    <span class="s0">set auto_execs($name) [list $file]</span>
+	    <span class="s0">return $auto_execs($name)</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+    <span class="s0">return &quot;&quot;</span>
+<span class="s0">}</span>
+
+<span class="s0">}</span>
+
+<span class="s0"># ::tcl::CopyDirectory --</span>
+<span class="s0">#</span>
+<span class="s0"># This procedure is called by Tcl's core when attempts to call the</span>
+<span class="s0"># filesystem's copydirectory function fail.  The semantics of the call</span>
+<span class="s0"># are that 'dest' does not yet exist, i.e. dest should become the exact</span>
+<span class="s0"># image of src.  If dest does exist, we throw an error.</span>
+<span class="s0">#</span>
+<span class="s0"># Note that making changes to this procedure can change the results</span>
+<span class="s0"># of running Tcl's tests.</span>
+<span class="s0">#</span>
+<span class="s0"># Arguments:</span>
+<span class="s0"># action -              &quot;renaming&quot; or &quot;copying&quot;</span>
+<span class="s0"># src -			source directory</span>
+<span class="s0"># dest -		destination directory</span>
+<span class="s0">proc tcl::CopyDirectory {action src dest} {</span>
+    <span class="s0">set nsrc [file normalize $src]</span>
+    <span class="s0">set ndest [file normalize $dest]</span>
+
+    <span class="s0">if {$action eq &quot;renaming&quot;} {</span>
+	<span class="s0"># Can't rename volumes.  We could give a more precise</span>
+	<span class="s0"># error message here, but that would break the test suite.</span>
+	<span class="s0">if {$nsrc in [file volumes]} {</span>
+	    <span class="s0">return -code error &quot;error $action \&quot;$src\&quot; to\</span>
+	      <span class="s0">\&quot;$dest\&quot;: trying to rename a volume or move a directory\</span>
+	      <span class="s0">into itself&quot;</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+    <span class="s0">if {[file exists $dest]} {</span>
+	<span class="s0">if {$nsrc eq $ndest} {</span>
+	    <span class="s0">return -code error &quot;error $action \&quot;$src\&quot; to\</span>
+	      <span class="s0">\&quot;$dest\&quot;: trying to rename a volume or move a directory\</span>
+	      <span class="s0">into itself&quot;</span>
+	<span class="s0">}</span>
+	<span class="s0">if {$action eq &quot;copying&quot;} {</span>
+	    <span class="s0"># We used to throw an error here, but, looking more closely</span>
+	    <span class="s0"># at the core copy code in tclFCmd.c, if the destination</span>
+	    <span class="s0"># exists, then we should only call this function if -force</span>
+	    <span class="s0"># is true, which means we just want to over-write.  So,</span>
+	    <span class="s0"># the following code is now commented out.</span>
+	    <span class="s0">#</span>
+	    <span class="s0"># return -code error &quot;error $action \&quot;$src\&quot; to\</span>
+	    <span class="s0"># \&quot;$dest\&quot;: file already exists&quot;</span>
+	<span class="s0">} else {</span>
+	    <span class="s0"># Depending on the platform, and on the current</span>
+	    <span class="s0"># working directory, the directories '.', '..'</span>
+	    <span class="s0"># can be returned in various combinations.  Anyway,</span>
+	    <span class="s0"># if any other file is returned, we must signal an error.</span>
+	    <span class="s0">set existing [glob -nocomplain -directory $dest * .*]</span>
+	    <span class="s0">lappend existing {*}[glob -nocomplain -directory $dest \</span>
+		    <span class="s0">-type hidden * .*]</span>
+	    <span class="s0">foreach s $existing {</span>
+		<span class="s0">if {[file tail $s] ni {. ..}} {</span>
+		    <span class="s0">return -code error &quot;error $action \&quot;$src\&quot; to\</span>
+		      <span class="s0">\&quot;$dest\&quot;: file already exists&quot;</span>
+		<span class="s0">}</span>
+	    <span class="s0">}</span>
+	<span class="s0">}</span>
+    <span class="s0">} else {</span>
+	<span class="s0">if {[string first $nsrc $ndest] != -1} {</span>
+	    <span class="s0">set srclen [expr {[llength [file split $nsrc]] - 1}]</span>
+	    <span class="s0">set ndest [lindex [file split $ndest] $srclen]</span>
+	    <span class="s0">if {$ndest eq [file tail $nsrc]} {</span>
+		<span class="s0">return -code error &quot;error $action \&quot;$src\&quot; to\</span>
+		  <span class="s0">\&quot;$dest\&quot;: trying to rename a volume or move a directory\</span>
+		  <span class="s0">into itself&quot;</span>
+	    <span class="s0">}</span>
+	<span class="s0">}</span>
+	<span class="s0">file mkdir $dest</span>
+    <span class="s0">}</span>
+    <span class="s0"># Have to be careful to capture both visible and hidden files.</span>
+    <span class="s0"># We will also be more generous to the file system and not</span>
+    <span class="s0"># assume the hidden and non-hidden lists are non-overlapping.</span>
+    <span class="s0">#</span>
+    <span class="s0"># On Unix 'hidden' files begin with '.'.  On other platforms</span>
+    <span class="s0"># or filesystems hidden files may have other interpretations.</span>
+    <span class="s0">set filelist [concat [glob -nocomplain -directory $src *] \</span>
+      <span class="s0">[glob -nocomplain -directory $src -types hidden *]]</span>
+
+    <span class="s0">foreach s [lsort -unique $filelist] {</span>
+	<span class="s0">if {[file tail $s] ni {. ..}} {</span>
+	    <span class="s0">file copy -force -- $s [file join $dest [file tail $s]]</span>
+	<span class="s0">}</span>
+    <span class="s0">}</span>
+    <span class="s0">return</span>
+<span class="s0">}</span>
+</pre>
+</body>
+</html>

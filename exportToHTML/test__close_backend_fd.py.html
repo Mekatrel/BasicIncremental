@@ -1,0 +1,123 @@
+<html>
+<head>
+<title>test__close_backend_fd.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #cc7832;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #6a8759;}
+.s3 { color: #808080;}
+.s4 { color: #6897bb;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+test__close_backend_fd.py</font>
+</center></td></tr></table>
+<pre><span class="s0">from </span><span class="s1">__future__ </span><span class="s0">import </span><span class="s1">print_function</span>
+<span class="s0">import </span><span class="s1">os</span>
+<span class="s0">import </span><span class="s1">unittest</span>
+
+<span class="s0">import </span><span class="s1">gevent</span>
+<span class="s0">from </span><span class="s1">gevent </span><span class="s0">import </span><span class="s1">core</span>
+<span class="s0">from </span><span class="s1">gevent.hub </span><span class="s0">import </span><span class="s1">Hub</span>
+
+<span class="s0">from </span><span class="s1">gevent.testing </span><span class="s0">import </span><span class="s1">sysinfo</span>
+
+<span class="s1">@unittest.skipUnless(</span>
+    <span class="s1">getattr(core</span><span class="s0">, </span><span class="s2">'LIBEV_EMBED'</span><span class="s0">, False</span><span class="s1">)</span><span class="s0">,</span>
+    <span class="s2">&quot;Needs embedded libev. &quot;</span>
+    <span class="s2">&quot;hub.loop.fileno is only defined when &quot;</span>
+    <span class="s2">&quot;we embed libev for some reason. &quot;</span>
+    <span class="s2">&quot;Choosing specific backends is also only supported by libev &quot;</span>
+    <span class="s2">&quot;(not libuv), and besides, libuv has a nasty tendency to &quot;</span>
+    <span class="s2">&quot;abort() the process if its FD gets closed. &quot;</span>
+<span class="s1">)</span>
+<span class="s0">class </span><span class="s1">Test(unittest.TestCase):</span>
+    <span class="s3"># NOTE that we extend unittest.TestCase, not greentest.TestCase</span>
+    <span class="s3"># Extending the later causes the wrong hub to get used.</span>
+
+    <span class="s1">assertRaisesRegex = getattr(unittest.TestCase</span><span class="s0">, </span><span class="s2">'assertRaisesRegex'</span><span class="s0">,</span>
+                                <span class="s1">getattr(unittest.TestCase</span><span class="s0">, </span><span class="s2">'assertRaisesRegexp'</span><span class="s1">))</span>
+
+    <span class="s1">BACKENDS_THAT_SUCCEED_WHEN_FD_CLOSED = (</span>
+        <span class="s2">'kqueue'</span><span class="s0">,</span>
+        <span class="s2">'epoll'</span><span class="s0">,</span>
+        <span class="s2">'linux_aio'</span><span class="s0">,</span>
+        <span class="s2">'linux_iouring'</span><span class="s0">,</span>
+    <span class="s1">)</span>
+
+    <span class="s1">BACKENDS_THAT_WILL_FAIL_TO_CREATE_AT_RUNTIME = (</span>
+        <span class="s3"># This fails on the Fedora Rawhide 33 image. It's not clear</span>
+        <span class="s3"># why; needs investigated.</span>
+        <span class="s2">'linux_iouring'</span><span class="s0">,</span>
+    <span class="s1">) </span><span class="s0">if not </span><span class="s1">sysinfo.libev_supports_linux_iouring() </span><span class="s0">else </span><span class="s1">(</span>
+
+    <span class="s1">)</span>
+
+    <span class="s1">BACKENDS_THAT_WILL_FAIL_TO_CREATE_AT_RUNTIME += (</span>
+        <span class="s3"># This can be compiled on any (?) version of</span>
+        <span class="s3"># linux, but there's a runtime check that you're</span>
+        <span class="s3"># running at least kernel 4.19, so we can fail to create</span>
+        <span class="s3"># the hub. When we updated to libev 4.31 from 4.25, Travis Ci</span>
+        <span class="s3"># was still on kernel 1.15 (Ubunto 16.04).</span>
+        <span class="s2">'linux_aio'</span><span class="s0">,</span>
+    <span class="s1">) </span><span class="s0">if not </span><span class="s1">sysinfo.libev_supports_linux_aio() </span><span class="s0">else </span><span class="s1">(</span>
+    <span class="s1">)</span>
+
+    <span class="s0">def </span><span class="s1">_check_backend(self</span><span class="s0">, </span><span class="s1">backend):</span>
+        <span class="s1">hub = Hub(backend</span><span class="s0">, </span><span class="s1">default=</span><span class="s0">False</span><span class="s1">)</span>
+
+        <span class="s0">try</span><span class="s1">:</span>
+            <span class="s1">self.assertEqual(hub.loop.backend</span><span class="s0">, </span><span class="s1">backend)</span>
+
+            <span class="s1">gevent.sleep(</span><span class="s4">0.001</span><span class="s1">)</span>
+            <span class="s1">fileno = hub.loop.fileno()</span>
+            <span class="s0">if </span><span class="s1">fileno </span><span class="s0">is None</span><span class="s1">:</span>
+                <span class="s0">return </span><span class="s3"># nothing to close, test implicitly passes.</span>
+
+            <span class="s1">os.close(fileno)</span>
+
+            <span class="s0">if </span><span class="s1">backend </span><span class="s0">in </span><span class="s1">self.BACKENDS_THAT_SUCCEED_WHEN_FD_CLOSED:</span>
+                <span class="s1">gevent.sleep(</span><span class="s4">0.001</span><span class="s1">)</span>
+            <span class="s0">else</span><span class="s1">:</span>
+                <span class="s0">with </span><span class="s1">self.assertRaisesRegex(SystemError</span><span class="s0">, </span><span class="s2">&quot;(libev)&quot;</span><span class="s1">):</span>
+                    <span class="s1">gevent.sleep(</span><span class="s4">0.001</span><span class="s1">)</span>
+
+            <span class="s1">hub.destroy()</span>
+            <span class="s1">self.assertIn(</span><span class="s2">'destroyed'</span><span class="s0">, </span><span class="s1">repr(hub))</span>
+        <span class="s0">finally</span><span class="s1">:</span>
+            <span class="s0">if </span><span class="s1">hub.loop </span><span class="s0">is not None</span><span class="s1">:</span>
+                <span class="s1">hub.destroy()</span>
+
+    <span class="s1">@classmethod</span>
+    <span class="s0">def </span><span class="s1">_make_test(cls</span><span class="s0">, </span><span class="s1">count</span><span class="s0">, </span><span class="s1">backend): </span><span class="s3"># pylint:disable=no-self-argument</span>
+        <span class="s0">if </span><span class="s1">backend </span><span class="s0">in </span><span class="s1">cls.BACKENDS_THAT_WILL_FAIL_TO_CREATE_AT_RUNTIME:</span>
+            <span class="s0">def </span><span class="s1">test(self):</span>
+                <span class="s0">with </span><span class="s1">self.assertRaisesRegex(SystemError</span><span class="s0">, </span><span class="s2">'ev_loop_new'</span><span class="s1">):</span>
+                    <span class="s1">Hub(backend</span><span class="s0">, </span><span class="s1">default=</span><span class="s0">False</span><span class="s1">)</span>
+        <span class="s0">else</span><span class="s1">:</span>
+            <span class="s0">def </span><span class="s1">test(self):</span>
+                <span class="s1">self._check_backend(backend)</span>
+        <span class="s1">test.__name__ = </span><span class="s2">'test_' </span><span class="s1">+ backend + </span><span class="s2">'_' </span><span class="s1">+ str(count)</span>
+        <span class="s0">return </span><span class="s1">test.__name__</span><span class="s0">, </span><span class="s1">test</span>
+
+    <span class="s1">@classmethod</span>
+    <span class="s0">def </span><span class="s1">_make_tests(cls):</span>
+        <span class="s1">count = backend = </span><span class="s0">None</span>
+
+        <span class="s0">for </span><span class="s1">count </span><span class="s0">in </span><span class="s1">range(</span><span class="s4">2</span><span class="s1">):</span>
+            <span class="s0">for </span><span class="s1">backend </span><span class="s0">in </span><span class="s1">core.supported_backends():</span>
+                <span class="s1">name</span><span class="s0">, </span><span class="s1">func = cls._make_test(count</span><span class="s0">, </span><span class="s1">backend)</span>
+                <span class="s1">setattr(cls</span><span class="s0">, </span><span class="s1">name</span><span class="s0">, </span><span class="s1">func)</span>
+                <span class="s1">name = func = </span><span class="s0">None</span>
+
+<span class="s1">Test._make_tests()</span>
+
+<span class="s0">if </span><span class="s1">__name__ == </span><span class="s2">'__main__'</span><span class="s1">:</span>
+    <span class="s1">unittest.main()</span>
+</pre>
+</body>
+</html>

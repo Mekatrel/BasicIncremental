@@ -1,0 +1,612 @@
+<html>
+<head>
+<title>writers.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #629755; font-style: italic;}
+.s3 { color: #cc7832;}
+.s4 { color: #a5c261;}
+.s5 { color: #6897bb;}
+.s6 { color: #6a8759;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+writers.py</font>
+</center></td></tr></table>
+<pre><span class="s0">#-----------------------------------------------------------------------------</span>
+<span class="s0"># Copyright (c) 2005-2021, PyInstaller Development Team.</span>
+<span class="s0">#</span>
+<span class="s0"># Distributed under the terms of the GNU General Public License (version 2</span>
+<span class="s0"># or later) with exception for distributing the bootloader.</span>
+<span class="s0">#</span>
+<span class="s0"># The full license is in the file COPYING.txt, distributed with this software.</span>
+<span class="s0">#</span>
+<span class="s0"># SPDX-License-Identifier: (GPL-2.0-or-later WITH Bootloader-exception)</span>
+<span class="s0">#-----------------------------------------------------------------------------</span>
+<span class="s2">&quot;&quot;&quot; 
+Utilities to create data structures for embedding Python modules and additional files into the executable. 
+&quot;&quot;&quot;</span>
+
+<span class="s0"># While an Archive is really an abstraction for any &quot;filesystem within a file&quot;, it is tuned for use with</span>
+<span class="s0"># imputil.FuncImporter. This assumes it contains python code objects, indexed by the the internal name (ie, no '.py').</span>
+<span class="s0">#</span>
+<span class="s0"># See pyi_carchive.py for a more general archive (contains anything) that can be understood by a C program.</span>
+
+<span class="s3">import </span><span class="s1">io</span>
+<span class="s3">import </span><span class="s1">marshal</span>
+<span class="s3">import </span><span class="s1">os</span>
+<span class="s3">import </span><span class="s1">struct</span>
+<span class="s3">import </span><span class="s1">sys</span>
+<span class="s3">import </span><span class="s1">zlib</span>
+<span class="s3">from </span><span class="s1">types </span><span class="s3">import </span><span class="s1">CodeType</span>
+
+<span class="s3">from </span><span class="s1">PyInstaller.building.utils </span><span class="s3">import </span><span class="s1">fake_pyc_timestamp</span><span class="s3">, </span><span class="s1">get_code_object</span><span class="s3">, </span><span class="s1">strip_paths_in_code</span>
+<span class="s3">from </span><span class="s1">PyInstaller.compat </span><span class="s3">import </span><span class="s1">BYTECODE_MAGIC</span><span class="s3">, </span><span class="s1">is_py37</span><span class="s3">, </span><span class="s1">is_win</span>
+<span class="s3">from </span><span class="s1">PyInstaller.loader.pyimod02_archive </span><span class="s3">import </span><span class="s1">PYZ_TYPE_DATA</span><span class="s3">, </span><span class="s1">PYZ_TYPE_MODULE</span><span class="s3">, </span><span class="s1">PYZ_TYPE_NSPKG</span><span class="s3">, </span><span class="s1">PYZ_TYPE_PKG</span>
+
+
+<span class="s3">class </span><span class="s1">ArchiveWriter(object):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    A base class for a repository of python code objects. The extract method is used by imputil.ArchiveImporter to 
+    get code objects by name (fully qualified name), so an end-user &quot;import a.b&quot; becomes extract('a.__init__') and 
+    extract('a.b'). 
+    &quot;&quot;&quot;</span>
+    <span class="s1">MAGIC = </span><span class="s4">b'PYL</span><span class="s3">\0</span><span class="s4">'</span>
+    <span class="s1">HDRLEN = </span><span class="s5">12  </span><span class="s0"># default is MAGIC followed by python's magic, int pos of toc</span>
+    <span class="s1">TOCPOS = </span><span class="s5">8</span>
+
+    <span class="s3">def </span><span class="s1">__init__(self</span><span class="s3">, </span><span class="s1">archive_path</span><span class="s3">, </span><span class="s1">logical_toc):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Create an archive file of name 'archive_path'. logical_toc is a 'logical TOC', a list of (name, path, ...), 
+        where name is the internal name (e.g., 'a') and path is a file to get the object from (e.g., './a.pyc'). 
+        &quot;&quot;&quot;</span>
+        <span class="s1">self.start = </span><span class="s5">0</span>
+
+        <span class="s1">self._start_add_entries(archive_path)</span>
+        <span class="s1">self._add_from_table_of_contents(logical_toc)</span>
+        <span class="s1">self._finalize()</span>
+
+    <span class="s3">def </span><span class="s1">_start_add_entries(self</span><span class="s3">, </span><span class="s1">archive_path):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Open an empty archive for addition of entries. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">self.lib = open(archive_path</span><span class="s3">, </span><span class="s6">'wb'</span><span class="s1">)</span>
+        <span class="s0"># Reserve space for the header.</span>
+        <span class="s3">if </span><span class="s1">self.HDRLEN:</span>
+            <span class="s1">self.lib.write(</span><span class="s4">b'</span><span class="s3">\0</span><span class="s4">' </span><span class="s1">* self.HDRLEN)</span>
+        <span class="s0"># Create an empty table of contents. Use a list to support reproducible builds.</span>
+        <span class="s1">self.toc = []</span>
+
+    <span class="s3">def </span><span class="s1">_add_from_table_of_contents(self</span><span class="s3">, </span><span class="s1">toc):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Add entries from a logical TOC (without absolute positioning info). 
+        An entry in a logical TOC is a tuple: 
+          entry[0] is name (under which it will be saved). 
+          entry[1] is fullpathname of the file. 
+          entry[2] is a flag for its storage format (True or 1 if compressed). 
+          entry[3] is the entry's type code. 
+        &quot;&quot;&quot;</span>
+        <span class="s3">for </span><span class="s1">toc_entry </span><span class="s3">in </span><span class="s1">toc:</span>
+            <span class="s1">self.add(toc_entry)  </span><span class="s0"># The guts of the archive.</span>
+
+    <span class="s3">def </span><span class="s1">_finalize(self):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Finalize an archive which has been opened using _start_add_entries(), writing any needed padding and the 
+        table of contents. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">toc_pos = self.lib.tell()</span>
+        <span class="s1">self.save_trailer(toc_pos)</span>
+        <span class="s3">if </span><span class="s1">self.HDRLEN:</span>
+            <span class="s1">self.update_headers(toc_pos)</span>
+        <span class="s1">self.lib.close()</span>
+
+    <span class="s0"># manages keeping the internal TOC and the guts in sync #</span>
+    <span class="s3">def </span><span class="s1">add(self</span><span class="s3">, </span><span class="s1">entry):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Override this to influence the mechanics of the Archive. Assumes entry is a seq beginning with (nm, pth, ...), 
+        where nm is the key by which we will be asked for the object. pth is the name of where we find the object. 
+        Overrides of get_obj_from can make use of further elements in entry. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">nm = entry[</span><span class="s5">0</span><span class="s1">]</span>
+        <span class="s1">pth = entry[</span><span class="s5">1</span><span class="s1">]</span>
+        <span class="s1">pynm</span><span class="s3">, </span><span class="s1">ext = os.path.splitext(os.path.basename(pth))</span>
+        <span class="s1">ispkg = pynm == </span><span class="s6">'__init__'</span>
+        <span class="s3">assert </span><span class="s1">ext </span><span class="s3">in </span><span class="s1">(</span><span class="s6">'.pyc'</span><span class="s3">, </span><span class="s6">'.pyo'</span><span class="s1">)</span>
+        <span class="s1">self.toc.append((nm</span><span class="s3">, </span><span class="s1">(ispkg</span><span class="s3">, </span><span class="s1">self.lib.tell())))</span>
+        <span class="s3">with </span><span class="s1">open(entry[</span><span class="s5">1</span><span class="s1">]</span><span class="s3">, </span><span class="s6">'rb'</span><span class="s1">) </span><span class="s3">as </span><span class="s1">f:</span>
+            <span class="s1">f.seek(</span><span class="s5">8</span><span class="s1">)  </span><span class="s0"># skip magic and timestamp</span>
+            <span class="s1">self.lib.write(f.read())</span>
+
+    <span class="s3">def </span><span class="s1">save_trailer(self</span><span class="s3">, </span><span class="s1">tocpos):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Default - toc is a dict Gets marshaled to self.lib 
+        &quot;&quot;&quot;</span>
+        <span class="s3">try</span><span class="s1">:</span>
+            <span class="s1">self.lib.write(marshal.dumps(self.toc))</span>
+        <span class="s0"># If the TOC to be marshalled contains an unmarshallable object, Python raises a cryptic exception providing no</span>
+        <span class="s0"># details on why such object is unmarshallable. Correct this by iteratively inspecting the TOC for</span>
+        <span class="s0"># unmarshallable objects.</span>
+        <span class="s3">except </span><span class="s1">ValueError </span><span class="s3">as </span><span class="s1">exception:</span>
+            <span class="s3">if </span><span class="s1">str(exception) == </span><span class="s6">'unmarshallable object'</span><span class="s1">:</span>
+                <span class="s0"># List of all marshallable types.</span>
+                <span class="s1">MARSHALLABLE_TYPES = {</span>
+                    <span class="s1">bool</span><span class="s3">, </span><span class="s1">int</span><span class="s3">, </span><span class="s1">float</span><span class="s3">, </span><span class="s1">complex</span><span class="s3">, </span><span class="s1">str</span><span class="s3">, </span><span class="s1">bytes</span><span class="s3">, </span><span class="s1">bytearray</span><span class="s3">, </span><span class="s1">tuple</span><span class="s3">, </span><span class="s1">list</span><span class="s3">, </span><span class="s1">set</span><span class="s3">, </span><span class="s1">frozenset</span><span class="s3">, </span><span class="s1">dict</span><span class="s3">, </span><span class="s1">CodeType</span>
+                <span class="s1">}</span>
+                <span class="s3">for </span><span class="s1">module_name</span><span class="s3">, </span><span class="s1">module_tuple </span><span class="s3">in </span><span class="s1">self.toc.items():</span>
+                    <span class="s3">if </span><span class="s1">type(module_name) </span><span class="s3">not in </span><span class="s1">MARSHALLABLE_TYPES:</span>
+                        <span class="s1">print(</span><span class="s6">'Module name &quot;%s&quot; (%s) unmarshallable.' </span><span class="s1">% (module_name</span><span class="s3">, </span><span class="s1">type(module_name)))</span>
+                    <span class="s3">if </span><span class="s1">type(module_tuple) </span><span class="s3">not in </span><span class="s1">MARSHALLABLE_TYPES:</span>
+                        <span class="s1">print(</span>
+                            <span class="s6">'Module &quot;%s&quot; tuple &quot;%s&quot; (%s) unmarshallable.' </span><span class="s1">%</span>
+                            <span class="s1">(module_name</span><span class="s3">, </span><span class="s1">module_tuple</span><span class="s3">, </span><span class="s1">type(module_tuple))</span>
+                        <span class="s1">)</span>
+                    <span class="s3">elif </span><span class="s1">type(module_tuple) == tuple:</span>
+                        <span class="s3">for </span><span class="s1">i </span><span class="s3">in </span><span class="s1">range(len(module_tuple)):</span>
+                            <span class="s3">if </span><span class="s1">type(module_tuple[i]) </span><span class="s3">not in </span><span class="s1">MARSHALLABLE_TYPES:</span>
+                                <span class="s1">print(</span>
+                                    <span class="s6">'Module &quot;%s&quot; tuple index %s item &quot;%s&quot; (%s) unmarshallable.' </span><span class="s1">%</span>
+                                    <span class="s1">(module_name</span><span class="s3">, </span><span class="s1">i</span><span class="s3">, </span><span class="s1">module_tuple[i]</span><span class="s3">, </span><span class="s1">type(module_tuple[i]))</span>
+                                <span class="s1">)</span>
+
+            <span class="s3">raise</span>
+
+    <span class="s3">def </span><span class="s1">update_headers(self</span><span class="s3">, </span><span class="s1">tocpos):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Default - MAGIC + Python's magic + tocpos 
+        &quot;&quot;&quot;</span>
+        <span class="s1">self.lib.seek(self.start)</span>
+        <span class="s1">self.lib.write(self.MAGIC)</span>
+        <span class="s1">self.lib.write(BYTECODE_MAGIC)</span>
+        <span class="s1">self.lib.write(struct.pack(</span><span class="s6">'!i'</span><span class="s3">, </span><span class="s1">tocpos))</span>
+
+
+<span class="s3">class </span><span class="s1">ZlibArchiveWriter(ArchiveWriter):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    ZlibArchive - an archive with compressed entries. Archive is read from the executable created by PyInstaller. 
+ 
+    This archive is used for bundling python modules inside the executable. 
+ 
+    NOTE: The whole ZlibArchive (PYZ) is compressed, so it is not necessary to compress individual modules. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">MAGIC = </span><span class="s4">b'PYZ</span><span class="s3">\0</span><span class="s4">'</span>
+    <span class="s1">TOCPOS = </span><span class="s5">8</span>
+    <span class="s1">HDRLEN = ArchiveWriter.HDRLEN + </span><span class="s5">5</span>
+    <span class="s1">COMPRESSION_LEVEL = </span><span class="s5">6  </span><span class="s0"># Default level of the 'zlib' module from Python.</span>
+
+    <span class="s3">def </span><span class="s1">__init__(self</span><span class="s3">, </span><span class="s1">archive_path</span><span class="s3">, </span><span class="s1">logical_toc</span><span class="s3">, </span><span class="s1">code_dict=</span><span class="s3">None, </span><span class="s1">cipher=</span><span class="s3">None</span><span class="s1">):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        code_dict      dict containing module code objects from ModuleGraph. 
+        &quot;&quot;&quot;</span>
+        <span class="s0"># Keep references to module code objects constructed by ModuleGraph to avoid writting .pyc/pyo files to hdd.</span>
+        <span class="s1">self.code_dict = code_dict </span><span class="s3">or </span><span class="s1">{}</span>
+        <span class="s1">self.cipher = cipher </span><span class="s3">or None</span>
+
+        <span class="s1">super().__init__(archive_path</span><span class="s3">, </span><span class="s1">logical_toc)</span>
+
+    <span class="s3">def </span><span class="s1">add(self</span><span class="s3">, </span><span class="s1">entry):</span>
+        <span class="s1">name</span><span class="s3">, </span><span class="s1">path</span><span class="s3">, </span><span class="s1">typ = entry</span>
+        <span class="s3">if </span><span class="s1">typ == </span><span class="s6">'PYMODULE'</span><span class="s1">:</span>
+            <span class="s1">typ = PYZ_TYPE_MODULE</span>
+            <span class="s3">if </span><span class="s1">path </span><span class="s3">in </span><span class="s1">(</span><span class="s6">'-'</span><span class="s3">, None</span><span class="s1">):</span>
+                <span class="s0"># This is a NamespacePackage, modulegraph marks them by using the filename '-'. (But wants to use None,</span>
+                <span class="s0"># so check for None, too, to be forward-compatible.)</span>
+                <span class="s1">typ = PYZ_TYPE_NSPKG</span>
+            <span class="s3">else</span><span class="s1">:</span>
+                <span class="s1">base</span><span class="s3">, </span><span class="s1">ext = os.path.splitext(os.path.basename(path))</span>
+                <span class="s3">if </span><span class="s1">base == </span><span class="s6">'__init__'</span><span class="s1">:</span>
+                    <span class="s1">typ = PYZ_TYPE_PKG</span>
+            <span class="s1">data = marshal.dumps(self.code_dict[name])</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s0"># Any data files, that might be required by pkg_resources.</span>
+            <span class="s1">typ = PYZ_TYPE_DATA</span>
+            <span class="s3">with </span><span class="s1">open(path</span><span class="s3">, </span><span class="s6">'rb'</span><span class="s1">) </span><span class="s3">as </span><span class="s1">fh:</span>
+                <span class="s1">data = fh.read()</span>
+            <span class="s0"># No need to use forward slash as path-separator here since pkg_resources on Windows back slash as</span>
+            <span class="s0"># path-separator.</span>
+
+        <span class="s1">obj = zlib.compress(data</span><span class="s3">, </span><span class="s1">self.COMPRESSION_LEVEL)</span>
+
+        <span class="s0"># First compress then encrypt.</span>
+        <span class="s3">if </span><span class="s1">self.cipher:</span>
+            <span class="s1">obj = self.cipher.encrypt(obj)</span>
+
+        <span class="s1">self.toc.append((name</span><span class="s3">, </span><span class="s1">(typ</span><span class="s3">, </span><span class="s1">self.lib.tell()</span><span class="s3">, </span><span class="s1">len(obj))))</span>
+        <span class="s1">self.lib.write(obj)</span>
+
+    <span class="s3">def </span><span class="s1">update_headers(self</span><span class="s3">, </span><span class="s1">tocpos):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Add level. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">ArchiveWriter.update_headers(self</span><span class="s3">, </span><span class="s1">tocpos)</span>
+        <span class="s1">self.lib.write(struct.pack(</span><span class="s6">'!B'</span><span class="s3">, </span><span class="s1">self.cipher </span><span class="s3">is not None</span><span class="s1">))</span>
+
+
+<span class="s3">class </span><span class="s1">CTOC(object):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    A class encapsulating the table of contents of a CArchive. 
+ 
+    When written to disk, it is easily read from C. 
+    &quot;&quot;&quot;</span>
+    <span class="s0"># (structlen, dpos, dlen, ulen, flag, typcd) followed by name</span>
+    <span class="s1">ENTRYSTRUCT = </span><span class="s6">'!iIIIBB'</span>
+    <span class="s1">ENTRYLEN = struct.calcsize(ENTRYSTRUCT)</span>
+
+    <span class="s3">def </span><span class="s1">__init__(self):</span>
+        <span class="s1">self.data = []</span>
+
+    <span class="s3">def </span><span class="s1">tobinary(self):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Return self as a binary string. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">rslt = []</span>
+        <span class="s3">for </span><span class="s1">(dpos</span><span class="s3">, </span><span class="s1">dlen</span><span class="s3">, </span><span class="s1">ulen</span><span class="s3">, </span><span class="s1">flag</span><span class="s3">, </span><span class="s1">typcd</span><span class="s3">, </span><span class="s1">nm) </span><span class="s3">in </span><span class="s1">self.data:</span>
+            <span class="s0"># Encode all names using UTF-8. This should be safe as standard python modules only contain ascii-characters</span>
+            <span class="s0"># (and standard shared libraries should have the same), and thus the C-code still can handle this correctly.</span>
+            <span class="s1">nm = nm.encode(</span><span class="s6">'utf-8'</span><span class="s1">)</span>
+            <span class="s1">nmlen = len(nm) + </span><span class="s5">1  </span><span class="s0"># add 1 for a '\0'</span>
+            <span class="s0"># align to 16 byte boundary so xplatform C can read</span>
+            <span class="s1">toclen = nmlen + self.ENTRYLEN</span>
+            <span class="s3">if </span><span class="s1">toclen % </span><span class="s5">16 </span><span class="s1">== </span><span class="s5">0</span><span class="s1">:</span>
+                <span class="s1">pad = </span><span class="s4">b'</span><span class="s3">\0</span><span class="s4">'</span>
+            <span class="s3">else</span><span class="s1">:</span>
+                <span class="s1">padlen = </span><span class="s5">16 </span><span class="s1">- (toclen % </span><span class="s5">16</span><span class="s1">)</span>
+                <span class="s1">pad = </span><span class="s4">b'</span><span class="s3">\0</span><span class="s4">' </span><span class="s1">* padlen</span>
+                <span class="s1">nmlen = nmlen + padlen</span>
+            <span class="s1">rslt.append(</span>
+                <span class="s1">struct.pack(</span>
+                    <span class="s1">self.ENTRYSTRUCT + </span><span class="s6">'%is' </span><span class="s1">% nmlen</span><span class="s3">, </span><span class="s1">nmlen + self.ENTRYLEN</span><span class="s3">, </span><span class="s1">dpos</span><span class="s3">, </span><span class="s1">dlen</span><span class="s3">, </span><span class="s1">ulen</span><span class="s3">, </span><span class="s1">flag</span><span class="s3">, </span><span class="s1">ord(typcd)</span><span class="s3">,</span>
+                    <span class="s1">nm + pad</span>
+                <span class="s1">)</span>
+            <span class="s1">)</span>
+
+        <span class="s3">return </span><span class="s4">b''</span><span class="s1">.join(rslt)</span>
+
+    <span class="s3">def </span><span class="s1">add(self</span><span class="s3">, </span><span class="s1">dpos</span><span class="s3">, </span><span class="s1">dlen</span><span class="s3">, </span><span class="s1">ulen</span><span class="s3">, </span><span class="s1">flag</span><span class="s3">, </span><span class="s1">typcd</span><span class="s3">, </span><span class="s1">nm):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Add an entry to the table of contents. 
+ 
+        DPOS is data position. 
+        DLEN is data length. 
+        ULEN is the uncompressed data len. 
+        FLAG says if the data is compressed. 
+        TYPCD is the &quot;type&quot; of the entry (used by the C code) 
+        NM is the entry's name. 
+ 
+        This function is used only while creating an executable. 
+        &quot;&quot;&quot;</span>
+        <span class="s0"># Ensure forward slashes in paths are on Windows converted to back slashes '\\' since on Windows the bootloader</span>
+        <span class="s0"># works only with back slashes.</span>
+        <span class="s1">nm = os.path.normpath(nm)</span>
+        <span class="s3">if </span><span class="s1">is_win </span><span class="s3">and </span><span class="s1">os.path.sep == </span><span class="s6">'/'</span><span class="s1">:</span>
+            <span class="s0"># When building under MSYS, the above path normalization uses Unix-style separators, so replace them</span>
+            <span class="s0"># manually.</span>
+            <span class="s1">nm = nm.replace(os.path.sep</span><span class="s3">, </span><span class="s6">'</span><span class="s3">\\</span><span class="s6">'</span><span class="s1">)</span>
+        <span class="s1">self.data.append((dpos</span><span class="s3">, </span><span class="s1">dlen</span><span class="s3">, </span><span class="s1">ulen</span><span class="s3">, </span><span class="s1">flag</span><span class="s3">, </span><span class="s1">typcd</span><span class="s3">, </span><span class="s1">nm))</span>
+
+
+<span class="s3">class </span><span class="s1">CArchiveWriter(ArchiveWriter):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    An Archive subclass that can hold arbitrary data. 
+ 
+    This class encapsulates all files that are bundled within an executable. It can contain ZlibArchive (Python .pyc 
+    files), dlls, Python C extensions and all other data files that are bundled in --onefile mode. 
+ 
+    Easily handled from C or from Python. 
+    &quot;&quot;&quot;</span>
+    <span class="s0"># MAGIC is usefull to verify that conversion of Python data types to C structure and back works properly.</span>
+    <span class="s1">MAGIC = </span><span class="s4">b'MEI</span><span class="s3">\014\013\012\013\016</span><span class="s4">'</span>
+    <span class="s1">HDRLEN = </span><span class="s5">0</span>
+    <span class="s1">LEVEL = </span><span class="s5">9</span>
+
+    <span class="s0"># Cookie - holds some information for the bootloader. C struct format definition. '!' at the beginning means network</span>
+    <span class="s0"># byte order. C struct looks like:</span>
+    <span class="s0">#</span>
+    <span class="s0">#   typedef struct _cookie {</span>
+    <span class="s0">#       char magic[8]; /* 'MEI\014\013\012\013\016' */</span>
+    <span class="s0">#       uint32_t len;  /* len of entire package */</span>
+    <span class="s0">#       uint32_t TOC;  /* pos (rel to start) of TableOfContents */</span>
+    <span class="s0">#       int  TOClen;   /* length of TableOfContents */</span>
+    <span class="s0">#       int  pyvers;   /* new in v4 */</span>
+    <span class="s0">#       char pylibname[64];    /* Filename of Python dynamic library. */</span>
+    <span class="s0">#   } COOKIE;</span>
+    <span class="s0">#</span>
+    <span class="s1">_cookie_format = </span><span class="s6">'!8sIIii64s'</span>
+    <span class="s1">_cookie_size = struct.calcsize(_cookie_format)</span>
+
+    <span class="s3">def </span><span class="s1">__init__(self</span><span class="s3">, </span><span class="s1">archive_path</span><span class="s3">, </span><span class="s1">logical_toc</span><span class="s3">, </span><span class="s1">pylib_name):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Constructor. 
+ 
+        archive_path path name of file (create empty CArchive if path is None). 
+        start        is the seekposition within PATH. 
+        len          is the length of the CArchive (if 0, then read till EOF). 
+        pylib_name   name of Python DLL which bootloader will use. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">self._pylib_name = pylib_name</span>
+
+        <span class="s0"># A CArchive created from scratch starts at 0, no leading bootloader.</span>
+        <span class="s1">super().__init__(archive_path</span><span class="s3">, </span><span class="s1">logical_toc)</span>
+
+    <span class="s3">def </span><span class="s1">_start_add_entries(self</span><span class="s3">, </span><span class="s1">path):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Open an empty archive for addition of entries. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">super()._start_add_entries(path)</span>
+        <span class="s0"># Override parents' toc {} with a class.</span>
+        <span class="s1">self.toc = CTOC()</span>
+
+    <span class="s3">def </span><span class="s1">add(self</span><span class="s3">, </span><span class="s1">entry):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Add an ENTRY to the CArchive. 
+ 
+        ENTRY must have: 
+          entry[0] is name (under which it will be saved). 
+          entry[1] is fullpathname of the file. 
+          entry[2] is a flag for it's storage format (0==uncompressed, 
+          1==compressed) 
+          entry[3] is the entry's type code. 
+          Version 5: 
+            If the type code is 'o': 
+              entry[0] is the runtime option 
+              eg: v  (meaning verbose imports) 
+                  u  (meaning unbuffered) 
+                  W arg (warning option arg) 
+                  s  (meaning do site.py processing. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">(nm</span><span class="s3">, </span><span class="s1">pathnm</span><span class="s3">, </span><span class="s1">flag</span><span class="s3">, </span><span class="s1">typcd) = entry[:</span><span class="s5">4</span><span class="s1">]</span>
+        <span class="s0"># FIXME Could we make the version 5 the default one?</span>
+        <span class="s0"># Version 5 - allow type 'o' = runtime option.</span>
+        <span class="s1">code_data = </span><span class="s3">None</span>
+        <span class="s1">fh = </span><span class="s3">None</span>
+        <span class="s3">try</span><span class="s1">:</span>
+            <span class="s3">if </span><span class="s1">typcd </span><span class="s3">in </span><span class="s1">(</span><span class="s6">'o'</span><span class="s3">, </span><span class="s6">'d'</span><span class="s1">):</span>
+                <span class="s1">ulen = </span><span class="s5">0</span>
+                <span class="s1">flag = </span><span class="s5">0</span>
+            <span class="s3">elif </span><span class="s1">typcd == </span><span class="s6">'s'</span><span class="s1">:</span>
+                <span class="s0"># If it is a source code file, compile it to a code object and marshall the object, so it can be</span>
+                <span class="s0"># unmarshalled by the bootloader.</span>
+
+                <span class="s1">code = get_code_object(nm</span><span class="s3">, </span><span class="s1">pathnm)</span>
+                <span class="s1">code = strip_paths_in_code(code)</span>
+
+                <span class="s1">code_data = marshal.dumps(code)</span>
+                <span class="s1">ulen = len(code_data)</span>
+            <span class="s3">elif </span><span class="s1">typcd == </span><span class="s6">'m'</span><span class="s1">:</span>
+                <span class="s1">fh = open(pathnm</span><span class="s3">, </span><span class="s6">'rb'</span><span class="s1">)</span>
+                <span class="s1">ulen = os.fstat(fh.fileno()).st_size</span>
+                <span class="s0"># Check if it is a PYC file</span>
+                <span class="s1">header = fh.read(</span><span class="s5">4</span><span class="s1">)</span>
+                <span class="s1">fh.seek(</span><span class="s5">0</span><span class="s1">)</span>
+                <span class="s3">if </span><span class="s1">header == BYTECODE_MAGIC:</span>
+                    <span class="s0"># Read whole header and load code. According to PEP-552, in python versions prior to 3.7, the PYC</span>
+                    <span class="s0"># header consists of three 32-bit words (magic, timestamp, and source file size).</span>
+                    <span class="s0"># From python 3.7 on, the PYC header was extended to four 32-bit words (magic, flags, and, depending</span>
+                    <span class="s0"># on the flags, either timestamp and source file size, or a 64-bit hash).</span>
+                    <span class="s3">if </span><span class="s1">is_py37:</span>
+                        <span class="s1">header = fh.read(</span><span class="s5">16</span><span class="s1">)</span>
+                    <span class="s3">else</span><span class="s1">:</span>
+                        <span class="s1">header = fh.read(</span><span class="s5">12</span><span class="s1">)</span>
+                    <span class="s1">code = marshal.load(fh)</span>
+                    <span class="s0"># Strip paths from code, marshal back into module form. The header fields (timestamp, size, hash,</span>
+                    <span class="s0"># etc.) are all referring to the source file, so our modification of the code object does not affect</span>
+                    <span class="s0"># them, and we can re-use the original header.</span>
+                    <span class="s1">code = strip_paths_in_code(code)</span>
+                    <span class="s1">data = header + marshal.dumps(code)</span>
+                    <span class="s0"># Create file-like object for timestamp re-write in the subsequent steps.</span>
+                    <span class="s1">fh = io.BytesIO(data)</span>
+                    <span class="s1">ulen = len(data)</span>
+            <span class="s3">else</span><span class="s1">:</span>
+                <span class="s1">fh = open(pathnm</span><span class="s3">, </span><span class="s6">'rb'</span><span class="s1">)</span>
+                <span class="s1">ulen = os.fstat(fh.fileno()).st_size</span>
+        <span class="s3">except </span><span class="s1">IOError:</span>
+            <span class="s1">print(</span><span class="s6">&quot;Cannot find ('%s', '%s', %s, '%s')&quot; </span><span class="s1">% (nm</span><span class="s3">, </span><span class="s1">pathnm</span><span class="s3">, </span><span class="s1">flag</span><span class="s3">, </span><span class="s1">typcd))</span>
+            <span class="s3">raise</span>
+
+        <span class="s1">where = self.lib.tell()</span>
+        <span class="s3">assert </span><span class="s1">flag </span><span class="s3">in </span><span class="s1">range(</span><span class="s5">3</span><span class="s1">)</span>
+        <span class="s3">if not </span><span class="s1">fh </span><span class="s3">and not </span><span class="s1">code_data:</span>
+            <span class="s0"># No need to write anything.</span>
+            <span class="s3">pass</span>
+        <span class="s3">elif </span><span class="s1">flag == </span><span class="s5">1</span><span class="s1">:</span>
+            <span class="s1">comprobj = zlib.compressobj(self.LEVEL)</span>
+            <span class="s3">if </span><span class="s1">code_data </span><span class="s3">is not None</span><span class="s1">:</span>
+                <span class="s1">self.lib.write(comprobj.compress(code_data))</span>
+            <span class="s3">else</span><span class="s1">:</span>
+                <span class="s3">assert </span><span class="s1">fh</span>
+                <span class="s0"># We only want to change it for pyc files.</span>
+                <span class="s1">modify_header = typcd </span><span class="s3">in </span><span class="s1">(</span><span class="s6">'M'</span><span class="s3">, </span><span class="s6">'m'</span><span class="s3">, </span><span class="s6">'s'</span><span class="s1">)</span>
+                <span class="s3">while </span><span class="s5">1</span><span class="s1">:</span>
+                    <span class="s1">buf = fh.read(</span><span class="s5">16 </span><span class="s1">* </span><span class="s5">1024</span><span class="s1">)</span>
+                    <span class="s3">if not </span><span class="s1">buf:</span>
+                        <span class="s3">break</span>
+                    <span class="s3">if </span><span class="s1">modify_header:</span>
+                        <span class="s1">modify_header = </span><span class="s3">False</span>
+                        <span class="s1">buf = fake_pyc_timestamp(buf)</span>
+                    <span class="s1">self.lib.write(comprobj.compress(buf))</span>
+            <span class="s1">self.lib.write(comprobj.flush())</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s3">if </span><span class="s1">code_data </span><span class="s3">is not None</span><span class="s1">:</span>
+                <span class="s1">self.lib.write(code_data)</span>
+            <span class="s3">else</span><span class="s1">:</span>
+                <span class="s3">assert </span><span class="s1">fh</span>
+                <span class="s3">while </span><span class="s5">1</span><span class="s1">:</span>
+                    <span class="s1">buf = fh.read(</span><span class="s5">16 </span><span class="s1">* </span><span class="s5">1024</span><span class="s1">)</span>
+                    <span class="s3">if not </span><span class="s1">buf:</span>
+                        <span class="s3">break</span>
+                    <span class="s1">self.lib.write(buf)</span>
+
+        <span class="s1">dlen = self.lib.tell() - where</span>
+        <span class="s3">if </span><span class="s1">typcd == </span><span class="s6">'m'</span><span class="s1">:</span>
+            <span class="s3">if </span><span class="s1">pathnm.find(</span><span class="s6">'.__init__.py'</span><span class="s1">) &gt; -</span><span class="s5">1</span><span class="s1">:</span>
+                <span class="s1">typcd = </span><span class="s6">'M'</span>
+
+        <span class="s3">if </span><span class="s1">fh:</span>
+            <span class="s1">fh.close()</span>
+
+        <span class="s0"># Record the entry in the CTOC</span>
+        <span class="s1">self.toc.add(where</span><span class="s3">, </span><span class="s1">dlen</span><span class="s3">, </span><span class="s1">ulen</span><span class="s3">, </span><span class="s1">flag</span><span class="s3">, </span><span class="s1">typcd</span><span class="s3">, </span><span class="s1">nm)</span>
+
+    <span class="s3">def </span><span class="s1">save_trailer(self</span><span class="s3">, </span><span class="s1">tocpos):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Save the table of contents and the cookie for the bootlader to disk. 
+ 
+        CArchives can be opened from the end - the cookie points back to the start. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">tocstr = self.toc.tobinary()</span>
+        <span class="s1">self.lib.write(tocstr)</span>
+        <span class="s1">toclen = len(tocstr)</span>
+
+        <span class="s0"># now save teh cookie</span>
+        <span class="s1">total_len = tocpos + toclen + self._cookie_size</span>
+        <span class="s1">pyvers = sys.version_info[</span><span class="s5">0</span><span class="s1">] * </span><span class="s5">100 </span><span class="s1">+ sys.version_info[</span><span class="s5">1</span><span class="s1">]</span>
+        <span class="s0"># Before saving cookie we need to convert it to corresponding C representation.</span>
+        <span class="s1">cookie = struct.pack(</span>
+            <span class="s1">self._cookie_format</span><span class="s3">, </span><span class="s1">self.MAGIC</span><span class="s3">, </span><span class="s1">total_len</span><span class="s3">, </span><span class="s1">tocpos</span><span class="s3">, </span><span class="s1">toclen</span><span class="s3">, </span><span class="s1">pyvers</span><span class="s3">, </span><span class="s1">self._pylib_name.encode(</span><span class="s6">'ascii'</span><span class="s1">)</span>
+        <span class="s1">)</span>
+        <span class="s1">self.lib.write(cookie)</span>
+
+
+<span class="s3">class </span><span class="s1">SplashWriter(ArchiveWriter):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    This ArchiveWriter bundles the data for the splash screen resources. 
+ 
+    Splash screen resources will be added as an entry into the CArchive with the typecode ARCHIVE_ITEM_SPLASH. 
+    This writer creates the bundled information in the archive. 
+    &quot;&quot;&quot;</span>
+    <span class="s0"># This struct describes the splash resources as it will be in an buffer inside the bootloader. All necessary parts</span>
+    <span class="s0"># are bundled, the *_len and *_offset fields describe the data beyond this header definition.</span>
+    <span class="s0"># Whereas script and image fields are binary data, the requirements fields describe an array of strings. Each string</span>
+    <span class="s0"># is null-terminated in order to easily iterate over this list from within C.</span>
+    <span class="s0">#</span>
+    <span class="s0">#   typedef struct _splash_data_header {</span>
+    <span class="s0">#       char tcl_libname[16];  /* Name of tcl library, e.g. tcl86t.dll */</span>
+    <span class="s0">#       char tk_libname[16];   /* Name of tk library, e.g. tk86t.dll */</span>
+    <span class="s0">#       char tk_lib[16];       /* Tk Library generic, e.g. &quot;tk/&quot; */</span>
+    <span class="s0">#       char rundir[16];       /* temp folder inside extraction path in</span>
+    <span class="s0">#                               * which the dependencies are extracted */</span>
+    <span class="s0">#</span>
+    <span class="s0">#       int script_len;        /* Length of the script */</span>
+    <span class="s0">#       int script_offset;     /* Offset (rel to start) of the script */</span>
+    <span class="s0">#</span>
+    <span class="s0">#       int image_len;         /* Length of the image data */</span>
+    <span class="s0">#       int image_offset;      /* Offset (rel to start) of the image */</span>
+    <span class="s0">#</span>
+    <span class="s0">#       int requirements_len;</span>
+    <span class="s0">#       int requirements_offset;</span>
+    <span class="s0">#</span>
+    <span class="s0">#   } SPLASH_DATA_HEADER;</span>
+    <span class="s0">#</span>
+    <span class="s1">_header_format = </span><span class="s6">'!16s 16s 16s 16s ii ii ii'</span>
+    <span class="s1">HDRLEN = struct.calcsize(_header_format)</span>
+
+    <span class="s0"># The created resource will be compressed by the CArchive, so no need to compress the data here.</span>
+
+    <span class="s3">def </span><span class="s1">__init__(self</span><span class="s3">, </span><span class="s1">archive_path</span><span class="s3">, </span><span class="s1">name_list</span><span class="s3">, </span><span class="s1">tcl_libname</span><span class="s3">, </span><span class="s1">tk_libname</span><span class="s3">, </span><span class="s1">tklib</span><span class="s3">, </span><span class="s1">rundir</span><span class="s3">, </span><span class="s1">image</span><span class="s3">, </span><span class="s1">script):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Custom writer for splash screen resources which will be bundled into the CArchive as an entry. 
+ 
+        :param archive_path: The filename of the archive to create 
+        :param name_list: List of filenames for the requirements array 
+        :param str tcl_libname: Name of the tcl shared library file 
+        :param str tk_libname: Name of the tk shared library file 
+        :param str tklib: Root of tk library (e.g. tk/) 
+        :param str rundir: Unique path to extract requirements to 
+        :param Union[str, bytes] image: Image like object 
+        :param str script: The tcl/tk script to execute to create the screen. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">self._tcl_libname = tcl_libname</span>
+        <span class="s1">self._tk_libname = tk_libname</span>
+        <span class="s1">self._tklib = tklib</span>
+        <span class="s1">self._rundir = rundir</span>
+
+        <span class="s1">self._image = image</span>
+        <span class="s1">self._image_len = </span><span class="s5">0</span>
+        <span class="s1">self._image_offset = </span><span class="s5">0</span>
+
+        <span class="s1">self._script = script</span>
+        <span class="s1">self._script_len = </span><span class="s5">0</span>
+        <span class="s1">self._script_offset = </span><span class="s5">0</span>
+
+        <span class="s1">self._requirements_len = </span><span class="s5">0</span>
+        <span class="s1">self._requirements_offset = </span><span class="s5">0</span>
+
+        <span class="s1">super().__init__(archive_path</span><span class="s3">, </span><span class="s1">name_list)</span>
+
+    <span class="s3">def </span><span class="s1">add(self</span><span class="s3">, </span><span class="s1">name):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        This methods adds a name to the requirement list in the splash data. This list (more an array) contains the 
+        names of all files the bootloader needs to extract before the splash screen can be started. The 
+        implementation terminates every name with a null-byte, that keeps the list short memory wise and makes it 
+        iterable from C. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">name = name.encode(</span><span class="s6">'utf-8'</span><span class="s1">)</span>
+        <span class="s1">self.lib.write(name + </span><span class="s4">b'</span><span class="s3">\0</span><span class="s4">'</span><span class="s1">)</span>
+        <span class="s1">self._requirements_len += len(name) + </span><span class="s5">1  </span><span class="s0"># zero byte at the end</span>
+
+    <span class="s3">def </span><span class="s1">update_headers(self</span><span class="s3">, </span><span class="s1">tocpos):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Updates the offsets of the fields. 
+ 
+        This function is called after self.save_trailer(). 
+        :param tocpos: 
+        :return: 
+        &quot;&quot;&quot;</span>
+        <span class="s1">self.lib.seek(self.start)</span>
+        <span class="s1">self.lib.write(</span>
+            <span class="s1">struct.pack(</span>
+                <span class="s1">self._header_format</span><span class="s3">,</span>
+                <span class="s1">self._tcl_libname.encode(</span><span class="s6">&quot;utf-8&quot;</span><span class="s1">)</span><span class="s3">,</span>
+                <span class="s1">self._tk_libname.encode(</span><span class="s6">&quot;utf-8&quot;</span><span class="s1">)</span><span class="s3">,</span>
+                <span class="s1">self._tklib.encode(</span><span class="s6">&quot;utf-8&quot;</span><span class="s1">)</span><span class="s3">,</span>
+                <span class="s1">self._rundir.encode(</span><span class="s6">&quot;utf-8&quot;</span><span class="s1">)</span><span class="s3">,</span>
+                <span class="s1">self._script_len</span><span class="s3">,</span>
+                <span class="s1">self._script_offset</span><span class="s3">,</span>
+                <span class="s1">self._image_len</span><span class="s3">,</span>
+                <span class="s1">self._image_offset</span><span class="s3">,</span>
+                <span class="s1">self._requirements_len</span><span class="s3">,</span>
+                <span class="s1">self._requirements_offset</span><span class="s3">,</span>
+            <span class="s1">)</span>
+        <span class="s1">)</span>
+
+    <span class="s3">def </span><span class="s1">save_trailer(self</span><span class="s3">, </span><span class="s1">script_pos):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Adds the image and script. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">self._requirements_offset = script_pos - self._requirements_len</span>
+
+        <span class="s1">self._script_offset = script_pos</span>
+        <span class="s1">self.save_script()</span>
+        <span class="s1">self._image_offset = self.lib.tell()</span>
+        <span class="s1">self.save_image()</span>
+
+    <span class="s3">def </span><span class="s1">save_script(self):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Add the tcl/tk script into the archive. This strips out every comment in the source to save some space. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">self._script_len = len(self._script)</span>
+        <span class="s1">self.lib.write(self._script.encode(</span><span class="s6">&quot;utf-8&quot;</span><span class="s1">))</span>
+
+    <span class="s3">def </span><span class="s1">save_image(self):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Copy the image into the archive. If self._image are bytes the buffer will be written directly into the archive, 
+        otherwise it is assumed to be a path and the file will be written into it. 
+        &quot;&quot;&quot;</span>
+        <span class="s3">if </span><span class="s1">isinstance(self._image</span><span class="s3">, </span><span class="s1">bytes):</span>
+            <span class="s0"># image was converted by PIL/Pillow</span>
+            <span class="s1">buf = self._image</span>
+            <span class="s1">self.lib.write(self._image)</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s0"># Copy image to lib</span>
+            <span class="s3">with </span><span class="s1">open(self._image</span><span class="s3">, </span><span class="s6">'rb'</span><span class="s1">) </span><span class="s3">as </span><span class="s1">image_file:</span>
+                <span class="s1">buf = image_file.read()</span>
+
+        <span class="s1">self._image_len = len(buf)</span>
+        <span class="s1">self.lib.write(buf)</span>
+</pre>
+</body>
+</html>

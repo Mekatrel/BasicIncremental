@@ -1,0 +1,588 @@
+<html>
+<head>
+<title>websocket.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #cc7832;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #6a8759;}
+.s3 { color: #629755; font-style: italic;}
+.s4 { color: #6897bb;}
+.s5 { color: #808080;}
+.s6 { color: #a5c261;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+websocket.py</font>
+</center></td></tr></table>
+<pre><span class="s0">import </span><span class="s1">struct</span>
+
+<span class="s0">from </span><span class="s1">socket </span><span class="s0">import </span><span class="s1">error</span>
+
+<span class="s0">from </span><span class="s1">._compat </span><span class="s0">import </span><span class="s1">string_types</span><span class="s0">, </span><span class="s1">range_type</span><span class="s0">, </span><span class="s1">text_type</span>
+<span class="s0">from </span><span class="s1">.exceptions </span><span class="s0">import </span><span class="s1">ProtocolError</span>
+<span class="s0">from </span><span class="s1">.exceptions </span><span class="s0">import </span><span class="s1">WebSocketError</span>
+<span class="s0">from </span><span class="s1">.exceptions </span><span class="s0">import </span><span class="s1">FrameTooLargeException</span>
+<span class="s0">from </span><span class="s1">.utf8validator </span><span class="s0">import </span><span class="s1">Utf8Validator</span>
+
+
+<span class="s1">MSG_SOCKET_DEAD = </span><span class="s2">&quot;Socket is dead&quot;</span>
+<span class="s1">MSG_ALREADY_CLOSED = </span><span class="s2">&quot;Connection is already closed&quot;</span>
+<span class="s1">MSG_CLOSED = </span><span class="s2">&quot;Connection closed&quot;</span>
+
+
+<span class="s0">class </span><span class="s1">WebSocket(object):</span>
+    <span class="s3">&quot;&quot;&quot; 
+    Base class for supporting websocket operations. 
+ 
+    :ivar environ: The http environment referenced by this connection. 
+    :ivar closed: Whether this connection is closed/closing. 
+    :ivar stream: The underlying file like object that will be read from / 
+        written to by this WebSocket object. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s1">__slots__ = (</span><span class="s2">'utf8validator'</span><span class="s0">, </span><span class="s2">'utf8validate_last'</span><span class="s0">, </span><span class="s2">'environ'</span><span class="s0">, </span><span class="s2">'closed'</span><span class="s0">,</span>
+                 <span class="s2">'stream'</span><span class="s0">, </span><span class="s2">'raw_write'</span><span class="s0">, </span><span class="s2">'raw_read'</span><span class="s0">, </span><span class="s2">'handler'</span><span class="s1">)</span>
+
+    <span class="s1">OPCODE_CONTINUATION = </span><span class="s4">0x00</span>
+    <span class="s1">OPCODE_TEXT = </span><span class="s4">0x01</span>
+    <span class="s1">OPCODE_BINARY = </span><span class="s4">0x02</span>
+    <span class="s1">OPCODE_CLOSE = </span><span class="s4">0x08</span>
+    <span class="s1">OPCODE_PING = </span><span class="s4">0x09</span>
+    <span class="s1">OPCODE_PONG = </span><span class="s4">0x0a</span>
+
+    <span class="s0">def </span><span class="s1">__init__(self</span><span class="s0">, </span><span class="s1">environ</span><span class="s0">, </span><span class="s1">stream</span><span class="s0">, </span><span class="s1">handler):</span>
+        <span class="s1">self.environ = environ</span>
+        <span class="s1">self.closed = </span><span class="s0">False</span>
+
+        <span class="s1">self.stream = stream</span>
+
+        <span class="s1">self.raw_write = stream.write</span>
+        <span class="s1">self.raw_read = stream.read</span>
+
+        <span class="s1">self.utf8validator = Utf8Validator()</span>
+        <span class="s1">self.handler = handler</span>
+
+    <span class="s0">def </span><span class="s1">__del__(self):</span>
+        <span class="s0">try</span><span class="s1">:</span>
+            <span class="s1">self.close()</span>
+        <span class="s0">except</span><span class="s1">:</span>
+            <span class="s5"># close() may fail if __init__ didn't complete</span>
+            <span class="s0">pass</span>
+
+    <span class="s0">def </span><span class="s1">_decode_bytes(self</span><span class="s0">, </span><span class="s1">bytestring):</span>
+        <span class="s3">&quot;&quot;&quot; 
+        Internal method used to convert the utf-8 encoded bytestring into 
+        unicode. 
+ 
+        If the conversion fails, the socket will be closed. 
+        &quot;&quot;&quot;</span>
+
+        <span class="s0">if not </span><span class="s1">bytestring:</span>
+            <span class="s0">return </span><span class="s2">''</span>
+
+        <span class="s0">try</span><span class="s1">:</span>
+            <span class="s0">return </span><span class="s1">bytestring.decode(</span><span class="s2">'utf-8'</span><span class="s1">)</span>
+        <span class="s0">except </span><span class="s1">UnicodeDecodeError:</span>
+            <span class="s1">self.close(</span><span class="s4">1007</span><span class="s1">)</span>
+
+            <span class="s0">raise</span>
+
+    <span class="s0">def </span><span class="s1">_encode_bytes(self</span><span class="s0">, </span><span class="s1">text):</span>
+        <span class="s3">&quot;&quot;&quot; 
+        :returns: The utf-8 byte string equivalent of `text`. 
+        &quot;&quot;&quot;</span>
+
+        <span class="s0">if not </span><span class="s1">isinstance(text</span><span class="s0">, </span><span class="s1">str):</span>
+            <span class="s1">text = text_type(text </span><span class="s0">or </span><span class="s2">''</span><span class="s1">)</span>
+
+        <span class="s0">return </span><span class="s1">text.encode(</span><span class="s2">&quot;utf-8&quot;</span><span class="s1">)</span>
+
+    <span class="s0">def </span><span class="s1">_is_valid_close_code(self</span><span class="s0">, </span><span class="s1">code):</span>
+        <span class="s3">&quot;&quot;&quot; 
+        :returns: Whether the returned close code is a valid hybi return code. 
+        &quot;&quot;&quot;</span>
+        <span class="s0">if </span><span class="s1">code &lt; </span><span class="s4">1000</span><span class="s1">:</span>
+            <span class="s0">return False</span>
+
+        <span class="s0">if </span><span class="s4">1004 </span><span class="s1">&lt;= code &lt;= </span><span class="s4">1006</span><span class="s1">:</span>
+            <span class="s0">return False</span>
+
+        <span class="s0">if </span><span class="s4">1012 </span><span class="s1">&lt;= code &lt;= </span><span class="s4">1016</span><span class="s1">:</span>
+            <span class="s0">return False</span>
+
+        <span class="s0">if </span><span class="s1">code == </span><span class="s4">1100</span><span class="s1">:</span>
+            <span class="s5"># not sure about this one but the autobahn fuzzer requires it.</span>
+            <span class="s0">return False</span>
+
+        <span class="s0">if </span><span class="s4">2000 </span><span class="s1">&lt;= code &lt;= </span><span class="s4">2999</span><span class="s1">:</span>
+            <span class="s0">return False</span>
+
+        <span class="s0">return True</span>
+
+    <span class="s1">@property</span>
+    <span class="s0">def </span><span class="s1">current_app(self):</span>
+        <span class="s0">if </span><span class="s1">hasattr(self.handler.server.application</span><span class="s0">, </span><span class="s2">'current_app'</span><span class="s1">):</span>
+            <span class="s0">return </span><span class="s1">self.handler.server.application.current_app</span>
+        <span class="s0">else</span><span class="s1">:</span>
+            <span class="s5"># For backwards compatibility reasons</span>
+            <span class="s0">class </span><span class="s1">MockApp():</span>
+                <span class="s0">def </span><span class="s1">on_close(self</span><span class="s0">, </span><span class="s1">*args):</span>
+                    <span class="s0">pass</span>
+
+            <span class="s0">return </span><span class="s1">MockApp()</span>
+
+    <span class="s1">@property</span>
+    <span class="s0">def </span><span class="s1">origin(self):</span>
+        <span class="s0">if not </span><span class="s1">self.environ:</span>
+            <span class="s0">return</span>
+
+        <span class="s0">return </span><span class="s1">self.environ.get(</span><span class="s2">'HTTP_ORIGIN'</span><span class="s1">)</span>
+
+    <span class="s1">@property</span>
+    <span class="s0">def </span><span class="s1">protocol(self):</span>
+        <span class="s0">if not </span><span class="s1">self.environ:</span>
+            <span class="s0">return</span>
+
+        <span class="s0">return </span><span class="s1">self.environ.get(</span><span class="s2">'HTTP_SEC_WEBSOCKET_PROTOCOL'</span><span class="s1">)</span>
+
+    <span class="s1">@property</span>
+    <span class="s0">def </span><span class="s1">version(self):</span>
+        <span class="s0">if not </span><span class="s1">self.environ:</span>
+            <span class="s0">return</span>
+
+        <span class="s0">return </span><span class="s1">self.environ.get(</span><span class="s2">'HTTP_SEC_WEBSOCKET_VERSION'</span><span class="s1">)</span>
+
+    <span class="s1">@property</span>
+    <span class="s0">def </span><span class="s1">path(self):</span>
+        <span class="s0">if not </span><span class="s1">self.environ:</span>
+            <span class="s0">return</span>
+
+        <span class="s0">return </span><span class="s1">self.environ.get(</span><span class="s2">'PATH_INFO'</span><span class="s1">)</span>
+
+    <span class="s1">@property</span>
+    <span class="s0">def </span><span class="s1">logger(self):</span>
+        <span class="s0">return </span><span class="s1">self.handler.logger</span>
+
+    <span class="s0">def </span><span class="s1">handle_close(self</span><span class="s0">, </span><span class="s1">header</span><span class="s0">, </span><span class="s1">payload):</span>
+        <span class="s3">&quot;&quot;&quot; 
+        Called when a close frame has been decoded from the stream. 
+ 
+        :param header: The decoded `Header`. 
+        :param payload: The bytestring payload associated with the close frame. 
+        &quot;&quot;&quot;</span>
+        <span class="s0">if not </span><span class="s1">payload:</span>
+            <span class="s1">self.close(</span><span class="s4">1000</span><span class="s0">, None</span><span class="s1">)</span>
+
+            <span class="s0">return</span>
+
+        <span class="s0">if </span><span class="s1">len(payload) &lt; </span><span class="s4">2</span><span class="s1">:</span>
+            <span class="s0">raise </span><span class="s1">ProtocolError(</span><span class="s2">'Invalid close frame: {0} {1}'</span><span class="s1">.format(</span>
+                <span class="s1">header</span><span class="s0">, </span><span class="s1">payload))</span>
+
+        <span class="s1">code = struct.unpack(</span><span class="s2">'!H'</span><span class="s0">, </span><span class="s1">payload[:</span><span class="s4">2</span><span class="s1">])[</span><span class="s4">0</span><span class="s1">]</span>
+        <span class="s1">payload = payload[</span><span class="s4">2</span><span class="s1">:]</span>
+
+        <span class="s0">if </span><span class="s1">payload:</span>
+            <span class="s1">validator = Utf8Validator()</span>
+            <span class="s1">val = validator.validate(payload)</span>
+
+            <span class="s0">if not </span><span class="s1">val[</span><span class="s4">0</span><span class="s1">]:</span>
+                <span class="s0">raise </span><span class="s1">UnicodeError</span>
+
+        <span class="s0">if not </span><span class="s1">self._is_valid_close_code(code):</span>
+            <span class="s0">raise </span><span class="s1">ProtocolError(</span><span class="s2">'Invalid close code {0}'</span><span class="s1">.format(code))</span>
+
+        <span class="s1">self.close(code</span><span class="s0">, </span><span class="s1">payload)</span>
+
+    <span class="s0">def </span><span class="s1">handle_ping(self</span><span class="s0">, </span><span class="s1">header</span><span class="s0">, </span><span class="s1">payload):</span>
+        <span class="s1">self.send_frame(payload</span><span class="s0">, </span><span class="s1">self.OPCODE_PONG)</span>
+
+    <span class="s0">def </span><span class="s1">handle_pong(self</span><span class="s0">, </span><span class="s1">header</span><span class="s0">, </span><span class="s1">payload):</span>
+        <span class="s0">pass</span>
+
+    <span class="s0">def </span><span class="s1">read_frame(self):</span>
+        <span class="s3">&quot;&quot;&quot; 
+        Block until a full frame has been read from the socket. 
+ 
+        This is an internal method as calling this will not cleanup correctly 
+        if an exception is called. Use `receive` instead. 
+ 
+        :return: The header and payload as a tuple. 
+        &quot;&quot;&quot;</span>
+
+        <span class="s1">header = Header.decode_header(self.stream)</span>
+
+        <span class="s0">if </span><span class="s1">header.flags:</span>
+            <span class="s0">raise </span><span class="s1">ProtocolError</span>
+
+        <span class="s0">if not </span><span class="s1">header.length:</span>
+            <span class="s0">return </span><span class="s1">header</span><span class="s0">, </span><span class="s6">b''</span>
+
+        <span class="s0">try</span><span class="s1">:</span>
+            <span class="s1">payload = self.raw_read(header.length)</span>
+        <span class="s0">except </span><span class="s1">error:</span>
+            <span class="s1">payload = </span><span class="s6">b''</span>
+        <span class="s0">except </span><span class="s1">Exception:</span>
+            <span class="s5"># TODO log out this exception</span>
+            <span class="s1">payload = </span><span class="s6">b''</span>
+
+        <span class="s0">if </span><span class="s1">len(payload) != header.length:</span>
+            <span class="s0">raise </span><span class="s1">WebSocketError(</span><span class="s2">'Unexpected EOF reading frame payload'</span><span class="s1">)</span>
+
+        <span class="s0">if </span><span class="s1">header.mask:</span>
+            <span class="s1">payload = header.unmask_payload(payload)</span>
+
+        <span class="s0">return </span><span class="s1">header</span><span class="s0">, </span><span class="s1">payload</span>
+
+    <span class="s0">def </span><span class="s1">validate_utf8(self</span><span class="s0">, </span><span class="s1">payload):</span>
+        <span class="s5"># Make sure the frames are decodable independently</span>
+        <span class="s1">self.utf8validate_last = self.utf8validator.validate(payload)</span>
+
+        <span class="s0">if not </span><span class="s1">self.utf8validate_last[</span><span class="s4">0</span><span class="s1">]:</span>
+            <span class="s0">raise </span><span class="s1">UnicodeError(</span><span class="s2">&quot;Encountered invalid UTF-8 while processing &quot;</span>
+                               <span class="s2">&quot;text message at payload octet index &quot;</span>
+                               <span class="s2">&quot;{0:d}&quot;</span><span class="s1">.format(self.utf8validate_last[</span><span class="s4">3</span><span class="s1">]))</span>
+
+    <span class="s0">def </span><span class="s1">read_message(self):</span>
+        <span class="s3">&quot;&quot;&quot; 
+        Return the next text or binary message from the socket. 
+ 
+        This is an internal method as calling this will not cleanup correctly 
+        if an exception is called. Use `receive` instead. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">opcode = </span><span class="s0">None</span>
+        <span class="s1">message = bytearray()</span>
+
+        <span class="s0">while True</span><span class="s1">:</span>
+            <span class="s1">header</span><span class="s0">, </span><span class="s1">payload = self.read_frame()</span>
+            <span class="s1">f_opcode = header.opcode</span>
+
+            <span class="s0">if </span><span class="s1">f_opcode </span><span class="s0">in </span><span class="s1">(self.OPCODE_TEXT</span><span class="s0">, </span><span class="s1">self.OPCODE_BINARY):</span>
+                <span class="s5"># a new frame</span>
+                <span class="s0">if </span><span class="s1">opcode:</span>
+                    <span class="s0">raise </span><span class="s1">ProtocolError(</span><span class="s2">&quot;The opcode in non-fin frame is &quot;</span>
+                                        <span class="s2">&quot;expected to be zero, got &quot;</span>
+                                        <span class="s2">&quot;{0!r}&quot;</span><span class="s1">.format(f_opcode))</span>
+
+                <span class="s5"># Start reading a new message, reset the validator</span>
+                <span class="s1">self.utf8validator.reset()</span>
+                <span class="s1">self.utf8validate_last = (</span><span class="s0">True, True, </span><span class="s4">0</span><span class="s0">, </span><span class="s4">0</span><span class="s1">)</span>
+
+                <span class="s1">opcode = f_opcode</span>
+
+            <span class="s0">elif </span><span class="s1">f_opcode == self.OPCODE_CONTINUATION:</span>
+                <span class="s0">if not </span><span class="s1">opcode:</span>
+                    <span class="s0">raise </span><span class="s1">ProtocolError(</span><span class="s2">&quot;Unexpected frame with opcode=0&quot;</span><span class="s1">)</span>
+
+            <span class="s0">elif </span><span class="s1">f_opcode == self.OPCODE_PING:</span>
+                <span class="s1">self.handle_ping(header</span><span class="s0">, </span><span class="s1">payload)</span>
+                <span class="s0">continue</span>
+
+            <span class="s0">elif </span><span class="s1">f_opcode == self.OPCODE_PONG:</span>
+                <span class="s1">self.handle_pong(header</span><span class="s0">, </span><span class="s1">payload)</span>
+                <span class="s0">continue</span>
+
+            <span class="s0">elif </span><span class="s1">f_opcode == self.OPCODE_CLOSE:</span>
+                <span class="s1">self.handle_close(header</span><span class="s0">, </span><span class="s1">payload)</span>
+                <span class="s0">return</span>
+
+            <span class="s0">else</span><span class="s1">:</span>
+                <span class="s0">raise </span><span class="s1">ProtocolError(</span><span class="s2">&quot;Unexpected opcode={0!r}&quot;</span><span class="s1">.format(f_opcode))</span>
+
+            <span class="s0">if </span><span class="s1">opcode == self.OPCODE_TEXT:</span>
+                <span class="s1">self.validate_utf8(payload)</span>
+
+            <span class="s1">message += payload</span>
+
+            <span class="s0">if </span><span class="s1">header.fin:</span>
+                <span class="s0">break</span>
+
+        <span class="s0">if </span><span class="s1">opcode == self.OPCODE_TEXT:</span>
+            <span class="s1">self.validate_utf8(message)</span>
+            <span class="s0">return </span><span class="s1">self._decode_bytes(message)</span>
+        <span class="s0">else</span><span class="s1">:</span>
+            <span class="s0">return </span><span class="s1">message</span>
+
+    <span class="s0">def </span><span class="s1">receive(self):</span>
+        <span class="s3">&quot;&quot;&quot; 
+        Read and return a message from the stream. If `None` is returned, then 
+        the socket is considered closed/errored. 
+        &quot;&quot;&quot;</span>
+
+        <span class="s0">if </span><span class="s1">self.closed:</span>
+            <span class="s1">self.current_app.on_close(MSG_ALREADY_CLOSED)</span>
+            <span class="s0">raise </span><span class="s1">WebSocketError(MSG_ALREADY_CLOSED)</span>
+
+        <span class="s0">try</span><span class="s1">:</span>
+            <span class="s0">return </span><span class="s1">self.read_message()</span>
+        <span class="s0">except </span><span class="s1">UnicodeError:</span>
+            <span class="s1">self.close(</span><span class="s4">1007</span><span class="s1">)</span>
+        <span class="s0">except </span><span class="s1">ProtocolError:</span>
+            <span class="s1">self.close(</span><span class="s4">1002</span><span class="s1">)</span>
+        <span class="s0">except </span><span class="s1">error:</span>
+            <span class="s1">self.close()</span>
+            <span class="s1">self.current_app.on_close(MSG_CLOSED)</span>
+
+        <span class="s0">return None</span>
+
+    <span class="s0">def </span><span class="s1">send_frame(self</span><span class="s0">, </span><span class="s1">message</span><span class="s0">, </span><span class="s1">opcode):</span>
+        <span class="s3">&quot;&quot;&quot; 
+        Send a frame over the websocket with message as its payload 
+        &quot;&quot;&quot;</span>
+        <span class="s0">if </span><span class="s1">self.closed:</span>
+            <span class="s1">self.current_app.on_close(MSG_ALREADY_CLOSED)</span>
+            <span class="s0">raise </span><span class="s1">WebSocketError(MSG_ALREADY_CLOSED)</span>
+
+        <span class="s0">if </span><span class="s1">opcode </span><span class="s0">in </span><span class="s1">(self.OPCODE_TEXT</span><span class="s0">, </span><span class="s1">self.OPCODE_PING):</span>
+            <span class="s1">message = self._encode_bytes(message)</span>
+        <span class="s0">elif </span><span class="s1">opcode == self.OPCODE_BINARY:</span>
+            <span class="s1">message = bytes(message)</span>
+
+        <span class="s1">header = Header.encode_header(</span><span class="s0">True, </span><span class="s1">opcode</span><span class="s0">, </span><span class="s6">b''</span><span class="s0">, </span><span class="s1">len(message)</span><span class="s0">, </span><span class="s4">0</span><span class="s1">)</span>
+
+        <span class="s0">try</span><span class="s1">:</span>
+            <span class="s1">self.raw_write(header + message)</span>
+        <span class="s0">except </span><span class="s1">error:</span>
+            <span class="s0">raise </span><span class="s1">WebSocketError(MSG_SOCKET_DEAD)</span>
+        <span class="s0">except</span><span class="s1">:</span>
+            <span class="s0">raise</span>
+
+    <span class="s0">def </span><span class="s1">send(self</span><span class="s0">, </span><span class="s1">message</span><span class="s0">, </span><span class="s1">binary=</span><span class="s0">None</span><span class="s1">):</span>
+        <span class="s3">&quot;&quot;&quot; 
+        Send a frame over the websocket with message as its payload 
+        &quot;&quot;&quot;</span>
+        <span class="s0">if </span><span class="s1">binary </span><span class="s0">is None</span><span class="s1">:</span>
+            <span class="s1">binary = </span><span class="s0">not </span><span class="s1">isinstance(message</span><span class="s0">, </span><span class="s1">string_types)</span>
+
+        <span class="s1">opcode = self.OPCODE_BINARY </span><span class="s0">if </span><span class="s1">binary </span><span class="s0">else </span><span class="s1">self.OPCODE_TEXT</span>
+
+        <span class="s0">try</span><span class="s1">:</span>
+            <span class="s1">self.send_frame(message</span><span class="s0">, </span><span class="s1">opcode)</span>
+        <span class="s0">except </span><span class="s1">WebSocketError:</span>
+            <span class="s1">self.current_app.on_close(MSG_SOCKET_DEAD)</span>
+            <span class="s0">raise </span><span class="s1">WebSocketError(MSG_SOCKET_DEAD)</span>
+
+    <span class="s0">def </span><span class="s1">close(self</span><span class="s0">, </span><span class="s1">code=</span><span class="s4">1000</span><span class="s0">, </span><span class="s1">message=</span><span class="s6">b''</span><span class="s1">):</span>
+        <span class="s3">&quot;&quot;&quot; 
+        Close the websocket and connection, sending the specified code and 
+        message.  The underlying socket object is _not_ closed, that is the 
+        responsibility of the initiator. 
+        &quot;&quot;&quot;</span>
+
+        <span class="s0">if </span><span class="s1">self.closed:</span>
+            <span class="s1">self.current_app.on_close(MSG_ALREADY_CLOSED)</span>
+
+        <span class="s0">try</span><span class="s1">:</span>
+            <span class="s1">message = self._encode_bytes(message)</span>
+
+            <span class="s1">self.send_frame(message</span><span class="s0">, </span><span class="s1">opcode=self.OPCODE_CLOSE)</span>
+        <span class="s0">except </span><span class="s1">WebSocketError:</span>
+            <span class="s5"># Failed to write the closing frame but it's ok because we're</span>
+            <span class="s5"># closing the socket anyway.</span>
+            <span class="s1">self.logger.debug(</span><span class="s2">&quot;Failed to write closing frame -&gt; closing socket&quot;</span><span class="s1">)</span>
+        <span class="s0">finally</span><span class="s1">:</span>
+            <span class="s1">self.logger.debug(</span><span class="s2">&quot;Closed WebSocket&quot;</span><span class="s1">)</span>
+            <span class="s1">self.closed = </span><span class="s0">True</span>
+
+            <span class="s1">self.stream = </span><span class="s0">None</span>
+            <span class="s1">self.raw_write = </span><span class="s0">None</span>
+            <span class="s1">self.raw_read = </span><span class="s0">None</span>
+
+            <span class="s1">self.environ = </span><span class="s0">None</span>
+
+            <span class="s5">#self.current_app.on_close(MSG_ALREADY_CLOSED)</span>
+
+
+<span class="s0">class </span><span class="s1">Stream(object):</span>
+    <span class="s3">&quot;&quot;&quot; 
+    Wraps the handler's socket/rfile attributes and makes it in to a file like 
+    object that can be read from/written to by the lower level websocket api. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s1">__slots__ = (</span><span class="s2">'handler'</span><span class="s0">, </span><span class="s2">'read'</span><span class="s0">, </span><span class="s2">'write'</span><span class="s1">)</span>
+
+    <span class="s0">def </span><span class="s1">__init__(self</span><span class="s0">, </span><span class="s1">handler):</span>
+        <span class="s1">self.handler = handler</span>
+        <span class="s1">self.read = handler.rfile.read</span>
+        <span class="s1">self.write = handler.socket.sendall</span>
+
+
+<span class="s0">class </span><span class="s1">Header(object):</span>
+    <span class="s1">__slots__ = (</span><span class="s2">'fin'</span><span class="s0">, </span><span class="s2">'mask'</span><span class="s0">, </span><span class="s2">'opcode'</span><span class="s0">, </span><span class="s2">'flags'</span><span class="s0">, </span><span class="s2">'length'</span><span class="s1">)</span>
+
+    <span class="s1">FIN_MASK = </span><span class="s4">0x80</span>
+    <span class="s1">OPCODE_MASK = </span><span class="s4">0x0f</span>
+    <span class="s1">MASK_MASK = </span><span class="s4">0x80</span>
+    <span class="s1">LENGTH_MASK = </span><span class="s4">0x7f</span>
+
+    <span class="s1">RSV0_MASK = </span><span class="s4">0x40</span>
+    <span class="s1">RSV1_MASK = </span><span class="s4">0x20</span>
+    <span class="s1">RSV2_MASK = </span><span class="s4">0x10</span>
+
+    <span class="s5"># bitwise mask that will determine the reserved bits for a frame header</span>
+    <span class="s1">HEADER_FLAG_MASK = RSV0_MASK | RSV1_MASK | RSV2_MASK</span>
+
+    <span class="s0">def </span><span class="s1">__init__(self</span><span class="s0">, </span><span class="s1">fin=</span><span class="s4">0</span><span class="s0">, </span><span class="s1">opcode=</span><span class="s4">0</span><span class="s0">, </span><span class="s1">flags=</span><span class="s4">0</span><span class="s0">, </span><span class="s1">length=</span><span class="s4">0</span><span class="s1">):</span>
+        <span class="s1">self.mask = </span><span class="s2">''</span>
+        <span class="s1">self.fin = fin</span>
+        <span class="s1">self.opcode = opcode</span>
+        <span class="s1">self.flags = flags</span>
+        <span class="s1">self.length = length</span>
+
+    <span class="s0">def </span><span class="s1">mask_payload(self</span><span class="s0">, </span><span class="s1">payload):</span>
+        <span class="s1">payload = bytearray(payload)</span>
+        <span class="s1">mask = bytearray(self.mask)</span>
+
+        <span class="s0">for </span><span class="s1">i </span><span class="s0">in </span><span class="s1">range_type(self.length):</span>
+            <span class="s1">payload[i] ^= mask[i % </span><span class="s4">4</span><span class="s1">]</span>
+
+        <span class="s0">return </span><span class="s1">payload</span>
+
+    <span class="s5"># it's the same operation</span>
+    <span class="s1">unmask_payload = mask_payload</span>
+
+    <span class="s0">def </span><span class="s1">__repr__(self):</span>
+        <span class="s1">opcodes = {</span>
+            <span class="s4">0</span><span class="s1">: </span><span class="s2">'continuation(0)'</span><span class="s0">,</span>
+            <span class="s4">1</span><span class="s1">: </span><span class="s2">'text(1)'</span><span class="s0">,</span>
+            <span class="s4">2</span><span class="s1">: </span><span class="s2">'binary(2)'</span><span class="s0">,</span>
+            <span class="s4">8</span><span class="s1">: </span><span class="s2">'close(8)'</span><span class="s0">,</span>
+            <span class="s4">9</span><span class="s1">: </span><span class="s2">'ping(9)'</span><span class="s0">,</span>
+            <span class="s4">10</span><span class="s1">: </span><span class="s2">'pong(10)'</span>
+        <span class="s1">}</span>
+        <span class="s1">flags = {</span>
+            <span class="s4">0x40</span><span class="s1">: </span><span class="s2">'RSV1 MASK'</span><span class="s0">,</span>
+            <span class="s4">0x20</span><span class="s1">: </span><span class="s2">'RSV2 MASK'</span><span class="s0">,</span>
+            <span class="s4">0x10</span><span class="s1">: </span><span class="s2">'RSV3 MASK'</span>
+        <span class="s1">}</span>
+
+        <span class="s0">return </span><span class="s1">(</span><span class="s2">&quot;&lt;Header fin={0} opcode={1} length={2} flags={3} mask={4} at &quot;</span>
+                <span class="s2">&quot;0x{5:x}&gt;&quot;</span><span class="s1">).format(</span>
+                    <span class="s1">self.fin</span><span class="s0">,</span>
+                    <span class="s1">opcodes.get(self.opcode</span><span class="s0">, </span><span class="s2">'reserved({})'</span><span class="s1">.format(self.opcode))</span><span class="s0">,</span>
+                    <span class="s1">self.length</span><span class="s0">,</span>
+                    <span class="s1">flags.get(self.flags</span><span class="s0">, </span><span class="s2">'reserved({})'</span><span class="s1">.format(self.flags))</span><span class="s0">,</span>
+                    <span class="s1">self.mask</span><span class="s0">, </span><span class="s1">id(self)</span>
+        <span class="s1">)</span>
+
+    <span class="s1">@classmethod</span>
+    <span class="s0">def </span><span class="s1">decode_header(cls</span><span class="s0">, </span><span class="s1">stream):</span>
+        <span class="s3">&quot;&quot;&quot; 
+        Decode a WebSocket header. 
+ 
+        :param stream: A file like object that can be 'read' from. 
+        :returns: A `Header` instance. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">read = stream.read</span>
+        <span class="s1">data = read(</span><span class="s4">2</span><span class="s1">)</span>
+
+        <span class="s0">if </span><span class="s1">len(data) != </span><span class="s4">2</span><span class="s1">:</span>
+            <span class="s0">raise </span><span class="s1">WebSocketError(</span><span class="s2">&quot;Unexpected EOF while decoding header&quot;</span><span class="s1">)</span>
+
+        <span class="s1">first_byte</span><span class="s0">, </span><span class="s1">second_byte = struct.unpack(</span><span class="s2">'!BB'</span><span class="s0">, </span><span class="s1">data)</span>
+
+        <span class="s1">header = cls(</span>
+            <span class="s1">fin=first_byte &amp; cls.FIN_MASK == cls.FIN_MASK</span><span class="s0">,</span>
+            <span class="s1">opcode=first_byte &amp; cls.OPCODE_MASK</span><span class="s0">,</span>
+            <span class="s1">flags=first_byte &amp; cls.HEADER_FLAG_MASK</span><span class="s0">,</span>
+            <span class="s1">length=second_byte &amp; cls.LENGTH_MASK)</span>
+
+        <span class="s1">has_mask = second_byte &amp; cls.MASK_MASK == cls.MASK_MASK</span>
+
+        <span class="s0">if </span><span class="s1">header.opcode &gt; </span><span class="s4">0x07</span><span class="s1">:</span>
+            <span class="s0">if not </span><span class="s1">header.fin:</span>
+                <span class="s0">raise </span><span class="s1">ProtocolError(</span>
+                    <span class="s2">&quot;Received fragmented control frame: {0!r}&quot;</span><span class="s1">.format(data))</span>
+
+            <span class="s5"># Control frames MUST have a payload length of 125 bytes or less</span>
+            <span class="s0">if </span><span class="s1">header.length &gt; </span><span class="s4">125</span><span class="s1">:</span>
+                <span class="s0">raise </span><span class="s1">FrameTooLargeException(</span>
+                    <span class="s2">&quot;Control frame cannot be larger than 125 bytes: &quot;</span>
+                    <span class="s2">&quot;{0!r}&quot;</span><span class="s1">.format(data))</span>
+
+        <span class="s0">if </span><span class="s1">header.length == </span><span class="s4">126</span><span class="s1">:</span>
+            <span class="s5"># 16 bit length</span>
+            <span class="s1">data = read(</span><span class="s4">2</span><span class="s1">)</span>
+
+            <span class="s0">if </span><span class="s1">len(data) != </span><span class="s4">2</span><span class="s1">:</span>
+                <span class="s0">raise </span><span class="s1">WebSocketError(</span><span class="s2">'Unexpected EOF while decoding header'</span><span class="s1">)</span>
+
+            <span class="s1">header.length = struct.unpack(</span><span class="s2">'!H'</span><span class="s0">, </span><span class="s1">data)[</span><span class="s4">0</span><span class="s1">]</span>
+        <span class="s0">elif </span><span class="s1">header.length == </span><span class="s4">127</span><span class="s1">:</span>
+            <span class="s5"># 64 bit length</span>
+            <span class="s1">data = read(</span><span class="s4">8</span><span class="s1">)</span>
+
+            <span class="s0">if </span><span class="s1">len(data) != </span><span class="s4">8</span><span class="s1">:</span>
+                <span class="s0">raise </span><span class="s1">WebSocketError(</span><span class="s2">'Unexpected EOF while decoding header'</span><span class="s1">)</span>
+
+            <span class="s1">header.length = struct.unpack(</span><span class="s2">'!Q'</span><span class="s0">, </span><span class="s1">data)[</span><span class="s4">0</span><span class="s1">]</span>
+
+        <span class="s0">if </span><span class="s1">has_mask:</span>
+            <span class="s1">mask = read(</span><span class="s4">4</span><span class="s1">)</span>
+
+            <span class="s0">if </span><span class="s1">len(mask) != </span><span class="s4">4</span><span class="s1">:</span>
+                <span class="s0">raise </span><span class="s1">WebSocketError(</span><span class="s2">'Unexpected EOF while decoding header'</span><span class="s1">)</span>
+
+            <span class="s1">header.mask = mask</span>
+
+        <span class="s0">return </span><span class="s1">header</span>
+
+    <span class="s1">@classmethod</span>
+    <span class="s0">def </span><span class="s1">encode_header(cls</span><span class="s0">, </span><span class="s1">fin</span><span class="s0">, </span><span class="s1">opcode</span><span class="s0">, </span><span class="s1">mask</span><span class="s0">, </span><span class="s1">length</span><span class="s0">, </span><span class="s1">flags):</span>
+        <span class="s3">&quot;&quot;&quot; 
+        Encodes a WebSocket header. 
+ 
+        :param fin: Whether this is the final frame for this opcode. 
+        :param opcode: The opcode of the payload, see `OPCODE_*` 
+        :param mask: Whether the payload is masked. 
+        :param length: The length of the frame. 
+        :param flags: The RSV* flags. 
+        :return: A bytestring encoded header. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">first_byte = opcode</span>
+        <span class="s1">second_byte = </span><span class="s4">0</span>
+        <span class="s1">extra = </span><span class="s6">b&quot;&quot;</span>
+        <span class="s1">result = bytearray()</span>
+
+        <span class="s0">if </span><span class="s1">fin:</span>
+            <span class="s1">first_byte |= cls.FIN_MASK</span>
+
+        <span class="s0">if </span><span class="s1">flags &amp; cls.RSV0_MASK:</span>
+            <span class="s1">first_byte |= cls.RSV0_MASK</span>
+
+        <span class="s0">if </span><span class="s1">flags &amp; cls.RSV1_MASK:</span>
+            <span class="s1">first_byte |= cls.RSV1_MASK</span>
+
+        <span class="s0">if </span><span class="s1">flags &amp; cls.RSV2_MASK:</span>
+            <span class="s1">first_byte |= cls.RSV2_MASK</span>
+
+        <span class="s5"># now deal with length complexities</span>
+        <span class="s0">if </span><span class="s1">length &lt; </span><span class="s4">126</span><span class="s1">:</span>
+            <span class="s1">second_byte += length</span>
+        <span class="s0">elif </span><span class="s1">length &lt;= </span><span class="s4">0xffff</span><span class="s1">:</span>
+            <span class="s1">second_byte += </span><span class="s4">126</span>
+            <span class="s1">extra = struct.pack(</span><span class="s2">'!H'</span><span class="s0">, </span><span class="s1">length)</span>
+        <span class="s0">elif </span><span class="s1">length &lt;= </span><span class="s4">0xffffffffffffffff</span><span class="s1">:</span>
+            <span class="s1">second_byte += </span><span class="s4">127</span>
+            <span class="s1">extra = struct.pack(</span><span class="s2">'!Q'</span><span class="s0">, </span><span class="s1">length)</span>
+        <span class="s0">else</span><span class="s1">:</span>
+            <span class="s0">raise </span><span class="s1">FrameTooLargeException</span>
+
+        <span class="s0">if </span><span class="s1">mask:</span>
+            <span class="s1">second_byte |= cls.MASK_MASK</span>
+
+        <span class="s1">result.append(first_byte)</span>
+        <span class="s1">result.append(second_byte)</span>
+        <span class="s1">result.extend(extra)</span>
+
+        <span class="s0">if </span><span class="s1">mask:</span>
+            <span class="s1">result.extend(mask)</span>
+
+        <span class="s0">return </span><span class="s1">result</span>
+</pre>
+</body>
+</html>

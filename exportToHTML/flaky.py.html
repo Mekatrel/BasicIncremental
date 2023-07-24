@@ -1,0 +1,135 @@
+<html>
+<head>
+<title>flaky.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #cc7832;}
+.s3 { color: #629755; font-style: italic;}
+.s4 { color: #6897bb;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+flaky.py</font>
+</center></td></tr></table>
+<pre><span class="s0"># Copyright (c) 2018 gevent community</span>
+<span class="s0">#</span>
+<span class="s0"># Permission is hereby granted, free of charge, to any person obtaining a copy</span>
+<span class="s0"># of this software and associated documentation files (the &quot;Software&quot;), to deal</span>
+<span class="s0"># in the Software without restriction, including without limitation the rights</span>
+<span class="s0"># to use, copy, modify, merge, publish, distribute, sublicense, and/or sell</span>
+<span class="s0"># copies of the Software, and to permit persons to whom the Software is</span>
+<span class="s0"># furnished to do so, subject to the following conditions:</span>
+<span class="s0">#</span>
+<span class="s0"># The above copyright notice and this permission notice shall be included in</span>
+<span class="s0"># all copies or substantial portions of the Software.</span>
+<span class="s0">#</span>
+<span class="s0"># THE SOFTWARE IS PROVIDED &quot;AS IS&quot;, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR</span>
+<span class="s0"># IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,</span>
+<span class="s0"># FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE</span>
+<span class="s0"># AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER</span>
+<span class="s0"># LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,</span>
+<span class="s0"># OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN</span>
+<span class="s0"># THE SOFTWARE.</span>
+<span class="s2">from </span><span class="s1">__future__ </span><span class="s2">import </span><span class="s1">absolute_import</span><span class="s2">, </span><span class="s1">print_function</span><span class="s2">, </span><span class="s1">division</span>
+
+<span class="s2">import </span><span class="s1">sys</span>
+<span class="s2">import </span><span class="s1">functools</span>
+<span class="s2">import </span><span class="s1">unittest</span>
+
+<span class="s2">from </span><span class="s1">. </span><span class="s2">import </span><span class="s1">sysinfo</span>
+<span class="s2">from </span><span class="s1">. </span><span class="s2">import </span><span class="s1">six</span>
+
+<span class="s2">class </span><span class="s1">FlakyAssertionError(AssertionError):</span>
+    <span class="s3">&quot;Re-raised so that we know it's a known-flaky test.&quot;</span>
+
+<span class="s0"># The next exceptions allow us to raise them in a highly</span>
+<span class="s0"># greppable way so that we can debug them later.</span>
+
+<span class="s2">class </span><span class="s1">FlakyTest(unittest.SkipTest):</span>
+    <span class="s3">&quot;&quot;&quot; 
+    A unittest exception that causes the test to be skipped when raised. 
+ 
+    Use this carefully, it is a code smell and indicates an undebugged problem. 
+    &quot;&quot;&quot;</span>
+
+<span class="s2">class </span><span class="s1">FlakyTestRaceCondition(FlakyTest):</span>
+    <span class="s3">&quot;&quot;&quot; 
+    Use this when the flaky test is definitely caused by a race condition. 
+    &quot;&quot;&quot;</span>
+
+<span class="s2">class </span><span class="s1">FlakyTestTimeout(FlakyTest):</span>
+    <span class="s3">&quot;&quot;&quot; 
+    Use this when the flaky test is definitely caused by an 
+    unexpected timeout. 
+    &quot;&quot;&quot;</span>
+
+<span class="s2">class </span><span class="s1">FlakyTestCrashes(FlakyTest):</span>
+    <span class="s3">&quot;&quot;&quot; 
+    Use this when the test sometimes crashes. 
+    &quot;&quot;&quot;</span>
+
+<span class="s2">def </span><span class="s1">reraiseFlakyTestRaceCondition():</span>
+    <span class="s1">six.reraise(FlakyAssertionError</span><span class="s2">,</span>
+                <span class="s1">FlakyAssertionError(sys.exc_info()[</span><span class="s4">1</span><span class="s1">])</span><span class="s2">,</span>
+                <span class="s1">sys.exc_info()[</span><span class="s4">2</span><span class="s1">])</span>
+
+<span class="s1">reraiseFlakyTestTimeout = reraiseFlakyTestRaceCondition</span>
+<span class="s1">reraiseFlakyTestRaceConditionLibuv = reraiseFlakyTestRaceCondition</span>
+<span class="s1">reraiseFlakyTestTimeoutLibuv = reraiseFlakyTestRaceCondition</span>
+
+<span class="s2">if </span><span class="s1">sysinfo.RUNNING_ON_CI </span><span class="s2">or </span><span class="s1">(sysinfo.PYPY </span><span class="s2">and </span><span class="s1">sysinfo.WIN):</span>
+    <span class="s0"># pylint: disable=function-redefined</span>
+    <span class="s2">def </span><span class="s1">reraiseFlakyTestRaceCondition():</span>
+        <span class="s0"># Getting stack traces is incredibly expensive</span>
+        <span class="s0"># in pypy on win, at least in test virtual machines.</span>
+        <span class="s0"># It can take minutes. The traceback consistently looks like</span>
+        <span class="s0"># the following when interrupted:</span>
+
+        <span class="s0"># dump_stacks -&gt; traceback.format_stack</span>
+        <span class="s0">#    -&gt; traceback.extract_stack -&gt; linecache.checkcache</span>
+        <span class="s0">#    -&gt; os.stat -&gt; _structseq.structseq_new</span>
+
+        <span class="s0"># Moreover, without overriding __repr__ or __str__,</span>
+        <span class="s0"># the msg doesn't get printed like we would want (its basically</span>
+        <span class="s0"># unreadable, all printed on one line). So skip that.</span>
+
+        <span class="s0">#msg = '\n'.join(dump_stacks())</span>
+        <span class="s1">msg = str(sys.exc_info()[</span><span class="s4">1</span><span class="s1">])</span>
+        <span class="s1">six.reraise(FlakyTestRaceCondition</span><span class="s2">,</span>
+                    <span class="s1">FlakyTestRaceCondition(msg)</span><span class="s2">,</span>
+                    <span class="s1">sys.exc_info()[</span><span class="s4">2</span><span class="s1">])</span>
+
+    <span class="s2">def </span><span class="s1">reraiseFlakyTestTimeout():</span>
+        <span class="s1">msg = str(sys.exc_info()[</span><span class="s4">1</span><span class="s1">])</span>
+        <span class="s1">six.reraise(FlakyTestTimeout</span><span class="s2">,</span>
+                    <span class="s1">FlakyTestTimeout(msg)</span><span class="s2">,</span>
+                    <span class="s1">sys.exc_info()[</span><span class="s4">2</span><span class="s1">])</span>
+
+    <span class="s2">if </span><span class="s1">sysinfo.LIBUV:</span>
+        <span class="s1">reraiseFlakyTestRaceConditionLibuv = reraiseFlakyTestRaceCondition</span>
+        <span class="s1">reraiseFlakyTestTimeoutLibuv = reraiseFlakyTestTimeout</span>
+
+
+<span class="s2">def </span><span class="s1">reraises_flaky_timeout(exc_kind=AssertionError</span><span class="s2">, </span><span class="s1">_func=reraiseFlakyTestTimeout):</span>
+
+    <span class="s2">def </span><span class="s1">wrapper(f):</span>
+        <span class="s1">@functools.wraps(f)</span>
+        <span class="s2">def </span><span class="s1">m(*args):</span>
+            <span class="s2">try</span><span class="s1">:</span>
+                <span class="s1">f(*args)</span>
+            <span class="s2">except </span><span class="s1">exc_kind:</span>
+                <span class="s1">_func()</span>
+        <span class="s2">return </span><span class="s1">m</span>
+
+    <span class="s2">return </span><span class="s1">wrapper</span>
+
+<span class="s2">def </span><span class="s1">reraises_flaky_race_condition(exc_kind=AssertionError):</span>
+    <span class="s2">return </span><span class="s1">reraises_flaky_timeout(exc_kind</span><span class="s2">, </span><span class="s1">_func=reraiseFlakyTestRaceCondition)</span>
+</pre>
+</body>
+</html>
